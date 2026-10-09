@@ -32,7 +32,8 @@ export type Scenario = 'owner' | 'guest';
  * 所以将来新增工具、或 MCP 接进来的外部工具，默认都是"客人不能碰"，不需要谁记得来改这里。
  */
 export const MACHINE_TOOLS: readonly string[] = [
-  'pwsh',            // 在这台机器上跑命令
+  'pwsh',            // Windows 命令执行
+  'bash',            // 非 Windows 命令执行
   'safe_write',      // 写文件
   'safe_edit',       // 改文件
   'multi_edit',      // 批量改文件

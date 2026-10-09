@@ -1,7 +1,8 @@
 /**
- * Irmia Agent — PowerShell 执行工具（docs/design.md §4.10 / §4.18 pwsh 专项、§4.21 jobs）
+ * Irmia Agent — 平台命令执行工具（Windows PowerShell / 非 Windows Bash）
  *
- * 五条实现纪律，每条都有实测依据：
+ * Bash 的脚本与路径扫描在 bash.ts；执行、超时和回执共用本模块。
+ * 以下 PowerShell 专项约束只作用于 Windows。
  *
  * 1. **检测链**：先探 `pwsh`（PowerShell 7+），缺失则 fallback `powershell`（5.1），
  *    并把带安装建议的 warning 回给模型。探测结果缓存，进程生命周期内只探一次。
@@ -75,6 +76,10 @@ import { dirname, join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 
 import { boundaryFixHint, boundaryScopeNote, effectiveBoundaryRoot, isInside } from './boundary.ts';
+import {
+  BASH_FORBIDDEN_PATTERNS, bashAbsolutePathsIn, buildBashSessionBootstrap,
+  buildBashSessionRoundScript, probeBashVersion, shellToolName,
+} from './bash.ts';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from './types.js';
 import {
   TOOL_ERROR_CODES,
@@ -130,10 +135,11 @@ const END_MARKER_PREFIX = '__IRMIA_END_';
 // ──────────────────────────────── 类型 ────────────────────────────────
 
 export type PowerShellKind = 'pwsh' | 'powershell';
+export type ShellKind = PowerShellKind | 'bash';
 
 export interface PowerShellProbe {
   /** 探测到的运行时种类 */
-  kind: PowerShellKind;
+  kind: ShellKind;
   /** 可执行文件名（交给 spawn，走 PATH 解析） */
   exe: string;
   /** 版本号文本，如 7.4.6 / 5.1.26100.9444 */
@@ -174,6 +180,8 @@ export interface PwshToolOptions {
    * 不传则退回"自己探一次 PATH 上的 pwsh"（CLI 窄路径与单测）。
    */
   depsProbe?: PowerShellDepProbe | undefined;
+  /** shell 平台覆盖点，供跨平台执行测试使用。 */
+  platform?: NodeJS.Platform;
 }
 
 export interface PwshToolDefinition extends ToolDefinition {
@@ -278,9 +286,10 @@ export function normalizeCommand(command: string): string {
 }
 
 /** 命中返回规则本身，未命中返回 null */
-export function screenCommand(command: string): ForbiddenPattern | null {
+export function screenCommand(command: string, platform: NodeJS.Platform = process.platform): ForbiddenPattern | null {
   const normalized = normalizeCommand(command);
-  for (const rule of FORBIDDEN_PATTERNS) {
+  const rules = platform === 'win32' ? FORBIDDEN_PATTERNS : [...FORBIDDEN_PATTERNS, ...BASH_FORBIDDEN_PATTERNS];
+  for (const rule of rules) {
     if (rule.pattern.test(normalized)) return rule;
   }
   return null;
@@ -619,14 +628,17 @@ export interface PowerShellDetectOptions {
   deps?: { probe: PowerShellDepProbe } | undefined;
   /** 探测覆盖点（测试注入假 shell 用）：给了它就不改 spawn 参数、只换被探的可执行文件 */
   runProbe?: ((exe: string) => Promise<string | null>) | undefined;
+  platform?: NodeJS.Platform;
 }
 
 /** 探测结论的缓存：进程生命周期内只探一次（真探测代价是一次 shell 启动） */
 let cachedProbe: Promise<PowerShellProbe> | null = null;
+let cachedBashProbe: Promise<PowerShellProbe> | null = null;
 
 /** 丢掉探测缓存（测试与"安装后复检"用；宿主不必调——它拿的是 deps 的缓存结论） */
 export function resetPowerShellProbeCache(): void {
   cachedProbe = null;
+  cachedBashProbe = null;
 }
 
 /**
@@ -639,6 +651,15 @@ export function resetPowerShellProbeCache(): void {
  * 而不是让模型对着"执行失败"猜。
  */
 export async function detectPowerShell(options: PowerShellDetectOptions = {}): Promise<PowerShellProbe> {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32') {
+    cachedBashProbe ??= (async () => {
+      const version = await (options.runProbe?.('bash') ?? probeBashVersion(PROBE_TIMEOUT_MS));
+      if (version === null) throw new Error('找不到可用的 Bash 运行时：请安装 bash 并加入 PATH。');
+      return { kind: 'bash', exe: 'bash', version, major: parseMajor(version), warning: null };
+    })();
+    return cachedBashProbe;
+  }
   const probe = options.runProbe ?? probeVersion;
   cachedProbe ??= resolvePowerShell(probe, options.deps);
   return cachedProbe;
@@ -830,13 +851,16 @@ class PersistentSession {
     this.#disposeChild();
     // 递增代数必须晚于 disposeChild：旧会话迟到的 close 一定不匹配新代数
     const generation = ++this.#generation;
-    const script = toEncodedCommand(buildSessionBootstrap(this.marker));
+    const isBash = this.#probe.kind === 'bash';
+    const args = isBash
+      ? ['--noprofile', '--norc', '-c', buildBashSessionBootstrap(this.marker)]
+      : ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', toEncodedCommand(buildSessionBootstrap(this.marker))];
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(
         this.#probe.exe,
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', script],
-        { cwd: workdir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+        args,
+        { cwd: workdir, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' },
       );
     } catch {
       // 起步失败（可执行文件或 cwd 不可用）：保持 dead 状态，由 run 返回 sessionLost
@@ -1018,13 +1042,15 @@ interface SingleShotOptions {
 /** 单次执行：独立进程，隔离干净，不共享任何会话状态 */
 function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
   return new Promise<ExecOutcome>((resolve) => {
-    const script = toEncodedCommand(buildSingleShotScript(options.command));
+    const args = options.probe.kind === 'bash'
+      ? ['--noprofile', '--norc', '-c', options.command]
+      : ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', toEncodedCommand(buildSingleShotScript(options.command))];
     let child: SingleShotChild;
     try {
       child = spawn(
         options.probe.exe,
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', script],
-        { cwd: options.workdir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+        args,
+        { cwd: options.workdir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' },
       );
     } catch (err) {
       resolve(emptyOutcome({
@@ -1101,6 +1127,9 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
   const warn = options.onWarning ?? ((): void => undefined);
   const defaultTimeoutMs = options.defaultTimeoutMs ?? PWSH_TIMEOUT_MS;
   const maxBackgroundMs = options.maxBackgroundMs ?? DEFAULT_BACKGROUND_MAX_MS;
+  const platform = options.platform ?? process.platform;
+  const toolName = shellToolName(platform);
+  const shellLabel = platform === 'win32' ? 'PowerShell' : 'Bash';
 
   /** 探测结果缓存：进程生命周期内只探一次 */
   let probePromise: Promise<PowerShellProbe> | null = null;
@@ -1111,9 +1140,10 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
   let backgroundSeq = 0;
 
   const probe = (): Promise<PowerShellProbe> => {
-    probePromise ??= detectPowerShell(
-      options.depsProbe === undefined ? {} : { deps: { probe: options.depsProbe } },
-    ).then((result) => {
+    probePromise ??= detectPowerShell({
+      platform,
+      ...(options.depsProbe === undefined ? {} : { deps: { probe: options.depsProbe } }),
+    }).then((result) => {
       if (result.warning !== null) warn(result.warning);
       return result;
     });
@@ -1131,7 +1161,7 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
   };
 
   const prepare = (rawArgs: unknown, ctx: ToolContext): PreparedCall => {
-    const args = argsRecord(rawArgs, PWSH_TOOL_NAME);
+    const args = argsRecord(rawArgs, toolName);
     const command = requiredString(args, 'command', { maxLength: 100_000 });
     const requestedWorkdir = optionalString(args, 'workdir', { maxLength: 4096 });
     // 边界决议只此一处（tools/boundary.ts）：`undefined` = 历史默认（ctx.workspaceRoot 即边界），
@@ -1168,7 +1198,8 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
     if (boundary === null) return null;
     const workdirProblem = workdirBoundaryError(call.workdir, boundary);
     if (workdirProblem !== null) return workdirProblem;
-    for (const literal of absolutePathLiteralsIn(call.command)) {
+    const paths = platform === 'win32' ? absolutePathLiteralsIn(call.command) : bashAbsolutePathsIn(call.command);
+    for (const literal of paths) {
       const problem = commandPathBoundaryError(literal, boundary);
       if (problem !== null) return problem;
     }
@@ -1229,14 +1260,14 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
     // 第三级门：destructive 默认关闭（design §4.10）
     if (!destructiveEnabled) {
       return errorResult(
-        'pwsh 是 destructive 工具，默认关闭，当前配置未显式开启，命令未执行。'
+        `${toolName} 是 destructive 工具，默认关闭，当前配置未显式开启，命令未执行。`
         + '请在配置里显式打开后重试（design §4.10 第三级门：有副作用的工具必须在配置里显式开启）。',
         TOOL_ERROR_CODES.destructiveDisabled,
       );
     }
 
     // 命令黑名单：命中即拒绝，并把原因与替代路径回给模型
-    const forbidden = screenCommand(call.command);
+    const forbidden = screenCommand(call.command, platform);
     if (forbidden !== null) {
       return errorResult(
         `命令被拒绝（规则 ${forbidden.id}）：${forbidden.reason}。`
@@ -1321,10 +1352,11 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
       // 会话不在（首次启动或已死）就重建：重建只影响"状态丢失"的告知，不影响命令语义
       let restarted = false;
       if (!session.alive) restarted = session.start(call.workdir);
-      // 只有模型显式指定 workdir 时才注入 Set-Location：默认每轮硬切回 workspace 根，
-      // 会抹掉会话自己用 Set-Location 建立的 cwd 状态，那就不是持久会话了
+      // 显式指定目录时才切换；普通调用保留会话当前目录。
       const roundScript = call.explicitWorkdir
-        ? buildSessionRoundScript(call.command, call.workdir)
+        ? (resolved.kind === 'bash'
+          ? buildBashSessionRoundScript(call.command, call.workdir)
+          : buildSessionRoundScript(call.command, call.workdir))
         : call.command;
       outcome = await session.run({
         command: roundScript,
@@ -1347,7 +1379,7 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
     if (outcome.sessionRestarted) {
       notes.push(
         '[持久会话已在本次调用前重建：工作目录与变量状态丢失] '
-        + '之前的 Set-Location 与变量/函数定义都不再有效，需要的话请重新设置。',
+        + `之前的 ${resolved.kind === 'bash' ? 'cd' : 'Set-Location'} 与变量/函数定义都不再有效，需要的话请重新设置。`,
       );
     }
     if (outcome.sessionLost) {
@@ -1377,14 +1409,14 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
   };
 
   return {
-    name: PWSH_TOOL_NAME,
+    name: toolName,
     description:
-      '执行 PowerShell 命令，默认持久会话（cwd/变量/函数跨调用保持）。'
+      `执行 ${shellLabel} 命令，默认持久会话（cwd/变量/函数跨调用保持）。`
       + 'runInBackground=true 转后台，立刻返回 jobId、完成唤醒你。'
       + '危险命令会被拒并说明原因。输出按头 8k 尾 2k 截断。',    parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: '要执行的 PowerShell 命令文本，可多行' },
+        command: { type: 'string', description: `要执行的 ${shellLabel} 命令文本，可多行` },
         workdir: { type: 'string', description: '工作目录；省略则继承持久会话当前目录（首轮为工作根；只限工作目录模式为边界根）' },
         timeoutMs: {
           type: 'integer',

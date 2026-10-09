@@ -45,6 +45,7 @@ import type { EventLog } from '../log/event-log.js';
 import type { DsClient, DsRequest, DsResponse, DsTextFormat } from '../model/ds-client.js';
 import { applyOne, finalizePressure } from '../state/fold.ts';
 import { memoriesDir } from './memory-maintain.ts';
+import { shellToolName } from '../tools/bash.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -118,7 +119,7 @@ export const ASSETS_SEED = `# 数字资产
 
 （这台机器上你能用的东西——**skill、MCP、PATH 里的命令，都算数字资产**，
  只是照习惯分三类写着方便：\`[skill]\` 读说明照着做、\`[mcp]\` 走它的调用面、
- \`[path]\` 用 pwsh 跑。一条一行：\`[分类] 名字 ｜ 一句话用途 ｜ 在哪\`。
+ \`[path]\` 用 ${shellToolName()} 跑。一条一行：\`[分类] 名字 ｜ 一句话用途 ｜ 在哪\`。
  三个分类都是**可选**的：不写分类就按 \`[path]\` 算。
  「在哪」如实写：\`已在 PATH\` / \`路径：…\` / \`未安装（需要 X）\`——写了"未安装"就是没装，
  别让它看起来像有；skill 与 mcp 写名字（或它的说明文件路径）就够，**框架会自己核对**
@@ -805,7 +806,7 @@ const PICK_SCHEMA = {
 
 export const ASSET_PICK_INSTRUCTIONS = [
   '下面是一台机器上可用资产的**索引**（编号 ｜ 分类 ｜ 名字 ｜ 用途 ｜ 就绪情况），以及这台机器',
-  '伙伴马上要做的一件事。分类的含义：[skill] 读说明照着做、[mcp] 走它的调用面、[path] 用 pwsh 跑。',
+  `伙伴马上要做的一件事。分类的含义：[skill] 读说明照着做、[mcp] 走它的调用面、[path] 用 ${shellToolName()} 跑。`,
   '挑出**做这件事可能用得上**的资产编号，最多 3 个，按相关度从高到低。',
   '纪律：',
   '1. 只挑真的相关的；拿不准就不挑——挑错会让她去用一件不对的东西，比不挑更坏。',

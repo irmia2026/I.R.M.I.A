@@ -437,7 +437,7 @@ function buildTaskTools(options: ToolCatalogOptions): ToolDefinition[] {
 }
 
 /**
- * shell 工具族：**只有 `pwsh` 一件**。
+ * shell 工具族：只有一件平台命令工具（Windows 的 `pwsh`，非 Windows 的 `bash`）。
  *
  * v27 删掉了它的别名 `run_command`。那个别名当年是为对齐 design §4.21 的措辞而加的
  * （把「后台任务」说出口），代价是两份**完全相同的参数 schema**（151 token）常驻，

@@ -92,9 +92,9 @@ describe('装置自述 · 静态常量', () => {
     assert.ok(SELF_BRIEF.includes('人听不到你'), '要说清不调工具的后果');
     assert.ok(SELF_BRIEF.includes('speak'), '点名日常聊天用哪个');
     assert.ok(SELF_BRIEF.includes('report'), '点名正式内容用哪个');
-    assert.ok(SELF_BRIEF.includes('怎么快怎么来'), '节奏交给工具去拆');
-    assert.ok(SELF_BRIEF.includes('一轮里通常只调一次'), '分寸：别用多次调用堆一大堆话（那叫烦人）');
-    assert.ok(SELF_BRIEF.includes('它会按真人节奏拆成几条发出去'), '拆分由工具负责，她只管把整段交上去');
+    assert.ok(SELF_BRIEF.includes('自然句末和长度均衡拆成最多五条'), '分段由工具负责且数量有界');
+    assert.ok(SELF_BRIEF.includes('需要先报进度再说结果时可以分几次调用'), '同一轮进度与结果不能被次数限制拦住');
+    assert.ok(SELF_BRIEF.includes('原文标点会保留'), '提示词与真实分段行为一致');
     assert.ok(SELF_BRIEF.includes('Markdown 原样保留、不切分'), 'report 不做切分');
   });
 

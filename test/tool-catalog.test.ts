@@ -27,6 +27,7 @@ import { buildCatalogRegistry } from '../src/tools/catalog.ts';
 import { FS_ERROR_CODES } from '../src/tools/fs/index.ts';
 import { MAX_DESCRIPTION_TOKENS, estimateTokens } from '../src/tools/registry.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
+import { shellToolName } from '../src/tools/bash.ts';
 
 function catalog(destructiveEnabled = true): ReturnType<typeof buildCatalogRegistry> {
   const timers = new TimerStore({ dir: 'data', fire: () => {} });
@@ -79,7 +80,7 @@ test('工具清单：run_command / notify 不许回来；ask_human 回来了，�
     assert.equal(registry.has(gone), false, `${gone} 又被注册回来了（每轮都要为它付一份 schema）`);
   }
   // 能力本身必须有替代出口，否则"删了"就成了"没了"
-  assert.ok(registry.has('pwsh'), '后台能力要有出口：pwsh');
+  assert.ok(registry.has(shellToolName()), '后台能力要有平台命令工具出口');
   assert.ok(registry.has('speak'), '推送能力要有出口：speak 的 level 参数');
   assert.equal(
     (registry.get('speak')?.parameters['properties'] as Record<string, unknown>)['level'] !== undefined,

@@ -172,13 +172,16 @@
       "$comment": [
         "QQ 官方 Bot API：需要 AppID 与 AppSecret 两把密钥，在 GUI「消息适配器 → QQ 官方」里填。",
         "groupBatchMinutes：群消息攒批窗口（分钟）。单聊每句都及时看；群聊的一条 @ 常常只是半句话，攒到窗口再一起看。0 = 每条都唤醒。",
+        "allowedGroups / blockedGroups：官方群 openid 白名单与黑名单。黑名单优先，白名单为空不限制；被拒消息直接丢弃，不进日志或信箱，不影响 OneBot。",
         "useMarkdown：发文本时用原生 markdown（msg_type=2）；拿不到该权限的机器人会被服务端拒绝，这里会自动降级为纯文本重发。"
       ],
       "enabled": false,
       "appIdEnv": "QQ_BOT_APP_ID",
       "clientSecretEnv": "QQ_BOT_CLIENT_SECRET",
       "useMarkdown": true,
-      "groupBatchMinutes": 3
+      "groupBatchMinutes": 3,
+      "allowedGroups": [],
+      "blockedGroups": []
     },
     "onebot": {
       "$comment": [

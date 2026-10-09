@@ -279,7 +279,7 @@ test('task 打开才注册：清单 +1 件、在模型视线内，且只由 task
   const view = opened.registry.listForModel({ includeDestructive: true });
   assert.equal(view.length, closedOwner.length + 1, `打开后 owner 视角应比基准多一件，实际 ${view.length}`);
   assert.equal(view.some(spec => spec.name === TASK_TOOL_NAME), true, 'task 必须进模型清单');
-  assert.equal(view.at(-1)?.name, 'pwsh', '清单尾部仍是 pwsh（顺序即前缀语义）');
+  assert.equal(view.at(-1)?.name, process.platform === 'win32' ? 'pwsh' : 'bash', '清单尾部仍是平台命令工具');
 
   // 关掉与打开**只差 task 这一件**，其余仍是同一串字节（顺序也没动）
   assert.equal(

@@ -343,7 +343,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '40';
+export const RENDER_VERSION = '41';
 
 /**
  * 哪次工具调用没有回执时，补给它（也补给她）的那句话。

@@ -22,6 +22,7 @@ import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
 import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channel/inbox.ts';
 import { ManagedProtocolService, readEndpointFromConfig, resolveServiceDir } from './services/snowluma.ts';
 import { normalizeSid, parseAliases } from './channel/sessions.ts';
+import { withGroupPolicy } from './channel/group-policy.ts';
 import { createNotifier } from './alert/notifier.ts';
 import { notifyStartupRecovery } from './alert/startup.ts';
 import { loadConfig, readApiKey, trustBoundaryRoot, type AppConfig } from './config/config.ts';
@@ -857,7 +858,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 不出现「（这一条你还没看过）」：判据 `wakeEvent.data.msgSeq > entry.readUpToSeq`
    * 遇上恒 0 永远为假，她会把它读成"又是上一次那条"而不回（报告 §3.4）。
    */
-  const onChannelMessage = (data: WakeChannel['data']): void => {
+  const onChannelMessage = withGroupPolicy((data: WakeChannel['data']): void => {
     // 文本提及（关键词）也算"在叫她"：判据在分流器里，这里只把**结论**记进事件
     // （`mentionsMe` 让渲染层说出"提到了你"而不是"@ 了你"——她据此判断该怎么接）。
     // **只有群聊才有"提及"这回事**：私聊里人家本来就在跟她说话，句子里带上名字是常事，
@@ -876,7 +877,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       (seq) => ({ ...data, msgSeq: msgSeqOf(data, seq) }),
       'internal',
     );
-  };
+  }, config.channels.qqOfficial);
 
   if (qqChannel !== null) {
     qqChannel.onMessage = onChannelMessage;

@@ -595,6 +595,10 @@ export interface ChannelsConfig {
      * 一起看——看了也不一定说话（要不要发言由她自己定）。0 = 不攒，每条都唤醒。
      */
     groupBatchMinutes: number;
+    /** 官方群 openid 白名单；空数组表示不限制。 */
+    allowedGroups: string[];
+    /** 官方群 openid 黑名单，优先于白名单；被拒消息不落日志或信箱。 */
+    blockedGroups: string[];
   };
   /**
    * OneBot 11 通道（NapCat / go-cqhttp 等协议端的正向 WebSocket）。默认关闭。
@@ -847,6 +851,8 @@ function buildDefaults(dir: string): AppConfig {
         useMarkdown: true,
         clientSecretEnv: DEFAULT_QQ_CLIENT_SECRET_ENV,
         groupBatchMinutes: DEFAULT_QQ_GROUP_BATCH_MINUTES,
+        allowedGroups: [],
+        blockedGroups: [],
       },
       onebot: {
         enabled: false,
@@ -1107,6 +1113,7 @@ function defaultDocument(dir: string): JsonObject {
         '  这是关键词匹配，不做语义判断：填宽了会误唤醒、填窄了会漏——分寸由人定，界面上可改。',
         '密钥不落配置文件：只写环境变量名（appIdEnv / clientSecretEnv / tokenEnv），值放进程环境里。',
         'QQ：两者齐备且 enabled=true 时才建连；apiBase/tokenUrl/gatewayUrl 不写用官方默认地址。',
+        'QQ：allowedGroups / blockedGroups 填官方群 openid；黑名单优先，白名单为空不限制。被拒绝的群消息直接丢弃，不进日志或信箱。仅限制官方 Bot，不影响 OneBot。',
         'QQ：AppID/ClientSecret 的值写在 data/.keys.json（界面填）或环境变量里，环境变量优先；'
           + 'groupBatchMinutes 是群消息攒批窗口（单聊不受它影响，每句都及时看）。',
           'useMarkdown：发文本时用原生 markdown（msg_type=2），默认开——她发的报告才能在 QQ 里真正渲染。',
@@ -1124,6 +1131,8 @@ function defaultDocument(dir: string): JsonObject {
         appIdEnv: d.channels.qqOfficial.appIdEnv,
         useMarkdown: d.channels.qqOfficial.useMarkdown,
         clientSecretEnv: d.channels.qqOfficial.clientSecretEnv,
+        allowedGroups: [...d.channels.qqOfficial.allowedGroups],
+        blockedGroups: [...d.channels.qqOfficial.blockedGroups],
       },
       onebot: {
         enabled: d.channels.onebot.enabled,
@@ -1432,6 +1441,8 @@ function parseQqOfficialChannel(raw: JsonValue | undefined, base: ChannelsConfig
     clientSecretEnv: pickEnvName(obj['clientSecretEnv'], 'channels.qqOfficial.clientSecretEnv', base.clientSecretEnv),
     // 0 合法（= 不攒批，每条都唤醒），所以下限是 0；上限 1440（一天）——再大就不是「攒一会儿」了
     groupBatchMinutes: pickInt(obj['groupBatchMinutes'], 'channels.qqOfficial.groupBatchMinutes', base.groupBatchMinutes, 0, 1440),
+    allowedGroups: pickToolNameList(obj['allowedGroups'], 'channels.qqOfficial.allowedGroups', base.allowedGroups),
+    blockedGroups: pickToolNameList(obj['blockedGroups'], 'channels.qqOfficial.blockedGroups', base.blockedGroups),
   };
   const apiBase = pickHttpUrlOptional(obj['apiBase'], 'channels.qqOfficial.apiBase');
   if (apiBase !== undefined) out.apiBase = apiBase;

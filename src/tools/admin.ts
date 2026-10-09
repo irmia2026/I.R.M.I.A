@@ -171,34 +171,8 @@ export const SPEAK_TEXT_SUGGESTED_MAX = 25;
  * ② **语域边界**：`report` 实测最短一次 135 字（docs/tools-audit.md §2.6）——再长本来就该走 report。
  */
 export const SPEAK_TEXT_REMIND_MAX = 25;
-/**
- * speak 的**硬门**：超过它**直接拒绝**（`errorResult`）——不截断、不"提醒之后照发"。
- *
- * 用户 2026-10-05 的原话：「超多少字不截断取消。而是超过 40 字直接拒绝。返回要求重新组织语言，
- * 或是多次调用，或是 report」。所以这一条与上面两条**性质不同**：
- *
- *   • **25**（`SPEAK_TEXT_SUGGESTED_MAX`）= **目标**——她该往哪儿说（越短越好，像打字聊天）；
- *   • **40（本常量）= 硬门**——过了就退回，一个字不发（`text` 那条路根本走不到）；
- *   • **提醒线**（`SPEAK_TEXT_REMIND_MAX`）= **纠偏的密度**——多久追她一句（不阻止发送）。
- *   • **分段**（`chat-split.ts`）= **40 以内的投递形态**——切成几条、按打字节奏一条条发。
- *
- * 三层的分工可以一句话说完：**25 是目标，40 是门，分段是门里的走路方式**。40 以内照旧分段
- * （那是"像人打字"的语义，没有"超过多少就不分段"这回事了——那条 45 字的口径已被用户取消）。
- *
- * **为什么 40 是"拒绝"而不是"截断"**：截断过的话照样发出去，人读到的就不是她想说的那句了
- * （回执与日志还会记着一段被砍过的文本）——那是替她说了半句。拒绝则把决定权还给她：
- * 重说、拆几次、还是改用 `report`，由她判断。拒绝文案必须给出这三条路（她照着就能改）。
- *
- * 判据用 `charCount`（中文计字口径：emoji / 增补平面字符算一个字），与分段、`maxLength`
- * 同一把尺子——用 `text.length` 会把 emoji 数成两个，同一句话带不带表情会落在门的两侧。
- * **边界是精确的**：正好 40 字通过，41 字起拒绝（测试 `test/admin-pwsh.test.ts` 钉住两侧）。
- *
- * `SPEAK_TEXT_HARD_MAX` 仍在、仍是 `requiredString` 的 `maxLength`：那是"别把整篇报告塞进来"
- * 的兜底（schema 层），400 > 40，所以真正会先拦下来的是这一条。
- */
-export const SPEAK_TEXT_MAX = 40;
-/** 硬上限：只是防它把整篇报告塞进来；稍微超过不拒，只在结果里提醒（那条提醒见 SPEAK_TEXT_REMIND_MAX） */
-const SPEAK_TEXT_HARD_MAX = 400;
+/** 框架聊天策略，不是 QQ 协议上限；按 Unicode 字符计数，更长内容使用 report。 */
+export const SPEAK_TEXT_MAX = 400;
 /** report 的上限：正式内容允许长，与 speak 差三个量级 */
 const REPORT_TEXT_MAX = 64000;
 
@@ -285,8 +259,7 @@ async function sleepUnlessInterrupted(
  * 上面那行已经逐字给过了——这里再抄一遍就是同一段话在上下文里出现两次，白花钱还容易让她
  * 把已发的那半截当成没发的重讲一遍（那正是"替她改主意"的一种）。
  *
- * 长度：整段文本本来就有硬上限（`SPEAK_TEXT_HARD_MAX` 400 字），所以这一行最多四百字出头
- * ——比一条群消息还短，不需要额外的截断规则。
+ * 长度：整段文本的框架上限为 `SPEAK_TEXT_MAX`，无需额外截断这一行。
  */
 function numberedUnreleased(segments: readonly string[]): string {
   if (segments.length === 0) return '（无）';
@@ -1564,10 +1537,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     description:
       `跟人说话用这个（**聊天用，不是写正式句子**）——一次说一件事、${SPEAK_TEXT_SUGGESTED_MAX} 字内、最多两个逗号；`
       + '整段交给它，按打字节奏自动断句发出去。'
-      + `超 ${SPEAK_TEXT_MAX} 字直接退回，别调它堆话；长内容用 report。`,
+      + `一次最多 ${SPEAK_TEXT_MAX} 字；长内容用 report。`,
     // 描述不许写长：它进 tools 那一段（请求的缓存前缀），且 `tool-catalog` 有一条
     // **<60 token** 的硬线（本轮口径，与另外六件一起算）。所以分段的细则
-    // （顿号不断、成对符号里不断、不足 12 字整段一条）**只写在 `chat-split.ts` 里**，
+    // （标点保留、成对符号与代码块内部不拆）**只写在 `chat-split.ts` 里**，
     // 不往这里塞——那些是她写标点时自然就会写对的规则，不需要她背。
     //
     // **"口语化、允许残缺/倒装/省略"那一句放在 `text` 参数的描述里**（参数不进那份 <60 预算，
@@ -1582,6 +1555,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       properties: {
         text: {
           type: 'string',
+          maxLength: SPEAK_TEXT_MAX,
           description:
             '要说的内容，**一句话**（会被自动断成几条，不必自己拆）。'
             + '**这是聊天消息，不是正式发言**：短、口语，允许句子残缺、倒装、省略、表达奇怪'
@@ -1617,24 +1591,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     handler: async (rawArgs, ctx): Promise<ToolHandlerResult> => {
       try {
         const args = argsRecord(rawArgs, 'speak');
-        const text = requiredString(args, 'text', { maxLength: SPEAK_TEXT_HARD_MAX });
-        // **硬门（`SPEAK_TEXT_MAX` 40）：超过就退回，一个字不发。** 用户 2026-10-05 的口径。
-        //
-        // 拒绝而不是截断：截断过的那半句照样发出去，人读到的就不是她想说的那句了；把它退回去，
-        // "重说 / 拆几次 / 改用 report"这三个决定仍在她手里。所以文案给全三条路，并把**收到多少字**
-        // 如实报出来（她据此才知道要砍掉多少）——这是"拒绝必须给模型明确的下一步"那条纪律
-        // （design.md §4.10）在这一处的落点。
-        //
-        // 位置刻意在**解析目标之前**：一句话超了门就没有"该不该发、发给谁"的问题了，先判它
-        // 才不会白算一轮；也保证被拒时日志里一个字都没落（截断或提醒后照发都做不到这一点）。
+        const text = requiredString(args, 'text');
         if (charCount(text) > SPEAK_TEXT_MAX) {
           return errorResult(
-            `这段 ${charCount(text)} 字，超过 speak 的上限（一次至多 ${SPEAK_TEXT_MAX} 字）——`
-            + 'speak 是聊天用的，一个字都没发出去。三条路挑一条：\n'
-            + `- 重新组织成更短的一句：聊天不必是完整句子，口语、残缺、倒装、省略都行`
-            + `（往 ${SPEAK_TEXT_SUGGESTED_MAX} 字左右收）；\n`
-            + '- 拆成几次调用：一次说一件事，说几轮都行；\n'
-            + '- 内容本来就长：改用 report（正式内容允许长，Markdown 原样保留、不按标点切）。',
+            `这段 ${charCount(text)} 字，超过 speak 的上限 ${SPEAK_TEXT_MAX} 字；没有发出，请拆成几次调用或改用 report。`,
             TOOL_ERROR_CODES.invalidArgs,
           );
         }
@@ -1642,9 +1602,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // "一次说一件事、像打字聊天"的目标，不该说成"你超了上限"（更不该说成"你做不到"）。
         // 提醒线与建议线**脱钩**（2026-10-05 用户定：两条都是 25），所以改提醒的密度
         // 只动 SPEAK_TEXT_REMIND_MAX，不要连建议线一起动——后者是用户定的说话风格。
-        const overRemindLine = text.length > SPEAK_TEXT_REMIND_MAX;
+        const overRemindLine = charCount(text) > SPEAK_TEXT_REMIND_MAX;
         const level = readNotifyLevel(args);
-        const chars = text.length;
+        const chars = charCount(text);
         const lines: string[] = [];
 
         // 目标先解析：它决定这个循环里除了落日志之外还要不要发 IM。
@@ -1674,11 +1634,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         //
         // 说话期间人又开口了（`ctx.interrupt`）就立刻停：已经发出去的收不回来，没发的
         // 一段都不发，并在回执里如实告诉她——那条回执是给她重新组织语言的依据。
-        // **分段照旧**：一次发言切成几条、按打字节奏一条条发（`chat-split.ts` 认逗号与句号，
-        // 成对符号与代码块有保护、不足 12 字整段一条——细则全在那个模块里，这里不重写一套）。
-        // 已经没有"超过多少字就不分段"这回事了：用户 2026-10-05 取消了那条 45 字的口径，
-        // 超长改由上面的硬门（`SPEAK_TEXT_MAX` 40）直接拒绝——**门在进 speak 之前**，
-        // 走到这里的文本一定在门内，于是"切不切"只剩"该怎么切"。
         const segments = splitForChat(text);
         // **正文原样出站**：一个字都不改、一段都不拦（2026-10-05 用户决定移除"名字 → openid →
         // 官方 @ 串"那一层，原话「我觉得没必要存在」，理由见 `channel/qq-official.ts` 文末那段
@@ -1729,7 +1684,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             break;
           }
           if (perCharMs > 0 && waitedMs < SPEAK_TOTAL_BUDGET_MS) {
-            const wait = Math.min(SPEAK_MAX_DELAY_MS, Math.round(segment.length * perCharMs));
+            const wait = Math.min(SPEAK_MAX_DELAY_MS, Math.round(charCount(segment) * perCharMs));
             if (wait > 0 && waitedMs + wait <= SPEAK_TOTAL_BUDGET_MS) {
               const completed = await sleepUnlessInterrupted(wait, probe);
               waitedMs += wait;
@@ -1740,7 +1695,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             }
           }
           emit('message/assistant', { text: segment, toolCalls: [] });
-          emit('speak/sent', { channel: 'log', chars: segment.length } satisfies SpeakSentPayload);
+          emit('speak/sent', { channel: 'log', chars: charCount(segment) } satisfies SpeakSentPayload);
           emitted += 1;
           started = true;
           // IM 紧跟同一段：本地先落（那一跳永远可用），再发出去（那一跳可能失败）。
@@ -1819,11 +1774,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // ——补上整篇文本与段数，`read_channel` 才能把"她在这个会话里说过什么"读回来
           //（逐段的 `message/assistant` 里没有会话坐标，见 log/types.ts 的 SpeakSent.text）。
           //
-          // 文本取**实际发出去的那几段拼起来**（不是 `text` 原文）：切分会摘掉逗号句号、
-          // 还可能化开破折号，所以"她说的"与"发出去的"不是一个字节串。这里记的是后者
-          // ——read_channel 要回答的是"那边到底收到了什么"。代价是相邻两句之间没有标点
-          //（原句的句号被摘了），读起来是连着的；宁可她读到自己那口气的原样，也不替她补一个
-          // 她没打过的标点（那是往"她说过的话"里加字）。
+          // 文本取**实际发出去的那几段拼起来**（不是 `text` 原文）：只记录投递成功的段落，
+          // 不把没有送达的内容写成已经说过。
           emit('speak/sent', deliverToSession({
             sid: target.url,
             chars,
@@ -1846,7 +1798,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           + (overRemindLine
             // 措辞是**纠偏**，不是判错：说"这段偏长、往回收"，不说"你超了上限"（更不说"做不到"）。
             // 顺带给出去路（拆成几次 / 正式内容走 report），否则她只收到一句"太长了"。
-            ? `\n\n提醒：这段 ${text.length} 字，比平时说话长了些（speak 的风格是一次说一件事、`
+            ? `\n\n提醒：这段 ${chars} 字，比平时说话长了些（speak 的风格是一次说一件事、`
               + `${SPEAK_TEXT_SUGGESTED_MAX} 字内）。能拆成几次说就拆；`
               + '正式内容直接走 report——speak 的断句与打字节奏是按短话设计的。'
             : ''));

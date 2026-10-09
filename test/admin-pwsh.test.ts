@@ -59,6 +59,9 @@ import { TimerStore } from '../src/wake/timer-store.ts';
 
 // ──────────────────────────────── 测试脚手架 ────────────────────────────────
 
+const CHAT_SEGMENTS = ['甲乙丙丁戊己庚辛壬癸。', '子丑寅卯辰巳午未申酉戌。'];
+const CHAT_TEXT = CHAT_SEGMENTS.join('');
+
 let root = '';
 
 before(async () => {
@@ -610,9 +613,8 @@ describe('speak：告警出口与三路投递', () => {
     setSleepForTest(async () => {});
     t.after(() => { setSleepForTest(null); });
 
-    // 分段是门内的投递形态：这条夹具 15 字，稳在硬门（`SPEAK_TEXT_MAX`）以内、也切成两条。
-    // 门的两侧（40 通过 / 41 被拒）在「硬门」那条用例里钉着，分段本身在「分段回来了」那条里钉着。
-    const spoken = '长任务跑完了，共 42 个文件';
+
+    const spoken = CHAT_TEXT;
     const result = await toolkit.byName('speak').handler({ text: spoken }, ctx);
     assert.equal(result.isError, undefined, result.content);
     assert.match(result.content, /日志\/前端：按聊天节奏发成 2 条/);
@@ -623,7 +625,7 @@ describe('speak：告警出口与三路投递', () => {
     const spokenSegments = recorder.events
       .filter((event) => event.type === 'message/assistant')
       .map((event) => (event.data as { text: string }).text);
-    assert.deepEqual(spokenSegments, ['长任务跑完了', '共 42 个文件'], '句末标点消失，逗号处断开');
+    assert.deepEqual(spokenSegments, CHAT_SEGMENTS, '按自然句末拆分，原文和标点保留');
     const channels = recorder.events
       .filter((event) => event.type === 'speak/sent')
       .map((event) => (event.data as { channel: string }).channel)
@@ -633,7 +635,7 @@ describe('speak：告警出口与三路投递', () => {
       .filter((event) => event.type === 'speak/sent')
       .map((event) => (event.data as { chars: number }).chars)
       .sort((a, b) => a - b);
-    assert.deepEqual(charCounts, [6, 8, 15, 15], 'log 路按段计字数；notify 与 reply-url 按整篇计');
+    assert.deepEqual(charCounts, [11, 12, 23, 23], 'log 路按段计字数；notify 与 reply-url 按整篇计');
     assert.equal(pushed.length, 1, '告警出口整篇一条，不刷屏');
     assert.equal(posted.length, 2, '回投逐段发：IM 那边一条条收');
     assert.equal(posted[0]?.target.idempotencyKey, 'turn-7', '幂等键 = turn 号');
@@ -647,8 +649,6 @@ describe('speak：告警出口与三路投递', () => {
       emit: makeRecorder().emit,
       personaRoot: join(ws, 'persona'),
     });
-    // 逗号处一律断开 → 段数确定；sleep 换成人账，看等的是多少毫秒。
-    // 12 字是"太短不拆"的下限，所以这一段挑够长的（否则整段一条，节奏就测不出来了）
     setSleepForTest(async (ms) => {
       waits.push(ms);
     });
@@ -656,12 +656,9 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
-    // 两段：『甲乙丙丁戊』(5 字) 与 『己庚辛壬癸子』(6 字)。**第一段也要等**——她按下的不是
-    // "发送"，是"开始打字"；默认速度 90 字/分钟 → 每字 60000/90 ≈ 666.7ms，
-    // 于是 5 字 → 3333ms、6 字 → 4000ms（都是待发送那一段自己的字数，不是上一段的）。
-    assert.deepEqual(waits, [3333, 4000], '每一段都等它自己要打多久');
+    assert.deepEqual(waits, [7333, 8000], '每一段都等它自己要打多久');
   });
 
   test('发言节奏可关：typingEffect=false 时一段都不等，全部立刻发完', async (t) => {
@@ -678,7 +675,7 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(waits, [], '关掉打字效果就是"内容尽快到手"，等待应当一次都没有');
     assert.match(result.content, /间隔共等 0\.0s/);
@@ -698,9 +695,9 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
-    // 300 字/分钟 = 每字 200ms：5 字 → 1000、6 字 → 1200
-    assert.deepEqual(waits, [1000, 1200]);
+    await toolkit.byName('speak').handler({ text: CHAT_TEXT }, makeCtx(ws));
+    // 两段计入保留的标点，分别 11 字与 12 字。
+    assert.deepEqual(waits, [2200, 2400]);
   });
 
   test('回投与日志同节奏：IM 那条跟着每一段走，不是等 sleep 花光才一股脑发', async (t) => {
@@ -727,11 +724,11 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(timeline, [
-      'sleep:3333', 'log:甲乙丙丁戊', 'im:甲乙丙丁戊',
-      'sleep:4000', 'log:己庚辛壬癸子', 'im:己庚辛壬癸子',
+      'sleep:7333', `log:${CHAT_SEGMENTS[0]}`, `im:${CHAT_SEGMENTS[0]}`,
+      'sleep:8000', `log:${CHAT_SEGMENTS[1]}`, `im:${CHAT_SEGMENTS[1]}`,
     ], '每段都是「等它自己打完 → 落日志 → 发 IM」；IM 落在 sleep 之前就等于旧的一股脑行为');
   });
 
@@ -761,13 +758,13 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.match(result.content, /发言被打断/);
     assert.match(result.content, /他刚说「你在忙吗」/, '要把对方的新话摆出来，她才知道该针对什么重说');
     assert.match(result.content, /一条都没发/);
-    assert.match(result.content, /己庚辛壬癸子/, '没发出去的内容要原样告诉她');
+    assert.match(result.content, /子丑寅卯辰巳午未申酉戌。/, '没发出去的内容要原样告诉她');
     assert.match(result.content, /重新组织语言/);
     assert.deepEqual(claimed, [4242], '被打断就把那条输入销账：不销，下一轮她会把同一个问题再答一遍');
     assert.deepEqual(posted, [], '被打断就一条都不发');
@@ -804,10 +801,10 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const first = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const first = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
     assert.match(first.content, /发言被打断/, '第一次确实被打断');
 
-    const second = await toolkit.byName('speak').handler({ text: '戊己庚辛壬癸，子丑寅卯辰巳' }, ctx);
+    const second = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
     assert.ok(!second.content.includes('被打断'), `第二次不该再被打断：${second.content}`);
     assert.match(second.content, /发言已处理/);
     assert.equal(recorder.count('message/assistant'), 2, '第二次的两段都该正常落进对话流');
@@ -844,19 +841,19 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(claimed, [88], '说了一半被打断也算"她看见了"：照样销账');
-    assert.deepEqual(posted, ['甲乙丙丁戊'], '已经发出去的那条收不回来');
+    assert.deepEqual(posted, CHAT_SEGMENTS.slice(0, 1), '已经发出去的那条收不回来');
     assert.deepEqual(
       recorder.events.filter((e) => e.type === 'message/assistant').map((e) => (e.data as { text: string }).text),
-      ['甲乙丙丁戊'],
+      CHAT_SEGMENTS.slice(0, 1),
       '后面的段落一个字都不许再落',
     );
-    assert.match(result.content, /已经发出去的（收不回来了）：1 条——甲乙丙丁戊/);
+    assert.match(result.content, /已经发出去的（收不回来了）：1 条——甲乙丙丁戊己庚辛壬癸。/);
     // 未发的那半截只有一条：不编号（加了「1.」既不帮读、又显得像在递清单），但条数照给
-    assert.match(result.content, /没来得及发的（1 条）：己庚辛壬癸子/);
+    assert.match(result.content, /没来得及发的（1 条）：子丑寅卯辰巳午未申酉戌。/);
   });
 
   test('打断不靠等待：关掉打字效果（一次都不等）时插话，剩下的段落照样一个字不发', async (t) => {
@@ -889,17 +886,17 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.match(result.content, /发言被打断/, `等待为 0 也不能漏掉插话：${result.content}`);
     assert.deepEqual(
       recorder.events.filter((e) => e.type === 'message/assistant').map((e) => (e.data as { text: string }).text),
-      ['甲乙丙丁戊'],
+      CHAT_SEGMENTS.slice(0, 1),
       '已经发出去的第一条不受影响，后面那条一个字都不许再落',
     );
-    assert.match(result.content, /已经发出去的（收不回来了）：1 条——甲乙丙丁戊/);
-    assert.match(result.content, /没来得及发的（1 条）：己庚辛壬癸子/);
+    assert.match(result.content, /已经发出去的（收不回来了）：1 条——甲乙丙丁戊己庚辛壬癸。/);
+    assert.match(result.content, /没来得及发的（1 条）：子丑寅卯辰巳午未申酉戌。/);
     assert.deepEqual(claimed, [4242], '真被打断就销账，销的是打断她的那一条');
   });
 
@@ -922,7 +919,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ text: CHAT_TEXT }, ctx);
 
     assert.ok(!result.content.includes('被打断'), `基准取的是开口那一刻：${result.content}`);
     assert.equal(recorder.count('message/assistant'), 2, '两段都该发出去');
@@ -958,48 +955,31 @@ describe('speak：告警出口与三路投递', () => {
     assert.deepEqual(claimed, [], '没被打断就不销账：那条消息要留在队列里等她下一轮看见');
   });
 
-  test('回执形状：九条气泡只出去三条 → 编号点名第 1~3 条已发、第 4~6 条没发，各逐条给内容', async (t) => {
-    // 用户 2026-10-01 的原设计：「返回结果告诉她『以下内容还没来得及发送，考虑重新组织语言』」。
-    // 2026-10-03 补的形状要求：**她得一眼看出"第 4 条起没出去、内容是什么"**——
-    // 只说"被取消"或静默丢掉，她就只能猜自己说到哪儿了，而重新组织语言必须建立在
-    // "我上一句停在哪"之上。这条用例把那个形状钉死（编号 + 条数 + 不重复已发的内容）。
+  test('回执点名已发与未发段落，且不重复已发内容', async () => {
     const ws = await workspace('speak-receipt-shape');
     const recorder = makeRecorder();
+    const segments = ['第一句内容已经足够完整。', '第二句内容也已经足够完整。',
+      '第三句内容还是足够完整。', '第四句内容同样足够完整。', '第五句内容也是足够完整。'];
     let epoch = 0;
-    // 六个逗号 → 六条气泡；第三条落库之后人插话。
-    // **整段必须压在硬门（`SPEAK_TEXT_MAX`）以内**：超门的话 speak 直接拒绝、一个字都不发，
-    // 这条用例锁的"第 4 条起没出去"就整个失效（连第一条都不会有）。这一份正好 40 字（贴线）。
-    const text = '第一句话在这里，第二句也在这，三句在这里了，四句在这呢，五句在这里呀，六句在这吧';
-    assert.equal(charCount(text), SPEAK_TEXT_MAX, '夹具必须正好压在硬门上（41 就会整段被拒）');
     const toolkit = createAdminTools({
-      timers: new TimerStore(null),
+      timers: new TimerStore(null), personaRoot: join(ws, 'persona'),
       emit: (type, data) => {
         recorder.emit(type, data);
         if (type === 'message/assistant' && recorder.count('message/assistant') === 3) epoch += 1;
       },
-      personaRoot: join(ws, 'persona'),
       speakTyping: { typingEffect: false, charsPerMinute: 90 },
-      userSpoke: () => ({ text: '和我的私聊是私有的，没关系', wakeSeq: 4242 }),
+      userSpoke: () => ({ text: '等等', wakeSeq: 4242 }),
     });
-    const ctx = {
-      ...makeCtx(ws), interruptEpoch: () => epoch,
-      claimInterruption: () => {},
-    };
-
-    const result = await toolkit.byName('speak').handler({ text }, ctx);
+    const result = await toolkit.byName('speak').handler({ text: segments.join('') }, {
+      ...makeCtx(ws), interruptEpoch: () => epoch, claimInterruption: () => {},
+    });
     const lines = result.content.split('\n');
-    assert.equal(lines.length, 4, `回执就四行（多了就是把同一段话抄两遍）：\n${result.content}`);
-    assert.match(lines[0]!, /发言被打断：他刚说「和我的私聊是私有的，没关系」。/);
-    assert.match(lines[1]!, /^- 已经发出去的（收不回来了）：3 条——第一句话在这里／第二句也在这／三句在这里了$/);
-    assert.match(
-      lines[2]!,
-      /^- 没来得及发的（3 条）：1\. 四句在这呢／2\. 五句在这里呀／3\. 六句在这吧$/,
-      '未发的必须逐条编号点名——她据此才看得出"第 4 条起没出去"',
-    );
-    // 第三行不重复已发的内容（重复 = 同一段话在上下文里出现两次，且容易让她把已发的重讲一遍）
-    assert.ok(!lines[2]!.includes('第一句话'), `未发那行不许夹带已发的内容：${lines[2]}`);
-    assert.match(lines[3]!, /重新组织语言/);
-    assert.match(lines[3]!, /^别把剩下这半截硬接上去/);
+    assert.equal(lines.length, 4);
+    assert.match(lines[0]!, /发言被打断：他刚说「等等」。/u);
+    assert.equal(lines[1], `- 已经发出去的（收不回来了）：3 条——${segments.slice(0, 3).join('／')}`);
+    assert.equal(lines[2], `- 没来得及发的（2 条）：1. ${segments[3]}／2. ${segments[4]}`);
+    assert.ok(!lines[2]!.includes(segments[0]!));
+    assert.match(lines[3]!, /重新组织语言/u);
   });
 
   test('speak 的 to：发到指定会话；sid 非法就如实报错，不静默', async (t) => {
@@ -1161,19 +1141,8 @@ describe('speak：告警出口与三路投递', () => {
     assert.equal(SPEAK_TEXT_SUGGESTED_MAX, 25, '25 是用户定的说话风格目标，不许按实测分布放宽');
     assert.match(description, /最多两个逗号/u, '「最多两个逗号」是用户风格口径的一部分');
 
-    // 硬门的那个数**同样由常量拼进描述**（两处各写一个数就是两处真相），并且要与常量本身相等。
-    assert.match(
-      description,
-      new RegExp(`超 ${SPEAK_TEXT_MAX} 字直接退回`, 'u'),
-      `描述里的硬门必须来自 SPEAK_TEXT_MAX：${description}`,
-    );
-    const onGate = /超 (\d+) 字/u.exec(description);
-    assert.notEqual(onGate, null, `描述里没有「超 N 字」这个硬门口径：${description}`);
-    assert.equal(
-      Number(onGate![1]),
-      SPEAK_TEXT_MAX,
-      `描述里手写了硬门的数（${onGate![1]}），必须与 SPEAK_TEXT_MAX 同源`,
-    );
+    assert.match(description, new RegExp(`一次最多 ${SPEAK_TEXT_MAX} 字`, 'u'));
+    assert.equal(SPEAK_TEXT_MAX, 400);
 
     // **"这是聊天用的、可以不成句"必须写在描述里**（用户 2026-10-05 特意点的那句）：
     // 她原来可能把 speak 当成"写正式短句"的地方。细节（残缺/倒装/省略那一串）在 `text` 参数里，
@@ -1223,55 +1192,52 @@ describe('speak：告警出口与三路投递', () => {
     assert.match(wayOver.content, /report/u, '要给出路，不能只说"太长了"');
   });
 
-  test('硬门：41 字直接拒绝（不截断、不照发），拒绝文案给全三条出路', async () => {
+  test('40 / 41 / 400 字正常发送，401 字不发送；emoji 按一个字符计数', async () => {
     const ws = await workspace('speak-gate');
     const recorder = makeRecorder();
+    const posted: string[] = [];
     const toolkit = createAdminTools({
-      timers: new TimerStore(null),
-      emit: recorder.emit,
-      personaRoot: join(ws, 'persona'),
-      // 关掉打字节奏：这一条锁的是"门"，不锁等多久
+      timers: new TimerStore(null), emit: recorder.emit, personaRoot: join(ws, 'persona'),
       speakTyping: { typingEffect: false, charsPerMinute: 90 },
-      // 目标故意给一个：门必须在**解析目标之前**就拦下（一句话超了门，就没有"发给谁"的问题了）
       replyTargetOf: () => ({ url: 'qq:group:G1', idempotencyKey: 'turn-gate' }),
+      replyPoster: { post: async (_target, text) => { posted.push(text); return { ok: true, status: 200 }; } },
     });
     const tool = toolkit.byName('speak');
-
-    // ① **正好 40 字：通过**（判据是「超过」，压线不算超）。
-    const onGate = '甲'.repeat(SPEAK_TEXT_MAX);
-    assert.equal(onGate.length, SPEAK_TEXT_MAX, '夹具必须正好压在门上');
-    const allowed = await tool.handler({ text: onGate }, makeCtx(ws));
-    assert.equal(allowed.isError, undefined, `正好 ${SPEAK_TEXT_MAX} 字必须放行：${allowed.content}`);
-    assert.doesNotMatch(allowed.content, /超过 speak 的上限/u, '压线不该被拒');
-    assert.equal(recorder.count('message/assistant'), 1, '放行的那条正常落库');
-
-    // ② **41 字（刚过门）：直接拒绝**——不是截断、不是"提醒之后照发"。
-    const overGate = '甲'.repeat(SPEAK_TEXT_MAX + 1);
-    const bubblesBefore = recorder.count('message/assistant');
-    const sentBefore = recorder.count('speak/sent');
-    const rejected = await tool.handler({ text: overGate }, makeCtx(ws));
-    assert.equal(rejected.isError, true, `超过 ${SPEAK_TEXT_MAX} 字必须被拒：${rejected.content}`);
-    assert.match(rejected.content, new RegExp(`${SPEAK_TEXT_MAX} 字`, 'u'), '要说清门是多少字');
-    assert.match(rejected.content, new RegExp(`这段 ${SPEAK_TEXT_MAX + 1} 字`, 'u'), '要如实报出收到了多少字');
-    // 三条出路一条都不许少（用户原话：重新组织语言 / 多次调用 / report）
-    assert.match(rejected.content, /重新组织/u, '出路①：重新组织成更短的一句');
-    assert.match(rejected.content, /拆成几次调用/u, '出路②：拆成几次调用');
-    assert.match(rejected.content, /report/u, '出路③：内容本来就长 → report');
-    // "一个字都没发出去"必须是**事实**，不是一句话：任何一路都不许多出一条
-    assert.equal(recorder.count('message/assistant'), bubblesBefore, '被拒时一个字都不许落进对话流');
-    assert.equal(recorder.count('speak/sent'), sentBefore, '被拒时不许新增任何 speak/sent 回执（三路都不许动）');
-    assert.equal(
-      recorder.events.some((event) => event.type === 'message/assistant'
-        && (event.data as { text: string }).text === overGate),
-      false,
-      '被拒的原文一个字都不许出现在对话流里（截断或照发都会留下痕迹）',
-    );
+    for (const text of ['甲'.repeat(40), '甲'.repeat(41), '甲'.repeat(400), '😀'.repeat(400)]) {
+      const result = await tool.handler({ text }, makeCtx(ws));
+      assert.equal(result.isError, undefined, result.content);
+      assert.equal(posted.at(-1), text);
+    }
+    const before = recorder.events.length;
+    const sent = posted.length;
+    for (const text of ['甲'.repeat(401), '😀'.repeat(401)]) {
+      const result = await tool.handler({ text }, makeCtx(ws));
+      assert.equal(result.isError, true);
+      assert.match(result.content, /400/u);
+      assert.match(result.content, /report/u);
+    }
+    assert.equal(recorder.events.length, before, '拒绝时任何一路都不记录发言');
+    assert.equal(posted.length, sent, '拒绝时不外发');
   });
 
-  test('分段回来了：40 字以内的多逗号文本照旧切成多条发出', async () => {
-    // 用户 2026-10-05 取消了"超过 45 字不分段"那条口径 → 分段对所有进门内的文本照旧生效。
-    // 夹具用 `test/speak-interrupt-web.test.ts` 那一份（4 段、共 33 字）：它同时证明
-    // "门内的长句仍然被切"，而不是整条发出。
+  test('同一轮同一目标允许进度、结果和再次发言，没有次数锁或相似去重', async () => {
+    const ws = await workspace('speak-multiple');
+    const posted: string[] = [];
+    const toolkit = createAdminTools({
+      timers: new TimerStore(null), emit: makeRecorder().emit, personaRoot: join(ws, 'persona'),
+      speakTyping: { typingEffect: false, charsPerMinute: 90 },
+      replyTargetOf: () => ({ url: 'qq:c2c:SAME', idempotencyKey: 'same-turn' }),
+      replyPoster: { post: async (_target, text) => { posted.push(text); return { ok: true, status: 200 }; } },
+    });
+    const texts = ['我先检查一下。', '结果已经确认，服务运行正常。', '结果已经确认，服务运行正常。'];
+    for (const [index, text] of texts.entries()) {
+      const result = await toolkit.byName('speak').handler({ text }, makeCtx(ws, { step: index + 1 }));
+      assert.equal(result.isError, undefined, result.content);
+    }
+    assert.deepEqual(posted, texts);
+  });
+
+  test('均衡分段：多逗号长句合成两段，保留标点', async () => {
     const ws = await workspace('speak-segment');
     const recorder = makeRecorder();
     const toolkit = createAdminTools({
@@ -1289,13 +1255,13 @@ describe('speak：告警出口与三路投递', () => {
     );
     const result = await tool.handler({ text: herSpeech }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
-    assert.match(result.content, /按聊天节奏发成 4 条/u, '门内的多段文本照旧分段（那条 45 字口径已取消）');
+    assert.match(result.content, /按聊天节奏发成 2 条/u);
     assert.deepEqual(
       recorder.events
         .filter((event) => event.type === 'message/assistant')
         .map((event) => (event.data as { text: string }).text),
-      ['第一句摆在这里', '第二句放在那边', '第三句换个地方说', '第四句再说一句吧'],
-      '逗号处断开、标点摘掉，逐条发出去',
+      ['第一句摆在这里，第二句放在那边，', '第三句换个地方说，第四句再说一句吧'],
+      '合并短片段但保留全部原文',
     );
   });
 
@@ -1374,20 +1340,17 @@ describe('speak：告警出口与三路投递', () => {
     setSleepForTest(async () => {});
     t.after(() => { setSleepForTest(null); });
 
-    // 夹具用短 id：真实 openid（32 位）的官方串连 `speak` 的 40 字硬门都进不去（见下面那条注释）。
     const tag = '<qqbot-at-user id="X9" />';
     const text = `${tag} 一号在不在，收到回个话`;
-    assert.ok(text.length <= 40, `夹具 ${text.length} 字必须落在 speak 的硬门（40）以内`);
     const result = await rig.toolkit(recorder.emit)
       .byName('speak').handler({ text }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
 
     const sent = rig.sentBodies.map((body) => (body['markdown'] as { content: string }).content);
-    // ① 逗号照旧断开（分段规则一个字没改）
-    assert.equal(sent.at(-1), '收到回个话', '逗号处断开、标点摘掉');
+    assert.equal(sent.join(''), text, '完整正文和标点原样发送');
+    assert.ok(sent.some((segment) => segment.includes(tag)), '@ 标记不被拆开');
     assert.equal(rig.sentBodies[0]?.['msg_type'], 2, 'markdown 开着照旧走 markdown（@ 不改这条口径）');
     // ② **框架没有在中间插字或改字**：每一段都是原文里按顺序截下来的一段。
-    //    切点在哪儿由 `chat-split` 一个人说了算（包括长过 `SPLIT_MAX_CHARS`=20 时补的那一刀）——
     //    这一层移除之后就再也没有"为了 @ 而先切后渲染"这回事了。
     let cursor = 0;
     for (const segment of sent) {
@@ -1402,17 +1365,10 @@ describe('speak：告警出口与三路投递', () => {
       '本地那份记录与发出去的是同一份字节',
     );
 
-    // 如实记下（2026-10-05，给下一个人的话）：`SPLIT_MAX_CHARS`=20，而官方串本身 25 字节起，
-    // 所以 `speak` 这条路上它**一定**长过 20，于是会在自己的空格处被再切一刀
-    // （`<qqbot-at-user` | `id="…" />…`）——那一刀会把 @ 切成两半。这不是这层移除带来的，
-    // 但移除之后它成了 @ 的唯一路径问题：**要 @ 人的正文请走 `report`**（不切分、不限长，
-    // 真 openid 的整串在下面那条用例里钉着）。要不要给 `chat-split` 加一条"标记内不许下刀"
-    // 的规则，由用户定——那是分段器的口径，不是这一层的。
     assert.match(result.content, /已发往|投递：已送达/u);
   });
 
   test('`report` 里写**真实 openid** 的官方串：整段逐字节进请求体，不切分也不改写', async (t) => {
-    // speak 那条 40 字硬门装不下真实 openid（32 位）+ 一句话，所以"@ 人的长正文"实际走 report。
     const ws = await workspace('report-mention-official');
     await writeMemberAliases(ws, [`${MEMBER1_OPENID} = **1 号**（群昵称「伊尔弥亚」，昵称不作数）`]);
     const recorder = makeRecorder();
@@ -1477,7 +1433,6 @@ describe('speak：告警出口与三路投递', () => {
       .byName('speak').handler({ text: '跑完了，42 个文件' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     // 与"加 @ 支持之前"逐字节一样：msg_type=2 + markdown.content + msg_seq=1（没有 msg_id 就是主动消息）。
-    // 9 字不足分段下限（`SPLIT_MIN_CHARS`=12），所以整句一条发出去。
     assert.deepEqual(rig.sentBodies, [
       { msg_type: 2, markdown: { content: '跑完了，42 个文件' }, msg_seq: 1 },
     ], '出站体一个字节都不许变');
@@ -1792,7 +1747,7 @@ describe('pwsh：命令黑名单与输出处理（纯函数）', () => {
 
 // ──────────────────────────────── pwsh：真实执行 ────────────────────────────────
 
-describe('pwsh：检测链与真实执行', () => {
+describe('pwsh：检测链与真实执行', { skip: process.platform !== 'win32' }, () => {
   /** 本组共用一个工具实例：pwsh 每次启动都是真实进程，集中复用减少开销 */
   let tool: PwshToolDefinition;
   let ws = '';
@@ -2032,7 +1987,7 @@ describe('pwsh：检测链与真实执行', () => {
 
 // ──────────────────────────────── pwsh：后台任务 ────────────────────────────────
 
-describe('pwsh：后台任务对接 jobs 回调', () => {
+describe('pwsh：后台任务对接 jobs 回调', { skip: process.platform !== 'win32' }, () => {
   test('runInBackground 立刻返回 jobId，完成后写 job/finished 与输出文件', async () => {
     const ws = await workspace('pwsh-bg');
     const jobsDir = join(ws, 'jobs');

@@ -104,6 +104,14 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 - **密钥不写进 `config.json`**：模型与通道的 key 走环境变量，或在界面里填（写进
   `<dataDir>/.keys.json`，界面此后只显示掩码）。
 
+### 命令工具与群消息范围
+
+- Windows 使用 `pwsh`（缺少 PowerShell 7 时沿用 5.1 回退），非 Windows 使用 `bash`。默认关闭；使用名单开启时填写当前平台的工具名。两者支持单次执行、持久会话、目录切换和后台任务。工作区模式检查工作目录和绝对路径字面量，但不是操作系统沙箱。
+- `channels.qqOfficial.allowedGroups` / `blockedGroups` 填 QQ 官方群的 openid，不是数字群号。黑名单优先，白名单为空表示不限制；被拒绝的消息在落日志前直接丢弃，不进入信箱。只影响官方 Bot，不影响私聊、频道或 OneBot。
+- `speak` 的框架聊天策略允许一次最多 400 个 Unicode 字符，超过 25 字仍给风格提醒。这不是 QQ 协议长度上限；更长内容使用 `report`。同一轮允许先报进度再发结果，没有一次发言限制或相似去重。
+- 聊天分段保留标点和原文，优先自然句末与换行，长句才按逗号等位置均衡分段；默认最多五段，短尾合并，括号、代码块、思维块与 Markdown 表格内部不拆。
+
+
 ## 目录
 
 | 目录 | 里面是什么 |
