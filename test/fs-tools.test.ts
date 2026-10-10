@@ -400,7 +400,7 @@ describe('路径白名单（M4-1 / M4-2）', () => {
   });
 });
 
-// ──────────────────────────────── safe_read / list_dir ────────────────────────────────
+// ──────────────────────────────── safe_read（含目录形态） ────────────────────────────────
 
 describe('safe_read', () => {
   it('行号前缀是固定形状：右对齐 4 + │ + 空格（safe_edit 的剥除按同一个形状认）', async () => {
@@ -607,13 +607,17 @@ describe('safe_read', () => {
     });
   });
 
-  it('目标是目录时指向 list_dir', async () => {
+  it('目标是目录时**直接列出目录内容**（v42：list_dir 已并入这里，不再指路到别处）', async () => {
     await withHarness(async (h) => {
       await mkdir(join(h.root, 'sub'), { recursive: true });
+      await writeFile(join(h.root, 'sub', 'inside.txt'), 'x', 'utf8');
       const res = await h.tool('safe_read').handler({ path: 'sub' }, h.ctx);
-      assert.equal(res.isError, true);
-      assert.equal(res.error?.code, FS_ERROR_CODES.NOT_A_FILE);
-      assert.match(res.content, /list_dir/u);
+      // 从前这里是一句「…是目录；查看目录内容请用 list_dir」——工具一删，那句话就指向一个
+      // 不存在的工具（她照做只会拿到"未知工具"）。现在同一个调用直接给结果。
+      assert.equal(res.isError, undefined, res.content);
+      assert.equal(res.error?.code, undefined);
+      assert.match(res.content, /^sub\/ · 目录 0 个 \/ 文件 1 个 · depth=1/u);
+      assert.match(res.content, /\[F\] inside\.txt/u);
     });
   });
 
@@ -628,20 +632,39 @@ describe('safe_read', () => {
   });
 });
 
-describe('list_dir', () => {
+describe('safe_read 的目录形态（v42：list_dir 并入这里）', () => {
   it('列出类型、大小与时间，depth 控制递归', async () => {
     await withHarness(async (h) => {
       await mkdir(join(h.root, 'pkg/nested'), { recursive: true });
       await writeFile(join(h.root, 'pkg/a.ts'), 'x', 'utf8');
       await writeFile(join(h.root, 'pkg/nested/b.ts'), 'yy', 'utf8');
 
-      const flat = await h.tool('list_dir').handler({ path: 'pkg' }, h.ctx);
+      const flat = await h.tool('safe_read').handler({ path: 'pkg' }, h.ctx);
       assert.match(flat.content, /\[F\] a\.ts/u);
       assert.match(flat.content, /\[D\] nested\//u);
       assert.ok(!flat.content.includes('b.ts'), 'depth=1 不应下探');
 
-      const deep = await h.tool('list_dir').handler({ path: 'pkg', depth: 2 }, h.ctx);
+      const deep = await h.tool('safe_read').handler({ path: 'pkg', depth: 2 }, h.ctx);
       assert.match(deep.content, /nested\/b\.ts/u);
+      // depth 是旧 list_dir 使用率最高的非默认参数（实测 136/201），口径一个字不改：上限 5
+      const over = await h.tool('safe_read').handler({ path: 'pkg', depth: 9 }, h.ctx);
+      assert.equal(over.isError, true);
+      assert.equal(over.error?.code, FS_ERROR_CODES.INVALID_ARGS);
+    });
+  });
+
+  it('条数上限复用 limit，超量如实截断并给"怎么缩小范围"的指路', async () => {
+    await withHarness(async (h) => {
+      for (let i = 0; i < 8; i += 1) await writeFile(join(h.root, `f${i}.txt`), 'x', 'utf8');
+      const res = await h.tool('safe_read').handler({ path: '.', limit: 3 }, h.ctx);
+      assert.equal(res.isError, undefined, res.content);
+      assert.match(res.content, /已截断：上限 3 条/u);
+      // 指路要可执行：缩小 path / 调小 depth / 两件搜索工具 / pwsh 的 Get-ChildItem
+      assert.match(res.content, /rg_search/u);
+      assert.match(res.content, /es_search/u);
+      assert.match(res.content, /Get-ChildItem/u);
+      const rows = res.content.split('\n').filter((line) => /^\[(D|F|L|\?)\] /u.test(line));
+      assert.equal(rows.length, 3, 'limit 就是这一次列目录的条数上限');
     });
   });
 
@@ -650,9 +673,18 @@ describe('list_dir', () => {
       await mkdir(join(h.root, 'real'), { recursive: true });
       await writeFile(join(h.root, 'real/deep.txt'), 'x', 'utf8');
       await symlink(join(h.root, 'real'), join(h.root, 'alias'), 'junction');
-      const res = await h.tool('list_dir').handler({ path: '.', depth: 3 }, h.ctx);
+      const res = await h.tool('safe_read').handler({ path: '.', depth: 3 }, h.ctx);
       assert.match(res.content, /\[L\] alias/u);
       assert.ok(!res.content.includes('alias/deep.txt'), '符号链接目录不应被展开');
+    });
+  });
+
+  it('head/tail/offset 对目录不适用时**说出口**（不静默假装生效）', async () => {
+    await withHarness(async (h) => {
+      await writeFile(join(h.root, 'only.txt'), 'x', 'utf8');
+      const res = await h.tool('safe_read').handler({ path: '.', head: 2 }, h.ctx);
+      assert.equal(res.isError, undefined, res.content);
+      assert.match(res.content, /head\/tail\/offset 对目录不适用/u);
     });
   });
 });
@@ -664,7 +696,7 @@ describe('rg_search（条件注册）', () => {
     await withHarness(async (h) => {
       assert.equal(h.has('rg_search'), false, '没有 ripgrep 就不该有这件工具');
       // 同一台机器上其余工具一件都不能少：条件注册只针对引擎那两件
-      for (const name of ['safe_read', 'list_dir', 'read_blob', 'safe_edit', 'safe_write']) {
+      for (const name of ['safe_read', 'read_blob', 'safe_edit', 'safe_write']) {
         assert.equal(h.has(name), true, `${name} 不该被连坐`);
       }
     }, { ripgrepPath: null });
@@ -794,7 +826,7 @@ describe('es_search（条件注册）', () => {
     await withHarness(async (h) => {
       assert.equal(h.has('es_search'), false, '没有 es.exe 就不该有这件工具');
       // 同一台机器上其余工具一件都不能少：条件注册只针对这一件
-      for (const name of ['safe_read', 'list_dir', 'read_blob', 'safe_edit']) {
+      for (const name of ['safe_read', 'read_blob', 'safe_edit']) {
         assert.equal(h.has(name), true, `${name} 不该被连坐`);
       }
     }, { everythingPath: null });
@@ -1168,6 +1200,82 @@ describe('read_blob', () => {
 // ──────────────────────────────── safe_edit ────────────────────────────────
 
 describe('safe_edit', () => {
+  // 这一组治的是**运行期回执里的死名字**（v42 收尾）：`list_dir` 在 334cf4c 删掉了，
+  // 但这句「是目录」的拒绝（`path-guard.ts` 的 NOT_A_FILE 出口，safe_edit / safe_write /
+  // multi_edit / read_blob 共用）起初还留着「行为与原来的 list_dir 一致」这种等价说明。
+  // 删掉它的理由不是洁癖：她历史里调过 `list_dir` **201 次**，回执里出现这个名字就等于
+  // 把那个选项重新摆到她面前——**对模型来说，提到名字就是可选项**，她下一个动作就是再发
+  // 一次（然后拿到"未知工具"）。所以这里既锁**正向**措辞，也锁**名字不许回来**。
+  describe('目标是目录时的拒绝（v42 收尾：回执里不许再出现 list_dir）', () => {
+    it('safe_edit 传目录：拒绝的理由指 safe_read / pwsh，且一个字都不提 list_dir', async () => {
+      await withHarness(async (h) => {
+        await mkdir(join(h.root, 'pkg'), { recursive: true });
+        await writeFile(join(h.root, 'pkg', 'a.ts'), 'const a = 1;\n', 'utf8');
+
+        const res = await h.tool('safe_edit').handler(
+          { path: 'pkg', old: 'const a = 1;', new: 'const a = 2;' },
+          h.ctx,
+        );
+        assert.equal(res.isError, true, 'safe_edit 只处理文件，传目录必须拒绝');
+        assert.equal(res.error?.code, FS_ERROR_CODES.NOT_A_FILE);
+
+        // 正向：出路要具体到"怎么调"——`safe_read` 收目录，`depth` / `limit` 是它的两个旋钮；
+        // 递归 / 隐藏项 / 按修改时间排这三件 safe_read 不做，归 `pwsh` 的 Get-ChildItem。
+        for (const [needle, why] of [
+          ['是目录', '要说清被拒的是目录这件事本身'],
+          ['safe_read', '列目录的出口是 safe_read（传目录即列目录）'],
+          ['depth', '递归要看 depth，这个参数名必须说出口'],
+          ['limit', '条数上限要看 limit，这个参数名必须说出口'],
+          ['Get-ChildItem', '递归/隐藏/按时间排归 pwsh，这三件 safe_read 不做'],
+        ] as const) {
+          assert.ok(res.content.includes(needle), `回执里必须出现「${needle}」（${why}）：\n${res.content}`);
+        }
+        // 方向别反了：safe_read 是出路，不是"别用它"
+        assert.doesNotMatch(res.content, /别用 safe_read/u);
+
+        // 反向：`list_dir` 已经删了（v42 并入 safe_read），回执里**一个字符都不许有**这名字。
+        // 连"与原来的 list_dir 行为一致"这种等价说明也不行——等价说明正是它上次活下来的方式。
+        assert.doesNotMatch(
+          res.content,
+          /list_dir/u,
+          '`list_dir` 在 v42 删了、回执里也不许再出现：提到名字就是可选项，她会再发一次拿到"未知工具"',
+        );
+      });
+    });
+
+    it('safe_write 与 multi_edit 共用同一个出口：三条路的拒绝措辞都不含 list_dir', async () => {
+      await withHarness(async (h) => {
+        await mkdir(join(h.root, 'pkg'), { recursive: true });
+
+        const write = await h.tool('safe_write').handler({ path: 'pkg', content: 'x' }, h.ctx);
+        assert.equal(write.error?.code, FS_ERROR_CODES.NOT_A_FILE, write.content);
+
+        const multi = await h.tool('multi_edit').handler(
+          { edits: [{ file: 'pkg', old: 'a', new: 'b' }] },
+          h.ctx,
+        );
+        assert.equal(multi.isError, true, multi.content);
+
+        for (const [name, text] of [['safe_write', write.content], ['multi_edit', multi.content]] as const) {
+          assert.ok(/是目录/u.test(text), `${name} 要沿用那句"是目录"的拒绝`);
+          assert.doesNotMatch(text, /list_dir/u, `${name} 的回执里不许出现已删的 list_dir`);
+        }
+      });
+    });
+
+    it('出口本身（resolveInsideRoot）的 reason 也不含 list_dir（堵住"绕过工具层加回来"）', async () => {
+      await withHarness(async (h) => {
+        await mkdir(join(h.root, 'pkg'), { recursive: true });
+        const guarded = await resolveInsideRoot(h.root, 'pkg', { purpose: 'safe_edit' });
+        assert.equal(guarded.ok, false);
+        assert.equal(guarded.ok === false ? guarded.code : '', FS_ERROR_CODES.NOT_A_FILE);
+        const reason = guarded.ok === false ? guarded.reason : '';
+        assert.ok(reason.includes('safe_read'), `理由要指向 safe_read：${reason}`);
+        assert.doesNotMatch(reason, /list_dir/u, `出口的 reason 里不许出现已删的 list_dir：${reason}`);
+      });
+    });
+  });
+
   // ── 行号前缀防呆（v27） ──
   //
   // 这一组锁的是「行号寻址」能用起来的前提：safe_read 的输出带 `  12│ ` 前缀，
@@ -1746,21 +1854,21 @@ function stubDeps(available: { rg: boolean; es: boolean }): DepsManager {
 }
 
 describe('fsTools 注册', () => {
-  it('两个引擎都没有时注册八件（rg_search 与 es_search 都不在），且三属性符合 design.md §4.18', async () => {
+  it('两个引擎都没有时注册六件（rg_search 与 es_search 都不在），且三属性符合 design.md §4.18', async () => {
     const table = new Map<string, ToolDefinition>();
     // 显式注入"两个引擎都没有"的结论：这条用例要在**任意一台机器上**给出同一份清单
     const list = await fsTools(
       { register: (tool) => table.set(tool.name, tool) },
       { deps: stubDeps({ rg: false, es: false }) },
     );
+    // v42：`list_dir` 删掉之后常驻八件 → 七件（这里没装引擎，所以是六件）
     assert.deepEqual(
       list.map((tool) => tool.name),
-      ['safe_read', 'list_dir', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
+      ['safe_read', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
     );
 
     const expected: Record<string, [string, string, number]> = {
       safe_read: ['parallel', 'none', 10_000],
-      list_dir: ['parallel', 'none', 10_000],
       read_blob: ['parallel', 'none', 10_000],
       safe_edit: ['exclusive', 'destructive', 30_000],
       safe_write: ['exclusive', 'destructive', 30_000],
@@ -1779,7 +1887,7 @@ describe('fsTools 注册', () => {
     }
   });
 
-  it('装齐两个引擎时是九件，且两件搜索工具各自插在原位置（顺序即缓存前缀）', async () => {
+  it('装齐两个引擎时是八件，且两件搜索工具各自插在原位置（顺序即缓存前缀）', async () => {
     const table = new Map<string, ToolDefinition>();
     const list = await fsTools(
       { register: (tool) => table.set(tool.name, tool) },
@@ -1787,7 +1895,7 @@ describe('fsTools 注册', () => {
     );
     assert.deepEqual(
       list.map((tool) => tool.name),
-      ['safe_read', 'list_dir', 'rg_search', 'es_search', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
+      ['safe_read', 'rg_search', 'es_search', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
     );
     for (const name of ['rg_search', 'es_search']) {
       const tool = table.get(name);
@@ -1797,7 +1905,7 @@ describe('fsTools 注册', () => {
     }
   });
 
-  it('只有 rg 时是八件：条件注册是逐件的，不互相连坐', async () => {
+  it('只有 rg 时是七件：条件注册是逐件的，不互相连坐', async () => {
     const table = new Map<string, ToolDefinition>();
     const list = await fsTools(
       { register: (tool) => table.set(tool.name, tool) },
@@ -1805,7 +1913,7 @@ describe('fsTools 注册', () => {
     );
     assert.deepEqual(
       list.map((tool) => tool.name),
-      ['safe_read', 'list_dir', 'rg_search', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
+      ['safe_read', 'rg_search', 'read_blob', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
     );
   });
 
@@ -1832,7 +1940,7 @@ describe('fsTools 注册', () => {
       {},
       { enableDestructive: false },
     );
-    assert.equal(list.length, 5);
+    assert.equal(list.length, 4);
     assert.ok(list.every((tool) => tool.sideEffect !== 'destructive'));
   });
 
@@ -1919,13 +2027,13 @@ describe('fsTools 注册', () => {
     });
   });
 
-  it('list_dir 短前缀 MEMORIES 列出记忆目录', async () => {
+  it('safe_read 短前缀 MEMORIES 列出记忆目录（v42：列目录并进 safe_read）', async () => {
     await withHarness(async (h) => {
       const memoryDir = join(h.root, 'data', 'workspace', 'MEMORIES');
       await mkdir(memoryDir, { recursive: true });
       await writeFile(join(memoryDir, 'facts.md'), 'x\n', 'utf8');
 
-      const result = await h.tool('list_dir').handler({ path: 'MEMORIES' }, h.ctx);
+      const result = await h.tool('safe_read').handler({ path: 'MEMORIES' }, h.ctx);
       assert.equal(result.isError, undefined, `短前缀应当解析得到，实际：${result.content}`);
       assert.match(result.content, /facts\.md/u);
     });
@@ -2264,7 +2372,7 @@ describe('参数契约与默认值（照 devkit 对齐）', () => {
     });
   });
 
-  it('list_dir 默认不列隐藏条目，include_hidden:true 才列', async () => {
+  it('safe_read 列目录默认不列隐藏条目（v42：要看隐藏项走 pwsh 的 Get-ChildItem）', async () => {
     await withHarness(async (h) => {
       await mkdir(join(h.root, 'proj'), { recursive: true });
       await writeFile(join(h.root, 'proj', 'visible.txt'), 'v', 'utf8');
@@ -2272,15 +2380,15 @@ describe('参数契约与默认值（照 devkit 对齐）', () => {
       await writeFile(join(h.root, 'proj', '.env'), 'E=1', 'utf8');
 
       // 源 dir_list 是 show_hidden 默认 False（tools/dir_list.py:11-13）；审计实测
-      // 本地旧默认把 `.secret` 直接列出来（§1 #28）
-      const def = await h.tool('list_dir').handler({ path: 'proj' }, h.ctx);
+      // 本地旧默认把 `.secret` 直接列出来（§1 #28）。v42 并进 safe_read 之后**默认值不变**，
+      // 但 `include_hidden` 那个开关没跟着搬过来（它 201 次里只用了 8 次）——
+      // 要看隐藏项的出口是 `pwsh` 的 `Get-ChildItem -Force`（截断指路里也写了）。
+      const def = await h.tool('safe_read').handler({ path: 'proj' }, h.ctx);
       assert.match(def.content, /visible\.txt/u);
       assert.ok(!def.content.includes('.secret'), `默认不该列隐藏文件：\n${def.content}`);
       assert.ok(!def.content.includes('.env'), `默认不该列隐藏文件：\n${def.content}`);
-
-      const shown = await h.tool('list_dir').handler({ path: 'proj', include_hidden: true }, h.ctx);
-      assert.match(shown.content, /\.secret/u);
-      assert.match(shown.content, /\.env/u);
+      // 隐藏项确实在盘上（不是"文件不存在"造成的假绿）
+      assert.equal(await readFile(join(h.root, 'proj', '.secret'), 'utf8'), 's');
     });
   });
 

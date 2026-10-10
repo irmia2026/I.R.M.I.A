@@ -414,9 +414,11 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
     const tk = reportToolkit(rec, async () => ({ ok: false, reason: '回投被拒：HTTP 403 主动消息无权限' }));
     const result = await tk.byName('report').handler({ text: REPORT, to: 'qq:group:G1' }, CTX);
     assert.equal(result.isError, undefined, result.content);
-    assert.match(result.content, /失败—/u, result.content);
+    assert.match(result.content, /失败/u, result.content);
     assert.match(result.content, /403/u, '原因要如实写出来（她据此换个方式再试）');
-    assert.equal(result.content.includes('不用再发一遍'), false, '没送达就不许给她"发出去了"的判据');
+    assert.equal(result.content.includes('不必重复发送'), false, '没送达就不许给她"发出去了"的判据');
+    // 失败那一侧要给"还要不要试"的判断（2026-10-08 用户的口径：与"成功"明确区分，别含糊）
+    assert.match(result.content, /不必重试|可稍后再试/u, `失败回执要给出重试判断：${result.content}`);
 
     assert.equal(rec.all('speak/sent').some((data) => deliveredToSid(data as never) !== null), false,
       '没有带 sid+text 的凭据——否则下一轮 read_channel 里会凭空多出一行"我说过"');
@@ -466,7 +468,9 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
 test('工具描述里写明了"也会列出你自己说过的话"（她看不到实现）', () => {
   const tk = toolkit(null, recorder());
   const description = tk.byName('read_channel').description;
-  assert.match(description, /你自己在这个会话说过的话/u, `她只能靠描述理解这条能力：${description}`);
+  // 2026-10-08 把这半句压短了（描述是每轮常驻开销，同一批里 timer 那边还多了一个动作要付）：
+  // 判据没变——她必须从描述里知道**自己的发言也在里面**，以及怎么认那一行。
+  assert.match(description, /也包括你自己说过的/u, `她只能靠描述理解这条能力：${description}`);
   assert.match(description, /（我）/u, '要告诉她怎么认那一行');
   const limit = tk.byName('read_channel').parameters.properties['limit'] as { description: string };
   assert.match(limit.description, /也占行/u, 'limit 的口径变了，描述必须跟着变（她据此决定要几行）');

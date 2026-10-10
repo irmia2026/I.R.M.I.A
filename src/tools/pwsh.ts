@@ -1381,10 +1381,16 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
     description:
       '执行 PowerShell 命令，默认持久会话（cwd/变量/函数跨调用保持）。'
       + 'runInBackground=true 转后台，立刻返回 jobId、完成唤醒你。'
-      + '危险命令会被拒并说明原因。输出按头 8k 尾 2k 截断。',    parameters: {
+      + '输出按头 8k 尾 2k 截断。列目录用 Get-ChildItem。',
+    parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: '要执行的 PowerShell 命令文本，可多行' },
+        // 「危险命令会被拒并说明原因」这句**从工具描述挪到了这里**（v42）：`description` 那条
+        // <60 token 的收紧线（test/tool-catalog.test.ts）当时只剩 7 token 余量，而"列目录用
+        // Get-ChildItem"这半句要花 6——两件事放在同一格里必然顶线。挪进参数描述**不省常驻
+        // 开销**（参数 schema 同样随每次请求发送），但它是这句话本来就最该在的地方（黑名单
+        // 判的就是 command 这一格），也让描述那条线重新有了余量。
+        command: { type: 'string', description: '要执行的 PowerShell 命令文本，可多行；危险命令会被拒并说明原因' },
         workdir: { type: 'string', description: '工作目录；省略则继承持久会话当前目录（首轮为工作根；只限工作目录模式为边界根）' },
         timeoutMs: {
           type: 'integer',

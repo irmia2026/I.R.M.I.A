@@ -1,11 +1,26 @@
 /**
- * Irmia Agent — 文件系工具包：只读三件（safe_read / list_dir / read_blob）
+ * Irmia Agent — 文件系工具包：只读两件（safe_read / read_blob）
  *
- * 三件工具都是 sideEffect none + parallel（design.md §4.18 工具清单）。
+ * 两件工具都是 sideEffect none + parallel（design.md §4.18 工具清单）。
  * 只读不等于随便读，三条纪律：
  *   1. 一律先过 resolveInsideRoot 白名单（符号链接展开后再比，M4-1/M4-2）；
  *   2. 大文件不整读——按硬上限截断后如实告知，并指明下一步怎么拿（§4.18 五原则第 4 条）；
  *   3. blob 目录是第二白名单：blobId 只接受 64 位十六进制，path 只接受 blob 根内的相对路径。
+ *
+ * **v42：`list_dir` 删掉了，列目录这件事并进 `safe_read`。**
+ *
+ * 依据是实测（`data/events/**` 全部 `tool/call`，改前）：`list_dir` 201 次 / 5264 次总量，
+ * 近 24h 仅 1 次，而它常驻 212 token（name 2 / desc 40 / params 170）——用户拍板删掉，
+ * 腾出的常驻开销要给后面的 `mcp` 入口。
+ *
+ * 删工具**不等于删能力**，两条配套一起落地：
+ *   · `safe_read` **收目录**：传目录路径就把目录内容列出来（`renderDirectoryListing`，
+ *     与旧 `list_dir` 同一套渲染、同一套上限），她再也不必先猜"这是文件还是目录"——
+ *     那正是历史上 13 次 `list_dir` 失败与 1 次 `safe_read` 传目录的同一个病根；
+ *   · `pwsh` 的描述里补半句指路（`Get-ChildItem`），递归/隐藏/按时间排这些少数用法有出口。
+ *
+ * **判据一处**：列目录的渲染只有 {@link renderDirectoryListing} 一份实现。删 `list_dir` 时
+ * 最该避免的就是"两个工具各写一套列目录"——那正是它当初该合并的理由。
  *
  * 名字是 safe_read 而不是 read_file：它与 safe_write / safe_edit / safe_rollback 是同一族
  * （devkit 原名）。v27 之前我们叫 read_file，那是移植时的漏改——同一族里三件叫 safe_*、
@@ -38,7 +53,6 @@ import {
   fail,
   invalidArgs,
   ok,
-  readOptionalBool,
   readOptionalInt,
   readOptionalString,
   readString,
@@ -154,15 +168,21 @@ export function createSafeReadTool(env: FsEnv): ToolDefinition {
     name: 'safe_read',
     description:
       '读取文本文件，**每行都带真实行号前缀**（`  12│ 内容`，safe_edit 的三种模式都认这个行号）。' +
-      `offset/limit 取区间、head/tail 取两端。自动检测编码（BOM/UTF-8/GBK）。只读。${PATH_BOUNDARY_HINT}。`,
+      `offset/limit 取区间、head/tail 取两端。传目录则列目录。`
+      + `自动检测编码（BOM/UTF-8/GBK）。只读。${PATH_BOUNDARY_HINT}。`,
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: `文件路径：相对工作根或绝对路径；MEMORIES/ 与 diary/ 会自动落到记忆目录。${PATH_BOUNDARY_HINT}` },
+        path: {
+          type: 'string',
+          description: '文件或目录路径：相对工作根或绝对路径；MEMORIES/ 与 diary/ 会自动落到记忆目录。'
+            + `传目录时列出里面的条目（类型/大小/修改时间，见 depth 与 limit）。${PATH_BOUNDARY_HINT}`,
+        },
         offset: { type: 'integer', description: '起始行号，1-based，默认 1（0 与 1 等价，都表示从头）' },
-        limit: { type: 'integer', description: '最多返回多少行，默认全部（受上限保护）' },
-        head: { type: 'integer', description: '只读前 N 行，与 offset/limit/tail 互斥' },
-        tail: { type: 'integer', description: '只读后 N 行，与 offset/limit/head 互斥' },
+        limit: { type: 'integer', description: '最多返回多少行，默认全部（受上限保护）；path 是目录时＝最多列多少条，默认 200' },
+        head: { type: 'integer', description: '只读前 N 行，与 offset/limit/tail 互斥（目录不适用）' },
+        tail: { type: 'integer', description: '只读后 N 行，与 offset/limit/head 互斥（目录不适用）' },
+        depth: { type: 'integer', description: 'path 是目录时的递归层数：1 只列直接子项，默认 1，上限 5' },
         encoding: {
           type: 'string',
           enum: ['auto', 'utf8', 'utf16le', 'utf16be', 'gbk', 'latin1'],
@@ -217,6 +237,8 @@ export function createSafeReadTool(env: FsEnv): ToolDefinition {
       if ('error' in headRes) return invalidArgs('safe_read', headRes.error);
       const tailRes = readOptionalInt(args, 'tail', 1, 200_000);
       if ('error' in tailRes) return invalidArgs('safe_read', tailRes.error);
+      const depthRes = readOptionalInt(args, 'depth', DIR_DEPTH_MIN, DIR_DEPTH_MAX);
+      if ('error' in depthRes) return invalidArgs('safe_read', depthRes.error);
 
       const head = headRes.value;
       const tail = tailRes.value;
@@ -229,16 +251,46 @@ export function createSafeReadTool(env: FsEnv): ToolDefinition {
         return invalidArgs('safe_read', 'head/tail 与 offset/limit 互斥；要区间就用 offset+limit，要两端就只用 head 或 tail');
       }
 
-      const guarded = await resolveGuarded(env, ctx, pathInput, { purpose: 'safe_read' });
+      // v42：**目录也收**（`allowDirectory`）。从前这里是一句「是目录；查看目录内容请用 list_dir」，
+      // 而 list_dir 已经删掉——列目录这件事现在归这里，所以再把它挡回去就是"指路到不存在的工具"。
+      const guarded = await resolveGuarded(env, ctx, pathInput, {
+        purpose: 'safe_read',
+        allowDirectory: true,
+      });
       if (!guarded.ok) return fail(guarded.code, guarded.reason);
 
-      let size = 0;
+      let info;
       try {
-        size = (await stat(guarded.path)).size;
+        info = await stat(guarded.path);
       } catch (err) {
         return fail(FS_ERROR_CODES.IO_ERROR, `无法读取 ${guarded.path}：${toErrorMessage(err)}`);
       }
       if (ctx.signal.aborted) return ABORTED_RESULT;
+
+      // ── 目录分支：走列目录，不再往下进行号那一套 ──
+      //
+      // offset/head/tail/encoding 对目录没有意义（不静默假装生效：head/tail 给了就在回执里说清），
+      // 只有 `limit` 兼职"最多列多少条"——这是 0 成本复用（`limit` 本来就是"这次回执的上限"，
+      // 实测旧 `list_dir` 的 `max_entries` 43 次里绝大多数是**调小**：40/60/80），
+      // 于是不必再为它添一个常驻参数。
+      //
+      // depth 是新添的那一个参数（22 token）：实测 `list_dir` 201 次调用里 `depth` 出现 **136 次**
+      // （2 层 87 / 1 层 46 / 3 层 3），是它使用率最高的非默认参数——递归这一轴没有同形替代
+      // （pwsh 的 Get-ChildItem -Recurse 不给类型/大小/修改时间这三格，也没有条数上限）。
+      if (info.isDirectory()) {
+        const listing = await renderDirectoryListing(guarded.path, guarded.relPath, {
+          ...(depthRes.value === undefined ? {} : { depth: depthRes.value }),
+          ...(limit === undefined ? {} : { maxEntries: limit }),
+          signal: ctx.signal,
+        });
+        if (listing.aborted) return ABORTED_RESULT;
+        const ignored = head !== undefined || tail !== undefined || offset !== undefined
+          ? '\n[提示] head/tail/offset 对目录不适用（它们只在读文件时生效）：列目录的条数用 limit，层数用 depth。'
+          : '';
+        return ok(listing.content + ignored);
+      }
+
+      const size = info.size;
 
       const readLen = Math.min(size, HARD_READ_LIMIT);
       let buf: Buffer;
@@ -411,7 +463,7 @@ export function createSafeReadTool(env: FsEnv): ToolDefinition {
   };
 }
 
-// ──────────────────────────────── list_dir ────────────────────────────────
+// ──────────────────────────────── 列目录（唯一实现） ────────────────────────────────
 
 const KIND_LABEL: Record<string, string> = {
   directory: '[D]',
@@ -420,97 +472,111 @@ const KIND_LABEL: Record<string, string> = {
   other: '[?]',
 };
 
-export function createListDirTool(env: FsEnv): ToolDefinition {
-  return {
-    name: 'list_dir',
-    description:
-      '列出目录内容：类型（D 目录/F 文件/L 链接）、大小、修改时间。' +
-      'depth 控制递归层数（默认 1，上限 5）。符号链接不跟进，不会成环。',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: `目录路径，默认 "."（工作根）。${PATH_BOUNDARY_HINT}` },
-        depth: { type: 'integer', description: '递归层数，1 表示只列直接子项，默认 1，上限 5' },
-        max_entries: { type: 'integer', description: '最多返回多少条，默认 200' },
-        include_hidden: { type: 'boolean', description: '是否包含以 . 开头的条目，默认 false（要 .env 这类隐藏文件时显式传 true）' },
-        sort_by: { type: 'string', enum: ['name', 'size', 'mtime'], description: '排序字段，默认 name' },
-      },
-      required: [],
-      additionalProperties: false,
-    },
-    executionMode: 'parallel',
-    sideEffect: 'none',
-    timeoutMs: 10_000,
-    async handler(rawArgs: unknown, ctx: ToolContext) {
-      const args = argsObject(rawArgs, 'list_dir');
-      if (args === null) return invalidArgs('list_dir', '期望一个对象，例如 {"path": "."}');
-      const pathInput = readOptionalString(args, 'path') ?? '.';
-      const depthRes = readOptionalInt(args, 'depth', 1, 5);
-      if ('error' in depthRes) return invalidArgs('list_dir', depthRes.error);
-      const maxRes = readOptionalInt(args, 'max_entries', 1, 5000);
-      if ('error' in maxRes) return invalidArgs('list_dir', maxRes.error);
-      const depth = depthRes.value ?? 1;
-      const maxEntries = maxRes.value ?? 200;
-      // 默认 false = 不列隐藏条目。依据是 devkit 的同名参数（那边叫 show_hidden，
-      // `tools/dir_list.py:11-13` 默认 False）；本仓库旧实现默认 true，实测默认输出里
-      // `.secret` 直接出现（docs/devkit-migration-audit.md §1 #28）。隐藏文件对"看目录结构"
-      // 是噪音，而她真需要 `.env` / `.gitignore` 时显式传 include_hidden:true 只有一次调用成本。
-      const includeHidden = readOptionalBool(args, 'include_hidden') ?? false;
-      const sortBy = readOptionalString(args, 'sort_by') ?? 'name';
+/** 递归层数：默认 1（只列直接子项）、上限 5 —— 与旧 `list_dir` 的 `depth` 同口径 */
+export const DIR_DEPTH_MIN = 1;
+export const DIR_DEPTH_DEFAULT = 1;
+export const DIR_DEPTH_MAX = 5;
+/** 条数：默认 200、上限 5000 —— 与旧 `list_dir` 的 `max_entries` 同口径 */
+export const DIR_ENTRIES_DEFAULT = 200;
+export const DIR_ENTRIES_MAX = 5000;
 
-      const guarded = await resolveGuarded(env, ctx, pathInput, {
-        purpose: 'list_dir',
-        requireDirectory: true,
-      });
-      if (!guarded.ok) return fail(guarded.code, guarded.reason);
+export interface DirListingOptions {
+  /** 递归层数，1..{@link DIR_DEPTH_MAX}，默认 {@link DIR_DEPTH_DEFAULT} */
+  depth?: number;
+  /** 最多返回多少条，默认 {@link DIR_ENTRIES_DEFAULT}、上限 {@link DIR_ENTRIES_MAX} */
+  maxEntries?: number;
+  /** 是否列出以 `.` 开头的条目，默认 false（与旧 `list_dir` 的默认一致，见下方注释） */
+  includeHidden?: boolean;
+  /** 中断信号：遍历在每个条目边界查一次（design.md §4.5） */
+  signal?: AbortSignal;
+}
 
-      const lines: string[] = [];
-      let truncated = false;
-      let dirCount = 0;
-      let fileCount = 0;
+export interface DirListing {
+  /** 完整回执正文（头部 + 逐条 + 截断说明） */
+  content: string;
+  /** 是否因为条数上限被截断（如实告知，不假装列完了） */
+  truncated: boolean;
+  /** 遍历途中被中断（调用方应当回 ABORTED_RESULT，而不是把这个当成功） */
+  aborted: boolean;
+}
 
-      const walk = async (dir: string, level: number, relPrefix: string): Promise<void> => {
-        if (truncated) return;
-        if (ctx.signal.aborted) return;
-        let entries = await readDirEntries(dir);
-        if (entries === null) {
-          lines.push(`(无法读取目录) ${relPrefix}`);
-          return;
-        }
-        if (!includeHidden) entries = entries.filter((entry) => !entry.name.startsWith('.'));
-        if (sortBy === 'size') entries.sort((a, b) => b.size - a.size || a.name.localeCompare(b.name));
-        else if (sortBy === 'mtime') entries.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
-        else entries.sort((a, b) => a.name.localeCompare(b.name));
+/**
+ * 列目录的**唯一渲染实现**。
+ *
+ * v42 删掉 `list_dir` 之后，它是唯一的列目录出口（`safe_read` 传目录时走它）。**「只许有一处
+ * 实现」是这次删除的判据本身**：删 `list_dir` 的意义就是不要再有"两个工具各写一套列目录"——
+ * 两份实现立刻会分叉成"同一个目录、两件工具给出两种形状"，而历史上 13 次 `list_dir` 失败与
+ * 1 次 `safe_read` 传目录，病根正是"文件还是目录要先猜对工具"。
+ *
+ * 所以这里**只认路径与选项，不认工具名**：谁调都一样。
+ *
+ * 行为逐项对齐旧 `list_dir`（口径不新造）：`[D]/[F]/[L]/[?]` 四种标记、文件才有大小、
+ * 修改时间取 ISO、目录名带尾 `/`、按 `localeCompare` 排名字、默认**不列隐藏条目**
+ * （依据 devkit 的同名参数 `show_hidden` 默认 False，`tools/dir_list.py:11-13`）、
+ * 符号链接不跟进（不会成环，见 `readDirEntries` 的 kind 判定）。
+ */
+export async function renderDirectoryListing(
+  dir: string,
+  relPath: string,
+  options: DirListingOptions = {},
+): Promise<DirListing> {
+  const depth = options.depth ?? DIR_DEPTH_DEFAULT;
+  const maxEntries = Math.min(options.maxEntries ?? DIR_ENTRIES_DEFAULT, DIR_ENTRIES_MAX);
+  const includeHidden = options.includeHidden ?? false;
+  const signal = options.signal;
 
-        for (const entry of entries) {
-          if (lines.length >= maxEntries) {
-            truncated = true;
-            return;
-          }
-          const label = KIND_LABEL[entry.kind] ?? '[?]';
-          const size = entry.kind === 'file' ? formatBytes(entry.size) : '-';
-          const when = entry.mtimeMs === 0 ? '-' : new Date(entry.mtimeMs).toISOString();
-          const suffix = entry.kind === 'directory' ? '/' : '';
-          if (entry.kind === 'directory') dirCount += 1;
-          else fileCount += 1;
-          lines.push(`${label} ${relPrefix}${entry.name}${suffix}  ${size}  ${when}`);
-          if (entry.kind === 'directory' && level < depth) {
-            await walk(entry.path, level + 1, `${relPrefix}${entry.name}/`);
-          }
-        }
-      };
+  const lines: string[] = [];
+  let truncated = false;
+  let aborted = false;
+  let dirCount = 0;
+  let fileCount = 0;
 
-      await walk(guarded.path, 1, '');
-      if (ctx.signal.aborted) return ABORTED_RESULT;
+  const walk = async (target: string, level: number, relPrefix: string): Promise<void> => {
+    if (truncated || aborted) return;
+    if (signal?.aborted === true) {
+      aborted = true;
+      return;
+    }
+    let entries = await readDirEntries(target);
+    if (entries === null) {
+      lines.push(`(无法读取目录) ${relPrefix}`);
+      return;
+    }
+    if (!includeHidden) entries = entries.filter((entry) => !entry.name.startsWith('.'));
+    entries.sort((a, b) => a.name.localeCompare(b.name));
 
-      const header =
-        `${guarded.relPath === '' ? '.' : guarded.relPath}/ · 目录 ${dirCount} 个 / 文件 ${fileCount} 个 · ` +
-        `depth=${depth}${sortBy === 'name' ? '' : ` · 按 ${sortBy} 排序`}`;
-      const body = lines.length === 0 ? '(空目录)' : lines.join('\n');
-      const tailNote = truncated ? `\n[已截断：上限 ${maxEntries} 条，缩小范围或用 rg_search/es_search 精确定位]` : '';
-      return ok(`${header}\n${body}${tailNote}`);
-    },
+    for (const entry of entries) {
+      if (lines.length >= maxEntries) {
+        truncated = true;
+        return;
+      }
+      const label = KIND_LABEL[entry.kind] ?? '[?]';
+      const size = entry.kind === 'file' ? formatBytes(entry.size) : '-';
+      const when = entry.mtimeMs === 0 ? '-' : new Date(entry.mtimeMs).toISOString();
+      const suffix = entry.kind === 'directory' ? '/' : '';
+      if (entry.kind === 'directory') dirCount += 1;
+      else fileCount += 1;
+      lines.push(`${label} ${relPrefix}${entry.name}${suffix}  ${size}  ${when}`);
+      if (entry.kind === 'directory' && level < depth) {
+        await walk(entry.path, level + 1, `${relPrefix}${entry.name}/`);
+      }
+    }
   };
+
+  await walk(dir, 1, '');
+  if (aborted) return { content: '', truncated, aborted };
+
+  const header =
+    `${relPath === '' ? '.' : relPath}/ · 目录 ${dirCount} 个 / 文件 ${fileCount} 个 · depth=${depth}`;
+  const body = lines.length === 0 ? '(空目录)' : lines.join('\n');
+  // 截断说明要**可执行**：说清被截了多少、以及三条真的能缩小范围的路（这是"把上限说出口"
+  // 与"指路"的同一句话，不是客套）。旧 list_dir 只说了"缩小范围或用 rg_search/es_search"。
+  const tailNote = truncated
+    ? `\n[已截断：上限 ${maxEntries} 条（同层按名称排序）。缩小 path、调小 depth，`
+      + '或用 rg_search（按内容）/es_search（按文件名）精确定位；'
+      + '要按修改时间或大小排序、要看隐藏项（.env 这类），用 pwsh 的 Get-ChildItem。]'
+    : '';
+  return { content: `${header}\n${body}${tailNote}`, truncated, aborted };
 }
 
 // ──────────────────────────────── read_blob ────────────────────────────────

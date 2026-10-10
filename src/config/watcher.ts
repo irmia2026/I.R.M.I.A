@@ -13,6 +13,11 @@
  * 需要重启的字段只写 `warnings`（提示重启），**不写 `config/changed`**：
  * 那个事件的含义是「已生效」，写它就必须真的生效了。
  *
+ * 名单现在**只有一项**：`mcp.servers`（2026-10-10 加，MCP 声明面热更）。
+ * 为什么是它、代价是什么、为什么失败能全身而退，逐条写在 `HOT_RELOAD_FIELDS` 的注释里。
+ * 生效方式有一条与"换一份新配置"不同的地方，见 `applyHotFieldsInPlace`：**就地改活的
+ * `AppConfig`**（引用它的消费者包括 `RealLoop` 与 `WebServer`，换对象等于它们继续读旧的）。
+ *
  * 事件化（§1）：生效后写 `config/changed { fields, configHash }`（internal）。
  * `configHash` 取的是**生效配置**的指纹（热更字段已并入、需重启字段保持旧值），
  * 于是它与 renderVersion、personaHash 一起仍然是 render 的唯一输入指纹。
@@ -50,22 +55,44 @@ export const CONFIG_POLL_INTERVAL_MS = 250;
 /**
  * 可热更字段（operations.md §1 表格左列）：带尾点的是前缀，不带的是整字段。
  *
- * ⚠️ **2026-10-04 清空**：这份名单曾经写着 `budget.` / `wake.` / `alerts.` / `models.` /
- * `tools.destructiveEnabled`，但**热更从来没有接进主进程**——`main.ts` 只在启动时
- * `loadConfig` 一次，`ConfigWatcher` 在整个仓库里没有任何调用方（连测试都没有）。
- * 于是"改了立刻生效"这句话在界面上、在文档里都说了好几天，实际上一次都没发生过：
- * 设置页保存完再读回来，看到的还是启动时那份（用户报的「保存后弹回旧值」就是这个）。
+ * ⚠️ **2026-10-04 清空 → 2026-10-10 只放回一项 `mcp.servers`**。这份名单的来历值得读完再改：
+ * 它曾经写着 `budget.` / `wake.` / `alerts.` / `models.` / `tools.destructiveEnabled`，但
+ * **热更从来没有接进主进程**——`main.ts` 只在启动时 `loadConfig` 一次，`ConfigWatcher`
+ * 在整个仓库里没有任何调用方。于是"改了立刻生效"这句话在界面上、在文档里都说了好几天，
+ * 实际上一次都没发生过（用户报的「保存后弹回旧值」就是这个）。所以在 2026-10-04 被**清空**，
+ * 口径改成"全部字段都要重启才生效"，等用户拍板那个取舍。
  *
- * 为什么是**清空名单**而不是顺手把它接上：热更的代价不在这段监听代码，而在
- * 「配置变了会不会换掉提示前缀」——`configHash` 是 render 三指纹之一，
- * 任何进入提示词的东西一变，KV 缓存就从失守那一条起全部重算（见 docs/context-audit.md）。
- * 那是个需要用户拍板的取舍，不该由一次"顺手接上"决定。
+ * **为什么现在只放回 `mcp.servers` 一项**（用户 2026-10-10 的原话：「配置的 mcp 不能热加载吗？」）
+ * ——取舍不是"顺手"，它逐条对着下面三件事判过：
  *
- * 所以现在的口径是：**全部字段都要重启才生效**，界面照这个说，事件里也照这个记
- * （`config/changed.requiresRestart`）。将来真要热更，先把上面那个取舍定下来，
- * 再把名单一项一项填回来——填一项就得有一项的证据。
+ *   ① **代价是实的、而且必须写在明处**：`configHash` 是 render 的**三指纹之一**
+ *      （与 `RENDER_VERSION`、`personaHash` 并列，见 `config.ts` 的 `configHash` 与
+ *      docs/context-audit.md）。而这一段（`mcp.servers`）**不进提示词的那一格**：
+ *      进上下文的是 **MCP 常驻索引**，它按既有快照机制**在重大变化点归集**
+ *      （`real-loop.mcpIndexSync` 的三个触发点：首次 / 模板换代 / `compaction/summary` 之后），
+ *      **不是**每次配置改动都重建。所以这一项热更**不会**改请求前缀的字节
+ *      ——"声明变了"这件事走的是**尾部追加的通报**（`wake/manual{via:'mcp'}`），与用户定的
+ *      「追加在末，固定位置，直到上下文重大变化时归集」逐字对齐。
+ *      ⚠️ 但**仍然至少有一次失配**：`configHash` 一变，凡是拿它当输入指纹的地方
+ *      （`replay` 的指纹比对、`/api/config` 的 `x-config-hash`、诊断）都会看到"换了一份配置"。
+ *      那是**设计内**的代价，不是 bug：指纹的全部意义就是"配置变了要看得出来"。
+ *      别为了让指纹保持不变而把这几个字段排除在 `AppConfig` 之外——那会让记录与事实脱钩。
+ *   ② **失败要能全身而退**：这一段的解析（`parseMcpServers` + 启动器白名单）**全在
+ *      `loadConfig` 里**（`readMcpConfig`）。所以"写坏了"这件事的处置不是"池里出现半份坏声明"，
+ *      而是**那份配置根本进不来**：`reloadOnce` 的 catch 保留旧配置继续跑，只留一行诊断
+ *      （见文件头「加载失败的处置」）。放行口缺失（`mcp.extraLaunchers` 没写、环境变量也没设）
+ *      同样在这一层被挡下 ⇒ 不会有一个"半生效"的中间态。
+ *   ③ **粒度按 server 算**：`mergeHotFields` 只负责把这一项换进生效配置；**只重连真变了的那几个**
+ *      server 是池的事（`McpClientPool.applyDeclarations`）。热更不该把另一个 server 正在飞的
+ *      调用打断，也不该把它的运维账清成零。
+ *
+ * **刻意没放回来的**：`budget.` / `wake.` / `alerts.` / `models.` / `tools.*`。
+ * 它们每一个都要单独回答"改了这一格，请求前缀的哪一段字节会变"（`budget` 那几个进提示词与
+ * 压缩预算、`wake` 那几个是循环构造参数、`tools.*` 是**工具装配参数**——工具清单一变就是一次
+ * 全 miss ≈9.6 万 token）。`mcp.servers` 之所以能先来，正是因为它**不在**那条路上（见 ①）。
+ * 填一项就得有一项的证据：别在改这一行时顺手把别的东西一起放进来。
  */
-export const HOT_RELOAD_FIELDS: readonly string[] = [];
+export const HOT_RELOAD_FIELDS: readonly string[] = ['mcp.servers'];
 
 /**
  * 必须重启才生效（§1 表格右列）。`timezone` / `paths` / `persona` 未列入可热更白名单，
@@ -190,6 +217,47 @@ export function mergeHotFields(
   const merged = cloneJson(current) as unknown as Record<string, unknown>;
   for (const field of hotFields) writePath(merged, field, readPath(next, field));
   return merged as unknown as AppConfig;
+}
+
+/**
+ * **就地**把白名单字段并进 `current`，并返回 `current` 自身（`reloadOnce` 用；2026-10-10 加）。
+ *
+ * 与 `mergeHotFields` 的差别只有一个词：**就地**。为什么非这样不可——
+ * 活的 `AppConfig` 对象在装配期被**按引用**交给了别处（`main.ts` 把 `config` 递给
+ * `RealLoop.config` 与 `startWebServer` 的 `deps.config`；`real-loop` 的 `deps.config` 是
+ * `private readonly`，没有任何替换口）。所以"换一个新对象"这条路的效果是
+ * **她与界面继续读旧配置**——那正是"保存后弹回旧值"那个老毛病的形状。
+ * 就地改则一处改、处处见，不需要给每个消费者加一个 setter（加十个 setter 就多十处会漏的地方）。
+ *
+ * **为什么这里敢就地改**（这不是"随手可变状态"）：热更名单里的字段是**整字段替换**的
+ * （`mcp.servers` 是数组、永远整体换），而被改的那一格在**同一拍**内没有第二个读者
+ * ——调用方（`ConfigWatcher.reloadOnce`）在改完**立刻**通知订阅者，订阅者再去重建
+ * 自己那份派生状态（池、索引、界面）。反过来，"先拷一份、改完再换引用"才是那个
+ * 会漏掉引用持有者的写法。
+ *
+ * 两条硬纪律（与白名单那一段注释同源）：
+ *   · **只动名单内的字段**：名单外的一律保持旧值（`readPath` 根本不会被调到它们）；
+ *   · **数组就地改**（`splice`），不重新赋值 `current.mcp.servers = [...]`
+ *     ——因为**有人可能已经抓住了这个数组**（`real-loop` 的索引视图、界面的快照）。
+ *     整字段替换的语义没变（旧元素全清、新元素全进），变的是"抓住它的那些人还看得见"。
+ */
+export function applyHotFieldsInPlace(
+  current: AppConfig,
+  next: AppConfig,
+  hotFields: readonly string[],
+): AppConfig {
+  const target = current as unknown as Record<string, unknown>;
+  for (const field of hotFields) {
+    const value = readPath(next, field);
+    const existing = readPath(current, field);
+    if (Array.isArray(existing) && Array.isArray(value)) {
+      // 就地替换数组内容（见上面那条纪律）：先清空再逐个推入，元素的**引用**照旧是新的
+      existing.splice(0, existing.length, ...value);
+      continue;
+    }
+    writePath(target, field, cloneJson(value));
+  }
+  return current;
 }
 
 // ──────────────────────────────── 文件监听 ────────────────────────────────
@@ -430,12 +498,33 @@ export class ConfigWatcher {
     this.files.stop();
   }
 
-  /** 订阅生效变更；返回退订函数。回调异常被隔离，不影响其他订阅者 */
+  /**
+   * 订阅生效变更；返回退订函数。回调异常被隔离，不影响其他订阅者
+   */
   subscribe(listener: ConfigChangeListener): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /**
+   * **这台实例上的热更接线是活的吗**（2026-10-11 加）：已启动 且 至少有一个订阅者。
+   *
+   * 为什么要这一格：有些回执要如实回答"这次改动**需要重启**吗"——而那个答案的字面意思
+   * 就是"本进程里有没有人在配置变化之后把派生状态跟上"。判据只有这里一处，
+   * 别让调用方各猜一遍（猜错的方向有两种，都很难查）：
+   *   · 猜"不接线"（一律回 `restartRequired: true`）⇒ 热更明明生效了却让人去重启，
+   *     正是用户报的那句"老是让用户手动帮忙"；
+   *   · 猜"接线了"（一律回 false）⇒ 夹具 / 内嵌方没接的时候，回执会撒谎说"已生效"
+   *     ——那比前者坏得多（`test/web-server.test.ts` 那批夹具正是这种形状）。
+   *
+   * 判据取"有没有订阅者"而不是"start() 过没有"：**把派生状态跟上**这件事就是订阅者干的
+   * （`main.ts` 那一个订阅者负责池重建与通报），没人订阅的 watcher 会改生效配置、
+   * 也会写 `config/changed`，但没有任何东西跟着动——那一刻说"已生效"是过头话。
+   */
+  get live(): boolean {
+    return !this.stopped && this.listeners.size > 0;
   }
 
   /**
@@ -518,8 +607,13 @@ export class ConfigWatcher {
       };
     }
 
-    const next = mergeHotFields(this.config, loaded.config, hot);
+    // **就地**并入（不是换一个新对象）：活的 AppConfig 被按引用交给了 RealLoop 与 WebServer，
+    // 换对象等于"她与界面继续读旧配置"。判据与两条纪律见 `applyHotFieldsInPlace` 的注释。
+    const next = applyHotFieldsInPlace(this.config, loaded.config, hot);
     this.config = next;
+    // 指纹取的是**生效配置**（热更字段已并入、需重启字段保持旧值）：所以它与
+    // renderVersion、personaHash 一起仍然是 render 的唯一输入指纹。代价如实说：
+    // 热更一次 ⇒ 这个指纹就变一次（**设计内**，见 HOT_RELOAD_FIELDS 注释的①）。
     this.hash = configHash(next);
     this.emit('config/changed', { fields: hot, configHash: this.hash }, 'internal');
     this.write(`[配置] ${trigger}：热更生效 ${hot.length} 项（${hot.join('、')}）`

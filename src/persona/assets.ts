@@ -3,7 +3,7 @@
  *
  * **一个概念：数字资产。三个分类：`skill` / `mcp` / `path`**（2026-10-06 用户收窄口径）：
  * 「skill、MCP 工具、PATH 里有的东西，都已统一是数字资产。只不过**还按照 skill、mcp 这样的
- * 习惯去分类**。由 **light loop 拿着索引清单，择机提醒**。」
+ * 习惯去分类**。」
  *
  * 分类**不是装饰**——它决定"怎么用"：
  *   • `skill` —— 读说明照着做（说明文件在哪由她自己写）；
@@ -14,63 +14,72 @@
  *
  * **清单分两层，这一条是这份设计的关键**（免得她手抄一份事实、然后过期）：
  *   • **事实层（框架给的）**：有哪些、在哪、**是否就绪**——skill 目录里的技能、配置里声明的
- *     MCP server、`PATH` 探测得到的结论。由 {withFacts} 在**读清单时聚合**，任何一帧都不落盘、
+ *     MCP server、`PATH` 探测得到的结论。由 {withFacts} 聚合，任何一帧都不落盘、
  *     也不进她的文件。
  *   • **她的知识层（她写的）**：**什么时候用**、**怎么用**（她自己的说明文件路径）。落在
  *     `MEMORIES/assets.md`，一条 = `[分类] 名字 ｜ 一句话用途 ｜ 在哪`。
  *   于是"框架只读事实、她只写知识"，两边都不需要抄对方那一半。
  *
- * 本模块只做五件事，全部是**机制**，没有一件是替她写内容：
+ * **v45 取消：框架不再替她"挑资产"**（2026-10-09 用户拍板，理由：准确率太低——他抽 18 条
+ * 看过，一半合理，系统性误判是"去群里说一声"被匹到一个私有工具、"另一个实例"被匹到
+ * `gh`）。原来那条**每轮一次 light 选取**（`selectAssets` / `buildAssetPickRequest` /
+ * `renderAssetsLine`）连同此刻层任务卡上那一行「本任务相关资产：…」一起**删掉**了：清单**不再
+ * 进她的上下文**，要用哪件由她自己照清单（与 SKILL.md）去读——那本来就是种子里写着的用法。
+ *
+ * 本模块现在只做四件事，全部是**机制**，没有一件是替她写内容：
  *   ① [ensureAssetsSeed]  —— 文件不存在时写一份**给未来她看的说明**（幂等；已存在一个字节都不动）；
  *   ② [parseAssets]       —— 把清单解析成条目（坏行如实跳过并计数，不编）；
- *   ③ [withFacts]         —— 把事实层聚合上去（就绪与否照实说，**不改写她写的"在哪"**）；
- *   ④ [renderAssetsLine]  —— 把选中的 ≤3 条渲染成此刻层那**一行只读文本**（带**指路**）；
- *   ⑤ [selectAssets]      —— 一次 light 调用，从**索引清单**（她的层 + 事实层）里挑 ≤3 条相关的。
+ *   ③ [withFacts] 一族     —— **事实层**：就绪与否照实说，**不改写她写的"在哪"**
+ *      （[factOf] / [factEntries] / [indexOf] / [probeOnPath]）；
+ *   ④ [mcpIndexView]      —— **MCP 常驻索引那一屏的素材**（2026-10-10 加，用户的设计：
+ *      "mcp 的存在类同 skill"，索引常驻、工具清单仍按需走 `mcp` 工具）。它读**配置面 +
+ *      落盘清单缓存**，**不起任何进程**；⓷ 那一族因此重新有了生产消费者（见文件末尾那一篇）。
  *
  * **那条纪律（一个字都不许松）**：框架永远不替她写清单、不替她写用法、不替她读用法。
- * 它只做两件事——把清单**索引**喂给 light 做选取、把选中的 ≤3 条**如实**渲染成一行。
+ * 它只做一件事——**把事实核对清楚**（有哪些、在哪、就绪没有），一个字的用法都不替她编。
  * 所以本模块里没有"生成一条资产"的函数，也永远不该有：清单里写什么、她的用法说明书放在
  * 哪个文件、什么时候读进来，都是她的决定（种子文件把这件事讲给她听）。
  *
- * **为什么清单不常驻进她的上下文**：只在她被叫去干活的那一拍，由 light 挑出与本任务相关的
- * 那几条露一次面。常驻就等于每轮都在她眼前，那不再是"择机提醒"，而是又一份长期记忆
- * （也与"用法像 skill：自己读"相冲）。**常驻的只有一行规则**（"先读说明再用，不许凭名字猜"），
- * 它在装置自述里（`model/self-brief.ts` 第⑰段）——短、稳定、不吃缓存。
+ * **常驻的只有一行规则**（"先读说明再用，不许凭名字猜"），它在装置自述里
+ * （`model/self-brief.ts` 第⑰段）——短、稳定、不吃缓存。
  */
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
 
-import type { BudgetConsumed, Projection } from '../log/types.js';
-import type { EventLog } from '../log/event-log.js';
-import type { DsClient, DsRequest, DsResponse, DsTextFormat } from '../model/ds-client.js';
-import { applyOne, finalizePressure } from '../state/fold.ts';
+import { MCP_TOOLS_CACHE_DIR, MCP_TOOLS_CACHE_VERSION, type McpServerEntry } from '../mcp/client.ts';
+// `desc` 那一句的来源与判据（唯一实现：索引行与申请单校验都调它，两处不许各拼一遍）
+import {
+  MCP_DESC_INFERRED_LABEL, MCP_DESC_MISSING_CLAUSE, describeMcpIndexDesc, mcpServerDescOf,
+} from '../mcp/description.ts';
 import { memoriesDir } from './memory-maintain.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 /** 清单文件名（与 `aliases.md` / `facts.md` 同级） */
 export const ASSETS_FILE_NAME = 'assets.md';
-/** 一次最多渲染几条（用户定的上限：**≤3**） */
-export const ASSET_PICK_MAX = 3;
-/** 喂给 light 的索引行上限（条数；清单长跑之后可能很长） */
-export const ASSET_TITLE_LINES_MAX = 60;
 /** 单条索引行的长度上限（字符） */
 export const ASSET_TITLE_CHARS_MAX = 120;
-/** 任务标题的长度上限（字符；与任务卡同一数量级就够 light 判断相关性） */
-const TASK_TITLE_MAX_CHARS = 200;
-/** light 调用超时（毫秒）：选取失败按"一条都不渲染"处理，绝不拖住她开工 */
-export const ASSET_SELECT_TIMEOUT_MS = 8_000;
-/** 事件 origin */
-export const ASSETS_ORIGIN = 'persona/assets';
-/** 那一行尾部永远带上的**指路**（light 漏选时她仍然有路可发现，见用户 2026-10-06 的第 5 条） */
+/**
+ * 那一行尾部本来是**指路**（v34 定的：`——完整清单见 MEMORIES/assets.md`）。
+ *
+ * **v45 起没有哪一行再引用它**（挑资产那条机制删了，见文件头）——留着它是因为这**一句话**
+ * 仍然活着：它现在长在种子说明里（[ASSETS_SEED]），也是她读清单时看到的同一句；
+ * 而这个常量是那句话在代码里唯一一份原样，别处要复述时照它抄，不要另写一个说法。
+ */
 export const ASSETS_INDEX_POINTER = '完整清单见 MEMORIES/assets.md';
 /**
  * 她那一段**说明**的长度上限（字符，按**字符**切、不按字节切——中文一个字是一个字符）。
  *
- * 为什么要有这个数：说明进的是**此刻层任务卡**，而此刻层**每一步都发**——说明被整段抬进上下文，
- * 就是每步都付一次的常驻开销。实测（`data/events` 全量 111 条带 assets 的 `memory/selected`）：
- * 那一行最长 527 字符、中位 125、均值 144，其中最长那条的 335 个字符全是她写在"在哪"里的说明
- * （命令、实测结论、别走弯路——那些属于 SKILL.md 的正文，不属于这一行）。
+ * **v45 起这一格不再进她的上下文**（挑资产那条机制删了，见文件头）：下面这一整段
+ * （[clipAssetNote] 与它的尺子）**没有任何生产消费者**——它连同 `renderAssetShort` 留下的，
+ * 是"那一行如果重新长出来，怎么截才不把她的文件弄坏"这条口径的实现与判据
+ * （`test/digital-assets.test.ts` ⑩ 那几条仍然钉着它）。**别把它当成当前行为**：
+ * 今天清单原样躺在盘上，一个字都不会被截。
+ *
+ * 当初为什么要有这个数（口径的来源，别丢）：说明进的是**此刻层任务卡**，而此刻层**每一步都发**
+ * ——说明被整段抬进上下文，就是每步都付一次的常驻开销。实测（`data/events` 全量 111 条带 assets
+ * 的 `memory/selected`）：那一行最长 527 字符、中位 125、均值 144，其中最长那条的 335 个字符
+ * 全是她写在"在哪"里的说明（命令、实测结论、别走弯路——那些属于 SKILL.md 的正文）。
  *
  * 60 这个数的分寸：一行提醒里一条资产给两屏不到；真要细节的**指路**就在行尾
  * （`ASSETS_INDEX_POINTER`），她照它去读全份清单、再照清单去读 SKILL.md——这条链一直在。
@@ -104,7 +113,9 @@ export type AssetKind = (typeof ASSET_KINDS)[number];
  *   ① 这份清单是干什么的、一条怎么写（三分类各是什么意思）；
  *   ② **事实不用她抄**——有哪些、在哪、就绪没有由框架聚合；她只写"什么时候用、怎么用"；
  *   ③ **用法说明书由她自己写、自己读**（框架不替她写、也不替她读）；
- *   ④ 她被叫去干活时会收到一行"本任务相关资产"（框架挑的 ≤3 条，**挑得对不对她自己判断**）。
+ *   ④ **清单不进她的上下文、也没人替她挑**（v45，2026-10-09 用户拍板取消那条 light 选取）：
+ *      要用哪一件，由她自己照这份清单去读——所以种子**不许**再许诺"干活时会收到一行挑好的"
+ *      （那是一条已经取消的机制，留着就是一句假话；判据在 `test/digital-assets.test.ts` ⑧a）。
  *
  * 三条刻意的写法：
  *   • 说明整段用 `（…）` 包住（解析时按注释跳过，见 `parseAssets`）——她随手往下写多少行都不会
@@ -123,9 +134,9 @@ export const ASSETS_SEED = `# 数字资产
  「在哪」如实写：\`已在 PATH\` / \`路径：…\` / \`未安装（需要 X）\`——写了"未安装"就是没装，
  别让它看起来像有；skill 与 mcp 写名字（或它的说明文件路径）就够，**框架会自己核对**
   "这个技能在不在、这个 server 配了没有"，你不用手抄事实。
- 这份清单**不在你的上下文里**：你在被叫去干活的那一拍，会收到一行「本任务相关资产」，
- 那是我从这份清单（加上框架聚合的事实）里替你挑的可能用得上的几条（最多三条）——
- 挑得对不对你自己判断；要看全的就照那一行末尾的指路去读。
+ 这份清单**不在你的上下文里**（也没有谁会替你挑几条递过来）：它是你自己查的台账——
+ 要动手做一件事之前，先照这份清单看一眼有没有现成的东西可用，
+ 再照每一条的指路去读它自己的说明；看完再动手。${ASSETS_INDEX_POINTER}。
  每一项**怎么用**，由你自己写说明文件、自己要用的那一刻自己去读——我不替你写，也不替你读。
  清单里没写的东西不等于没有；这里只记你确认过的。）
 
@@ -159,16 +170,16 @@ export interface TaskAsset {
   /** 来源：她写的（`her`）还是框架聚合出来的事实（`fact`） */
   from?: 'her' | 'fact';
   /**
-   * 事实层核对结论；`null`/缺省 = **没核对**（不写"未知"，那一行就只写她写的那份）。
+   * 事实层核对结论；`null`/缺省 = **没核对**（不写"未知"，那一格就只写她写的那份）。
    *
    *   • `ready`  —— 事实层证明它就在那儿（skill 目录里有这个技能 / PATH 里找得到这个命令 /
    *                 MCP server 已启动）；`detail` 可以是探测到的真实路径（**探测结论**，可以写出来）；
    *   • `missing`——**核对过**、结论是"不在"（技能不在目录里、命令不在 PATH、配置里没这个 server）
-   *                 ——那一行会如实缀一句 `（已探测：未找到）`，且**不渲染**（见 `renderable`）；
+   *                 ——如实说"未找到"，**不写成"能用"**（原话如此，v45 起没有哪一行再渲染它）；
    *   • `declared`——**有话说，但结论来自她自己写的那一行**（"清单里写着未安装"）或"配置里声明了、
-   *                 但是否已启动未知"：照她写的算，**不猜**。它**能渲染**（"未知"不等于"用不了"）；
+   *                 但是否已启动未知"：照她写的算，**不猜**；
    *   • `unknown`——**框架这一轮没有核对的依据**（读不到配置面 / 没有技能目录 / 没有探测手段）
-   *                 ——既不写"未找到"，也**不进那一行**（摆一条"没核过"的东西等于让"看起来有"）。
+   *                 ——既不写"未找到"，也不假装核对过（没核对就不写误导性文字）。
    */
   fact?: AssetFact | null;
 }
@@ -377,9 +388,9 @@ export function commandOf(asset: TaskAsset): string | null {
  *
  * ⚠️ `unknown` 与 `declared` 的分别（v34 接线时补的，别把它们合回去）：
  *   • `declared` = **有话说**，只是结论来自她自己写的那一行（"清单里写着未安装""已配置（是否已启动未知）"）
- *     ——那一行照原文渲染，**能用**（"未知"不等于"用不了"）；
+ *     ——照原文说，**能用**（"未知"不等于"用不了"）；
  *   • `unknown` = **框架这一轮根本没核对的依据**（读不到配置面 / 没有技能目录 / 没有探测手段）
- *     ——它**不进那一行**：摆在任务旁边只会让她以为"这条核过了"。判据在 `renderable`。
+ *     ——它**不许被说成"没有"**：没核过就是没核过（`isUsable` 因此把它算在"能用"那一侧）。
  */
 export function factOf(asset: TaskAsset, source: AssetFactSource): AssetFact {
   if (NOT_INSTALLED.test(asset.where)) return { state: 'declared', detail: '清单里写着未安装' };
@@ -502,18 +513,23 @@ function isFile(path: string): boolean {
   }
 }
 
-// ──────────────────────────────── 渲染（那一行） ────────────────────────────────
+// ──────────────────── 渲染（那一行：v45 起没有生产消费者，见下） ────────────────────
 
 /**
  * **说明字段的规矩：一行、一句话。**
  *
- * 这条是**展示层**的纪律，写在代码里的理由是它防的是一种会反复犯的错：
- * 清单里的"在哪"（她习惯写成 `说明：…`）很容易被越写越长——把**怎么用**、命令怎么拼、
- * 哪条路跑不通、实测结论、注意事项一起塞进去。那一格一旦带着命令原文进那一行，就等于
- * **把 SKILL.md 的正文整段抬进上下文**——而此刻层是**每一步都发**的，这笔开销每步都付。
+ * ⚠ **v45 起这一段没有生产调用点**：渲染那一行（`renderAssetsLine` / `renderAssetShort`）随
+ * "框架替她挑资产"那条机制一起删了（见文件头），留下的是**这一格的截断口径本身**——
+ * 连同 `test/digital-assets.test.ts` ⑩ 那几条断言（长说明截 60、畸形只取第一句、
+ * 指路不切半、多字节字符不切坏、同一输入逐字节相同）。**别把它读成当前行为**：
+ * 今天清单原样躺在盘上，她的文件一个字都不会被截。
  *
- * 所以口径钉死在这里：**命令与细节属于 SKILL.md（她该自己去读），展示层只取一句话**。
- * 将来真有人在清单里塞命令，这一行也不会把整段抬进上下文——截在展示层，不靠她自觉。
+ * 当初为什么要有它（口径的来源，别丢）：清单里的"在哪"（她习惯写成 `说明：…`）很容易被越写
+ * 越长——把**怎么用**、命令怎么拼、哪条路跑不通、实测结论、注意事项一起塞进去。那一格一旦带着
+ * 命令原文进上下文，就等于**把 SKILL.md 的正文整段抬进上下文**——而此刻层是**每一步都发**的。
+ *
+ * 所以口径钉死在这里：**命令与细节属于 SKILL.md（她该自己去读），展示层只取一句话**；
+ * 真要重开一条"给她递点什么"的路，截在这一层，不靠她自觉。
  *
  * 这一条**不改她的文件**（`MEMORIES/assets.md` 是她的资产，框架不替她写、不替她改）：
  * 截的是渲染出来的那几个字节，落盘的清单一个字符都没动。
@@ -605,8 +621,8 @@ function sentenceCut(text: string, marks: RegExp): number | null {
  *      说明 ≤60），所以"取第一句"取出来的长句照样会被收进 60 里。
  *
  * 五处"不越界"的分寸：
- *   • **事实层不进来**：调用方只在"她写的那一层"上调它（见 [renderAssetShort]）——
- *     `skill 目录里有它` / `已在 PATH → …` / `路径：…` / `未安装（需要 X）` 本来就短，保持原样；
+ *   • **事实层不进来**：这一层只在"她写的那一层"上用（事实层的结论本来就短，原样说）——
+ *     `skill 目录里有它` / `已在 PATH → …` / `路径：…` / `未安装（需要 X）` 保持原样；
  *   • **指路不切半**：见第③步；这也是这一格与"话"分开处理的原因；
  *   • **路宽话窄**：一截**指路**（一个路径）用 [ASSET_NAV_CHARS_MAX]，其余的话用 [ASSET_NOTE_CHARS_MAX]
  *     ——判据在 [looksLikePath]（它只看形状，不猜内容）；
@@ -700,309 +716,293 @@ function withoutDanglingOpen(text: string): string {
 }
 
 /**
- * 清单里"名字 ｜ 用途 ｜ 在哪"里的**名字 + 在哪**（用途不进这一行：给 light 判断相关性用，
- * 摆在上下文里只会变长，而她要看的是"这东西在哪、到底有没有"）。
- *
- * **她那一段照原文**——不做任何美化：清单写"未安装（需要 X）"，这一行就写"未安装（需要 X）"。
- * 用户的要求是"不许让看起来有"，所以这里连"（路径）"这种括注都不替她加。
- * 唯一的加工是上面那条**说明规矩**：`说明：…` 取指路那一截、整格归一成一行一句话、
- * 截到 [ASSET_NOTE_CHARS_MAX]（**她写的东西一个字都没被改**，只是没被整段抬进上下文）。
- *
- * **事实层那几条走的是另一条路**（`from === 'fact'` 那一条分支）：原文照旧、**不截不切**——
- * `skill 目录里有它` / `已在 PATH → …` / `路径：…` / `未安装（需要 X）` 本来就短，
- * 而它们每一句都是"就绪与否"的**结论**，截掉半句就是误导（"不许让看起来有"的反面）。
- * 这也是为什么它**排在最前面**：事实层一个字都不该被这一版的规矩碰到。
- *
- * 事实层的核对结论**只做两件事**（都不改原文）：
- *   • `missing` ⇒ 缀一句 `已探测：未找到`（它现在真的不在了——技能被删、命令被卸）；
- *   • `ready` 且探测到了**真实路径**（`[path]` 那种）⇒ 把真实路径也给她（她要照它去跑）。
- */
-export function renderAssetShort(entry: TaskAsset): string {
-  const fact = entry.fact ?? null;
-  // 事实条目（`factEntries` 折出来的那几条）：**框架自己的结论，原样**——不截不切，排在最前
-  if (entry.from === 'fact') return `${entry.name}（${entry.where}）`;
-  if (fact?.state === 'missing') return `${entry.name}（${entry.where}；已探测：未找到）`;
-  const note = clipAssetNote(entry.where);
-  if (fact?.state === 'ready' && entry.kind === 'path'
-    && /[\\/]/u.test(fact.detail) && !entry.where.includes(fact.detail)) {
-    return `${entry.name}（${note} → ${fact.detail}）`;
-  }
-  return withoutDanglingOpen(`${entry.name}（${note}）`);
-}
-
-/**
- * 此刻层任务卡里那一行（**只读**：不动她的 todo，也不产生任何"已读/已选"状态）。
- *
- * 形状（用户 2026-10-06 定的，除条目外**必须带指路**）：
- *   `本任务相关资产：Obscura（D:\…\obscura.exe）· gh（已在 PATH）——完整清单见 MEMORIES/assets.md`
- *
- * **指路那一句不能省**（用户的第 5 条）：light 只挑 ≤3 条，漏选是常态；没有指路，
- * "漏选"就等于"她不知道有这个"。有了它，她随时能自己去读全份清单——这一行是**提醒**，不是清单。
- *
- * **能渲染的才渲染**（判据在 `renderable`，v34 接线时收窄过）：
- *   • 事实层**核对过、结论是"不在"**（`missing`）⇒ 滤掉：一条"现在真的用不了"的东西摆在任务旁边
- *     只会误导（她会去试、然后撞墙）；
- *   • 她自己写着**未安装** ⇒ 滤掉（同上）；
- *   • 框架**这一轮没核对的依据**（`unknown`：读不到 MCP 配置面 / 没有技能目录 / 没有探测手段）
- *     ⇒ 也滤掉——**不写误导性文字**（用户的原话："读不到配置面就整格留空并不渲染"）。
- *     注意这与"就绪不可知"不是一回事：「已配置（是否已启动未知）」是 `declared`，**能渲染**
- *     （那是有话说，只是不知道起没起）；`unknown` 是"我这一轮压根没核过"。
- *   先滤掉再截前三条——截断之后仍然 ≤3，且**每条都是能给她看的那一类**。滤空了整行不出现。
- *
- * 没有可选条目时返回空串（整行不出现——不写"暂无"、不写"0 条"）：
- * 那一行只在"真的挑出了能给她的东西"时才存在，否则它只是每轮多付一次的前缀噪音。
- *
- * 坏行计数（`skipped`）只在**真有坏行**时缀一句——她在维护这份清单，知道"有几行我没读懂"
- * 比让她以为"清单就这几条"要好；但也不能让它变成每轮都挂着的一句话。
- *
- * **每一条的"说明"在这里被收成一行一句话**（v39，2026-10-07；规矩与判据全在 [clipAssetNote] 上）：
- * 那一格是**指路**，不是 SKILL.md 的正文——命令与细节由她自己照指路去读。
- * 这一层不改她的文件（`MEMORIES/assets.md` 一个字节都不动），只决定**进上下文的那几个字节**。
- */
-export function renderAssetsLine(entries: readonly TaskAsset[], skipped = 0): string {
-  const usable = entries.filter(entry => entry.name !== '' && renderable(entry));
-  const picked = usable.slice(0, ASSET_PICK_MAX);
-  if (picked.length === 0) return '';
-  const list = picked.map(renderAssetShort).join(' · ');
-  const rest = skipped > 0 ? `（清单里另有 ${skipped} 行没读懂，格式是「[分类] 名字 ｜ 用途 ｜ 在哪」）` : '';
-  return `本任务相关资产：${list}${rest}——${ASSETS_INDEX_POINTER}`;
-}
-
-/**
  * 这一条**现在能用**吗（`false` = 现在真的碰不到：技能删了 / 命令不在 PATH / 她写着未安装）。
  *
- * 与 [renderable] 的分别：`unknown`（这一轮没核对）**算能用**——没核对不等于不能用，
- * 她照自己写的那份去试是对的；只是它不该进那一行提示（见 `renderable`）。
  * 判据只两条：事实层**核对过**说不在（`missing`），或她自己写着"未安装"。
+ * **`unknown`（这一轮没核对）算能用**——没核对不等于不能用，她照自己写的那份去试是对的。
+ * 曾经还有一层更严的 `renderable()`（在它之上再滤掉 `unknown`），那是给"挑出来摆在任务旁边"
+ * 用的：v45 取消那条机制时它一起删了（见文件头）。现在这个判据只服务事实层的如实汇报
+ * （[factOf] 那一族），不再决定任何"要不要进上下文"。
  */
 export function isUsable(entry: TaskAsset): boolean {
   if (entry.fact?.state === 'missing') return false;
   return !NOT_INSTALLED.test(entry.where);
 }
 
+// ──────────────────── MCP 常驻索引（2026-10-10：事实层重新有了消费者） ────────────────────
+
 /**
- * 这一条能不能进**那一行提示**（此刻层任务卡上的一行）。
+ * 本模块**为什么会重新长出一个生产消费者**（写在最前面，免得下一轮又把它读成"没人用"）：
  *
- * 在 [isUsable] 之上再收一道：`unknown`（框架这一轮没有核对的依据）也不进——
- * 用户的口径是"读不到配置面就整格留空并不渲染（不要写误导性文字）"。
- * 把一条"我压根没核过"的东西摆在她的任务旁边，等于让她以为框架已经确认过它。
+ * v45（2026-10-09）取消「light 选取资产」之后，事实层那一族（[factOf] / [factEntries] /
+ * [indexOf] / [probeOnPath]）一度**一个生产调用点都没有**（用户问过这件事）。2026-10-10
+ * 用户给的设计又把这条路接了回来：**MCP 要有一份常驻索引在上下文里**（与技能 catalog
+ * 同类同位），而这份索引的**事实来源**正是这里——"配置里声明了哪些 server"就是
+ * `[mcp]` 那一格的事实（[AssetFactSource.mcp]），不是另造一份判据。
+ *
+ * 两处刻意复用、一处刻意不碰：
+ *   • `[mcp]` 那一格的**就绪措辞**由 [factOf] 给（`已配置（是否已启动未知）` 那一族，
+ *     唯一实现）——本模块**不另写一份**"这个 server 起没起"的说法；
+ *   • 事实条目的**生成**走 [factEntries]（她的清单一栏为空：这段索引讲的是配置面的事实，
+ *     不是她写的知识层）——于是"事实条目长什么样"仍然只有一处实现；
+ *   • **不碰** `probeOnPath` 那条路：MCP 索引不需要 `[path]` 探测（一个子进程都不起，
+ *     这是用户的口径"别去起进程"）。它仍然是"没消费者"的那一格，谁要重开 PATH 核对
+ *     再来接它（`real-loop` 的 `probeAssetPath` 注入点也还留着）。
  */
-export function renderable(entry: TaskAsset): boolean {
-  return isUsable(entry) && entry.fact?.state !== 'unknown';
+
+/**
+ * 这一版索引里**一个 server** 的四格事实（**写进事件的那一份**，见 `log/types.ts` 的
+ * [McpIndexEntry]）。刻意与"渲染出来的那一行"分开：日后要改措辞不必动事件里的数。
+ */
+export interface McpIndexServerFacts {
+  name: string;
+  /** 配置里写着 `disabled: true`（保留条目但不起进程，**调用也不会拉起它**） */
+  disabled: boolean;
+  /** 那一刻知道的工具数；`toolsFrom === 'none'` 时是 0（**别读成"它一件工具都没有"**） */
+  tools: number;
+  /** 这个数从哪来：`live` = 活连接刚拉的 / `cache` = 落盘清单缓存（可能过期）/ `none` = 都没有 */
+  toolsFrom: 'live' | 'cache' | 'none';
+  /** `toolsFrom === 'cache'` 时那份清单的取回时刻（epoch ms），其余为 null */
+  cachedAtMs: number | null;
+  /**
+   * **这个 server 是干什么的**那一句（2026-10-11 加，用户点名的"索引内容质量低"那一笔）。
+   *
+   * 来源与判据在 `mcp/description.ts`（唯一实现）：声明（`config.mcp.servers[].desc`）优先，
+   * 落盘清单缓存里 server 自报的第一句工具描述**兜底**——后者是**推断**，
+   * 渲染时**必须带标注**（`MCP_DESC_INFERRED_LABEL`）。
+   * 两处都没有时是空串，渲染照实写 [MCP_DESC_MISSING_CLAUSE]（**不编一句出来**）。
+   */
+  desc: string;
+  /** 上面那句话是哪来的：`config` 声明 / `cache` 推断 / `none` 两处都没有 */
+  descFrom: 'config' | 'cache' | 'none';
 }
 
-// ──────────────────────────────── 选取（一次 light） ────────────────────────────────
+/** 这一段索引与它的事实（**文本与事实一起交出去**：事件里两样都要落） */
+export interface McpIndexView {
+  /** 逐字节进请求的那段文字；**空串 = 整段不出现**（与技能 catalog 的 null/空语义一致） */
+  text: string;
+  servers: McpIndexServerFacts[];
+  /** 上面那段文字是按哪一版**行模板**拼的（写进 `mcp/index` 快照，判"该不该重建"用） */
+  descClauseVersion: number;
+}
 
-/** light 回包的形状：只要**序号**，不要它改写我的清单 */
-const PICK_SCHEMA = {
-  type: 'object',
-  properties: {
-    picks: { type: 'array', items: { type: 'integer' } },
-  },
-  required: ['picks'],
-  additionalProperties: false,
-} as const;
+/**
+ * **索引行模板的版本**（2026-10-11 加）。给索引行补一截时就 +1，**并且同批递 `RENDER_VERSION`**
+ * （请求体字节真的变了）。
+ *
+ * 为什么要单独一个版本号，而不是只认 `RENDER_VERSION`：两者回答的是**两个问题**——
+ *   • `RENDER_VERSION`（`render.ts`）= "这一串字节是哪一代**渲染模板**写下的"；
+ *   • 本常量 = "这一**行**是怎么拼的"。
+ * 绝大多数时候它们一起变，但"只动行模板"的那类改动（这一版给行尾补 `desc` 那一截就是）
+ * 若只认前者，`mcpIndexSync` 就得靠"快照的 version ≠ 当前 RENDER_VERSION"来判断——
+ * 那在**这一版自己的生命周期里**也成立（旧快照确实是 v47），于是**每一拍都会重建一次索引**，
+ * 索引那一段就变成每轮都变的字节（正是 v46 花了一整版躲开的那件事）。
+ * 有了本常量，判据变成"快照的行模板版本 ≠ 当前"⇒ **只重建一次**，之后照旧冻结。
+ *
+ * 版本 1 = 行里**没有** `desc` 那一截（`- name —— 状态，工具数`，即 2026-10-11 之前那一版）。
+ * 缺这一格的老快照因此按 1 算：**该重建**（那一行正是用户抱怨的那一行），重建之后就冻结。
+ */
+export const MCP_INDEX_DESC_CLAUSE_VERSION = 2;
 
-export const ASSET_PICK_INSTRUCTIONS = [
-  '下面是一台机器上可用资产的**索引**（编号 ｜ 分类 ｜ 名字 ｜ 用途 ｜ 就绪情况），以及这台机器',
-  '伙伴马上要做的一件事。分类的含义：[skill] 读说明照着做、[mcp] 走它的调用面、[path] 用 pwsh 跑。',
-  '挑出**做这件事可能用得上**的资产编号，最多 3 个，按相关度从高到低。',
-  '纪律：',
-  '1. 只挑真的相关的；拿不准就不挑——挑错会让她去用一件不对的东西，比不挑更坏。',
-  '2. 标着"已探测：未找到"或"未安装"的**不要挑**（它现在用不了）。',
-  '3. 一条都不相关就返回空数组；只输出编号，不要输出名字，也不要改写索引。',
-].join('\n');
+/**
+ * 这份索引的**表头**（固定文案，与技能 catalog 的 `CATALOG_HEADER` 同一体例）。
+ *
+ * 三件事必须一次说清，少一件她就得靠猜：
+ *   ① 这是**有哪些 server**（不是"有哪些工具"）——工具清单按需，见 `mcp` 工具；
+ *   ② 要看/要调**都走 `mcp` 工具**（用户 2026-10-10 的原话：「入口不是自己读而是我们的统一
+ *      mcp 工具」）；所以这一段里**一个工具名都没有**（有名字就等于把清单搬回常驻）；
+ *   ③ 这一屏是**一次快照**（她得知道它可能不是此刻的现状——加删 server 之后的通报走的是
+ *      后来那条追加，要拿最新的就调 `mcp` 工具现问）。
+ */
+export const MCP_INDEX_HEADER =
+  '[MCP server] 配置里声明的 MCP server（每条 = 名字 + 启用状态 + 已见工具数）。'
+  + '要调 MCP：用 mcp 工具——不带 server 看全部，带 server 看它的工具，server + tool 就是调用；'
+  + '这一屏是**上一次快照**，加删 server 之后以框架的通报或 mcp 工具现问的为准。';
 
-/** 容错取 JSON（与 injection-judge / 记忆整理同口径的宽松解析） */
-function extractJson(text: string): unknown {
-  const trimmed = text.trim();
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
-  const body = fenced === null ? trimmed : (fenced[1] ?? '').trim();
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
+/** 表头之后那一句指路（与技能 catalog 尾句同一做法：把"下一步做什么"写死在固定文案里） */
+const MCP_INDEX_POINTER = '（要看某个 server 的工具就调 mcp 工具带上它的名字；工具名不在这段索引里。）';
+
+/**
+ * 停用那一组的组头。**为什么要分组**：停用与启用**在索引里必须一眼可分**——用户要的判据是
+ * "名字 + 启用/停用"，而"每行都缀一句状态"在十个 server 时很难扫；分组把这件事变成一个位置。
+ */
+const MCP_INDEX_DISABLED_HEADER = '（下面是配置里留着、但**已停用**的：不起进程，调用也不会拉起它）';
+
+/**
+ * 落盘工具清单缓存里那份形状（`<dataDir>/mcp-cache/<server>.json`）。
+ *
+ * ⚠️ 这里**只读它认得的那三格**（`version` / `server` / `tools`），其余一格不碰：
+ * 缓存是**加速器**（池自己的注释如此），认不出来就当"没有缓存"，绝不因为解析不了就报错——
+ * 一段索引不值得让进程多一句告警。`fingerprint` **刻意不校验**：那要重算 server 指纹
+ * （命令/参数/cwd/env 的散列），属于池的内部口径（`client.ts` 的 `entryFingerprint`），
+ * 本模块重写一遍就是第二份实现（而且这份索引**本来就不声称"这就是此刻的清单"**——
+ * 它把"来自缓存、可能过期"写在那一行里）。
+ */
+interface CachedToolsShape {
+  fetchedAtMs: number | null;
+  tools: number;
+}
+
+/** 认一份缓存文件（认不出给 null；**永不抛**） */
+function readToolsCacheFile(path: string): CachedToolsShape | null {
+  let raw: string;
   try {
-    return JSON.parse(body.slice(start, end + 1));
+    raw = readFileSync(path, 'utf8');
   } catch {
     return null;
   }
-}
-
-function textFromOutputs(response: DsResponse): string {
-  let text = '';
-  for (const item of response.outputItems) {
-    if (item.type === 'message') text += item.text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
   }
-  return text;
-}
-
-/** 从回包里取序号（去重、越界丢弃、按模型给的顺序、截到上限） */
-export function readPicks(payload: unknown, total: number): number[] {
-  if (typeof payload !== 'object' || payload === null) return [];
-  const raw = (payload as Record<string, unknown>)['picks'];
-  if (!Array.isArray(raw)) return [];
-  const out: number[] = [];
-  for (const item of raw) {
-    const value = typeof item === 'number' ? item : Number.parseInt(String(item), 10);
-    if (!Number.isInteger(value) || value < 1 || value > total) continue;
-    if (out.includes(value)) continue;
-    out.push(value);
-    if (out.length >= ASSET_PICK_MAX) break;
-  }
-  return out;
-}
-
-/** 一条索引行（**廉价**：编号 + 分类 + 名字 + 用途 + 就绪情况，不给正文） */
-export function assetIndexLine(entry: TaskAsset, index: number): string {
-  // **用不了的当场标出来**（事实层核对过说不在，或她自己写着"未安装"）：light 才知道不该挑它
-  // ——挑了也会被渲染层滤掉，白白占掉三个名额里的一个。
-  // `unknown`（这一轮没核对）**不标**：没核对不是"没有"，标了就是编。
-  const unusable = !isUsable(entry);
-  const why = entry.fact?.state === 'missing'
-    ? entry.fact.detail
-    : (NOT_INSTALLED.test(entry.where) ? '清单里写着未安装' : '');
-  const state = unusable ? `⚠ ${why === '' ? '现在用不了' : why}` : (entry.fact?.detail ?? '');
-  const tail = state === '' ? '' : ` ｜ ${clip(state, 60)}`;
-  return `${index} ｜ [${entry.kind}] ${clip(entry.name, 40)} ｜ ${clip(entry.purpose, ASSET_TITLE_CHARS_MAX)}${tail}`;
-}
-
-/** 索引清单 → 喂给 light 的标题行 */
-export function assetTitleLines(entries: readonly TaskAsset[]): string[] {
-  return entries.slice(0, ASSET_TITLE_LINES_MAX).map((entry, i) => assetIndexLine(entry, i + 1));
-}
-
-function clip(text: string, max: number): string {
-  const flat = text.replace(/\s+/gu, ' ').trim();
-  return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
-}
-
-/** 一次选取的结果（给调用方写账、给测试断言） */
-export interface AssetSelection {
-  /** 选中的条目（≤ [ASSET_PICK_MAX]，按相关度） */
-  entries: TaskAsset[];
-  /** 选取理由：'none' 没清单/空清单（**没有发请求**）· 'model' 走了 light · 'failed' light 失败 */
-  by: 'none' | 'model' | 'failed';
-  /** 清单里的坏行数（原样带给渲染层） */
-  skipped: number;
-  /** light 是否真的发了请求（测试断言"闲聊那一拍不选"就数它） */
-  called: boolean;
-}
-
-export interface SelectAssetsOptions {
-  ds: Pick<DsClient, 'generate' | 'modelFor'>;
-  /** 任务标题（本轮唤醒那句话的人读摘要，与任务卡同一个来源） */
-  task: string;
-  /** 事实层（宿主聚合）：技能目录、MCP 声明、PATH 探测 */
-  facts?: AssetFactSource;
-  log?: EventLog | null;
-  projection?: Projection | null;
-  now?: () => Date;
-  turn?: number;
-  timeoutMs?: number;
-  out?: (line: string) => void;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  // 版本对不上就当没有：缓存格式变了之后，旧文件的 `tools` 未必还是那个意思
+  if (record['version'] !== MCP_TOOLS_CACHE_VERSION) return null;
+  if (typeof record['server'] !== 'string' || record['server'].trim() === '') return null;
+  if (!Array.isArray(record['tools'])) return null;
+  const fetchedAtMs = record['fetchedAtMs'];
+  return {
+    fetchedAtMs: typeof fetchedAtMs === 'number' && Number.isFinite(fetchedAtMs) ? fetchedAtMs : null,
+    tools: record['tools'].length,
+  };
 }
 
 /**
- * 从索引清单里挑 ≤3 条与本任务相关的资产（**一次 light 调用**）。
+ * 那一行里的"工具数"那一截（**来源必须写在行上**，见 [MCP_INDEX_HEADER]）。
  *
- * 三条分寸：
- *   • **没有清单、清单里一条都没有 → 一次请求都不发**（返回 `by:'none'`）。这是"清单不存在
- *     就不渲染、不报错"那条要求的实现：判据在发请求之前，而不是让模型去挑一份空清单。
- *   • **失败即空**（`by:'failed'`）：选取不可用时她照样开工，只是这一轮没有那一行提示——
- *     绝不把它变成"开不了口"的前置条件（与 injection-judge 同一条分寸）。
- *   • 记账与别的 light 调用**同一份口径**（`budget/consumed{lane:'light'}`）：失败也记，
- *     否则 light 通道坏了 failStreak 永远是 0。
+ * 三种来源说三种话，**没有一个字是猜的**：
+ *   • 有缓存 ⇒ `已见 N 件工具（来自缓存，可能过期）`——"已见"是缓存文件的措辞（它记的是
+ *     那一次拉到的份数），"可能过期"是用户给缓存定的口径（`mcp-entry` 的回执也这么说）；
+ *   • 活连接有清单（`live`）⇒ `已见 N 件工具（本次运行拉到的）`；
+ *   • 都没有（`none`）⇒ `工具清单还没拉过（要看就调 mcp 工具）`——**不写"0 件"**：
+ *     "还没看过"与"它一件都没有"是两件事，写错那一格就是假话（事实层那条纪律）。
  */
-export async function selectAssets(dataDir: string, opts: SelectAssetsOptions): Promise<AssetSelection> {
-  const doc = readAssets(dataDir);
-  const facts = opts.facts ?? {};
-  // 她那一层为空时**仍然要看事实层**：技能与 MCP 是框架知道的，她没抄过也该被提醒到。
-  const index = indexOf(doc?.entries ?? [], facts);
-  if (index.length === 0) {
-    return { entries: [], by: 'none', skipped: doc?.skipped ?? 0, called: false };
+function toolsClauseOf(server: McpIndexServerFacts): string {
+  if (server.toolsFrom === 'cache') {
+    const when = server.cachedAtMs === null ? '' : `，取于 ${isoMinute(server.cachedAtMs)}Z`;
+    return `已见 ${server.tools} 件工具（来自缓存${when}，可能过期）`;
   }
-  const startedAt = (opts.now ?? (() => new Date()))().getTime();
-  let response: DsResponse | null = null;
-  try {
-    response = await opts.ds.generate({
-      ...buildAssetPickRequest(index, opts.task),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? ASSET_SELECT_TIMEOUT_MS),
-    });
-    const indexes = readPicks(extractJson(textFromOutputs(response)), index.length);
-    const picked = indexes
-      .map(i => index[i - 1])
-      .filter((entry): entry is TaskAsset => entry !== undefined);
-    account(opts, response, 'completed', startedAt);
-    return { entries: picked, by: 'model', skipped: doc?.skipped ?? 0, called: true };
-  } catch (err) {
-    account(opts, response, 'failed', startedAt);
-    (opts.out ?? (() => undefined))(
-      `[数字资产] 选取失败，这一轮不渲染那一行：${err instanceof Error ? err.message : String(err)}`,
-    );
-    return { entries: [], by: 'failed', skipped: doc?.skipped ?? 0, called: true };
-  }
+  if (server.toolsFrom === 'live') return `已见 ${server.tools} 件工具（本次运行拉到的）`;
+  return '工具清单还没拉过（要看就调 mcp 工具）';
 }
 
-/** light 账（lane=light，与 injection-judge / 记忆整理同口径） */
-function account(
-  opts: SelectAssetsOptions,
-  response: DsResponse | null,
-  finishReason: 'completed' | 'failed',
-  startedAtMs: number,
-): void {
-  const log = opts.log ?? null;
-  const projection = opts.projection ?? null;
-  if (log === null || projection === null) return;
-  const usage = response?.usage ?? null;
-  const inputTokens = usage?.inputTokens ?? 0;
-  const outputTokens = usage?.outputTokens ?? 0;
-  const cacheHitTokens = Math.max(0, Math.min(usage?.cachedTokens ?? 0, inputTokens));
-  const now = opts.now ?? (() => new Date());
-  const event: BudgetConsumed = {
-    seq: log.nextSeq(),
-    ts: now().toISOString(),
-    type: 'budget/consumed',
-    data: {
-      turn: opts.turn ?? 0,
-      step: 0,
-      lane: 'light',
-      model: response?.model ?? (typeof opts.ds.modelFor === 'function' ? opts.ds.modelFor('light') : 'assets'),
-      inputTokens,
-      outputTokens,
-      cacheHitTokens,
-      cacheMissTokens: Math.max(0, inputTokens - cacheHitTokens),
-      // 思维链 token：**每次都写**（没产思维链就是 0），见 log/types.ts 的字段注释
-      reasoningTokens: usage?.reasoningTokens ?? 0,
-      durationMs: Math.max(0, now().getTime() - startedAtMs),
-      retryCount: 0,
-      finishReason,
-      tokensTodayAccum: projection.budget.tokensToday + inputTokens + outputTokens,
-    },
-    visibility: 'internal',
-    origin: ASSETS_ORIGIN,
-  };
-  log.append(event, { sync: false });
-  applyOne(projection, event);
-  finalizePressure(projection, event.ts);
+/** `2026-10-10T03:12`（UTC，分钟精度）：给人看够用，且**与渲染时刻无关**（值来自缓存文件） */
+function isoMinute(ms: number): string {
+  const date = new Date(ms);
+  if (!Number.isFinite(date.getTime())) return '';
+  return date.toISOString().slice(0, 16);
 }
 
-/** 选取请求体的**唯一**构造点（诊断/测试要断言"喂给 light 的是什么"时不必重抄一遍） */
-export function buildAssetPickRequest(entries: readonly TaskAsset[], task: string): DsRequest {
-  return {
-    lane: 'light',
-    input: [
-      ASSET_PICK_INSTRUCTIONS,
-      '',
-      '可用资产索引：',
-      assetTitleLines(entries).join('\n'),
-      '',
-      `马上要做的事：${clip(task, TASK_TITLE_MAX_CHARS) || '（没写标题）'}`,
-    ].join('\n'),
-    text: { type: 'json_schema', name: 'asset_picks', schema: PICK_SCHEMA } as DsTextFormat,
-    // 思考强度：**用户的口径（2026-10-06）—— light 一律 `low`，不提供更改**
-    // （另一档 heavy 一律 `high`，唯一落点是 `runtime/agent-loop.ts` 的 `toDsRequest`）。
-    // **别给这里加配置项**：config.json 里没有、也不许长出能改它的字段——
-    // 判据钉在 `test/thinking-effort-invariant.test.ts`（想加旋钮，那条测试要先红）。
-    reasoning: { effort: 'low' },
-  };
+/** 一段索引里 server 那一行的措辞（**唯一实现**：文本与测试引用同一处） */
+export function mcpIndexLineOf(server: McpIndexServerFacts): string {
+  const status = server.disabled ? '已停用' : '启用';
+  return `- ${server.name} —— ${descClauseOf(server)} —— ${status}，${toolsClauseOf(server)}`;
+}
+
+/**
+ * 那一行里"它是干什么的"那一截（2026-10-11 加，用户点名的"索引内容质量低"那一笔）。
+ *
+ * 三种写法，**没有一种会编**（判据在 `mcp/description.ts`，这里只负责摆）：
+ *   • 声明那句 ⇒ 原样（超长已在 `describeMcpIndexDesc` 里**可见地**截断）；
+ *   • 推断那句 ⇒ 后面**必须**跟一句"据它自报的工具描述"（不标注就等于假造一条声明）；
+ *   • 都没有   ⇒ [MCP_DESC_MISSING_CLAUSE]——**照实说这一格是空的**，而不是把这一截省掉：
+ *     省掉之后索引读起来与改动之前逐字相同（那正是用户抱怨的那一行），
+ *     而写上它，人一眼就看得出"该补的是这一格"。
+ *
+ * **停用的 server 照旧有这一截**：描述讲的是"它是什么"，与"现在起不起进程"无关；
+ * 而"已停用"那一格由组头与行上的状态词承担（见 [MCP_INDEX_DISABLED_HEADER]）。
+ *
+ * 事实里那句**已经是截断过的**（`mcpIndexView` 造事实时就过 `describeMcpIndexDesc`）：
+ * 同一份事实因此既能拼出这一行，又能在事件里如实记下"当时写进索引的就是这一句"。
+ */
+function descClauseOf(server: McpIndexServerFacts): string {
+  if (server.desc === '' || server.descFrom === 'none') return MCP_DESC_MISSING_CLAUSE;
+  return server.descFrom === 'cache' ? `${server.desc}${MCP_DESC_INFERRED_LABEL}` : server.desc;
+}
+
+/**
+ * 从"配置面 + 落盘清单缓存"造这一段索引（**一个子进程都不起**，用户的口径）。
+ *
+ * 三个约束是硬的，改这一版时别松：
+ *   ① **不读活连接、不起进程**：`McpClientPool` 归宿主（`main.ts`），本模块与 `real-loop`
+ *      都拿不到它；而去起进程只为数一下工具数，正是用户点名不许的那件事。所以"工具数"
+ *      只有两个来源：**落盘缓存**（池每次真拉到清单时写的）与"都没有"。
+ *   ② **顺序确定**：按配置里的声明顺序（启用的一组在前、停用的一组在后）。配置是启动期
+ *      读一次的东西 ⇒ 同一份配置渲染出同一串字节（缓存那段"取于"的时刻也来自文件、
+ *      不来自时钟）⇒ 重放与运行期得到同一份。
+ *   ③ **一个工具名都不许出现**：这一段回答"有哪些 server"，工具清单按需（`mcp` 工具）。
+ *      往这里加工具名等于把披露式入口的价值整个抹掉（v43 那一版的红线）。
+ *
+ * `servers` 为空 ⇒ `text` 是空串（渲染层整段不出现）。**注意**：调用方（`real-loop` 的
+ * `mcpIndexSync`）在空串时**不写快照事件**——"没有 server"这件事不需要一条事件来记，
+ * 而写了它反而会让 `heartbeat-real-wake` 那类"事件序列逐字相同"的基线无故多一条。
+ */
+export function mcpIndexView(
+  servers: readonly McpServerEntry[],
+  dataDir: string,
+): McpIndexView {
+  if (servers.length === 0) return { text: '', servers: [], descClauseVersion: MCP_INDEX_DESC_CLAUSE_VERSION };
+
+  // 事实层那一格的素材：**只有名字**（`ready` 我们看不到——池归宿主，这一格如实写"未知"，
+  // 由 [factOf] 的既有措辞承担："已配置（是否已启动未知）"）。停用的条目**不进**这一份：
+  // 它不是"一个可以核对的 server"，它是"配置里留着但不起进程"——那一行由本段自己说。
+  const live = servers.filter((entry) => entry.disabled !== true);
+  const source: AssetFactSource = { mcp: live.map((entry) => ({ name: entry.name })) };
+
+  const facts: McpIndexServerFacts[] = servers.map((entry) => {
+    const disabled = entry.disabled === true;
+    const cached = disabled || entry.toolsCache === false
+      ? null
+      : readToolsCacheFile(join(dataDir, MCP_TOOLS_CACHE_DIR, `${entry.name}.json`));
+    // "它是干什么的"那一句（2026-10-11 加）：声明优先、缓存兜底，**取不到就空着**。
+    // 事实里存的是**渲染要用的那一份**（截断已经过 `describeMcpIndexDesc`）——
+    // 同一份事实因此既拼得出这一行，又能在事件里如实记下"当时索引里写的就是这一句"。
+    const declared = mcpServerDescOf(entry, dataDir);
+    const indexDesc = describeMcpIndexDesc(declared);
+    const descText = indexDesc.kind === 'none' ? '' : indexDesc.text;
+    return {
+      name: entry.name,
+      disabled,
+      tools: cached?.tools ?? 0,
+      toolsFrom: cached === null ? 'none' : 'cache',
+      cachedAtMs: cached?.fetchedAtMs ?? null,
+      desc: descText,
+      // 三态只认 `describeMcpIndexDesc` 的那两种来源：`absent` 归 `none`
+      // （"声明与缓存都没有"与"渲染出来是空的"在索引这一层是同一件事）
+      descFrom: descText === '' ? 'none' : (declared.source === 'cache' ? 'cache' : 'config'),
+    };
+  });
+
+  // 事实层那一次走查（`factEntries`）：它把 `[mcp]` 那一格的**事实条目**造出来，
+  // 而"起没起、配没配"的措辞只有那一处实现。这一版里它不再只是"造好了没人看"：
+  // 下面的 `enabled` / `disabledLines` 两句分别用它给出的结论（见各自的注释）。
+  const factRows = factEntries(source, []);
+
+  const enabled = facts.filter((row) => !row.disabled);
+  const disabled = facts.filter((row) => row.disabled);
+
+  const lines: string[] = [MCP_INDEX_HEADER];
+  if (enabled.length > 0) {
+    lines.push(...enabled.map((row) => mcpIndexLineOf(row)));
+  } else {
+    // 一个启用的都没有（全停用）：**如实说**，不写"（空）"——"空"会被读成"没有 server"，
+    // 而真相是"有几个、全都停用了"（下面那一段会把它们列出来）。
+    lines.push(`（配置里的 ${facts.length} 个 server 全都是停用状态）`);
+  }
+  if (disabled.length > 0) {
+    lines.push(MCP_INDEX_DISABLED_HEADER);
+    lines.push(...disabled.map((row) => mcpIndexLineOf(row)));
+  }
+  // 事实层那一格本轮核对出来的结论：**只在"配置面读不到"时才有话说**
+  // （`AssetFactSource.mcp === undefined` 那一支，detail 是"这一轮读不到 MCP 配置面"）。
+  // 这一版永远读得到（素材就是配置本身）⇒ 正常情况下这一句根本不出现；留着它是因为
+  // 判据只有一处实现——"没核对就不许说没有"这句纪律由 `factOf` 说了算，不由本段重新判。
+  const unknown = factRows.find((row) => row.fact?.state === 'unknown');
+  if (unknown !== undefined) lines.push(`（${unknown.fact?.detail ?? '这一轮没有可核对的事实'}）`);
+  lines.push(MCP_INDEX_POINTER);
+
+  return { text: lines.join('\n'), servers: facts, descClauseVersion: MCP_INDEX_DESC_CLAUSE_VERSION };
 }

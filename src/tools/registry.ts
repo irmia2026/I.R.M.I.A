@@ -97,7 +97,7 @@ export interface ListForModelOptions {
    *
    * 与 `includeDestructive` 的区别是"排除法"与"列举法"：前者是"除了危险的那些都给"，
    * 后者是"只有这些能给"。给外部来源（群里的人、陌生人、webhook）用后者——
-   * `safe_read` / `list_dir` / `rg_search` 都不是 destructive，但它们能读到 MEMORIES/
+   * `safe_read` / `rg_search` 都不是 destructive，但它们能读到 MEMORIES/
    * 里关于用户的事，对陌生人同样不该给。见 `runtime/trust.ts`。
    */
   allowOnly?: readonly string[];
@@ -233,7 +233,7 @@ function isVisible(def: ToolDefinition, options: ListForModelOptions): boolean {
   // allowOnly 是比 destructive 更硬的一道：它列的**只有**这些件，其余一律不出现。
   // 用在"本轮不是用户/她自己发起的"那些轮次上（见 runtime/trust.ts）——外部来源
   // （群里的人、陌生人、webhook）能看到的工具是**严格白名单**而不是"非 destructive 的那些"：
-  // safe_read / list_dir / rg_search 都能读到 MEMORIES/ 里关于用户的事，它们不是 destructive，
+  // safe_read / rg_search 都能读到 MEMORIES/ 里关于用户的事，它们不是 destructive，
   // 但对一个群里来的陌生人来说同样不该给。
   if (options.allowOnly !== undefined) return options.allowOnly.includes(def.name);
   if (def.sideEffect !== 'destructive') return true;

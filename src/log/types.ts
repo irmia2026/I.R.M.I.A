@@ -183,14 +183,43 @@ export interface WakeManual extends EventEnvelope<'wake/manual', {
    */
   person?: string;
   /**
-   * 这条唤醒是谁让它发生的（'dream' = 界面的 /dream 动作，不是用户打的话）。
+   * 这条唤醒是谁让它发生的（`'dream'` = 界面的 /dream 动作；`'mcp'` = MCP 声明面被改）。
+   * **两个都不是用户打的话**——是框架替他做的动作留下的通报。
    *
    * 为什么要这个字段：GUI 对 wake/manual 的既有口径是「有 note = 用户在输入框里打的字」
    * → 右侧气泡。而 /dream 的 note 是**框架写的指令**（该做梦了……），拿它当用户说的话
    * 就成了截图里那条蓝气泡（用户 2026-10-04：「同样应该包装成框架卡片」）。
    * 有了标记，界面就能按来源分：用户打的字走气泡，框架的动作用框架卡片。
+   *
+   * **`'mcp'`（2026-10-09 补）与 `'dream'` 是同一类，但有一处判据上的差别**：
+   * `/dream` 那条 note 是**对她说的话**（"该做梦了……"，必须进她的上下文），
+   * 而 MCP 这条是**框架给她的通报**（"哪个 server 变了"）——两者都进上下文（都不许被
+   * `isSlashCommandEvent` 当成指令吃掉），但界面上都该走框架卡片，谁打的字都不是。
+   *
+   * 加这个值的时候**界面那一侧还没有分支**（`gui/lib/pages/chat_page.dart` 只认 `'dream'`）：
+   * 于是 `'mcp'` 的那条在今天的界面上会落进"有 note = 用户的话"那一支，摆成右侧蓝气泡。
+   * 这是**已知的界面滞后**（与 /dream 修之前同一个形状），记在这里免得下一轮当成新 bug 查；
+   * 后端这一侧的标记先按契约给上（界面加分支时不必回头改写入侧）。
    */
-  via?: 'dream';
+  /**
+   * **`'compact'`（2026-10-09 补）是第三种，而且是唯一一种"没有人按下任何按钮"的**：
+   * 自动压缩（`compaction/summary` 落库）之后，框架**主动**叫她一次，告诉她"刚才压过上下文、
+   * 手上没做完的事接着做"（写入点见 `real-loop.ts` 的 `handleCompactionWake`）。
+   *
+   * 三个值的共同点（也是它必须被记下来的理由）与 `'mcp'` 完全一样：**这条 note 不是用户
+   * 打的话**——界面上该走框架卡片，`noteUserSpoke` 那条路也要绕开它（否则会把框架通报
+   * 写成"他刚说「…」"）。
+   *
+   * 两处判据上的差别，都影响消费方：
+   *   • 与 `'dream'` 不同：`'dream'` 的 note 是**对她说的话**（"该做梦了……"），
+   *     这条是**通报**（"刚压过，接着做"）——但两者都进上下文，都不许被
+   *     `isSlashCommandEvent` 当成指令吃掉（那个函数按 `via !== undefined` 一刀切，见它实现）；
+   *   • 与 `'mcp'` 不同：`'mcp'` 只是通报，`'compact'` 还带一句**要她继续干活**的祈使句。
+   *     这不是行文风格问题：压缩正好落在"一轮刚收尾、可能还有没做完的事"的时刻，不叫醒她
+   *     就等于让那份交接笔记躺到下一次有人说话为止（用户 2026-10-09 的原话：
+   *     「压缩后，应该也进行一次唤醒……**如有中断的工作则继续**」）。
+   */
+  via?: 'dream' | 'mcp' | 'compact';
 }> {}
 
 /**
@@ -217,8 +246,48 @@ export interface WakeIntention extends EventEnvelope<'wake/intention', {
   intentionId: string; content: string;
 }> {}
 
+/**
+ * 唤醒里带的结果正文上限（**字符**，按码点切，不切坏多字节字符）。
+ *
+ * 为什么正文要随唤醒一起给她、又为什么必须有上限（2026-10-08 用户的口径：
+ * 「后台任务回执、timer 提醒，这类得是真唤醒」——判据是"**真的起 turn，且那一条内容出现在
+ * 当轮请求体里**"）：
+ *   · 只写一句"任务完成"等于让她再花一次工具调用去捞结果，而"捞"这一步她最容易跳过，
+ *     然后按"任务完成了"这个印象说话；
+ *   · 但输出可以任意大（实测单条工具输出最长 16.5 KB 正文，任务日志只会更长），而唤醒那一行
+ *     **从此留在历史里、之后每轮重发**——不设上限就是每轮都在为一份日志付费。
+ *
+ * 数定在**事件契约**这一层（契约的读者有两处：产生侧 `runtime/job-manager.ts` 按它切，
+ * 渲染侧 `model/render.ts` 按它说"这是开头多少字"）——两处各写一个数必然漂移。
+ * 取**开头**：与 blob 预览同一条口径（`blob-store` 的 `previewChars` 也取开头）。
+ */
+export const JOB_WAKE_EXCERPT_CHARS = 2000;
+
+/**
+ * 后台任务完成（`runtime/job-manager.ts` 是唯一写入点）。
+ *
+ * **它必须是一条"真唤醒"**（2026-10-08 用户的口径：「后台任务回执、timer 提醒，这类得是真唤醒」
+ * ——判据是**真的起一个 turn，且那一条内容出现在当轮请求体里**）。所以事件不只带一个 jobId：
+ * 结果正文的一截随事件走，渲染层照它进本轮新输入（见 render 的 `wake/job`）。
+ *
+ * 正文为什么放在**事件里**而不是"让她自己去查"：事件的字节就是她看到的东西，
+ * 而查那一步要她再花一次工具调用——实测她更容易跳过它、然后凭"任务完成了"这个印象说话。
+ * 放事件里还有个好处：**重放**（`replay`）与界面预览读到的是同一份字节。
+ */
 export interface WakeJob extends EventEnvelope<'wake/job', {
   jobId: string;
+  /** 跑的是什么命令（原文）。她起的任务，回来看见才知道这结果是"什么的结果" */
+  command?: string;
+  /** 退出码；`null` = 没跑完就被结算（重启孤儿、被杀）——不是 0，别读成成功 */
+  exitCode?: number | null;
+  /** 结果正文的**开头一截**（上限见 `JOB_WAKE_EXCERPT_CHARS`）；没有输出时缺席 */
+  outputExcerpt?: string;
+  /** 上面那一截是不是被截过（截了要如实说，否则她拿它当全文） */
+  outputTruncated?: boolean;
+  /** 结果全文多少字节（截没截都带上：她据此决定要不要读全文） */
+  outputBytes?: number;
+  /** 全文在哪（本机路径）。要全文就用 `safe_read` 读它 */
+  outputFile?: string;
 }> {}
 
 /** IM 通道消息（QQ/未来微信/Telegram 统一入口）：外部不可信数据，渲染时包边界标注 */
@@ -725,6 +794,17 @@ export interface BudgetConsumed extends EventEnvelope<'budget/consumed', {
    */
   context?: ContextBreakdown;
   /**
+   * **请求体构造点**：这次请求渲染时看得见的最大事件 seq（= `context.builtAtSeq` 的镜像）。
+   *
+   * 为什么在事件上再抄一格（2026-10-10）：读日志的人（和告警排查）第一眼要看的就是"这一拍是什么
+   * 时候装出来的"——`ts` 是调用**结束**的时刻，两者能差到 63 秒（实测）。有了它就一眼能看出
+   * "上一次调用的构造点之后、这一次的构造点之前"这段窗口里到底发生了什么。
+   *
+   * **可选**：老日志里没有它（读的一侧退回按 `seq` 切窗口，结论不变）。它不进请求体，
+   * 所以**不需要动 `RENDER_VERSION`**（判据：`ds-client.buildRequestBody` 的白名单里没有它）。
+   */
+  contextBuiltAtSeq?: number;
+  /**
    * 缓存破坏哨兵的结论：与上一次被审计的调用做前缀比对，**除此刻层尾巴以外**的部分变了才有。
    *
    * 没有这个字段 = 这次与上次的冻结前缀一致（不是"没查"）。只在真破坏时出现，
@@ -920,6 +1000,60 @@ export interface CompactionSummary extends EventEnvelope<'compaction/summary', {
   coveredUpToSeq: number; summary: string;
 }> {}
 
+/**
+ * **这一拍为什么不压**（压缩判定的留痕，2026-10-09 加；internal）。
+ *
+ * 为什么必须有它：`maybeCompact` 有四条静默 return（阈值没过 / 遮蔽点回退 / 折叠反而更大 /
+ * 收益闸门没过），而"这一拍为什么没压"在日志里**一个字都没有**——出问题时只能靠
+ * "很久没见到 `compaction/summary` 了"去反推，而反推不出是哪一条判据拦下的。
+ * 先例是 `wake/heartbeat` 把 `probability`/`roll` 落进事件（"这一拍为什么现在响"要能复算）：
+ * **判据用到的每一个数都要能从日志里读回来**，而不是只能重跑一遍代码。
+ *
+ * 一 turn 恰好一条（写入点在 `runtime/agent-loop.ts` 的 `TurnRunner.run()` 收尾，唯一一处），
+ * 所以"按 turn 取一行"恒成立，不必去重。
+ *
+ * 字段口径（**全部来自 `compactionDecision` 这一个函数的同一次求值**，不接受别处再算一遍）：
+ *   • `turn`——本 turn 的号（与 `turn/start.turn` 同一个数）；
+ *   • `historyTokens`——**算出来的**可见历史估算（`estimateHistoryTokens`，尚未遮蔽）；
+ *   • `thresholdTokens`——当时生效的配置阈值；
+ *   • `coveredUpToSeq`——本次算出来的遮蔽点（`compactionCoveredUpToSeq` 的结果）；
+ *   • `previousCoveredUpToSeq`——闸门的**参照点**：已有摘要的覆盖点（`0` = 还没压过，这一次
+ *     就是第一次折叠；判据见 `agent-loop.ts` 的 `maxSummaryCoverage`）。刻意不是
+ *     "上一个 turn/end"，也不是"本 turn 起始 seq"——那两个都会让第一次折叠永远压不动；
+ *   • `maskedTokens`——④甲 闸门量：`(参照点, 遮蔽点]` 之间的可见历史规模
+ *     （`estimateMaskedTokens`），也就是"这次折叠将要改变的字节有多少"。
+ *
+ * 后四格里 `coveredUpToSeq` / `previousCoveredUpToSeq` / `maskedTokens` **可选**：
+ * 阈值没过时后面那几格**根本没算**（那时"遮蔽点在哪"不是一个已经成立的事实），
+ * 编一个 0 填进去等于伪造一次判定。缺省即"这一条判据还没走到"。
+ *
+ * 可见性 internal（写不写在这里、以及"为什么不压"，与她的行事无关，也不该占她的上下文）：
+ * 她该看见的是压缩的**效果**——`compaction/summary` 那份交接笔记，以及紧随其后的那条
+ * `wake/manual`（`via: 'compact'`）。GUI 侧同样不上屏（chat_page 的映射表里没有它）。
+ */
+export interface CompactionDecision extends EventEnvelope<'compaction/decision', {
+  turn: number;
+  /** 算出来的可见历史估算（token） */
+  historyTokens: number;
+  thresholdTokens: number;
+  /**
+   * 结论。**取第一条拦下它的判据**，判据的顺序就是 `compactionDecision` 里那五道门
+   * （与 `maybeCompact` 原来的静默 return 一一对应）：
+   *   · `threshold` —— 可见历史没越过阈值（最常见的一支，绝大多数 turn 都是它）；
+   *   · `monotonic` —— 遮蔽点回退（不许把已经不在现场的内容变回现场）；
+   *   · `no-shrink` —— 折叠完反而更大（那种"压缩"是纯粹的负收益）；
+   *   · `gate`      —— ④甲 收益闸门：新闭合的历史不足一个 recent tail；
+   *   · `wrote`     —— **压了**：同一批里必有一条 `compaction/summary`。
+   */
+  reason: 'threshold' | 'monotonic' | 'no-shrink' | 'gate' | 'wrote';
+  /** 本次算出来的遮蔽点；`threshold` 时缺席（没算） */
+  coveredUpToSeq?: number;
+  /** 已有摘要的覆盖点（`0` = 还没压过）；`threshold` 时缺席 */
+  previousCoveredUpToSeq?: number;
+  /** ④甲 闸门量：`(previousCovered, covered]` 的可见历史规模；`threshold`/`monotonic`/`no-shrink` 时缺席 */
+  maskedTokens?: number;
+}> {}
+
 export interface PersonaUpdated extends EventEnvelope<'persona/updated', {
   file: string; diffHash: string; by: 'agent' | 'human';
 }> {}
@@ -1042,11 +1176,184 @@ export interface MemoryRead extends EventEnvelope<'memory/read', {
 
 export interface McpServerStarted extends EventEnvelope<'mcp/server-started', {
   name: string; pid: number; tools: string[];
+  /**
+   * 这次启动时那份工具清单的**名字 + 描述**（2026-10-09 加，评审缺陷 ⑤）。
+   *
+   * 为什么要多这一格：池在生产上**刻意不拿注册表**（拿了就会把 `mcp__*` 写进 `tools` 段），
+   * 于是 `registeredByServer` 只在池内部维护、注册表里一件 MCP 工具都没有 ⇒ 扩展页那三个
+   * 字段（`registeredTools` / `toolsCount` / `toolDetails`）**恒为空**，真起过真调过也写
+   * "注册工具 0 件"。观测面要的是"它给了什么"，这件事**只有池在启动那一刻知道**，
+   * 所以由它经这条 internal 事件带出来（事件不进模型请求，零缓存代价）。
+   *
+   * 旧日志里没有这一格：读日志的代码必须能读旧形状（`tools` 只有名字）——`mcpView` 两档都认。
+   */
+  toolDetails?: Array<{ name: string; description: string }>;
+  /**
+   * 本次启动的耗时（spawn → 握手 + `tools/list`，毫秒）。2026-10-10 加（资源观测）。
+   * 旧日志缺这一格 ⇒ 读的人按 null 处理（`mcpView` 就是这么读的）。
+   */
+  startMs?: number;
 }> {}
 
 export interface McpServerStopped extends EventEnvelope<'mcp/server-stopped', {
   name: string; reason: 'idle-reclaim' | 'crashed' | 'shutdown';
+  /** 这个进程活了多久（ms）；旧日志缺这一格 */
+  uptimeMs?: number;
+  /** 整个生命周期里在飞请求的峰值；旧日志缺这一格 */
+  inFlightPeak?: number;
+  /**
+   * 回收前**最后一次采到的** RSS（MB）；没采到就是 null。
+   * 口径：它是"最近一次采样"（通常是启动后不久那次），**不是**回收瞬间的内存。
+   */
+  rssMb?: number | null;
 }> {}
+
+/**
+ * 资源观测（internal；2026-10-10 加，`src/mcp/client.ts` 的池异步落）。
+ *
+ * **为什么不塞进 `mcp/server-started`**：RSS 要起一个短命的读数进程（Windows 上是
+ * `tasklist`，几十毫秒），塞进启动事件就等于让"启动"这条同步路径去等一个观测。
+ * 观测不该拖慢被观测的东西 ⇒ 自己一条事件、异步落。
+ *
+ * 可见性 internal（走 `defaultVisibility` 的缺省）：它不进请求、零缓存代价；
+ * 消费面是 `/api/mcp`（`web/server.ts` 的 `mcpView`）折出来的"谁在吃内存"。
+ */
+export interface McpServerResource extends EventEnvelope<'mcp/server-resource', {
+  name: string; pid: number; sampledAtMs: number;
+  rssMb: number | null;
+  /** 这个数是怎么来的：`proc`（Linux /proc）/ `tasklist`（Windows）/ `ps` / `unavailable`（没采到） */
+  rssSource: 'proc' | 'tasklist' | 'ps' | 'unavailable';
+  startMs: number;
+  inFlightPeak: number;
+}> {}
+
+// ──────────────────────── MCP 常驻索引的快照（2026-10-10 加） ────────────────────────
+
+/**
+ * 快照里一个 server 的那一行事实（**写时那一刻**的，不是读时的）。
+ *
+ * 为什么连这四格一起落进事件、而不是只落渲染好的那段文字：事后要能回答"当时索引里
+ * 为什么写的是 3 件工具"。`tools` 与 `toolsFrom` 是同一件事的两半——前者是数，后者是
+ * "这个数从哪来"（刚拉的 / 落盘缓存 / 没拿到），只落数不落来源，复盘的结论就会比当时自信。
+ */
+export interface McpIndexEntry {
+  /** server 名（照 `mcp.servers[].name` 原样） */
+  name: string;
+  /** 配置里写着 `disabled: true`（保留条目但不起进程） */
+  disabled: boolean;
+  /** 那一刻知道的工具数（`toolsFrom === 'none'` 时是 0，别读成"它一件工具都没有"） */
+  tools: number;
+  /** 这个数从哪来：`live` = 活连接刚拉的 / `cache` = 落盘清单缓存 / `none` = 都没有 */
+  toolsFrom: 'live' | 'cache' | 'none';
+  /** `toolsFrom === 'cache'` 时那份清单的取回时刻（epoch ms）；其余为 null */
+  cachedAtMs: number | null;
+  /**
+   * **这个 server 是干什么的**那一句（2026-10-11 加，用户点名的"索引内容质量低"那一笔）。
+   *
+   * 旧事件**没有这一格**（那时索引行里只有名字 + 状态 + 工具数）⇒ 读的人按"没有那句话"处理，
+   * 不许反推、更不许拿 `name` 凑一句。`descFrom` 一起读才读得准：
+   *   • `'config'` —— 权威：`config.json` 的 `mcp.servers[].desc`（人或人批过的她写的）；
+   *   • `'cache'`  —— **推断**：落盘清单缓存里 server 自报的第一句工具描述（索引行上必须带标注）；
+   *   • `'none'`   —— 两处都没有（索引行照实写"配置里没写它做什么"）。
+   * 判据与整段理由在 `src/mcp/description.ts` 的文件头（那里是唯一实现）。
+   */
+  desc?: string;
+  descFrom?: 'config' | 'cache' | 'none';
+}
+
+/**
+ * **MCP 常驻索引的一份快照**（internal；2026-10-10 加）。
+ *
+ * ──────────────────────────── 它解决的是什么 ────────────────────────────
+ *
+ * 用户 2026-10-10 的设计原话（逐字）：
+ * 「虽然有了入口，但是**还是需要有对应的索引存在**。**mcp 的存在类同 skill**。不过**入口不是
+ *  自己读而是我们的统一 mcp 工具**。」「**增删进入上下文的方式依然还是。追加在末，固定位置，
+ *  直到上下文重大变化时归集到正确的索引位置。**」
+ *
+ * 落成两件事，**缺一不可**：
+ *   ① **索引常驻**：与技能 catalog 同一类位置（请求头部那段长期记忆层的同一段素材里），
+ *      每个 server 一行（名字 + 启用/停用 + 工具数 + 一句"要看它的工具就调 mcp 工具"）。
+ *      它只回答"**有哪些 server**"，**一个工具名都不列**——工具清单仍然按需披露
+ *      （`mcp` 工具的第二层回执），否则"披露式"就白做了（一份 40 件工具的 server 会把
+ *      常驻开销搬回来）。
+ *   ② **索引只在重大变化点重建**（"归集"）：增删 server 的那一拍**照旧**走尾部追加
+ *      （一条真唤醒，正文进当轮输入），**不动索引那一段的字节**；到下一个重大变化点
+ *      （压缩 / 界面 reset 写下的 `compaction/summary`）才用当前配置重建索引。
+ *
+ * ───────────────── 为什么必须落成事件（这是本类型存在的唯一理由） ─────────────────
+ *
+ * 若索引每轮都从**实时配置**现渲染，那么"加一个 server"就会立刻改掉请求的**前缀**
+ * ——前缀一变，KV 缓存整段失效（本仓库实测口径 ≈9.6 万 token 一轮），而这恰恰与上面
+ * 那条"增删只追加在末尾、到重大变化点才归集"的意图相反。
+ *
+ * ⇒ 索引必须在**重大变化点冻结**。而"冻结"这件事要能被 `render` 看见，就只剩一条路：
+ * 它得是**日志里的一条事实**。`render` 是纯函数（缓存铁律 1：不读配置、不读文件、不读时钟），
+ * 它只能读事件；把那段文字写进事件之后，"这一轮用的是哪一版索引"与请求体逐字节可复现，
+ * 事后（`replay`）也重建得回来——否则重建出来的请求会少一整段。
+ *
+ * ──────────────────────────── 三处纪律 ────────────────────────────
+ *
+ * ① **`text` 是逐字节进请求的那段文字本身**（不是"再渲染一次的素材"）。空串 = 那一刻
+ *    配置里一个 server 都没有 ⇒ 渲染层**整段不出现**（与技能 catalog 的 null 语义一致）。
+ *    存文本而不是"存条目、渲染时再拼"：拼法属于模板，模板改了就得递增 `RENDER_VERSION`
+ *    （那正是 `version` 这一格要认出来的事，见下）；存文本之后，"当时是什么字节"与
+ *    "现在的模板怎么拼"是两件事，旧快照不会被新模板重新解释一遍。
+ * ② **`version` = 写下它时的 `RENDER_VERSION`**。它不是缓存版本号，而是**快照的度量衡**：
+ *    渲染模板换了代（`RENDER_VERSION` 变了）⇒ 这份快照与当前模板不是同一把尺子
+ *    ⇒ 下一次同步（`real-loop` 的 `mcpIndexSync`）当场重建它，而不是拿旧字节去比新模板。
+ *    这一条同时解释了为什么**不需要**为"模板改了"单独写一条重建触发点。
+ * ③ **append-only**：快照**只增不改**，永远追加在日志末尾。屏幕上"索引归集到正确位置"
+ *    这件事因此不需要改写任何历史——`render` 取**最后一条**快照（它可能在很久以后才出现），
+ *    于是"尾部那些追加"自然被新快照覆盖掉语义（那几条 `wake/manual` 仍在历史里，
+ *    逐字节不动，这正是"历史不许回改"）。
+ *
+ * ─────────────────── 什么时候写（`real-loop.mcpIndexSync`，唯一写入点） ───────────────────
+ *
+ * 判据是"这份快照还代表现在吗"，两个条件**任一**成立就重建（并如实写一条新事件）：
+ *   • 日志里**还没有**任何 `mcp/index`（首次、或升级上来的老日志）；
+ *   • 最后一条 `mcp/index` 的 `version` ≠ 当前 `RENDER_VERSION`，或者它的 `seq` **早于**
+ *     最后一条 `compaction/summary`（那一刻上下文重大变化过 ⇒ 该归集了）。
+ *
+ * 为什么"重大变化点"只认 `compaction/summary`：它是本仓库里**唯一**的"上下文换了一版"的
+ * 事实（自动压缩与界面 reset 都写它，人工 `/compact` 也写它），遮蔽点由它唯一确定
+ * （`render` 的遮蔽规则）。配置改动**不是**触发点——今天所有字段都要重启才生效
+ * （`config/watcher.ts` 的热更白名单是空的），进程一起就是"配置不动"的那段时间，
+ * 中间只有工具清单缓存可能被后台刷新；那件事**必须**走尾部追加、不许改前缀。
+ */
+export interface McpIndexSnapshot {
+  /** 写下它时的 `RENDER_VERSION`（见上：它是快照的度量衡，不是缓存版本号） */
+  version: string;
+  /**
+   * **逐字节进请求的那段文字**。空串 = 那一刻配置里没有 server（渲染层整段不出现）。
+   *
+   * 为什么全文落事件、而不是像 `memory/selected` 那样只落指纹：那一条的正文（`INDEX.md`）
+   * 在盘上另有一份、且**可能很大**（兆字节量级的风险）；这一段是**有界的小文本**
+   * （一个 server 一行，server 数是人手配的），而它的**字节本身**就是请求的一部分
+   * ——只落指纹的话，重建请求时没人拼得出那几个字节。
+   */
+  text: string;
+  /** 那一刻的 server 事实（审计与复盘的依据，见 [McpIndexEntry]） */
+  servers: McpIndexEntry[];
+  /**
+   * **这一份快照是按哪一版"行模板"写的**（2026-10-11 加；缺这一格 = 第 0 版，即
+   * "name —— 状态 + 工具数"那一版，没有 desc 那一截）。
+   *
+   * 为什么它必须与 `version` 分开：`version` 回答的是"这一串字节是哪一代**渲染模板**写下的"
+   * （模板换代 ⇒ 请求体可比性变了 ⇒ `render.ts` 的 `RENDER_VERSION`），而这一格回答的是
+   * "这一行**怎么拼**"。两者绝大多数时候一起变，但有一类改动只动后者而**不动模板**：
+   * 给索引行补一截（例如这一版加的 `desc`）时，`RENDER_VERSION` 照旧要递（字节真的变了），
+   * 可"要不要重建"这件事**只与行模板有关**——分开记之后，`mcpIndexSync` 才能在
+   * "行模板换了代、但渲染模板没换"时**也只重建一次**，而不是每一拍都判"旧快照过期"
+   * 然后每一拍都重建一遍（那会把索引变成每轮都变的字节）。
+   *
+   * ⚠ 判据是**双向**的：写的时候要落当前版本，读的时候"缺这一格"要按 0 算
+   * （`MCP_INDEX_DESC_CLAUSE_VERSION`，唯一常量在 `persona/assets.ts`）。
+   */
+  descClauseVersion?: number;
+}
+
+export interface McpIndex extends EventEnvelope<'mcp/index', McpIndexSnapshot> {}
 
 export interface SkillInstalled extends EventEnvelope<'skill/installed', {
   name: string; path: string; by: 'agent' | 'human';
@@ -1056,6 +1363,157 @@ export interface SkillInstalled extends EventEnvelope<'skill/installed', {
    */
   contentHash?: string;
 }> {}
+
+// ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
+
+/**
+ * 她**发起**了一张申请单（internal）。方案稿：`docs/skill-mcp-grant-plan.md` §2。
+ *
+ * ──────────────────────────── 这条通道解决的是什么 ────────────────────────────
+ *
+ * 用户 2026-10-11 的原话：「**我希望 skill 和 mcp 都尽量是 agent 自行增删。人类用户只做审批**」。
+ * 落成一条五步流水，每一步都有既有形状可用（一处新机制都没造）：
+ *
+ * ```
+ * ① 她发起        写一份**申请单**到 `<dataDir>/grants/<id>.json`（工具入口的回执指路）
+ * ② 待批          框架那一拍（`real-loop.settleGrants`）拾取 ⇒ `grant/requested`（本事件）
+ *                 + `human/asked{source:'system'}`（她与界面都看得见的那条提问）
+ * ③ 用户看        界面把那一条提问摆出来（待批段 / 顶层卡），**只在界面点批准或驳回**
+ * ④ 用户点        `POST /api/commands/answer {askSeq, answer:'approve' | 'reject:<理由>'}`
+ *                 ——复用既有答复通道（`plan-mode.ts` 的 `answerHuman`），不新开一条
+ * ⑤ 框架执行      **框架**按申请单落地（`mcp.servers[]` 走 `withConfigDoc`；技能走回收站那条）
+ *                 + 本通道的第二条事件 `grant/resolved` + `wake/manual{via:'grant'}` 叫她一次
+ * ```
+ *
+ * ──────────────────── 三条边界（写在这里，免得下一轮有人放宽） ────────────────────
+ *
+ * ① **申请单本身不构成任何授权。** 谁能写那个目录谁就能放一张单子进去——所以单子**不是**门，
+ *    门仍是人的那一次点击。这一条与"人格提案"那条路同源（提案文件同样不是授权）。
+ * ② **她不许直接改 `config.json`**：她只能"申请"。落地那一步由**框架**做，走
+ *    `withConfigDoc`（整份文档读出改再写回 → `loadConfig` 复核 → 失败回滚原文 → 文件锁），
+ *    且只改 `mcp.servers[]` 那一段。
+ * ③ **白名单不因为她申请就放宽**：单子里的 `command` **两面都判**——她发起时判一次
+ *    （当场给她一句能读懂的错），框架落地时**再判一次**（单子可能在盘上躺了很久，放行口可能
+ *    已经变了）。判据仍是 `parseMcpServers` / `checkStdioLauncher`，一处都没有第二条路。
+ */
+export interface GrantRequested extends EventEnvelope<'grant/requested', {
+  /** 申请单 id（= `<dataDir>/grants/<id>.json` 的文件名，也是 `human/asked` 的 seq 配对对象） */
+  id: string;
+  kind: GrantKind;
+  /** skill = 技能名；mcp = 服务名 */
+  name: string;
+  /** 谁发起的。今天只有 `'agent'`（人在界面上的动作走既有命令，不经过这条线） */
+  by: 'agent';
+  /**
+   * 内容指纹：`mcp-add` = 那一条 server 声明的规范化指纹（`command` / `args` / `env` / `desc`
+   * 五格的 sha256，由 `grant/mcp-grant.ts` 的 `grantContentHash` 现算）；删除类 = 空串。
+   * **批准那一刻重算一次**，不一致 ⇒ 这份单子在审阅期间被改过 ⇒ 拒执行（`skipped-stale`）。
+   */
+  contentHash: string;
+  /** 申请单在盘上的落点（相对 dataDir，排障时一眼看得出是哪个文件） */
+  path: string;
+  /** 她写的一句理由：**为什么想加它 / 为什么该删它**（不可信文本，进卡面前必须洗净） */
+  reason: string;
+  turn: number;
+  /** 人看到的那个问题（= `human/asked.question` 同一串字符串，两处不许各拼一遍） */
+  question: string;
+  /**
+   * 人看到的那段上下（= `human/asked.context` **同一份字节**）。
+   *
+   * 为什么落进事件而不是让界面自己拼：它是**待批那一段**与**卡面**的同一份素材，
+   * 而"这段话里有什么"属于这条通道的口径（风险点、不点会怎样那一句都在里面）。
+   * 两处各拼一遍，迟早出现"界面上说他批的是 A、日志说他批的是 B"。
+   */
+  context: string;
+  /**
+   * **这条申请单完整的那几格**（2026-10-11：事件就是那张单子的凭据）。
+   *
+   * 为什么把单子上的字段也落进事件，而不是让界面去读 `<dataDir>/grants/<id>.json`：
+   * 这一条事件的用途正是"事后回答**当时申请的是什么**"（方案稿 §4.1 那条判据）。
+   * 让 Web 层去读那个文件有两个毛病：① 单子可能在审阅期间被改过（而指纹对不上时
+   * **恰恰要拿事件里这一份**去说清"它原来是什么"）；② 那要多一条"读不到文件怎么办"的
+   * 分支，而这条路上的每一个分支都得说人话。落进事件之后，`GET /api/grants` 与界面
+   * 都**只读事件**——一处真相，没有第二个来源。
+   */
+  desc: string;
+  command: string;
+  args: string[];
+  /**
+   * 环境变量的**键名**（**值一律不落事件**）。
+   *
+   * 与 `/api/keys` 同一条口径：值里可能有密钥，而事件是会被界面摆出来、被人读的东西。
+   * 键名足够回答"它会拿到哪些环境变量"这个问题（详情那段话里也只有键名）。
+   */
+  envKeys: string[];
+  /** 申请单里写着 `enabled: false`（加进去但不起进程） */
+  disabled: boolean;
+  /**
+   * **技能那一支的摘要**（`kind` 是 `skill-*` 时才有；2026-10-11 第二笔加）。
+   *
+   * 正文与随包文件**不进事件**（可能几十 KB）：事件里只落"指纹 + 摘要"，
+   * 内容是 `<dataDir>/grants/<id>.json` 那份申请单里的事。这四格够卡面把风险说清：
+   *   · `description` —— frontmatter 那一句（技能**唯一**的触发机制）；
+   *   · `bodyBytes`   —— 正文多少字节（`SKILL.md` 那一份，不含 frontmatter）；
+   *   · `fileCount`   —— 随包带几个文件；
+   *   · `scriptNames` —— **`scripts/` 下那些可执行内容的名字**（方案稿 D8：卡面上单列一行）。
+   *     "装技能 = 引入可执行内容"在本机不是假设（`skills/anysearch/scripts/` 里真有一批脚本）。
+   */
+  skillDescription?: string;
+  skillBodyBytes?: number;
+  skillFileCount?: number;
+  skillScriptNames?: string[];
+  /**
+   * 挂起它的是哪一条 `human/asked`（**拾取那一刻**就知道了，所以这一格是必填）。
+   *
+   * 有它 `GET /api/grants` 才配得上"这张单子的卡超时了没有"，也才认得出"人答的是哪一张"。
+   * 老事件（2026-10-11 的这一天之内）没有这一格 ⇒ 读的人按 null 处理（当"配不上卡"），
+   * **不许**按问题文本去猜。
+   */
+  askSeq: number;
+}> {}
+
+/**
+ * 这张申请单的结局（internal）：**人的决定**与**框架执行的结果**分开记。
+ *
+ * 为什么非要把执行结果也落成事件（而不是"批准=写文件、失败就 500"）：这条通道的落地是**两步**
+ * （技能要建目录再写文件；MCP 要改配置再复核），"批了、但没装成"是一个真实存在的结局。
+ * 没有这一格，日志会替框架说一句假话——「批准了」读起来像「装上了」（方案稿 §4.1 那条判据）。
+ *
+ * 幂等靠**事件状态**而不是内存记账：`human/answered` 已经把那张 `human/asked` 出队了，
+ * 第二次点批准在 `answerHuman` 那一步就撞「askSeq 不在台面上」⇒ 不会重复落地。
+ */
+export interface GrantResolved extends EventEnvelope<'grant/resolved', {
+  id: string;
+  /** 答复的是哪一条 `human/asked`（精确配对，照 [HumanAnswered.askSeq]） */
+  askSeq: number;
+  kind: GrantKind;
+  name: string;
+  outcome: 'approved' | 'rejected';
+  /** 谁批的（今天恒为 `'human'`） */
+  by: string;
+  /** 驳回理由。**批准时为 null**；驳回时允许为空串（界面给输入框但不强制填） */
+  reason: string | null;
+  /** 批准那一刻**重新算**的指纹（与 `grant/requested.contentHash` 不一致 ⇒ `stale`） */
+  contentHash: string;
+  /**
+   * 框架执行的结果——**这一格是"批了但没装成"与"批了装成了"的分界**。
+   *   • `ok`              —— 真落地了（`landed` 那一格说落在哪）；
+   *   • `failed`          —— 试了但没成（`failure` 说清为什么）；
+   *   • `skipped-stale`   —— 内容在审阅期间被改过，**拒执行**（照人格提案的 `stale-proposal`）；
+   *   • `skipped-invalid` —— 落地复核（白名单/名字/存在性）没过，拒执行；
+   *   • `not-applicable`  —— 驳回：它压根没有被执行（这一格让"驳回"与"批准但失败"读得开）。
+   */
+  exec: {
+    state: 'ok' | 'failed' | 'skipped-stale' | 'skipped-invalid' | 'not-applicable';
+    /** `state !== 'ok'` 时那句话说清楚（进回执，也进她下一拍的上下文） */
+    failure?: string;
+    /** 真落地的东西：`mcp-add` = server 名；`mcp-remove` = 被移除的名字 */
+    landed?: string;
+  };
+}> {}
+
+/** 申请单能做的四件事（skill 那两件是同一套形状的第二笔，见方案稿 §2.1 与 §8） */
+export type GrantKind = 'mcp-add' | 'mcp-remove' | 'skill-install' | 'skill-remove';
 
 export interface HookFired extends EventEnvelope<'hook/fired', {
   hook: 'PreToolUse' | 'PostToolUse' | 'Wake';
@@ -1312,9 +1770,10 @@ export type AppEvent =
   | PolicyDenied | AuthzDenied | LogRepaired | InstanceTakeover
   | InputClaimed | InputDeadLetter | InputRequeued | InputDiscarded | ToolZombie
   | SlashHandled
-  | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary
+  | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
-  | McpServerStarted | McpServerStopped | SkillInstalled | HookFired | SpeakSent
+  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillInstalled | HookFired | SpeakSent
+  | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
   | JobStarted | JobFinished
   | HumanAsked | HumanAnswered | HumanExpired
@@ -1361,6 +1820,27 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   'plan/pending': 'internal', 'plan/resolved': 'internal',
   'review/resolved': 'model',
   'compaction/summary': 'model',
+  // 压缩判定的留痕（一 turn 一条）：**这一拍为什么不压**。internal 是刻意的——它是判据的
+  // 审计账（阈值/遮蔽点/闸门量），不是她的输入；她该看见的是压缩的**效果**（那份摘要，
+  // 以及紧随其后那条 wake/manual · via='compact'）。写在这里而不是靠 defaultVisibility 兜底，
+  // 是为了让"这条线是有意画的"看得见，也防住将来有人手滑把它写成 model
+  //（那会让她每 turn 都读一遍"我这拍为什么没压缩"——纯粹的常驻开销）。
+  'compaction/decision': 'internal',
+  // MCP 常驻索引的快照（2026-10-10）**刻意 internal，而它进上下文的那段文字照旧进**：
+  // 两者是两件事——`mcp/index` 是"这一版索引是什么"的**凭据**（复现与审计用），
+  // 给她看的是 `render` 从这条事件里取出来的那段文字（进长期记忆层，与技能 catalog 同段素材）。
+  // 若把这条事件写成 model，同一段索引会在她的上下文里出现**两遍**（一遍是渲染出来的段、
+  // 一遍是事件自己的渲染），第二遍纯属常驻开销。写在这里而不是靠 defaultVisibility 兜底，
+  // 是为了让"这条线是有意画的"看得见。
+  'mcp/index': 'internal',
+  // 申请单的两条都 **internal，刻意不进她的上下文**（2026-10-11）：
+  //   · `grant/requested` —— 她**知道**自己递过单子（工具回执当场回了她一句），
+  //     而"框架在下一拍把这份单子拾起来了"是簿记，进上下文只是同一件事渲染两遍；
+  //   · `grant/resolved` —— 结局**由那条真唤醒（`wake/manual · via='grant'`）告诉她**，
+  //     那一条进上下文（note 是框架写给她的话），这两条只是它的凭据（审计与复盘用）。
+  // 两件事必须分得开：本表说 model ⇒ 不进请求；凭据是"这一版结局是什么"，
+  // 给她的是那句话。写在这里而不是靠 defaultVisibility 兜底，是为了让"这条线是有意画的"看得见。
+  'grant/requested': 'internal', 'grant/resolved': 'internal',
   'policy/denied': 'model',
   // 整理留痕只在日志与前端，不进上下文（记忆的秩序由机制保证，不必每轮提醒她一遍）
   'memory/maintained': 'internal',
@@ -1385,6 +1865,46 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
 
 export function defaultVisibility(type: string): Visibility {
   return EVENT_VISIBILITY[type] ?? 'internal';
+}
+
+/**
+ * **工具侧写入点的可见性判据**：表说 `model` 的事件**必须显式给**——省略即抛。
+ *
+ * 为什么要它（2026-10-11 修的一类静默失效，两处现场都在工具侧）：
+ *   · `vision_read` 的 inline（`image/attached`）：`tools/catalog.ts` 那个 emit 适配层把第三个
+ *     参数吃掉，事件落成 internal ⇒ 回执写着"图片已放进你的上下文"，请求体里一张图都没有；
+ *   · `speak` / `report` 落下的 `message/assistant`：她自己说过的话没有独立形态进历史。
+ * 两处的共同形状是"**事件在日志里、数据也在，只有 visibility 那一栏不对**"——从日志上查不出错，
+ * 只能从请求体那一侧看出来。根因是两份口径：上面那张表说 `model`，而这个写入点的默认参数是
+ * **恒为 `internal`** 的字面量（`main.ts` 的 `emit`）。于是"省略可见性"这个动作在两侧的含义相反。
+ *
+ * 判据只此一处：**表说 `model` ⇒ 省略即抛、写 `internal` 也抛**。这不是"多加一道校验"，
+ * 而是把"她必须看见"这件事从每个调用点的记性挪到一处——与 `runtime/agent-loop.ts` 那个写入点
+ * 同一条纪律（`visibility: defaultVisibility(type)`，"可见性一律走 schema 表，不在写入点手填"）。
+ * `internal` 那些类型照旧可省：省略与表同值，写 `internal` 也放行。
+ *
+ * **反向不在这里管**（表说 internal、写入点却显式给 model）：那一路的后果是"多花常驻 token"
+ * 而不是"静默丢失"，代价可见、也退得回来；真发生时有 `cacheBreak` 的归因与此刻层可查。
+ * 这条判据要挡的是**看不见的那一种**。
+ *
+ * 真要写一条不进上下文的 `model` 类型事件时，别在这里绕——先改 `EVENT_VISIBILITY` 那一行
+ * 并说清为什么，让"她看不见它"成为一个**写在表上的决定**。
+ */
+export function resolveEventVisibility(type: string, explicit?: Visibility): Visibility {
+  const fallback = defaultVisibility(type);
+  if (fallback === 'model') {
+    if (explicit !== 'model') {
+      throw new Error(
+        `事件 ${type} 的缺省可见性是 model（表里写着"她必须看见它"），`
+        + `${explicit === undefined ? '而这个写入点省略了可见性' : `却被显式写成 ${explicit}`}——`
+        + '那会让它落成 internal：事件在日志里、负载也在，渲染层（isModelVisible）却看不见它。'
+        + `这一处要显式写 defaultVisibility('${type}')；`
+        + '若它确实不该进上下文，先改 src/log/types.ts 的 EVENT_VISIBILITY 并说清为什么。',
+      );
+    }
+    return 'model';
+  }
+  return explicit ?? 'internal';
 }
 
 // ──────────────────────────────── 归属判定 ────────────────────────────────

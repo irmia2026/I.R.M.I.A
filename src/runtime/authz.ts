@@ -57,9 +57,17 @@ export const MACHINE_TOOLS: readonly string[] = [
 /** 社交类：明确放行的那些（说话、看、发媒体）；其余按本机类处理 */
 export const SOCIAL_TOOLS: readonly string[] = [
   'speak', 'report', 'read_channel', 'send_media', 'vision_read', 'vision_query',
-  'http_get', 'todo', 'list_dir', 'rg_search', 'es_search', 'read_blob',
+  'http_get', 'todo', 'rg_search', 'es_search', 'read_blob',
   'ask_human',
 ];
+// v42：`list_dir` 从这张名单里**移出**（工具本身也删了，列目录并进 `safe_read`）。
+// 这是一次**权限语义变更，得知道**（docs/tools-audit.md §3.1 当年就点过这一条）：
+//   · 改前：客人（硬拒绝档）能列目录——`list_dir` 在社交类名单里；
+//   · 改后：列目录走 `safe_read`，而 `safe_read` **不在**这张名单里（也**不能**在：它能读到
+//     MEMORIES/ 里关于用户的事，registry.ts 的注释写着为什么）。
+//   ⇒ **客人 + 硬拒绝档从此列不了目录**。方向是收紧、安全，且硬拒绝默认是关的
+//     （软提醒档下两张名单都不参与判定，一切照旧），所以实际影响只在"客人 + 硬拒绝"那一档。
+//   反方向（把 safe_read 加进社交类）是**不能做**的：那等于把 MEMORIES/ 交给陌生人。
 
 export function isMachineTool(name: string): boolean {
   if (SOCIAL_TOOLS.includes(name)) return false;

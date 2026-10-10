@@ -147,7 +147,7 @@ export function readMemoryEntry(
       path: relPath,
       line,
       message: `${relPath} 不在盘上。记忆文件缺失是正常状态（她还没写过那一份）；`
-        + '要确认现在有哪些记忆文件，用 list_dir 看 MEMORIES/。',
+        + '要确认现在有哪些记忆文件，用 safe_read 把 MEMORIES/ 这个目录交给它（传目录即列目录）。',
     };
   }
 

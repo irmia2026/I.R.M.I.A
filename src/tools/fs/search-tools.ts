@@ -335,7 +335,7 @@ export function createRgSearchTool(env: FsEnv, gate: SearchEngineGate): ToolDefi
           FS_ERROR_CODES.SEARCH_FAILED,
           `ripgrep 未返回结果：${why}（引擎 ${gate.command}）。`
           + '请确认它在设置页「外部依赖」里显示为已就绪；按文件名找用 es_search，'
-          + '或先 list_dir 看目录结构。',
+          + '或先 safe_read 那个目录看结构（传目录即列目录）。',
         );
       }
 
@@ -660,7 +660,7 @@ export function createEsSearchTool(env: FsEnv, gate: SearchEngineGate): ToolDefi
             : result.stderr.trim() || `退出码 ${result.code ?? 'null'}`;
         return fail(
           FS_ERROR_CODES.SEARCH_FAILED,
-          `es.exe 未返回结果：${why}。找文件内容用 rg_search；按名字找且引擎不可用时，可用 list_dir 逐层看。`,
+          `es.exe 未返回结果：${why}。找文件内容用 rg_search；按名字找且引擎不可用时，可用 safe_read 传目录逐层看。`,
         );
       }
 

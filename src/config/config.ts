@@ -32,6 +32,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, copyFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
+import { McpConfigError, parseMcpServers } from '../mcp/client.ts';
+import type { McpServerEntry, McpToolAttributes } from '../mcp/client.js';
 import { resolveKey, type KeyName } from './keys.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
@@ -251,6 +253,29 @@ export interface SpeakConfig {
    * 调大 = 说得更快（更短的总等待），调小 = 更慢更黏。范围 30~600。
    */
   charsPerMinute: number;
+  /**
+   * **开口之前的"正在输入"**（默认开）。
+   *
+   * 开：她每次 `speak` 真正说话**之前**，先给通道发一个"正在输入"状态（官方口径 =
+   * `msg_type: 6` + `input_notify{input_type:1, input_second:60}`，走 `POST /v2/users/{openid}/messages`）。
+   * 一次 speak 至多一次——不是每句话都发。
+   *
+   * 三条边界，逐条都能让你决定要不要关掉它：
+   *   • **仅单聊**：官方只在《发送单聊消息》那一页列了 `msg_type: 6`，群聊页既没有这个
+   *     类型、请求体里也没有 `input_notify`。所以群里**一次都不发**（如实跳过，不是失败）。
+   *   • ⚠️ **它到底占不占"被动回复 4 次窗口"的计数，官方文档没写**（《消息收发概述》只说
+   *     被动回复"每个消息最多回复 4 次"）。这是本仓**未亲验**的一条：真撞上了会表现为
+   *     随后那条正文收到 `40034128`（被动回复时间或次数超限）。所以它做成可关，且**失败
+   *     绝不影响说话**（发不出去就照旧说，最多 2.5 秒超时）。
+   *   • **OneBot 通道没有这条能力**（那套协议里没有等价动作）⇒ 在那条通道上优雅跳过。
+   *
+   * 关掉 = 一句话都不发（连请求都不发出去）。
+   *
+   * ⚠️ 这个字段的**声明位置**有讲究（见下面 `SpeakConfig.inputNotify` 那条注释的兄弟版：
+   * 它必须写在 `buildDefaults()` 的 `speak:` 段里，而不是这份接口里——`Read-CodeDefaults`
+   * 按行序抓字面量，接口里的 `boolean` 会被它读成 `false`）。
+   */
+  inputNotify: boolean;
 }
 
 /** 图片进上下文的两个口径（design.md §4.20 图片两条途径） */
@@ -477,6 +502,91 @@ function readContacts(raw: JsonValue | undefined, where: string): ContactBook {
   return out;
 }
 
+/**
+ * 解析 `mcp` 段（2026-10-09 起，2026-10-10 加 `maxInFlight` / `rssSample` 两格）。
+ *
+ * `servers[]` 的校验规则**不在本文件重写一遍**：直接复用 `mcp/client.ts` 的 `parseMcpServers`
+ * ——界面那侧（web/server.ts 的 `mcp-save` / `mcp-test` / `mcpView`）与这里读的是同一份文件，
+ * 两处各写一套校验必然漂移（一处收紧、另一处照旧放行，"配了却不生效"就是这么来的）。
+ *
+ * **非法就抛**（不静默当成空数组）：与 `persona.contacts` / `deps.paths` 同一条纪律
+ * ——"我配了却不生效"比"启动时报一句配置错"难查得多。缺 `mcp` 段 / 缺 `servers`
+ * 都是**合法的"没声明"**（返回空数组），那才是"优雅降级"要覆盖的那一种。
+ *
+ * `McpConfigError` 折成 `ConfigError`：调用方只该认一种配置错误类型
+ * （它带 `where`，启动期直接打印就能施救）；原始消息逐字保留（它自己带下标定位）。
+ *
+ * 两个全局格（2026-10-10 加）与 `servers[]` **走同一条纪律**：类型不对当场抛、带 `where`，
+ * 并且**缺省不写就是出厂值**（这是"旧配置照旧能跑"的那一半——加格不给旧文件添麻烦）。
+ */
+function readMcpConfig(raw: JsonValue | undefined): McpConfig {
+  const section = raw === undefined || raw === null ? {} : objectOr(raw, 'mcp');
+  const out: McpConfig = { servers: [], maxInFlight: 8, rssSample: true, extraLaunchers: [] };
+  /**
+   * 放行口那一格**必须排在 `servers[]` 前面**（2026-10-10 加）。
+   *
+   * 为什么顺序是判据而不是风格：`servers[].command` 要过启动器白名单，而白名单的第三个来源
+   * 正是这一格（默认表 → `mcp.extraLaunchers` → 环境变量 `IRMIA_MCP_STDIO_ALLOWLIST`）。
+   * 先读它 ⇒ "在同一个文件里写了 `extraLaunchers: ["obscura"]` 又写了一条 `obscura` 的
+   * server"这份配置**当场合法**——不必先去设一个环境变量、更不必重启。
+   * 反过来（先解析 servers）就会得到一句"启动器不在白名单里"，而答案明明写在同一段里。
+   */
+  const extraRaw = section['extraLaunchers'];
+  if (extraRaw !== undefined && extraRaw !== null) {
+    if (!Array.isArray(extraRaw)) {
+      throw new ConfigError(
+        `mcp.extraLaunchers 必须是字符串数组（这台机器上额外放行的 MCP 启动器命令名），`
+        + `收到 ${describeValue(extraRaw)}`,
+        'mcp.extraLaunchers',
+      );
+    }
+    out.extraLaunchers = extraRaw.map((item, index) => {
+      const itemWhere = `mcp.extraLaunchers[${index}]`;
+      if (typeof item !== 'string' || item.trim() === '') {
+        throw new ConfigError(`${itemWhere} 必须是非空字符串（命令名，如 "obscura"），收到 ${describeValue(item)}`, itemWhere);
+      }
+      // 与 `launcher-guard.ts` 的 `configAllowedLaunchers` 同一条归一口径（trim + 小写）：
+      // 两处不一致会出现"配了却不生效"，而这里归一之后写进 `configHash` 的那份也就是生效的那份
+      return item.trim().toLowerCase();
+    });
+  }
+  const serversRaw = section['servers'];
+  if (serversRaw !== undefined && serversRaw !== null) {
+    try {
+      // 第三个参数 = 上面那一格放行口（**同一份文件里的声明当场生效**，见上面那段注释）
+      out.servers = parseMcpServers(serversRaw, 'mcp.servers', out.extraLaunchers);
+    } catch (err) {
+      if (err instanceof McpConfigError) throw new ConfigError(err.message, err.where);
+      throw err;
+    }
+  }
+  const maxInFlight = section['maxInFlight'];
+  if (maxInFlight !== undefined && maxInFlight !== null) {
+    // 正整数：写 0/负数/小数/字符串都当场报错。**不静默改成 0**——那会让所有 MCP 调用一件都发不出去，
+    // 而配置看起来"生效了"（与 `maxInFlight` 那一格的逐 server 版本同一条判据）。
+    if (typeof maxInFlight !== 'number' || !Number.isInteger(maxInFlight) || maxInFlight < 1) {
+      throw new ConfigError(
+        `mcp.maxInFlight 必须是 >= 1 的整数（同时在飞的 MCP 请求上限；超限如实拒绝，不排队），`
+        + `收到 ${describeValue(maxInFlight)}`,
+        'mcp.maxInFlight',
+      );
+    }
+    out.maxInFlight = maxInFlight;
+  }
+  const rssSample = section['rssSample'];
+  if (rssSample !== undefined && rssSample !== null) {
+    if (typeof rssSample !== 'boolean') {
+      throw new ConfigError(
+        `mcp.rssSample 必须是 true / false（是否采那个 server 的 RSS——**整棵进程树**；关掉后 /api/mcp 那几格留空），`
+        + `收到 ${describeValue(rssSample)}`,
+        'mcp.rssSample',
+      );
+    }
+    out.rssSample = rssSample;
+  }
+  return out;
+}
+
 /** 人格连续性与上下文压缩（design.md §4.11 / §4.13、persona.md §4） */
 export interface PersonaConfig {
   /**
@@ -650,6 +760,96 @@ export interface DepsConfig {
   };
 }
 
+/**
+ * MCP server 的声明面（2026-10-09）。
+ *
+ * **为什么它到这一版才进 `AppConfig`**：MCP 的声明面过去只活在 `config.json` 里
+ * （`real-loop.ts` 的 `declaredMcpServers` 自己读盘、`web/server.ts` 的 `mcpView` 自己读盘），
+ * 因为 `McpClientPool` 在生产路径上**从来没有被构造过**——那是"第一次把它接上"，
+ * 而接上之后池必须在装配期拿到这份声明面，于是它得有个正经的家（这份配置）。
+ *
+ * **读盘那条老路仍然保留**（`declaredMcpServers`）：CLI 的 replay / doctor 与不算配置的
+ * 测试台没有 `AppConfig`，它们读的是同一份文件。两条路都走 `parseMcpServers`，
+ * 校验规则只有一份（下面 `readMcpConfig` 就是这条纪律的落点）。
+ *
+ * **一个 server 都不声明 = 空数组**（不是"没有这个键"）：`mcp` 入口工具**照旧常驻**，
+ * 调用时如实回一句"没有已声明的 server"。工具的有无**不由这份声明面决定**——
+ * 清单一变就是一次全 miss（≈9.6 万 token，见 `tools/mcp-entry.ts` 文件头判据 1）。
+ */
+export interface McpConfig {
+  /**
+   * `mcp.servers[]`：一个 server 一条，形状见 `McpServerEntry`（`src/mcp/client.ts`）。
+   *
+   * ⚠️ **这一份声明面进上下文的那一格是"MCP 常驻索引"（v46），而它在重大变化点冻结**
+   * （2026-10-10 用户的设计：「增删进入上下文的方式依然还是。追加在末，固定位置，直到上下文
+   * 重大变化时归集到正确的索引位置」）：改这里要**重启**才生效（所有字段都如此，
+   * 见 `config/watcher.ts` 的空热更白名单），重启就是一次"上下文重大变化"⇒ 索引在这一刻
+   * 按**当前这份配置**重建。而运行期里索引那一段的字节**不变**——否则加一个 server
+   * 就等于每轮改请求前缀（缓存整段失效）。判据与三个重建触发点写在 `real-loop.mcpIndexSync`
+   * 与 `model/render.ts` 的 v46 那一篇，测试在 `test/mcp-index.test.ts`。
+   */
+  servers: McpServerEntry[];
+  /**
+   * **整池**同时在飞的 MCP 请求上限（2026-10-10 加，出厂 `DEFAULT_MAX_IN_FLIGHT` = 8）。
+   *
+   * 语义是硬的：超限**如实拒绝**（回执说"同时在飞的调用已达上限 N 件：这次调用没有发出去，
+   * 同时调用太多了"），**不是排队**——排队会引出"唯一在跑的那件在等一件排队的启动"这种死锁面。
+   *
+   * 两个上限的关系：这一格管**整池总量**（"别同时拉起 N 个别人的进程"，每个 ≈ 一整套 runtime 基线），
+   * 逐 server 那一格 `mcp.servers[].maxInFlight`（出厂 4）管"别把同一个 server 打爆"。
+   * 今天 `mcp` 与 `task` 都是 exclusive（一次最多一件 MCP 调用在跑），所以这两个数**是兜底不是瓶颈**；
+   * 真正要往上调的场景是：**声明的 server 很多、且将来子代理并发起来**（那时同时有好几件在跑）。
+   */
+  maxInFlight: number;
+  /**
+   * 池的 **RSS 采样**开关（2026-10-10 加，出厂 **true**）。
+   *
+   * `true` = 每次成功启动后异步采一次那个 server 的 RSS（进 `mcp/server-resource` 事件，
+   * `/api/mcp` 折出"谁在吃内存"）；`false` = 不采，那几格**如实留空**（不是填 0）。
+   *
+   * **口径是"整棵进程树"**（2026-10-10 第二版）：启动器 + 真 server + conhost 的子/孙进程全都算。
+   * 第一版只量根进程，实测会低报 12–21 倍（`uvx mcp-server-time` 6.0 MB vs 整棵树 124.7 MB）；
+   * 事件里的 `rssSource` 会说清是哪一种口径（`cim-tree`/`ps-tree` = 整棵树、
+   * `tasklist`/`proc`/`ps` = 整棵树读不到时的降级、`unavailable` = 没采到）。判据见 `src/mcp/client.ts`
+   * 的 `McpRssSource` / `createMcpRssSampler`。
+   *
+   * 代价是实的：Windows 上采一次要起一个 PowerShell 读数进程求整棵树（**本机实测中位数 ≈0.95 s**，
+   * 降级那条约 0.51 s），仅每个 server 启动时付一次、异步落、不阻塞握手也不进任何一次调用的等待。
+   * **环境变量 `IRMIA_MCP_RSS_SAMPLE` 比这一格优先**（命令行临时开关用它）。
+   */
+  rssSample: boolean;
+  /**
+   * **额外放行的 MCP 启动器命令名**（2026-10-10 加，出厂空数组）。
+   *
+   * 这道闸管的是 `servers[].command` 那一格（判据在 `src/mcp/launcher-guard.ts` 的
+   * `DEFAULT_STDIO_LAUNCHER_ALLOWLIST`）：命令名必须是已知启动器才肯起进程。
+   * 默认表**只放通用启动器**（运行时 / 包管理 / 解释器 / 容器 / 通用壳那一批），
+   * 因为它们是"谁的机器上都有、且语义稳定"的那些；**专有工具走这里**——`obscura`、
+   * 某个单位内部打包的 `xyz-server.exe`，都只在这台机器上有意义，塞进默认表等于替所有人做主。
+   *
+   * 语义与 `IRMIA_MCP_STDIO_ALLOWLIST` **逐字相同**（逗号 / 分号分隔也认，大小写不敏感，
+   * 路径按文件名那一格判）：两者是**并集**，不是覆盖——**环境变量优先级最高**
+   * （它从前的行为一个字节都没改，临时试一次或配置读不到时仍走它）。
+   *
+   * 顺序（`effectiveLauncherAllowlist`）：默认表 → 这一格 → 环境变量。
+   *
+   * ⚠️ **为什么这件事值得一道闸**：加一个 server = 在**这台机器上多跑一个不受 `trust.mode`
+   * 约束的进程**（那条边界只作用于 fs 族与 `pwsh`，见 `tools/boundary.ts` 与
+   * docs/mcp-wiring.md:100-102）。所以这一格**不是"随便填"**：填进去的每一个名字，
+   * 都是"我允许配置面用它起一个我管不到的进程"的**显式声明**。放行口只放开"命令名"这一格
+   * ——逐启动器禁内联执行（`python -c` / `node -e` / `pwsh -Command` / `cmd /c` /
+   * `docker --network host` 那些）与 args/env 控制字符那两层**照旧生效**。
+   *
+   * **什么时候该用配置、什么时候该进默认表**：默认表只放通用启动器；专有工具走配置。
+   * 判断标准是"这个名字对**别人**是不是也是同一个程序、同一个语义"——是，才可能进默认表。
+   *
+   * **改这一格不需要重启**：它与 `servers[]` 同属声明面热更（`config/watcher.ts` 的
+   * `HOT_RELOAD_FIELDS` 里那一项就是 `mcp.servers`，而放行口参与的是**解析**）——
+   * 写坏了两者中的任何一个，那份配置都过不了解析 ⇒ 按"保留旧配置继续跑"处置（见 watcher 文件头）。
+   */
+  extraLaunchers: string[];
+}
+
 /** 生效的配置全量。人可读、可 JSON 序列化、无循环引用，可直接参与指纹计算 */
 export interface AppConfig {
   /** 配置 schema 版本 */
@@ -665,6 +865,17 @@ export interface AppConfig {
   speak: SpeakConfig;
   persona: PersonaConfig;
   tools: ToolsConfig;
+  /**
+   * MCP 声明面（`mcp.servers[]`）与两格池级参数（`mcp.maxInFlight` / `mcp.rssSample`）。
+   * 默认一个 server 都不声明（空数组）；两格池级参数各有出厂值——整池在飞上限 8、RSS 采样开
+   *（⚠️ 这里**不写** `字段: 值` 那种形状：`tools/make-config-example.ps1` 的 Read-CodeDefaults
+   *  按正则抓"字段默认值"、且**同名只留第一次出现**，写在注释里会让它把注释当成默认值的出处，
+   *  `$expect` 的断言就再也盯不住 `buildDefaults` 那一行了）。
+   *
+   * 它是**启动参数**：`McpClientPool` 在装配期按这份声明面建好，改完要重启进程才接管
+   * （界面的 `mcp-save` / `mcp-remove` 回执里也是这么说的 —— `restartRequired: true`）。
+   */
+  mcp: McpConfig;
   /** 外部依赖（pwsh / rg / es）的用户指定路径；探测的第一段 */
   deps: DepsConfig;
   channels: ChannelsConfig;
@@ -803,6 +1014,16 @@ function buildDefaults(dir: string): AppConfig {
     speak: {
       typingEffect: true,
       charsPerMinute: 90,
+      // 开口前的"正在输入"（`msg_type: 6` + `input_notify`）：出厂**开**。
+      // 为什么默认开：它是用户 2026-10-11 点名要做的那一件（「只做正在输入。speak 时触发」），
+      // 而且失败不影响说话、群聊自动跳过、不占主动消息配额——开着没有"会坏事"的路径；
+      // 唯一未亲验的是"算不算一次被动回复"，那条留给这一格设成假值这个出口。
+      //
+      // ⚠️ 上面那两句注释**不许写成字面量**（例如写"留给 speak 的那一格设成假"时顺手写成
+      // `字段名 + 冒号 + false`）：`tools/make-config-example.ps1` 的 Read-CodeDefaults 按**行序**
+      // 抓"第一次出现的 `名字: 字面量`"，注释里那一行会被它当成代码默认值 ⇒ 出包当场报
+      // 「出厂值 True ≠ 代码默认值 False」。（2026-10-11 真的这么栽过一次，所以把话留在这里。）
+      inputNotify: true,
     },
     persona: {
       // 出厂压缩阈值 = 100000（可见历史估算超过它就压一次）：对齐现场 config.json 的实测值
@@ -835,6 +1056,20 @@ function buildDefaults(dir: string): AppConfig {
       // 加一件 = 一次缓存 miss + 常驻 token，所以要人显式要，而不是默认替所有人付）
       taskEnabled: false,
     },
+    // 默认一个 server 都不声明（**不是"没有这个键"**）：`mcp` 入口工具照旧常驻，
+    // 调用时如实回"没有已声明的 server"。理由见 McpConfig 的注释与 tools/mcp-entry.ts 判据 1。
+    //
+    // 两个全局格（2026-10-10 加）的出厂值：
+    //   · maxInFlight：整池同时在飞上限（值 = `mcp/client.ts` 的 `DEFAULT_MAX_IN_FLIGHT`）。
+    //     ⚠️ 这里写**字面量 8**，不写那个标识符：出包脚本 `tools/make-config-example.ps1` 的
+    //     Read-CodeDefaults **只读本文件**，它的常量表来自**本文件里**的 `const NAME = 字面量`
+    //     ——`DEFAULT_MAX_IN_FLIGHT` 定义在 `mcp/client.ts`，它解不出来（写了就是"这个字段
+    //     在 config.ts 里找不到默认值"，出包当场红）。两处同值由 `test/config.test.ts` 的断言钉住
+    //     （与上面 `stateBudgetBytes: 8192` 同一条理由、同一种做法）。
+    //   · rssSample：真 = 每个 server 启动后异步采一次它的 RSS（**整棵进程树**）——观测面要的"谁在吃内存"。
+    //   · extraLaunchers：额外放行的启动器命令名（出厂空 = 只有默认表 + 环境变量那两格）。
+    //     出厂**必须留空**：填一个具体名字等于替使用者放行一个他可能根本没有的程序。
+    mcp: { servers: [], maxInFlight: 8, rssSample: true, extraLaunchers: [] },
     // 默认一个路径都不指定：探测的三段顺序里"用户指定"是显式干预，
     // 默认值必须是"没干预"，否则框架自装目录与 PATH 就永远轮不到
     deps: { paths: {} },
@@ -958,6 +1193,40 @@ function parseJsonDocument(text: string, path: string): JsonObject {
 }
 
 /**
+ * 把声明面写成**可序列化**的形状（`defaultDocument` 用）。
+ *
+ * 为什么要逐字段抄一遍而不是 `{...entry}`：`McpServerEntry` 带着 `readonly string[]`
+ * 与几个可选字段，它**不是** `JsonValue`（TS 会拦下来，这是好事——它逼这里显式列出
+ * 写进文件的每一个字段，于是"哪些字段会落进用户的 config.json"永远是一眼可核对的）。
+ */
+function mcpServersToJson(servers: readonly McpServerEntry[]): JsonObject[] {
+  return servers.map((entry) => {
+    const out: JsonObject = { name: entry.name, command: entry.command };
+    if (entry.args !== undefined) out['args'] = [...entry.args];
+    if (entry.cwd !== undefined) out['cwd'] = entry.cwd;
+    if (entry.env !== undefined) out['env'] = { ...entry.env };
+    if (entry.disabled !== undefined) out['disabled'] = entry.disabled;
+    if (entry.requestTimeoutMs !== undefined) out['requestTimeoutMs'] = entry.requestTimeoutMs;
+    if (entry.idleReclaimMs !== undefined) out['idleReclaimMs'] = entry.idleReclaimMs;
+    if (entry.toolDefaults !== undefined) out['toolDefaults'] = toolAttributesToJson(entry.toolDefaults);
+    if (entry.tools !== undefined) {
+      const tools: JsonObject = {};
+      for (const [name, attrs] of Object.entries(entry.tools)) tools[name] = toolAttributesToJson(attrs);
+      out['tools'] = tools;
+    }
+    return out;
+  });
+}
+
+function toolAttributesToJson(attrs: McpToolAttributes): JsonObject {
+  const out: JsonObject = {};
+  if (attrs.sideEffect !== undefined) out['sideEffect'] = attrs.sideEffect;
+  if (attrs.executionMode !== undefined) out['executionMode'] = attrs.executionMode;
+  if (attrs.timeoutMs !== undefined) out['timeoutMs'] = attrs.timeoutMs;
+  return out;
+}
+
+/**
  * 带注释的默认配置文档：内容全部来自 `defaultConfig()`，只有 `$comment` 是手写的。
  * 单一默认值源 + 注释插值，避免"模板与默认值漂移"这种最恶心的配置 bug。
  */
@@ -1037,9 +1306,15 @@ function defaultDocument(dir: string): JsonObject {
         '发言节奏（speak 的拆条投递）：段与段之间按"这一段要打多久"隔开，界面与 IM 同一节奏。',
         'typingEffect：默认 true。关掉则所有段立刻发完，没有"人在打字"的体感。',
         'charsPerMinute：打字速度（默认 90 字/分钟，中文手机输入的常见速度）。调大说得更快，范围 30~600。',
+        'inputNotify：默认 true。她每次 speak 真正说话**之前**先发一个"正在输入"状态（官方 msg_type=6 + input_notify，一次 speak 至多一次）。',
+        '  · **仅单聊**：官方只有单聊接口列了这个能力，群里一次都不发（如实跳过，不是失败）；OneBot 通道没有这条能力，同样跳过。',
+        '  · **失败不影响说话**：发不出去就照旧说，最多等 2.5 秒。',
+        '  · ⚠️ 它到底算不算一次"被动回复"（单聊那条窗口一共 4 次），**官方文档没写**——本仓未亲验。真撞上会表现为随后那条正文收到 40034128，那种情况把它关掉。',
+        '  · 关掉 = 一个请求都不发。',
       ],
       typingEffect: d.speak.typingEffect,
       charsPerMinute: d.speak.charsPerMinute,
+      inputNotify: d.speak.inputNotify,
     },
     persona: {
       $comment: [
@@ -1084,6 +1359,93 @@ function defaultDocument(dir: string): JsonObject {
       askHumanTimeoutMin: d.tools.askHumanTimeoutMin,
       taskEnabled: d.tools.taskEnabled,
       disabled: [...d.tools.disabled],
+    },
+    mcp: {
+      $comment: [
+        'MCP server 声明（design.md §4.19）。**一条一个 server**，形状：',
+        '  { "name": "time", "command": "uvx", "args": ["mcp-server-time"] }',
+        'name 只允许字母、数字、- 与 _（这个名字调用时用得到，判据 src/mcp/client.ts 的 MCP_NAME_PATTERN）；command 是可执行文件（PATH 里找得到，或写绝对路径）。',
+        '⚠️ **command 必须是这一台机器上真起得来的东西**。三种实测能起的写法：`uvx <工具名>`、',
+        '  `node <绝对路径>/cli.js`（把那个包落下来、直指入口 js）、任何**绝对路径的 .exe**（原生单文件最省）。',
+        '  **不要写 `npx` / `npm` / `pnpm` / `yarn`**：在 Windows 上它们只有 .cmd/.ps1 垫片，而我们的',
+        '  启动器是 `spawn(command, args)`、不经 shell ⇒ 起不来的那一刻只有一句 ENOENT；`npx.cmd` 这类',
+        '  包装脚本更直接被 Node 同步拒掉（CVE-2024-27980 之后的缓解：必须 shell:true）。这一条的判据与',
+        '  "为什么 / 改成什么"整段话在 src/mcp/launcher-guard.ts 的「这一台机器上起不来的形状」那一节',
+        '  （**只有一处**），起进程之前就会把它当成回执给出来——所以这里不再骗你写 npx',
+        '  （那一行曾经就是 `{"command":"npx"}`）。',
+        '⚠️ **command 还要过启动器白名单**（2026-10-09 加，判在任何子进程被拉起之前）：默认只认常见的',
+        '  运行时/包管理/解释器/容器启动器（uvx、node、python、pwsh、cmd、docker、npx 那一批），',
+        '  且逐启动器禁内联执行（python -c / node -e / pwsh -Command / cmd /c / docker --network host …）；',
+        '  白名单在 src/mcp/launcher-guard.ts，要加自定义启动器就设环境变量',
+        '  IRMIA_MCP_STDIO_ALLOWLIST=命令名,逗号分隔 再重启（显式放行才算数；内联执行那层放行口关不掉）。',
+        '  理由：加一个 server = 在这台机器上多跑一个不受 trust.mode 约束的进程（docs/mcp-wiring.md:100-102）。',
+        '可选字段：cwd / env（字符串到字符串）/ disabled:true（保留条目但不起进程，临时停用不必删配置）；',
+        '  requestTimeoutMs / idleReclaimMs（逐 server 覆盖超时与空闲回收窗口）；',
+        '  maxInFlight（这个 server 上**同时在飞**的请求上限，出厂 4：超限时那次调用**不会发出去**，',
+        '    回执如实说"同时调用太多"——这是自保，不排队、不抢占）；',
+        '  toolsCache:false（关掉这个 server 的**工具清单落盘缓存**，出厂开）：清单缓存落在',
+        '    <dataDir>/mcp-cache/<server>.json，命中时"看一眼它有哪些工具"从一次冷启动变成读一个 json；',
+        '    代价是那份清单可能过期 ⇒ 回执里一定会标明"取回于 X、可能已过期"，不会静默；',
+        '    command/args/cwd/env 变了（指纹不同）或它起不来时，缓存自动作废、下次真连一次。',
+        '  toolDefaults / tools（逐 server、逐工具声明三属性 sideEffect / executionMode / timeoutMs）。',
+        '两格**全局**的（与上面那些逐 server 的不同，写在 servers 旁边那一层）：',
+        'extraLaunchers（**额外放行的启动器命令名**，出厂空数组）：command 那一道闸的放行口。',
+        '  · 默认只认通用启动器（uvx、node、python、pwsh、cmd、docker 那一批）；专有工具（例如 obscura、',
+        '    或者某个单位内部打包的 xyz-server.exe）写在这里——它们只在这台机器上有意义，',
+        '    塞进默认表等于替所有人做主。默认表只放通用启动器，专有工具走这一格。',
+        '  · 语义与环境变量 IRMIA_MCP_STDIO_ALLOWLIST **完全一样**（逗号/分号分隔也认、大小写不敏感、',
+        '    按命令名判）：两者是**并集**，而**环境变量优先级最高**（临时试一次走它，行为没变）。',
+        '  · ⚠️ 这一格**不是"随便填"**：加一个 server = 在这台机器上多跑一个**不受 trust.mode 约束**的',
+        '    进程（那条边界只作用于 fs 族与 pwsh）。填进去的每个名字都是一句显式声明："我允许配置面用它起进程"。',
+        '    放行口只放开"命令名"这一格——逐启动器禁内联执行（python -c / node -e / pwsh -Command /',
+        '    cmd /c / docker --network host …）与 args/env 控制字符照旧生效。',
+        '  · 与 servers 一样**改完不必重启**（声明面热更会连它一起重新校验）；写坏了这一格',
+        '    与写坏 servers 一样：那份配置过不了解析 ⇒ **保留旧配置继续跑**，并如实报错。',
+        'maxInFlight（整池同时在飞的 MCP 请求上限，出厂 8）：',
+        '  · 语义是硬的：超限**如实拒绝**（回执说"同时在飞的调用已达上限 N 件：这次调用没有发出去"），',
+        '    **不是排队**——排队会引出"唯一在跑的那件在等一件排队的启动"这种死锁面；',
+        '  · 它与逐 server 的 maxInFlight（出厂 4）分工不同：这一格管**整池总量**（别同时拉起 N 个',
+        '    别人的进程，每个 ≈ 一整套 runtime 基线），那一格管**别把同一个 server 打爆**；',
+        '  · 什么时候往上调：**声明的 server 很多、而且同时有好几件在跑**（子代理并发起来之后是典型场景）',
+        '    ——今天 mcp 与 task 都是 exclusive（一次最多一件 MCP 调用在跑），所以出厂值只是兜底、不是瓶颈。',
+        'rssSample（是否采那个 server 的 RSS，出厂 true）：',
+        '  · true = 每次成功启动后**异步**采一次（进 mcp/server-resource 事件，GET /api/mcp 折出',
+        '    "谁在吃内存 / 冷启动多慢 / 回收救回多少"）；**采不到写 unavailable，不是 0**；',
+        '  · **口径是"整棵进程树"**（2026-10-10 第二版）：启动器 + 真 server + conhost 那些子/孙进程',
+        '    全都算进去。第一版只量根进程，实测低报到危险的程度——`uvx mcp-server-time` 根进程 6.0 MB',
+        '    而整棵树 124.7 MB（≈21×）、`uv tool install` 的 shim 6.1 vs 74.9（≈12×）（docs/multi-mcp-memory.md §5.4）；',
+        '    事件里那条 rssSource 会说清是哪一种口径：`cim-tree`/`ps-tree` = 整棵树，',
+        '    `tasklist`/`proc`/`ps` = 整棵树读不到时的降级（**只量到根进程**），`unavailable` = 没采到。',
+        '  · 代价是实的：Windows 上采一次要起一个 PowerShell 读数进程求整棵树（**本机实测中位数 ≈0.95 s**；',
+        '    降级那条只量根进程的 tasklist 是 ≈0.51 s），每个 server 启动时付一次、异步落、',
+        '    不阻塞握手也不进任何一次调用的等待；',
+        '  · 设 false = 不采，那几格**如实留空**；环境变量 IRMIA_MCP_RSS_SAMPLE（0/false/off/no 关、',
+        '    1/true/on/yes 开）**比这一格优先**，命令行临时开关用它。',
+        '资源观测（2026-10-10 加，第二版同日加了"整棵树"）：每个 server 的**启动耗时 / RSS / 在飞峰值 /',
+        '  最近一次回收时间**走 internal 事件（mcp/server-started · mcp/server-resource · mcp/server-stopped）',
+        '  落库，界面从 GET /api/mcp 读那几格——想彻底关掉这笔开销就设 rssSample:false',
+        '  （或环境变量 IRMIA_MCP_RSS_SAMPLE=0）。',
+        '⚠️ 未显式声明三属性的 MCP 工具一律按 **destructive** 算（"server 说自己是只读的"不算数，',
+        '  那是崩溃恢复时最不该采信的一句话）⇒ 要调它们得先开 tools.destructiveEnabled；',
+        '  真要放行只读的那些，就在这个 server 的 tools 里逐件写 sideEffect:"none"。',
+        '**调用走内置的 mcp 工具**（2026-10-09 定的口径）：她的工具清单里不出现 mcp__server__tool，',
+        '  三格路由按"填了哪几格"分：**不带 server** 看有哪些 server、**带 server** 看它有哪些工具、',
+        '  **server + tool** 就是调用（一次一件）。它**没有 action 参数**——这三条路本来就能从描述里读出来，',
+        '  而多一个常驻字段要多花二十几个 token（这一段曾经写成 action=list / action=call，那是个不存在的字段，2026-10-09 改准）。',
+        '  好处：一个 server 有几十件工具时，常驻开销是**一件**，清单只在她真要用的那一刻披露。',
+        '**改完不必重启**（2026-10-10 起）：这一段是**声明面热更**的那一格——config.json 一改，',
+        '  进程当场按新声明重建 MCP 声明面（只重连真变了的那几个 server），并给你发一条通报',
+        '  （`wake/manual` · via=mcp）。**唯一**要重启的是另外两格池级参数',
+        '  （maxInFlight / rssSample 是建池时的参数，不在热更名单里）。',
+        '  出厂留空数组 = 不接任何 MCP server。',
+      ],
+      servers: mcpServersToJson(d.mcp.servers),
+      // 三个全局格照写（`$comment` 里已经把它们讲清楚；值缺席时读盘那一侧按出厂值兜）
+      maxInFlight: d.mcp.maxInFlight,
+      rssSample: d.mcp.rssSample,
+      // 放行口（2026-10-10 加）：出厂空数组。**必须写出这一格**——它是使用者最需要看见的
+      // "还有一个地方能放行"的落点；只在注释里说、不给键，等于让人以为得去设环境变量。
+      extraLaunchers: [...d.mcp.extraLaunchers],
     },
     deps: {
       $comment: [
@@ -1593,6 +1955,7 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
       base.speak.charsPerMinute,
       30,
     ),
+    inputNotify: pickBoolean(speakRaw['inputNotify'], 'speak.inputNotify', base.speak.inputNotify),
   };
 
   const personaRaw = objectOr(doc['persona'], 'persona');
@@ -1720,8 +2083,11 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     ),
   };
 
+  // MCP 声明面（2026-10-09）：走 mcp/client.ts 的唯一一套校验（见 readMcpConfig）。
+  // 缺 mcp 段 = 合法的"没声明任何 server"，不是错误。
+  const mcp: McpConfig = readMcpConfig(doc['mcp']);
   return {
-    schemaVersion, dataDir, models, budget, wake, vision, speak, persona, tools, deps, channels,
+    schemaVersion, dataDir, models, budget, wake, vision, speak, persona, tools, mcp, deps, channels,
     alerts, contextAudit, web, timezone, trust,
   };
 }

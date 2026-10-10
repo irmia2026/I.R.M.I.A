@@ -215,7 +215,10 @@ describe('read_channel · 她自己点开信箱', () => {
     const same1 = await tool.handler({ sid: 'qq:c2c:U1', limit: 3 }, CTX);
     assert.match(same1.content, /没有新消息/u, '同一批、同一条窗口 → 照旧去重');
     const same2 = await tool.handler({ sid: 'qq:c2c:U1', limit: 3 }, CTX);
-    assert.match(same2.content, /还是\s*没有新消息/u, '第三次把话说得更直白');
+    // 2026-10-08 起措辞的第一句固定是「没有新消息」（用户的口径：没有消息就直接这么说），
+    // "把话说得更直白"那半句跟在后面——所以这里钉的是**它跟出来了**，不是它排在最前面。
+    assert.match(same2.content, /^没有新消息/u, '第三次照样是这四个字开头');
+    assert.match(same2.content, /这一轮你已经读过它 3 次/u, '第三次把话说得更直白（读到第几次）');
     assert.equal(rec.count('channel/read'), 1, '没有新东西就不该再记一笔已读');
 
     // 【2026-10-08 口径收窄】"要看更早的就把 limit 调大"这条老出路**没有了**：
@@ -275,7 +278,7 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.equal(rec.count('channel/read'), 1, '没有新东西就不该再记一笔已读');
 
     const third = await tool.handler({ sid: 'qq:group:G1', limit: 5 }, CTX);
-    assert.match(third.content, /还是\s*没有新消息/u, '第三次把话说得更直白');
+    assert.match(third.content, /^没有新消息/u, '第三次照样是这四个字开头');
     assert.match(third.content, /3 次/u, '数得清这是第几次（她自己看得见这个数）');
   });
 
@@ -417,10 +420,10 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.ok(again.content.includes('第二份报告'), '新发的那一篇要读得到');
 
     // 反向：她也**没**再发、外面也没有新的 → 照旧去重（这条闸没被整体放开），
-    // 而且措辞要点明"这个位置含你自己发出去的那些"，免得她把"没有新消息"读成"我那篇不在里面"
+    // 而且措辞要点明"你自己发出去的那些不算新消息"，免得她把"没有新消息"读成"我那篇不在里面"
     const repeat = await tool.handler({ sid: 'qq:group:G1', limit: 8 }, CTX);
     assert.match(repeat.content, /没有新消息/u, `真的没有新东西时照旧去重：${repeat.content}`);
-    assert.match(repeat.content, /含你自己发出去的那些/u, `去重那句话要说清她的凭据在里面：${repeat.content}`);
+    assert.match(repeat.content, /你自己发出去的那些/u, `去重那句话要说清她的凭据在里面：${repeat.content}`);
   });
 
   test('描述在单件 100 token 的硬线以内（工具清单是每轮常驻开销）', () => {

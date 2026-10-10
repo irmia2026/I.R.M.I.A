@@ -393,7 +393,7 @@ test('同一批未读第二次读：没展示的那些仍在"没看到"里（提
 
   // 第二次读：上一屏那条提及**已经在里面给过她了**（已读推到它），于是默认那一屏落回
   // **未读里仅存的那条提及**（第 30 句在未读里没了，但更早那条提及如果还在窗口里就照给）；
-  // 这一批里已经没有别的提及 ⇒ 如实说"没有点了你的新消息"或照给窗口，都不许再倒已给过的那一段。
+  // 这一批里已经没有别的提及 ⇒ 如实说"没有新消息"或照给窗口，都不许再倒已给过的那一段。
   const second = await rig.read({ sid: SID, limit: 44 });
   assert.equal(second.isError, undefined, second.content);
   assert.equal(second.content.includes('第 30 句'), false,
@@ -402,7 +402,7 @@ test('同一批未读第二次读：没展示的那些仍在"没看到"里（提
 
 // ──────────────────────────────── ⑥ 一条提及都没有 ────────────────────────────────
 
-test('一条提及都没有：如实说"没有点了你的新消息"，并指路翻页（不静默给空）', async (t) => {
+test('一条提及都没有（有未读但都跟她无关）：第一句"没有新消息"，带"另有 N 条你没看"', async (t) => {
   const rig = await makeRig(t);
   // 先来 30 句闲话、只给她最近 3 句（其余"还没给过她"）——那 27 句正是要靠翻页才看得到的
   for (let no = 1; no <= 30; no += 1) rig.write(no);
@@ -415,13 +415,18 @@ test('一条提及都没有：如实说"没有点了你的新消息"，并指路
   for (let no = 31; no <= 34; no += 1) rig.write(no);
   const out = await rig.read({ sid: SID, limit: 3 });
   assert.equal(out.isError, undefined, out.content);
-  assert.match(out.content, /没有点了你的新消息/u, `要如实说为什么没内容：\n${out.content}`);
+  // ① 回执的**第一句**就是那四个字（2026-10-08 用户的口径：「read_channel，如果没有消息
+  //    就直接回执没有新消息」）——她要的是一眼可判的结论，不是"没有点名你的新消息"这种绕着说的话
+  assert.match(out.content, /^没有新消息/u, `第一句必须是「没有新消息」：\n${out.content}`);
+  // ② 而这里**确实有没给她看的未读**（只是没点她）⇒ 按用户的口径可以附一句，但必须带 N
+  assert.match(out.content, /另有 \d+ 条你没看/u, `有未读就得如实说数量：\n${out.content}`);
   assert.match(out.content, /翻页/u, '要给一条出路（想看就翻页）');
   assert.match(out.content, /before=\d+/u, '出路要具体到"填哪个游标"');
   assert.equal(rig.readEvents().length, 1, '一条都没给她看 ⇒ 一条都不许标成已读');
   // 再读一次：**照旧**说同一件事（那批未读一条都没被她看到过，这不算"重复投递"）
   const again = await rig.read({ sid: SID, limit: 3 });
-  assert.match(again.content, /没有点了你的新消息/u);
+  assert.match(again.content, /^没有新消息/u);
+  assert.match(again.content, /另有 \d+ 条你没看/u);
   assert.equal(rig.readEvents().length, 1, '还是没给她看 ⇒ 仍然不许标已读');
 
   // 而"她想看就能看到"这件事必须成立：页脚那个游标翻过去，那些"没点她、也不是最近一屏"的话都在
@@ -432,7 +437,29 @@ test('一条提及都没有：如实说"没有点了你的新消息"，并指路
   // 这一页正是"她还没看过、又不是最近那一屏"的那一段（第 15..31 句；第 31 句刚好压在前一屏的取数窗口外）
   assert.deepEqual(pagedRows, Array.from({ length: 17 }, (_, i) => i + 15),
     `翻页要接着往前给，一条不漏一条不重：\n${paged.content}`);
-  assert.equal(paged.content.includes('没有点了你的新消息'), false, '翻页那一支就是照给内容，不是再说一遍"没有"');
+  assert.equal(paged.content.includes('没有新消息'), false, '翻页那一支就是照给内容，不是再说一遍"没有"');
+});
+
+test('两种"没有新消息"措辞可分：确实什么都没有 ⇒ 不带 N；有未读但没点她 ⇒ 带 N', async (t) => {
+  // 判据只有一个：**有没有没给她看的未读**。两句话因此一眼分得开——
+  // 前者是"这里真的没有新东西了"，后者是"有新话，只是没点你"。混淆的代价是她反复翻同一个信箱。
+  const quiet = await makeRig(t);
+  quiet.write(1);
+  await quiet.read({ sid: SID, limit: 5 });
+  const nothing = await quiet.read({ sid: SID, limit: 5 });
+  assert.match(nothing.content, /^没有新消息/u, `第一句照旧是那四个字：\n${nothing.content}`);
+  assert.equal(/另有 \d+ 条你没看/u.test(nothing.content), false,
+    `确实什么都没有时**不许**提数量（那会让她以为漏了什么）：\n${nothing.content}`);
+
+  const busy = await makeRig(t);
+  busy.write(1);
+  await busy.read({ sid: SID, limit: 3 });
+  // 未读装不下一屏（limit 3）且一条都没点她 ⇒ 落到"有未读但都跟她无关"那一支
+  for (let no = 2; no <= 8; no += 1) busy.write(no);
+  const unrelated = await busy.read({ sid: SID, limit: 3 });
+  assert.match(unrelated.content, /^没有新消息/u, `第一句照旧是那四个字：\n${unrelated.content}`);
+  assert.match(unrelated.content, /另有 \d+ 条你没看/u,
+    `有未读但没点她时必须带 N（否则她以为这里真的空了）：\n${unrelated.content}`);
 });
 
 // ──────────────────────────────── ⑦ 上限：夹住并如实说 ────────────────────────────────

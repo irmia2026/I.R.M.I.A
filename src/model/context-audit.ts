@@ -46,14 +46,55 @@ export interface ContextSegment {
   tokens: number;
   /** 该段渲染文本的 sha256 前 {@link SEGMENT_HASH_CHARS} 位 */
   hash: string;
+  /**
+   * 该段**文字**的 utf8 字节数（与 `tokens` 同一串输入；哈希仍按整段 JSON，两者口径不同是刻意的）。
+   *
+   * 为什么要有它（2026-10-10）：失守时人问的第一个问题是"变了多少"——token 估算是启发式的、
+   * 还会被 64 块的供方粒度吃掉，字节数是**可复算的硬数**。观测字段，**不进请求体**。
+   * **可选**：老日志没有它。
+   */
+  bytes?: number;
   /** 该段由几条 input item 组成（`instructions` / `tools` 不是 item，字段不出现） */
   items?: number;
+}
+
+/**
+ * **一节**的事实（长期记忆层的分节 / 历史前段的逐条）：名字 + token + 字节 + 哈希。
+ *
+ * 为什么要有它（2026-10-10，用户点名："以后再有失守，一眼看出是哪一节、变了多少字节"）：
+ * 整段一个哈希只能回答"记忆层变了"，回答不了"是技能目录、MCP 索引还是早期摘要变的"——
+ * 2026-10-09 18:07 / 19:17 两次现场都得靠事后逐字节重建才知道（第一次是 MCP 索引那一行 +6 token，
+ * 第二次压根不是记忆层、是历史第 1 条 item）。分节之后这两个问题都是**一次读**。
+ *
+ * 口径（两处用途不同，各自与它要解释的那个哈希对齐）：
+ *   · `memory.sections` —— 哈希/字节按**该节自己的文字**算（分隔符 `\n\n` 不计入任何一节）；
+ *   · `history.headItems` —— 哈希/字节按该条 item 的 **JSON** 算（与 `history.headHash` 同一串输入）。
+ */
+export interface ContextSectionFact {
+  /** 节名：记忆层用 `skills` / `mcp` / `summary`；历史前段用 `#1`…`#N`（item 序号，从 1 起） */
+  name: string;
+  tokens: number;
+  bytes: number;
+  hash: string;
 }
 
 /** 请求的上下文构成（`budget/consumed.context`，internal 可见性——**不进她的上下文**） */
 export interface ContextBreakdown {
   /** 渲染版本（`RENDER_VERSION`）：它一变，请求体整体就变了，不是某一段的事 */
   renderVersion: string;
+  /**
+   * **请求体构造点**：渲染这一次请求时看得见的最大事件 seq（含本轮唤醒）。
+   *
+   * 为什么要有它（2026-10-10 加；02:08 与 03:17 两次「原因不明」都是缺它造成的）：
+   * `budget/consumed` 的 `ts` / `seq` 是调用**结束**的时刻，而缓存失守的原因发生在请求
+   * **构造之前**。在飞久的调用（实测有 63 秒的）会把"上一次被审计调用"的 seq 落到真正的原因
+   * **之后** ⇒ 归因窗口里空无一物 ⇒ 明明是自己压缩/重建索引弄的，却报成 `unattributable` 告警。
+   * 有了这一格，窗口切成 `prev.builtAtSeq < seq ≤ cur.builtAtSeq`，比的才是"这次请求看见了什么"。
+   *
+   * **可选**：这条改动之前写下的 `budget/consumed` 里没有它（读的一侧退回按 `seq` 切，
+   * 见 {@link detectCacheBreak}），所以老日志的结论逐字段不变。
+   */
+  builtAtSeq?: number;
   /**
    * 人格常驻层 = IDENTITY + CONSTITUTION + STYLE + SELF_BRIEF。
    * 它是请求的**最前面**：这里一变，整个请求从头失配。
@@ -62,19 +103,26 @@ export interface ContextBreakdown {
   /** 工具清单（JSON 形态的 name/description/parameters） */
   tools: ContextSegment & { count: number };
   /**
-   * input[0] 长期记忆层：技能目录 + 早期摘要（压缩会改写它）。
+   * input[0] 长期记忆层：技能目录 + MCP 索引 + 早期摘要（压缩会改写它）。
    *
    * **记忆索引不在这里**（v30 起在下面的 `state` 那一段）：她写一笔记忆索引就重建一次，
    * 放头部会让整段历史从第 1 条起失守。这一段现在只剩"变了就是大事"的两样。
+   *
+   * `sections` 是三节**各自**的事实（2026-10-10 加，可选）：整段哈希回答"变了没有"，
+   * 它回答"是哪一节变的、变了多少字节"——见 {@link ContextSectionFact}。
    */
-  memory: ContextSegment;
+  memory: ContextSegment & { sections?: ContextSectionFact[] };
   /** 事件流渲染出来的历史 items。
    *
    * `headHash` 是**前 {@link HISTORY_HEAD_ITEMS} 条**的哈希：历史每步都在追加尾巴（正常），
    * 只有**前段被改写**才是缓存破坏。单看整段哈希会把每次追加都算成破坏，那是刷屏不是哨兵；
    * 而"两边窗口长度不同"这件事由 `historyRewritten` 显式挡掉。
+   *
+   * `headItems` 是那前 N 条**逐条**的事实（2026-10-10 加，可选）：`headHash` 只说"前段变了"，
+   * 它说"变的是第几条"——2026-10-09 19:17 那次现场（`· 重投` 追溯改写历史第 1 条）就属于
+   * "整段看上去只是追加、其实头部一条被改写"，有它一眼定位。
    */
-  history: ContextSegment & { headHash: string; items: number };
+  history: ContextSegment & { headHash: string; items: number; headItems?: ContextSectionFact[] };
   /**
    * 本轮固定块（B2）：`[当前状态]` + `[关系档案]` + 本轮选中的记忆正文 + **记忆索引**（v30）。
    *
@@ -104,7 +152,21 @@ export function hashOf(text: string): string {
 
 /** 一段文本 → 段落事实（`instructions` 这种纯文本段用它） */
 export function segmentOfText(text: string): ContextSegment {
-  return { tokens: estimateTokens(text), hash: hashOf(text) };
+  return { tokens: estimateTokens(text), bytes: Buffer.byteLength(text, 'utf8'), hash: hashOf(text) };
+}
+
+/**
+ * 一节文字 → 分节事实（记忆层的三节用它；历史前段逐条另有一处调用，口径见 {@link ContextSectionFact}）。
+ *
+ * 与 `hashOf` 同源、与 `estimateTokens` 同源，所以段与节、节与节之间可比。
+ */
+export function sectionFactOf(name: string, text: string): ContextSectionFact {
+  return {
+    name,
+    tokens: estimateTokens(text),
+    bytes: Buffer.byteLength(text, 'utf8'),
+    hash: hashOf(text),
+  };
 }
 
 // ──────────────────────────────── 哨兵 ────────────────────────────────
@@ -244,6 +306,13 @@ export interface AuditedCall {
    */
   seq?: number;
   /**
+   * **请求体构造点**（= `context.builtAtSeq`）：这条请求渲染时看得见的最大事件 seq。
+   *
+   * 窗口优先用它，而不是上面那个 `seq`（完成点）：见 {@link ContextBreakdown.builtAtSeq}。
+   * **可选**：老日志没有它、手写构造的调用也可以不给 ⇒ 退回用 `seq` 切窗口，结论不变。
+   */
+  builtAtSeq?: number;
+  /**
    * 这条调用属于第几轮（`budget/consumed.turn`）。
    *
    * 它只服务固定块的"形状差异"判据：块**只在每轮第 1 步发**，比"上一轮某一步"与"这一轮第 1 步"
@@ -283,6 +352,54 @@ export interface CacheBreak {
   silent?: boolean;
   /** 这次调用本人的 seq（与 {@link AuditedCall.seq} 同源，重放对齐用） */
   seq?: number;
+  /**
+   * **新旧分段对照**（2026-10-10 加，可选）：哪一段变了、变了多少字节 / 多少 token、分节里是哪一节。
+   *
+   * 为什么要有它（用户 2026-10-10 的原话：「以后再有失守，一眼看出是哪一节、变了多少字节，
+   * 不用再绕一整轮归因」）：`classes` 只说"记忆层变了"，接下来人要自己去把两次请求体逐字节重建
+   * 才能知道变的是哪一节——2026-10-09 18:07 那次（MCP 索引那一行 +6 token）与 19:17 那次
+   * （历史第 1 条 item 被补 ` · 重投`）都是这么查出来的，各花了半小时。
+   *
+   * 与 `classes` **同序、只含"真的按段失守"的那几类**（`render` / `idle` 不是某一段的字节，不编）。
+   * **可选**：老日志没有它。
+   */
+  diff?: CacheBreakDiff[];
+}
+
+/**
+ * 一段（或一节）的新旧对照。字段一律**可选**，因为两边都可能缺那一段：
+ *   · `state` 只在每轮第 1 步发（一边有、一边没有是常态）；
+ *   · `sections` / `headItems` 是 2026-10-10 才有的（老日志两边都没有）。
+ * 缺一边时 `delta*` 一律不出现——**不拿 0 冒充"没变"**，那是两种不同的事实。
+ */
+export interface CacheBreakSectionDiff {
+  /** 节名：记忆层是 `skills` / `mcp` / `summary`；历史前段是 `#1`…（item 序号，从 1 起） */
+  name: string;
+  /** 两边的哈希是否不同（缺一边时也算"变了"，因为形状变了） */
+  changed: boolean;
+  /** 这一节出现在哪一边（`prev-only` / `next-only` 也是形状变化的一种） */
+  side: 'both' | 'prev-only' | 'next-only';
+  prevHash?: string;
+  nextHash?: string;
+  prevTokens?: number;
+  nextTokens?: number;
+  deltaTokens?: number;
+  prevBytes?: number;
+  nextBytes?: number;
+  deltaBytes?: number;
+}
+
+/** 一整段的对照（{@link CacheBreakDiff} 的展开形态，见那边的口径） */
+export interface CacheBreakDiff extends Omit<CacheBreakSectionDiff, 'name' | 'side' | 'changed'> {
+  class: CacheBreakClass;
+  /**
+   * 分节对照（只有 `memory` / `history` 有）：
+   *   · `memory` → 三节（技能目录 / MCP 索引 / 早期摘要）；
+   *   · `history` → 前 {@link HISTORY_HEAD_ITEMS} 条**逐条**（`#1`…）——"变的是第几条"就靠它。
+   * **没变的节也照列**（`changed: false`）："哪一节都没变"与"这一版没有分节"是两件事，
+   * 读的人必须能分开——后者意味着"要另找原因"，前者意味着"原因在这几节之外"。
+   */
+  sections?: CacheBreakSectionDiff[];
 }
 
 /** 窗口里出现这两个，就说明进程换过代（`instance/takeover` 先写、`session/start` 紧随） */
@@ -482,6 +599,8 @@ export function lastAuditedCall(events: Iterable<AppEvent>): AuditedCall | null 
       cacheMissTokens: event.data.cacheMissTokens,
       // seq / turn 都是归因用的（见 AuditedCall 的字段注释）；重放时它们来自同一条日志，逐字段一致
       seq: event.seq,
+      // 构造点（新增，可选）：窗口优先用它——完成点会把真正的原因挡在窗口外（2026-10-10）
+      ...(context.builtAtSeq === undefined ? {} : { builtAtSeq: context.builtAtSeq }),
       turn: event.data.turn,
     };
   }
@@ -524,10 +643,23 @@ export function detectCacheBreak(
   if (prev === null) return null;
 
   const gapMs = Math.max(0, parseMs(cur.ts) - parseMs(prev.ts));
-  // 事件窗口 = 上次调用之后、本次调用之前。两端都用**严格不等**：落在边界上的两条调用本身
-  // 不是"原因"，它们才是被比对的对象。
-  const window = [...events].filter((event) => (prev.seq === undefined || event.seq > prev.seq)
-    && (cur.seq === undefined || event.seq < cur.seq));
+  // 事件窗口 = **上一次调用的构造点**之后、**本次调用的构造点**（含）之前。
+  //
+  // 为什么是构造点而不是"上一次调用在日志里的 seq"（2026-10-10 修）：`budget/consumed` 的
+  // seq/ts 是调用**结束**的时刻，而请求体是**之前**就装配好的。在飞久的调用（实测 63 秒）会把
+  // 真正的原因（那次上下文压缩、那次 `mcp/index` 重建）挡在 `prev.seq` 之前 ⇒ 窗口空 ⇒ 明明是
+  // 自己干的，却报成 `unattributable` 并告警（2026-10-09 18:07 / 19:17 两次都栽在这里）。
+  // 两端语义：`prev.builtAtSeq` **严格不等**（落在构造点上那条事件上次已经看见了，它变不出差异），
+  // `cur.builtAtSeq` **取等**（它正是本次请求看得见的最后一条）。
+  // 缺 `builtAtSeq`（老日志 / 手写构造的调用）⇒ 退回按 seq 切，逐字段与本次改动之前一致。
+  const windowFrom = prev.builtAtSeq ?? prev.seq;
+  const windowTo = cur.builtAtSeq ?? cur.seq;
+  // 上界的取等规则跟语义走：构造点**取等**（它正是本次请求看得见的最后一条），旧的 seq 语义
+  // 是"本次调用本身不算原因"⇒**严格小于**。
+  const includeTo = cur.builtAtSeq !== undefined;
+  const window = [...events].filter((event) =>
+    (windowFrom === undefined || event.seq > windowFrom)
+    && (windowTo === undefined || (includeTo ? event.seq <= windowTo : event.seq < windowTo)));
   const evidence = evidenceOf(window);
 
   const broken = segmentBreaks(prev, cur, evidence);
@@ -562,7 +694,98 @@ export function detectCacheBreak(
     + `距上次调用 ${Math.round(gapMs / 60_000)} 分钟，本次 input ${cur.context.input.tokens} token`
     + `${hit === null ? '' : `，缓存命中 ${(hit * 100).toFixed(1)}%`}。`
     + `${CAUSE_TEXT[cause]}${silent ? '（预期内，不告警）' : '（**归因不明 ⇒ 仍然告警**）'}。${stateShapeNote}`;
-  return { class: primary, classes, reason, gapMs, cause, causes, silent, ...(cur.seq === undefined ? {} : { seq: cur.seq }) };
+  // 新旧分段对照：只对"真的按段失守"的那几类做（render / idle 不是某一段的字节，不编）
+  const diff = diffOf(prev.context, cur.context, broken);
+  return {
+    class: primary, classes, reason, gapMs, cause, causes, silent,
+    ...(diff.length === 0 ? {} : { diff }),
+    ...(cur.seq === undefined ? {} : { seq: cur.seq }),
+  };
+}
+
+/**
+ * 新旧分段对照的**唯一**构造点（口径写在 {@link CacheBreakDiff} / {@link CacheBreakSectionDiff}）。
+ *
+ * 只回答"字节/规模差在哪"，**不回答原因**——原因仍然只由 {@link segmentCause} 认（一处判据）。
+ * `render` / `idle` 两类刻意不在这里出现：它们不是"某一段的文字变了"，编一条对照等于说谎。
+ */
+function diffOf(
+  prev: ContextBreakdown,
+  cur: ContextBreakdown,
+  classes: readonly CacheBreakClass[],
+): CacheBreakDiff[] {
+  const out: CacheBreakDiff[] = [];
+  for (const cls of classes) {
+    if (cls === 'persona') out.push(segmentDiff('persona', prev.instructions, cur.instructions));
+    else if (cls === 'tools') out.push(segmentDiff('tools', prev.tools, cur.tools));
+    else if (cls === 'state') out.push(segmentDiff('state', prev.state, cur.state));
+    else if (cls === 'memory') {
+      const sections = sectionDiffsOf(prev.memory.sections, cur.memory.sections);
+      out.push({
+        ...segmentDiff('memory', prev.memory, cur.memory),
+        ...(sections === undefined ? {} : { sections }),
+      });
+    } else if (cls === 'history') {
+      const sections = sectionDiffsOf(prev.history.headItems, cur.history.headItems);
+      out.push({
+        // 历史段的"哈希"用 headHash（那才是哨兵判的那一格），规模用整段
+        ...segmentDiff('history', { ...prev.history, hash: prev.history.headHash },
+          { ...cur.history, hash: cur.history.headHash }),
+        ...(sections === undefined ? {} : { sections }),
+      });
+    }
+  }
+  return out;
+}
+
+/** 一段的新旧对照（缺一边时只出那一边的事实，差额一律不出现） */
+function segmentDiff(
+  cls: CacheBreakClass,
+  a: ContextSegment | undefined,
+  b: ContextSegment | undefined,
+): CacheBreakDiff {
+  return {
+    class: cls,
+    ...(a === undefined ? {} : { prevHash: a.hash, prevTokens: a.tokens, ...(a.bytes === undefined ? {} : { prevBytes: a.bytes }) }),
+    ...(b === undefined ? {} : { nextHash: b.hash, nextTokens: b.tokens, ...(b.bytes === undefined ? {} : { nextBytes: b.bytes }) }),
+    ...(a === undefined || b === undefined ? {} : {
+      deltaTokens: b.tokens - a.tokens,
+      ...(a.bytes === undefined || b.bytes === undefined ? {} : { deltaBytes: b.bytes - a.bytes }),
+    }),
+  };
+}
+
+/**
+ * 分节对照（记忆层三节 / 历史前段逐条）：**没变的节也列**，见 {@link CacheBreakDiff.sections}。
+ *
+ * 两边都没有分节（老日志、或这一版之前的调用）⇒ 返回 `undefined`——读的人由此知道
+ * "这一版拿不到分节"，而不是把"没列"读成"没变"。
+ * 顺序：先按上一次那边的顺序（`skills → mcp → summary` 是渲染顺序，读起来对得上），再补这次新增的。
+ */
+function sectionDiffsOf(
+  prevFacts: readonly ContextSectionFact[] | undefined,
+  nextFacts: readonly ContextSectionFact[] | undefined,
+): CacheBreakSectionDiff[] | undefined {
+  if (prevFacts === undefined && nextFacts === undefined) return undefined;
+  const names: string[] = [];
+  for (const fact of [...(prevFacts ?? []), ...(nextFacts ?? [])]) {
+    if (!names.includes(fact.name)) names.push(fact.name);
+  }
+  return names.map((name) => {
+    const a = prevFacts?.find((fact) => fact.name === name);
+    const b = nextFacts?.find((fact) => fact.name === name);
+    const side: CacheBreakSectionDiff['side'] = a === undefined ? 'next-only' : (b === undefined ? 'prev-only' : 'both');
+    return {
+      name,
+      side,
+      changed: a?.hash !== b?.hash,
+      ...(a === undefined ? {} : { prevHash: a.hash, prevTokens: a.tokens, prevBytes: a.bytes }),
+      ...(b === undefined ? {} : { nextHash: b.hash, nextTokens: b.tokens, nextBytes: b.bytes }),
+      ...(a === undefined || b === undefined
+        ? {}
+        : { deltaTokens: b.tokens - a.tokens, deltaBytes: b.bytes - a.bytes }),
+    };
+  });
 }
 
 /**

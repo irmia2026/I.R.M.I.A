@@ -168,7 +168,7 @@ test('工具清单：任何一件的描述都不许贴到硬门上（距硬门�
 
 test('工具清单：常驻总量不许悄悄涨（防"文档与实测各说各话"复发）', async () => {
   // 为什么要有这一条：件数与 token 是**每轮请求都要付的常驻开销**，而它历史上一直是"悄悄涨、
-  // 事后才发现"的（4391 / 3875 / 3699 / 3931 / 4587 / 4645 / 4839 / 4874 / 5088 / 5167 / 5435，
+  // 事后才发现"的（4391 / 3875 / 3699 / 3931 / 4587 / 4645 / 4839 / 4874 / 5088 / 5167 / 5435 / 5497 / 5370，
   // docs/design.md §4.18 记着这一串）。单件都在各自的门内，加起来仍然可能多付一份 schema
   // ——所以钉的是**总量**。
   //
@@ -186,11 +186,13 @@ test('工具清单：常驻总量不许悄悄涨（防"文档与实测各说各�
   );
 });
 
-test('工具清单：定时器三件已并成一件 `timer`，旧名不许回来、三个动作一个不许少', async () => {
+test('工具清单：定时器三件已并成一件 `timer`，旧名不许回来、四个动作一个不许少', async () => {
   // v35（design §4.18）：`set_timer` / `cancel_timer` / `list_timers` 合成的依据是
   // 四天 8 次调用（set 2 / list 6 / cancel 0）却常驻 269 token。合并的是**入口**，
   // 所以这一条同时钉两件事：旧名不许回来（回来就是每轮多付一份 schema），
-  // 三个能力也不许少（少了 `list` 她看不到自己排了什么；少了 `cancel` 误排就撤不回来）。
+  // 四个能力也不许少（少了 `list` 她看不到自己排了什么；少了 `cancel` 误排就撤不回来；
+  // 少了 `wait`——2026-10-08 用户的口径「timer 提供一个 wait」——她就只能自己算绝对时刻，
+  // 或者干脆在原地反复 read_channel）。
   const { registry } = await catalog();
   for (const gone of ['set_timer', 'cancel_timer', 'list_timers']) {
     assert.equal(registry.has(gone), false, `${gone} 又注册回来了：定时器已并成一件 timer`);
@@ -198,10 +200,17 @@ test('工具清单：定时器三件已并成一件 `timer`，旧名不许回来
   const timer = registry.get('timer');
   assert.ok(timer !== null, 'timer 是合并后的那一件，不许消失');
   const props = timer.parameters['properties'] as Record<string, unknown>;
-  assert.deepEqual((props['action'] as { enum?: unknown }).enum, ['set', 'cancel', 'list'],
-    'action 三个取值就是三个能力');
+  assert.deepEqual((props['action'] as { enum?: unknown }).enum, ['set', 'wait', 'cancel', 'list'],
+    'action 四个取值就是四个能力');
   assert.equal('at' in props && 'cron' in props && 'payload' in props, true, 'set 的两条路与 payload 都要在');
   assert.equal('timer_id' in props, true, 'cancel 必须能指定撤哪一个');
+  // wait（2026-10-08）：时长两个单位都在（参数描述里写明单位），上限写在 minutes 那一格里
+  assert.equal('seconds' in props && 'minutes' in props, true, 'wait 的时长要有分钟与秒两个单位');
+  assert.match(String((props['seconds'] as { description?: string }).description), /秒/u,
+    '单位必须写进参数描述（她看得到的就是那一行）');
+  assert.match(String((props['minutes'] as { description?: string }).description), /分钟/u);
+  assert.match(String((props['minutes'] as { description?: string }).description), /12 小时/u,
+    '上限要写清（防呆：更远的唤醒该走 set 的 at/cron）');
 });
 
 test('工具清单：read_file 已改名 safe_read，且行号是**无开关**的默认输出', async () => {
@@ -211,6 +220,33 @@ test('工具清单：read_file 已改名 safe_read，且行号是**无开关**�
   assert.ok(safeRead !== null);
   const props = safeRead.parameters['properties'] as Record<string, unknown>;
   assert.equal('line_numbers' in props, false, '行号不该有开关——它是行号寻址唯一的地址来源');
+});
+
+test('工具清单：list_dir 已删（v42 并入 safe_read），旧名不许回来、列目录的能力也不许少', async () => {
+  // 删除依据是实测：`data/events/**` 全部 `tool/call` 里 `list_dir` **201 次 / 5264 次总量**、
+  // 近 24h 仅 1 次，却常驻 212 token（name 2 / desc 40 / params 170）——而列目录这件事
+  // `pwsh` 的 `Get-ChildItem` 与 `safe_read` 的目录形态都能做。腾出的常驻开销是留给 `mcp` 的。
+  //
+  // 这一条钉两件事（与"定时器三件并成一件"、"run_command / notify 不许回来"同一套写法）：
+  // ① 旧名不许回来（回来就是每轮多付一份 schema）；② **能力一件都不许少**——
+  //    `safe_read` 必须带着目录形态（`depth` 参数 + 那句"传目录则列目录"），
+  //    否则"删了一件工具"就变成了"她不会列目录了"。
+  const { registry, problems } = await catalog();
+  assert.equal(registry.has('list_dir'), false, '`list_dir` 又注册回来了：v42 已把它并进 safe_read');
+  assert.deepEqual(problems, [], `有工具被跳过：${problems.join('；')}`);
+
+  const safeRead = registry.get('safe_read');
+  assert.ok(safeRead !== null, 'safe_read 是承接列目录的那一件，不许消失');
+  const props = safeRead.parameters['properties'] as Record<string, unknown>;
+  assert.equal('depth' in props, true, '目录形态要能递归（旧 list_dir 的 depth 实测用了 136/201 次）');
+  // 条数上限走既有的 limit（不新添常驻参数），描述里必须说清"目录时是什么单位"
+  assert.match(String((props['limit'] as { description?: string }).description), /目录/u,
+    'limit 兼作列目录的条数上限——这件事必须写在它自己的参数描述里');
+  assert.match(safeRead.description, /目录/u, '工具描述里要有"传目录则列目录"，否则没有任何地方告诉她');
+  // `pwsh` 是递归/隐藏项/按时间排这些少数用法的出口，指路必须留在它的描述里
+  const pwsh = registry.get('pwsh');
+  assert.ok(pwsh !== null);
+  assert.match(pwsh.description, /Get-ChildItem/u, '少了指路她会在"想列目录"时发懵');
 });
 
 test('人格资产只读（P2）：fs 写工具拒绝 data/persona/**，并把该走哪条路说清楚', async (t) => {

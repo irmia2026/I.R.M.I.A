@@ -2,7 +2,7 @@
  * Irmia Agent — 文件系工具包：递归扫描与匹配内核
  *
  * rg_search / es_search 在没有外部引擎时需要同一条 TS fallback 路径，
- * list_dir 也需要单层目录枚举。三处共用本模块，保证：
+ * `safe_read` 列目录时也需要单层目录枚举。三处共用本模块，保证：
  *   • 忽略集合唯一（`.git` `node_modules` `dist` 等只在常量里写一次）；
  *   • 深度、文件数、单文件字节三个上限统一，避免 fallback 比引擎路径更容易失控；
  *   • AbortSignal 在每个文件边界检查一次，长扫描能被超时打断（design.md §4.5）。
@@ -74,7 +74,7 @@ function kindOf(entry: { isFile(): boolean; isDirectory(): boolean; isSymbolicLi
   return 'other';
 }
 
-/** 单层目录枚举（list_dir 用）。返回 null 表示该目录不可读 */
+/** 单层目录枚举（`safe_read` 列目录用，经 `renderDirectoryListing`）。返回 null 表示该目录不可读 */
 export async function readDirEntries(dir: string): Promise<DirEntryInfo[] | null> {
   const out: DirEntryInfo[] = [];
   try {

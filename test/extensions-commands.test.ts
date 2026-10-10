@@ -59,7 +59,21 @@ interface Fixture {
 }
 
 /** 建一个独立的临时工程：config.json + skills/ + data/，服务端指向它们 */
-async function setup(t: TestContext): Promise<Fixture> {
+async function setup(
+  t: TestContext,
+  options: {
+    /**
+     * **配置热更接线**（2026-10-11 加）：给 `true` = 这台夹具"有人接管配置变化"
+     * （生产上就是 main.ts 里那个 `() => configWatcher.live`），`mcp-save` / `mcp-remove`
+     * 的回执因此说 `restartRequired: false`。
+     *
+     * 缺省**不给**（= 没接线）是刻意的：本文件绝大多数用例关心的不是这一格，
+     * 而"没接线"正是这些夹具的真实形状——回执照旧说"要重启"，不给它们添一处假话。
+     * 只有专门钉这一格的用例才传 `{ configReload: true }`。
+     */
+    configReload?: boolean;
+  } = {},
+): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), 'irmia-ext-'));
   const dataDir = join(dir, 'data');
   const eventsDir = join(dataDir, 'events');
@@ -96,6 +110,7 @@ async function setup(t: TestContext): Promise<Fixture> {
     configPath,
     port: 0,
     out: (line) => { logLines.push(line); },
+    ...(options.configReload === true ? { configReload: () => true } : {}),
   });
 
   t.after(async () => {
@@ -622,7 +637,32 @@ test('mcp-save：写入 config.mcp.servers，界面上的 enabled 落成配置�
   assert.deepEqual(servers[0]?.['args'], ['-y', '@modelcontextprotocol/server-filesystem']);
   assert.deepEqual(servers[0]?.['env'], { ROOT: 'D:/work' });
   assert.equal('disabled' in (servers[0] ?? {}), false, 'enabled: true = 配置里不出现 disabled 这个键');
-  assert.equal((added.body as { restartRequired?: boolean }).restartRequired, true, 'MCP 池在启动期建，改动要重启才接管');
+  /**
+   * **`restartRequired` 的判据（2026-10-11 改成"按净效果给"）**：这一格回答的是
+   * "这次改动**在活进程里生效了吗**"——没生效才回 `true`。所以判据有两个输入：
+   * **① 净效果**（这次写命令真的动过什么没有）× **② 写下的字段活进程接不接得住**
+   * （`classifyConfigField(field) === 'hot'`，名单在 `src/config/watcher.ts` 的
+   * `HOT_RELOAD_FIELDS`）。两个输入都不在界面、也不在这里判：**唯一那一处在
+   * `WebServerImpl.mcpRestartOutcome` 的方法头**（那一节也是"将来加了不走热更的字段
+   * 要登记的地方"）。
+   *
+   * 本用例：`mcp-save` 加的是一条真声明（净效果 = `added`，不是"什么都没改"）
+   * **且**这份夹具没有接热更（`setup` 缺省不传 `configReload`，等于"内嵌方 / 夹具 / 停掉
+   * watcher 之后"那种形状）⇒ 活进程里没人接管 ⇒ `true`。
+   * ⚠️ 但要说清：**这一支在生产上今天是不可达的**（`main.ts` 递的就是 `() => configWatcher.live`，
+   * 常驻实例里恒为 true）。今天唯一一条**接线活着却仍要重启**的活路径是"顺带写了
+   * `tools.disabled`"（`mcp-remove` 清禁用名单那一支），钉在下面 `mcp-remove：删服务并清掉…` 里。
+   * **三面各钉一条**：这一条=有改动·没人接住；下一条=有改动·接住了；再下一条=接住了但有一格接不住。
+   */
+  const addedBody = added.body as { restartRequired?: boolean; effect?: string; restartNote?: string };
+  assert.equal(addedBody.effect, 'updated', '这次是真改动（新加一条声明）⇒ 净效果不是"没改"');
+  assert.equal(
+    addedBody.restartRequired,
+    true,
+    '本进程没接配置热更 ⇒ 盘上变了而活进程一字未动，如实说要重启',
+  );
+  assert.match(String(addedBody.restartNote), /重启主进程才生效/u,
+    `要重启就得给理由：${String(addedBody.restartNote)}`);
 
   // 改：只动传进来的字段，其余原样保留
   const edited = await command(fx, 'mcp-save', {
@@ -649,6 +689,59 @@ test('mcp-save：写入 config.mcp.servers，界面上的 enabled 落成配置�
   assert.deepEqual(kept['toolDefaults'], { sideEffect: 'none' });
 });
 
+test('mcp-save：热更接住了 ⇒ 回执说"已生效、不必重启"（同一判据的另一面）', async (t) => {
+  // 与上一条**同一判据的另一面**：这次有真改动（净效果 = added），而写下的字段只有
+  // `mcp.servers`——它是热更字段、接线又是活的（生产上 `main.ts` 把 `() => configWatcher.live`
+  // 递给服务端）⇒ **写盘即生效**，回执不许再喊重启（判据见 `WebServerImpl.mcpRestartOutcome`）。
+  const fx = await setup(t, { configReload: true });
+
+  const added = await command(fx, 'mcp-save', {
+    name: 'filesystem',
+    command: 'node',
+    args: ['server.mjs'],
+    enabled: true,
+  });
+  assert.equal(added.status, 200, added.text);
+  const addedBody = added.body as {
+    restartRequired?: boolean; effect?: string; restartNote?: string;
+  };
+  assert.equal(addedBody.effect, 'updated', '这次是真改动（不是"什么都没改"那一支）');
+  assert.equal(
+    addedBody.restartRequired,
+    false,
+    '声明面写盘即生效 ⇒ 不必重启（回执不许再让人白重启一次）',
+  );
+  // 那一格**不许只是 false**：`false` 也要有一句能摆在人眼前的话（界面原样接在 toast 后面）
+  assert.match(String(addedBody.restartNote), /已生效/u, `false 也要说人话：${String(addedBody.restartNote)}`);
+
+  // 删服务走**同一个判据**（同一个 `mcpRestartOutcome()`）：也不该说"要重启"
+  const removed = await command(fx, 'mcp-remove', { name: 'filesystem' });
+  assert.equal(removed.status, 200, removed.text);
+  assert.equal(
+    (removed.body as { restartRequired?: boolean }).restartRequired,
+    false,
+    '删服务同样走声明面热更（判据只有一处，两处不许各写一遍）',
+  );
+});
+
+test('mcp-save：同内容再存一次 ⇒ 净效果为零，接线活不活都不必重启', async (t) => {
+  // 判据的第一个输入是**净效果**：按一下"保存"而值本来就是这样 ⇒ 没有要生效的东西。
+  // 这一条**故意用没接线的夹具**：那是"要重启"那一侧最容易误伤的形状——
+  // 若只按"接线活没活"给这一格，一次什么都没改的保存也会叫人去重启。
+  const fx = await setup(t);
+  await command(fx, 'mcp-save', { name: 'same', command: 'node', args: ['a.mjs'], enabled: true });
+  const again = await command(fx, 'mcp-save', { name: 'same', command: 'node', args: ['a.mjs'], enabled: true });
+  assert.equal(again.status, 200, again.text);
+  const body = again.body as {
+    restartRequired?: boolean; effect?: string; restartNote?: string; changedServers?: string[];
+  };
+  assert.deepEqual(body.changedServers, [], '声明面逐字段相同');
+  assert.equal(body.effect, 'unchanged', '净效果为零 ⇒ 这一格要如实说"没改动"，不许说成"已生效"');
+  assert.equal(body.restartRequired, false, '没有要生效的东西 ⇒ 不必重启（哪怕这台实例没接热更）');
+  assert.match(String(body.restartNote), /没有改动任何东西/u,
+    `理由要说"没改"：${String(body.restartNote)}`);
+});
+
 test('mcp-save：字段不合法 → 400；配置校验失败 → 回滚原文件', async (t) => {
   const fx = await setup(t);
   const original = readFileSync(fx.configPath, 'utf8');
@@ -668,13 +761,18 @@ test('mcp-save：字段不合法 → 400；配置校验失败 → 回滚原文�
   assert.equal(
     (await command(fx, 'mcp-save', { name: 'bad name!', command: 'npx' })).status,
     400,
-    'server 名要匹配 ^[A-Za-z0-9_-]{1,128}$（工具名会合成 mcp__{name}__{tool}）',
+    'server 名要匹配 ^[A-Za-z0-9_-]{1,128}$（只允许字母、数字、- 与 _）',
   );
   assert.equal(readFileSync(fx.configPath, 'utf8'), original, '被拒的写入一个字节都不该落盘');
 });
 
 test('mcp-remove：删服务并清掉指向它的禁用名单条目', async (t) => {
-  const fx = await setup(t);
+  // **这一条同时是"确实要重启"那一面的活证据**（判据见 `WebServerImpl.mcpRestartOutcome`）：
+  // 夹具**接了**热更（`configReload: true`，与生产同形），可这一支仍然要回 `true`——
+  // 因为 `mcp-remove` 会**顺带**写 `tools.disabled`，而那一格**不在热更名单里**
+  // （它是工具装配参数，池的 `applyDeclarations` 不管它）⇒ 盘上那份停用名单要重启才与
+  // 运行中的注册表一致。这也是**今天唯一一条接线活着却仍要重启的活路径**。
+  const fx = await setup(t, { configReload: true });
   await command(fx, 'mcp-save', { name: 'demo', command: 'node', args: ['server.mjs'], enabled: true });
   await command(fx, 'mcp-save', { name: 'keep', command: 'node', args: ['other.mjs'], enabled: true });
 
@@ -702,7 +800,10 @@ test('mcp-remove：删服务并清掉指向它的禁用名单条目', async (t) 
 
   const res = await command(fx, 'mcp-remove', { name: 'demo' });
   assert.equal(res.status, 200, res.text);
-  const body = res.body as { servers: string[]; prunedDisabledTools: string[] };
+  const body = res.body as {
+    servers: string[]; prunedDisabledTools: string[]; restartRequired?: boolean;
+    restartNote?: string; appliedFields?: string[];
+  };
   assert.deepEqual(body.servers, ['keep'], '要删的那条真的从数组里消失了');
   assert.deepEqual(body.prunedDisabledTools, ['mcp__demo__echo']);
   assert.deepEqual(registry.disabledNames(), ['mcp__keep__echo'], '别的服务的禁用条目不许被连坐');
@@ -711,6 +812,15 @@ test('mcp-remove：删服务并清掉指向它的禁用名单条目', async (t) 
     ['mcp__keep__echo'],
     '清掉的名单要写回配置',
   );
+  // —— 判据那一格：写了两格字段，其中 `tools.disabled` 接不住 ⇒ 如实回 true 并点名它 ——
+  assert.deepEqual(body.appliedFields, ['mcp.servers', 'tools.disabled'],
+    '回执要能看出"这次写了哪两格"：`tools.disabled` 在里面就是要重启的原因');
+  assert.equal(body.restartRequired, true,
+    '接线活着，但顺带写的 tools.disabled 不在热更名单里 ⇒ 仍然要重启（今天唯一一条这样的活路径）');
+  assert.match(String(body.restartNote), /tools\.disabled/u,
+    `要重启就得点名是哪一格接不住：${String(body.restartNote)}`);
+  assert.match(String(body.restartNote), /名单/u,
+    `理由要说到"禁用名单/停用名单"这一层，不能只丢一个字段名：${String(body.restartNote)}`);
 
   // 删一个不存在的：404（不静默成功）
   const missing = await command(fx, 'mcp-remove', { name: 'nope' });
@@ -765,19 +875,43 @@ test('mcp-test：真拉起 MCP 进程、握手、取回工具清单，然后按�
 
 test('mcp-test：命令不存在 → 如实报"起不来"，主进程照常活着', async (t) => {
   const fx = await setup(t);
-  const res = await command(fx, 'mcp-test', {
-    name: 'nope',
-    command: join(fx.dir, 'definitely-not-a-real-binary.exe'),
-  });
+  // 命令名要过**启动器白名单**（`src/mcp/launcher-guard.ts`，2026-10-09 加）：这一条要验的是
+  // "spawn 失败如实回报"，不是"白名单挡不挡得住"（那条有自己的用例）。
+  // ⇒ 用一个**白名单内**的启动器名 + 一个**一定不存在**的绝对路径：白名单放行、spawn 失败。
+  const missing = join(fx.dir, process.platform === 'win32' ? 'mcp-server.exe' : 'mcp-server');
+  const res = await command(fx, 'mcp-test', { name: 'nope', command: missing });
   assert.equal(res.status, 200, '测试失败不是 HTTP 错误：结果本身是"连不上"');
   const body = res.body as { ok: boolean; reason: string | null; failureKind: string | null };
   assert.equal(body.ok, false);
   assert.equal(body.failureKind, 'spawn');
   assert.match(body.reason ?? '', /(进程|命令)/u, `失败要给原因：${body.reason ?? ''}`);
 
+  // 而"白名单外的启动器"是另一条路：**400 + 一句能照做的话**（这里只钉"不是 200 也不是崩"）
+  const rejected = await command(fx, 'mcp-test', { name: 'nope', command: 'definitely-not-a-real-binary' });
+  assert.equal(rejected.status, 400, '白名单外的启动器要在配置校验那一层就被拒，不是起进程再失败');
+
   // 主进程照常服务（这条命令绝不允许把服务带崩）
   const after = await call(fx, '/api/mcp');
   assert.equal(after.status, 200);
+});
+
+test('mcp-test：Windows 上 `npx` 的测试回执是一句**能照做**的话（不是裸 ENOENT）', async (t) => {
+  if (process.platform !== 'win32') return; // 非 Windows 上 npx 是真能起的
+  const fx = await setup(t);
+  // 界面「添加 MCP 服务」那一格以前被人照着填 `npx -y <包>`（出厂注释也那么写过）。
+  // 这一条验的是：**测试连接这条回执**也要拿到那句诊断，而不是"进程已退出（code=null）"。
+  const res = await command(fx, 'mcp-test', {
+    name: 'npxsrv',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem', '.'],
+  });
+  assert.equal(res.status, 200, res.text);
+  const body = res.body as { ok: boolean; reason: string | null; failureKind: string | null };
+  assert.equal(body.ok, false);
+  assert.equal(body.failureKind, 'spawn', '失败发生在"起进程"那一格');
+  assert.match(body.reason ?? '', /在 Windows 上起不来/u, `要说清为什么：${body.reason ?? ''}`);
+  assert.match(body.reason ?? '', /node <绝对路径>\/cli\.js/u, '要给出路（能照做的那三条）');
+  assert.match(body.reason ?? '', /没有为它留下任何进程/u, '要说清判在起进程之前');
 });
 
 test('mcp-test：握手超时 → 到点即杀，绝不留后台进程', async (t) => {
@@ -887,8 +1021,310 @@ test('/api/mcp：视图带上 env / 工具描述 / 运行计数（界面要用�
   assert.equal(after.runningCount, 1);
 });
 
-// ──────────────────────────────── Hooks：人可写、agent 仍只读 ────────────────────────────────
+test('/api/mcp：工具清单**经事件**可读（名字 + 描述），注册表为空也照样给（缺陷 ⑤）', async (t) => {
+  // 修前的形状（`docs/mcp-chain-review.md` 缺陷 ⑤）：生产上池**刻意不拿注册表**
+  // （拿了就把 `mcp__*` 写进 `tools` 段），而观测面只从注册表读 ⇒ 三个字段恒为空：
+  // 真起过、真调过，扩展页照样写「注册工具 0 件」，每个服务卡里没有工具清单、没有描述。
+  // 修后：`mcp/server-started` 的 data 带上 `[{name, description}]`（internal 事件，
+  // 不进模型请求），`mcpView` 以它为准、注册表只作回退。
+  const fx = await setup(t);
+  await command(fx, 'mcp-save', {
+    name: 'demo',
+    command: 'node',
+    args: ['server.mjs'],
+    enabled: true,
+  });
+  assert.equal(fx.registry.names().filter((name) => name.startsWith('mcp__')).length, 0,
+    '前提：这个夹具的注册表里一件 MCP 工具都没有（生产就是这么装配的）');
 
+  const started: AppEvent = {
+    seq: fx.log.nextSeq(),
+    ts: T0.toISOString(),
+    type: 'mcp/server-started',
+    data: {
+      name: 'demo',
+      pid: 4242,
+      tools: ['read', 'write'],
+      toolDetails: [
+        { name: 'read', description: '读一个文件（server 自报的原话）' },
+        { name: 'write', description: '写一个文件（server 自报的原话）' },
+      ],
+    },
+    visibility: defaultVisibility('mcp/server-started'),
+    origin: 'test',
+  } as unknown as AppEvent;
+  fx.log.append(started, { sync: true });
+  applyOne(emptyProjection(), started);
+
+  const view = (await call(fx, '/api/mcp')).body as {
+    servers: Array<{
+      name: string;
+      toolsCount: number;
+      registeredTools: string[];
+      toolDetails: Array<{ name: string; fullName: string; description: string }>;
+      toolsSeenAt: string | null;
+    }>;
+    registeredCount: number;
+    registeredTools: string[];
+  };
+  const demo = view.servers.find((server) => server.name === 'demo');
+  assert.ok(demo !== undefined);
+  assert.equal(demo.toolsCount, 2, `必须有 2 件（修前这里恒为 0）：${JSON.stringify(demo)}`);
+  assert.deepEqual(demo.toolDetails.map((tool) => tool.name), ['read', 'write']);
+  assert.deepEqual(demo.toolDetails.map((tool) => tool.fullName), ['mcp__demo__read', 'mcp__demo__write'],
+    '全名要按 `mcp__{server}__{tool}` 合成（界面拿它对照日志与配置）');
+  assert.match(demo.toolDetails[0]?.description ?? '', /读一个文件/u, '描述必须来自事件，不许留空');
+  assert.equal(demo.toolsSeenAt, T0.toISOString(), '要能说出"这份清单是哪一刻看到的"');
+  // 顶层那两个数：注册表为空时以事件里那份为准——页头写"0 件"而卡片里列着工具是自相矛盾
+  assert.equal(view.registeredCount, 2);
+  assert.deepEqual([...view.registeredTools].sort(), ['mcp__demo__read', 'mcp__demo__write']);
+
+  // 旧日志（没有 `toolDetails` 那一格）也读得动：退回名字那一档、描述留空，不许读崩
+  const legacy = await setup(t);
+  await command(legacy, 'mcp-save', { name: 'old', command: 'node', args: ['server.mjs'], enabled: true });
+  const legacyEvent: AppEvent = {
+    seq: legacy.log.nextSeq(),
+    ts: T0.toISOString(),
+    type: 'mcp/server-started',
+    data: { name: 'old', pid: 1, tools: ['echo'] },
+    visibility: defaultVisibility('mcp/server-started'),
+    origin: 'test',
+  } as unknown as AppEvent;
+  legacy.log.append(legacyEvent, { sync: true });
+  applyOne(emptyProjection(), legacyEvent);
+  const oldView = (await call(legacy, '/api/mcp')).body as {
+    servers: Array<{ name: string; toolsCount: number; toolDetails: Array<{ name: string; description: string }> }>;
+  };
+  const old = oldView.servers.find((server) => server.name === 'old');
+  assert.equal(old?.toolsCount, 1, '旧形状（只有名字）照样要数得出来');
+  assert.equal(old?.toolDetails.length, 1);
+  assert.equal(old?.toolDetails[0]?.name, 'echo');
+  assert.equal(old?.toolDetails[0]?.description, '', '描述留空，但不许臆造');
+});
+
+test('/api/mcp：资源观测可读（启动耗时 / RSS / 在飞峰值 / 最近一次回收时间）—— 2026-10-10 加', async (t) => {
+  // 判据（docs/multi-mcp-orchestration.md L1 缺口 ⑤）：用户这一轮的原问题里有"谁在吃内存、
+  // 冷启动到底多慢、回收救回多少"。池把这三笔账落进 internal 事件（不进请求、零缓存代价），
+  // `/api/mcp` 从事件折出来——**没有事件就不许编**（空 = 还没采到）。
+  const fx = await setup(t);
+  await command(fx, 'mcp-save', { name: 'demo', command: 'node', args: ['server.mjs'], enabled: true });
+
+  const append = (type: string, data: unknown): void => {
+    const event: AppEvent = {
+      seq: fx.log.nextSeq(),
+      ts: T0.toISOString(),
+      type,
+      data,
+      visibility: defaultVisibility(type),
+      origin: 'test',
+    } as unknown as AppEvent;
+    fx.log.append(event, { sync: true });
+    applyOne(emptyProjection(), event);
+  };
+
+  append('mcp/server-started', {
+    name: 'demo', pid: 4242, tools: ['read'], toolDetails: [{ name: 'read', description: '读文件' }], startMs: 812,
+  });
+  append('mcp/server-resource', {
+    name: 'demo', pid: 4242, sampledAtMs: T0.getTime() + 50, rssMb: 46.5, rssSource: 'tasklist',
+    startMs: 812, inFlightPeak: 1,
+  });
+
+  const running = (await call(fx, '/api/mcp')).body as {
+    servers: Array<{
+      name: string; lastStartMs: number | null; rssMb: number | null; rssSource: string | null;
+      rssSampledAt: string | null; uptimeMs: number | null; inFlightPeak: number | null;
+      lastReclaimedAt: string | null;
+    }>;
+  };
+  const demo = running.servers.find((server) => server.name === 'demo');
+  assert.equal(demo?.lastStartMs, 812, '冷启动耗时读得到（这一格答"到底多慢"）');
+  assert.equal(demo?.rssMb, 46.5, 'RSS 读得到');
+  assert.equal(demo?.rssSource, 'tasklist', '采样来源如实带出（没采到与 0 MB 分得开）');
+  assert.equal(demo?.rssSampledAt, new Date(T0.getTime() + 50).toISOString());
+  assert.equal(demo?.lastReclaimedAt, null, '还没回收过 ⇒ 这一格是空，不许编一个时刻');
+
+  // 回收：活多久 + 峰值 + 最后采到的 RSS + 回收时刻
+  append('mcp/server-stopped', {
+    name: 'demo', reason: 'idle-reclaim', uptimeMs: 300_000, inFlightPeak: 1, rssMb: 46.5,
+  });
+  const stopped = (await call(fx, '/api/mcp')).body as {
+    servers: Array<{ name: string; uptimeMs: number | null; lastReclaimedAt: string | null; runningNow: boolean }>;
+  };
+  const gone = stopped.servers.find((server) => server.name === 'demo');
+  assert.equal(gone?.uptimeMs, 300_000, '上一个进程活了多久（与回收理由一起才读得出"是空闲回收还是起来就崩"）');
+  assert.equal(gone?.lastReclaimedAt, T0.toISOString(), '最近一次回收时间 = 那条 stopped 事件的 ts');
+  assert.equal(gone?.runningNow, false);
+
+  // 旧日志（那几格都没有）照样读得动：一律 null，不许读崩、也不许编
+  const legacy = await setup(t);
+  await command(legacy, 'mcp-save', { name: 'old', command: 'node', args: ['server.mjs'], enabled: true });
+  const legacyEvent: AppEvent = {
+    seq: legacy.log.nextSeq(),
+    ts: T0.toISOString(),
+    type: 'mcp/server-started',
+    data: { name: 'old', pid: 1, tools: ['echo'] },
+    visibility: defaultVisibility('mcp/server-started'),
+    origin: 'test',
+  } as unknown as AppEvent;
+  legacy.log.append(legacyEvent, { sync: true });
+  applyOne(emptyProjection(), legacyEvent);
+  const oldView = (await call(legacy, '/api/mcp')).body as {
+    servers: Array<{ name: string; lastStartMs: number | null; rssMb: number | null; uptimeMs: number | null }>;
+  };
+  const old = oldView.servers.find((server) => server.name === 'old');
+  assert.equal(old?.lastStartMs, null);
+  assert.equal(old?.rssMb, null);
+  assert.equal(old?.uptimeMs, null);
+});
+
+test('/api/mcp：工具清单与进程状态解耦（回收后仍列得出名字 + 清单时刻 + 年龄）—— 2026-10-10 加', async (t) => {
+  // 用户这一轮的原话："mcp 卡片要显示 server 和工具名称"。挡在这句话前面的不是接口没数据，
+  // 而是**回收即清空**：生产上池空闲 5 分钟就回收（`idle-reclaim`），而清单只在启动那一刻进日志，
+  // 于是人点开扩展页时最常看到的状态恰恰是"已停止 + 0 件"——工具名一个都不剩。
+  //
+  // 这一条钉三件事：
+  //   ① `toolList` 在回收之后**照样给**（连同描述），`toolDetails`/`toolsCount`/`registeredTools`
+  //      与它同源（三个字段一起改口径：只改一个就会出现"卡片里列着工具、页头写着 0 件"）；
+  //   ② `toolsFrom` 说清这份清单是 `live` 还是 `cached`，`toolsListAt` 给出清单时刻、
+  //      `toolsAgeMs` 给出"多久以前"（按夹具的 now 算，可复现）；
+  //   ③ "起来过、一件工具都没给"（`toolsQuery = 'empty'`）与"从没起来过"（`toolsQuery = null`、
+  //      `state = never-started`）在接口上分得开——界面那两句空态就是靠这个分开的。
+  const fx = await setup(t);
+  await command(fx, 'mcp-save', { name: 'demo', command: 'node', args: ['server.mjs'], enabled: true });
+
+  const append = (type: string, data: unknown, ts: Date = T0): void => {
+    const event: AppEvent = {
+      seq: fx.log.nextSeq(),
+      ts: ts.toISOString(),
+      type,
+      data,
+      visibility: defaultVisibility(type),
+      origin: 'test',
+    } as unknown as AppEvent;
+    fx.log.append(event, { sync: true });
+    applyOne(emptyProjection(), event);
+  };
+
+  append('mcp/server-started', {
+    name: 'demo', pid: 4242, tools: ['read'], toolDetails: [{ name: 'read', description: '读文件' }], startMs: 812,
+  });
+
+  interface ServerRow {
+    name: string; state: string; toolsCount: number;
+    toolDetails: Array<{ name: string }>;
+    toolList: Array<{ name: string; fullName: string; description: string }>;
+    toolsListAt: string | null; toolsFrom: string; toolsQuery: string | null; toolsAgeMs: number | null;
+    toolsSeenAt: string | null;
+  }
+  const readOne = async (fixture: Fixture): Promise<ServerRow | undefined> => {
+    const view = (await call(fixture, '/api/mcp')).body as { servers: ServerRow[] };
+    return view.servers.find((server) => server.name === 'demo');
+  };
+
+  const live = await readOne(fx);
+  assert.equal(live?.toolsFrom, 'live', '最后一条日志是"起来了" ⇒ 这份清单是此刻的');
+  assert.equal(live?.toolsQuery, 'ok');
+  assert.deepEqual(live?.toolList.map((tool) => tool.name), ['read']);
+  assert.equal(live?.toolList[0]?.description, '读文件', '描述要跟着清单一起给（界面那一栏就吃它）');
+  assert.equal(live?.toolsListAt, T0.toISOString());
+  assert.equal(live?.toolsAgeMs, 0, '夹具的 now = T0 ⇒ 清单刚看到，年龄 0');
+
+  // 回收：清单跟着上一次启动留着，但来源改成 cached（进程状态与清单是两件事实）。
+  // 这一条的 ts 比清单晚一小时：证明"这份清单是何时的"跟着**清单**走，不跟着回收那一刻走。
+  append('mcp/server-stopped', { name: 'demo', reason: 'idle-reclaim', uptimeMs: 300_000 },
+    new Date(T0.getTime() + 3_600_000));
+  const cached = await readOne(fx);
+  assert.equal(cached?.state, 'stopped');
+  assert.deepEqual(cached?.toolList.map((tool) => tool.name), ['read'],
+    '回收之后"它给过什么"仍然读得到（这一格就是用户要的工具名）');
+  assert.equal(cached?.toolsFrom, 'cached', '同时必须说得出这份清单不是此刻的');
+  assert.equal(cached?.toolsQuery, 'ok', '问过了就是问过了，回收不改这件事');
+  assert.deepEqual(cached?.toolDetails.map((tool) => tool.name), ['read'],
+    '`toolDetails` 也留着（它答"日志里看到过什么"）：清空它换不来诚实，只让人以为"它没有工具"');
+  assert.equal(cached?.toolsCount, 1,
+    '件数与 `toolList` 同源（不然卡片里列着 1 件、页头写着 0 件，这一页就没人信了）');
+  assert.equal(cached?.toolsListAt, T0.toISOString(),
+    '清单时刻跟着**清单**走（不是回收那一刻）：不然"这份清单多旧"就被答成了"多久前回收的"');
+  assert.equal(cached?.toolsAgeMs, 0,
+    '年龄按**夹具的 now** 算（那个时钟恒等于 T0）⇒ 0；真实环境里它就是这个数与清单时刻的距离');
+
+  // "起来过、一件工具都没给" ⟷ "从没起来过"：两种空必须分得开
+  const quiet = await setup(t);
+  await command(quiet, 'mcp-save', { name: 'demo', command: 'node', args: ['server.mjs'], enabled: true });
+  const quietEvent: AppEvent = {
+    seq: quiet.log.nextSeq(),
+    ts: T0.toISOString(),
+    type: 'mcp/server-started',
+    data: { name: 'demo', pid: 7, tools: [], toolDetails: [] },
+    visibility: defaultVisibility('mcp/server-started'),
+    origin: 'test',
+  } as unknown as AppEvent;
+  quiet.log.append(quietEvent, { sync: true });
+  applyOne(emptyProjection(), quietEvent);
+  const empty = await readOne(quiet);
+  assert.equal(empty?.toolsQuery, 'empty', '握手过了、tools/list 回了空 ⇒ 是"它当前不提供工具"');
+  assert.equal(empty?.toolsFrom, 'none');
+  assert.deepEqual(empty?.toolList, []);
+  assert.equal(empty?.toolsSeenAt, T0.toISOString(),
+    '这一格现在只答"拉到过没有"：拉到过就给时刻（老语义还要求清单非空，两种空在那格上分不开）');
+
+  const never = await setup(t);
+  await command(never, 'mcp-save', { name: 'demo', command: 'node', args: ['server.mjs'], enabled: true });
+  const cold = await readOne(never);
+  assert.equal(cold?.state, 'never-started');
+  assert.equal(cold?.toolsQuery, null, '没起来过就不写这一格——"没问过"由 state 那一格说');
+  assert.equal(cold?.toolsFrom, 'none');
+  assert.equal(cold?.toolsListAt, null);
+  assert.equal(cold?.toolsAgeMs, null, '没有清单就没有年龄，不许编一个 0');
+});
+
+test('/api/mcp：工具清单的兼容面——旧后端（没有 toolList）与旧日志（只有 tools 名字）', async (t) => {
+  // 界面与主进程是**两个可执行文件**：界面先升、后端还跑着上一版 dist 是常态，
+  // 所以"新字段不在"这种情况必须按数据缺格读（界面那一侧照 `toolDetails` 回退，见
+  // gui/lib/pages/extensions_page.dart 的 `_McpTools`）。这一条钉后端这一侧的两档：
+  //   ① 旧日志的启动事件只有 `tools`（没有 `toolDetails`）⇒ 名字照样进 `toolList`，描述留空；
+  //   ② 回收不把 `toolsSeenAt`（清单时刻）一起清掉——它是这份清单唯一的"是何时的答案"。
+  const fx = await setup(t);
+  await command(fx, 'mcp-save', { name: 'old', command: 'node', args: ['server.mjs'], enabled: true });
+  const append = (type: string, data: unknown, ts: Date = T0): void => {
+    const event: AppEvent = {
+      seq: fx.log.nextSeq(),
+      ts: ts.toISOString(),
+      type,
+      data,
+      visibility: defaultVisibility(type),
+      origin: 'test',
+    } as unknown as AppEvent;
+    fx.log.append(event, { sync: true });
+    applyOne(emptyProjection(), event);
+  };
+  append('mcp/server-started', { name: 'old', pid: 1, tools: ['echo'] });
+
+  interface Row {
+    toolList: Array<{ name: string; description: string; fullName: string }>;
+    toolsFrom: string; toolsQuery: string | null; toolsListAt: string | null; toolsSeenAt: string | null;
+  }
+  const readOne = async (): Promise<Row | undefined> => {
+    const view = (await call(fx, '/api/mcp')).body as { servers: Row[] };
+    return view.servers.find((server) => server.name === 'old');
+  };
+
+  const first = await readOne();
+  assert.deepEqual(first?.toolList.map((tool) => tool.name), ['echo'], '旧形状只有名字，照样列得出来');
+  assert.equal(first?.toolList[0]?.description, '', '描述留空，但不许臆造');
+  assert.equal(first?.toolList[0]?.fullName, 'mcp__old__echo', '全名按 `mcp__{server}__{tool}` 合成');
+  assert.equal(first?.toolsQuery, 'ok');
+
+  append('mcp/server-stopped', { name: 'old', reason: 'crashed' }, T0);
+  const afterStop = await readOne();
+  assert.equal(afterStop?.toolsFrom, 'cached');
+  assert.deepEqual(afterStop?.toolList.map((tool) => tool.name), ['echo']);
+  assert.equal(afterStop?.toolsListAt, T0.toISOString(),
+    '清单时刻不许被回收清掉——没有它，那份清单就成了一句没有出处的断言');
+});
+
+// ──────────────────────────────── Hooks：人可写、agent 仍只读 ────────────────────────────────
 test('hook-save：写 data/hooks.json，条目过与装配侧同一把尺子', async (t) => {
   const fx = await setup(t);
   const file = join(fx.dataDir, 'hooks.json');

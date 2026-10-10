@@ -1852,7 +1852,29 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     const manual = evt<WakeManual>('wake/manual', { note: '手动戳一下' });
     assert.equal(renderWake(file), '[文件变化] changed：INBOX.md');
     assert.equal(renderWake(intention), '[意图到期] 检查备份');
-    assert.equal(renderWake(job), '[后台任务完成] job-7（用 job 查询工具看结果）');
+    // 后台任务完成（v41）：**正文随唤醒进请求**（用户 2026-10-08：「这类得是真唤醒」）。
+    // 没有正文的事件（老日志、或输出读不到）照旧给一行，但**不许**再指向那个不存在的"job 查询工具"。
+    assert.equal(renderWake(job), '[后台任务完成] job-7\n（这次没有留下输出正文）');
+    // 有正文时：命令、退出码、正文、以及"全文在哪 + 怎么读"四样齐
+    assert.equal(
+      renderWake(evt<WakeJob>('wake/job', {
+        jobId: 'job-8', command: 'npm run build', exitCode: 0,
+        outputExcerpt: '构建成功：42 个文件', outputBytes: 26, outputFile: 'data/jobs/job-8.log',
+      })),
+      '[后台任务完成] job-8：npm run build（退出码 0）\n'
+      + '结果正文（全文 26 字节，要全文（或重读）就用 safe_read 读 data/jobs/job-8.log）：\n'
+      + '构建成功：42 个文件',
+    );
+    // 截断过的那一截要**如实标注**（否则她把开头当成全文），并说清全文在哪
+    const clipped = renderWake(evt<WakeJob>('wake/job', {
+      jobId: 'job-9', command: 'noisy', exitCode: null,
+      outputExcerpt: '开头这一截', outputTruncated: true, outputBytes: 99_999,
+      outputFile: 'data/jobs/job-9.log',
+    }));
+    assert.match(clipped, /只给了开头 \d+ 字/u, clipped);
+    assert.match(clipped, /全文 99999 字节/u, clipped);
+    assert.match(clipped, /退出码 未知（没跑完就被结算）/u, '没跑完不许读成成功');
+    assert.equal(clipped.includes('job 查询工具'), false, '那句话指向的工具根本不存在');
     // 界面消息：带来源标注，不再是"无头无主的一句话"——她得能判断这话是谁递的
     assert.equal(renderWake(manual), '[界面消息] 手动戳一下', '无署名时也直说是界面消息');
     assert.equal(

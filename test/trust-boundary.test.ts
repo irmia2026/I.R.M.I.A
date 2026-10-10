@@ -195,11 +195,11 @@ describe('完全信任 · 工作根之外的文件真的能碰', () => {
     t.diagnostic(`已实测：boundaryRoot=null 时成功读取 ${target}`);
   });
 
-  it('list_dir：列工作根之外的目录', async () => {
+  it('safe_read 传目录：列工作根之外的目录（v42：列目录并进 safe_read）', async () => {
     const h = await makeHarness();
     await writeFile(join(outside, 'listed.txt'), 'x', 'utf8');
 
-    const result = await run(h.tool('list_dir'), h.ctx({ boundaryRoot: null }), { path: outside });
+    const result = await run(h.tool('safe_read'), h.ctx({ boundaryRoot: null }), { path: outside });
 
     assert.notEqual(result.isError, true, result.content);
     assert.match(result.content, /listed\.txt/u);
@@ -246,9 +246,9 @@ describe('只限工作目录 · 同样的路径被拒绝，且理由说清边界
     assertBoundaryDenial(result, boundary);
   });
 
-  it('list_dir 越界被拒', async () => {
+  it('safe_read 传目录越界同样被拒（列目录不是绕过边界的第二条路）', async () => {
     const h = await makeHarness();
-    const result = await run(h.tool('list_dir'), h.ctx({ boundaryRoot: boundary }), { path: outside });
+    const result = await run(h.tool('safe_read'), h.ctx({ boundaryRoot: boundary }), { path: outside });
     assertBoundaryDenial(result, boundary);
   });
 
@@ -342,7 +342,7 @@ describe('workspace 档 · 默认边界（= 工作根）下，她自己的资产
     const ctx = h.ctx({ boundaryRoot: root });
 
     const read = await run(h.tool('safe_read'), ctx, { path: join(outside, 'secret.txt') });
-    const list = await run(h.tool('list_dir'), ctx, { path: outside });
+    const list = await run(h.tool('safe_read'), ctx, { path: outside });
 
     for (const result of [read, list]) {
       assertBoundaryDenial(result, root);
@@ -353,16 +353,18 @@ describe('workspace 档 · 默认边界（= 工作根）下，她自己的资产
 // ──────────────────────────────── 默认仍是受限（回归钉子） ────────────────────────────────
 
 describe('回归钉：不传 boundaryRoot 的调用点一条都不许被打开', () => {
-  it('safe_read / safe_write / list_dir 在工作根之外全被拒绝（历史口径原样）', async () => {
+  it('safe_read / safe_write 在工作根之外全被拒绝（历史口径原样）', async () => {
     const h = await makeHarness();
     const plain = h.ctx(); // 刻意不带 boundaryRoot
     assert.equal('boundaryRoot' in plain, false, '这条用例的前提就是不传它');
 
     const read = await run(h.tool('safe_read'), plain, { path: join(outside, 'whatever.txt') });
     const write = await run(h.tool('safe_write'), plain, { path: join(outside, 'pwn.txt'), content: 'x' });
-    const list = await run(h.tool('list_dir'), plain, { path: outside });
+    // 目录形态走的是同一条 resolveGuarded（`allowDirectory` 只改"收不收目录"，
+    // **边界那一条一个字没松**）——所以它必须同样被拒，措辞也是同一句
+    const list = await run(h.tool('safe_read'), plain, { path: outside });
 
-    for (const [name, result] of [['safe_read', read], ['safe_write', write], ['list_dir', list]] as const) {
+    for (const [name, result] of [['safe_read', read], ['safe_write', write], ['safe_read（目录）', list]] as const) {
       assert.equal(result.isError, true, `${name} 本该被拒：${result.content}`);
       assert.equal(result.error?.code, FS_ERROR_CODES.PATH_DENIED, name);
       // 历史措辞原样保留（既有 fs 测试按它断言）

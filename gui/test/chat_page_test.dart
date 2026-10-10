@@ -434,6 +434,59 @@ void main() {
     expect(find.text('手动唤醒'), findsOneWidget);
   });
 
+  // ── 框架通报（`via` 有值）与"用户的话"的分流：判据是 via，不是 note 的内容 ──
+  //
+  // 背景：`via:'mcp'` 那一条曾经落进"有 note = 用户的话"那一支，被摆成右侧蓝气泡
+  // （用户 2026-10-09 的截图）。修法不是"再补一个 via == 'mcp' 分支"，而是**按
+  // "是不是框架通报"分流**——所以下面第三条用一个**今天还不存在的 via** 钉住它。
+
+  testWidgets('框架通报：via 有值 → 一张框架卡，正文在卡里（不是用户的气泡）', (tester) async {
+    const note = '你手边的 MCP 声明改了：加了 filesystem。现在一共 1 个。';
+    await pumpChat(tester, history: [
+      evt(1, 'wake/manual', {'note': note, 'via': 'mcp'}),
+    ]);
+
+    final card = find.byKey(const ValueKey('notice-card'));
+    expect(card, findsOneWidget, reason: '框架替他做的动作留下的通报 → 走框架卡');
+    expect(find.text('框架提醒'), findsOneWidget, reason: '卡头那枚徽章说的是"这不是谁说的话"');
+    expect(find.text('MCP 声明变更'), findsOneWidget, reason: '卡头写清是哪种通报');
+    expect(find.descendant(of: card, matching: find.text(note)), findsOneWidget,
+        reason: '通报正文摆在卡里——原来的毛病正是它被摆成右侧蓝气泡（= 用户的话）');
+  });
+
+  testWidgets('做梦（via=dream）仍是原来那张卡，标签一个字没动', (tester) async {
+    await pumpChat(tester, history: [
+      evt(1, 'wake/manual', {'note': '该做梦了（用户按的）。', 'via': 'dream'}),
+    ]);
+
+    expect(find.byKey(const ValueKey('notice-card')), findsOneWidget);
+    expect(find.text('做梦'), findsOneWidget);
+    expect(find.text('该做梦了（用户按的）。'), findsOneWidget);
+  });
+
+  testWidgets('以后再加一种 via（压缩通报）**不必改界面**：照样进同一张框架卡', (tester) async {
+    // `'compact'` 今天不存在——这条用例钉的正是"判据是 via 有没有值，不是逐个 via 列举"：
+    // 哪天写入侧真的补上 `via:'compact'`，界面不用回来改，也不会退回蓝气泡。
+    await pumpChat(tester, history: [
+      evt(1, 'wake/manual', {'note': '上下文压缩了一次。', 'via': 'compact'}),
+    ]);
+
+    final card = find.byKey(const ValueKey('notice-card'));
+    expect(card, findsOneWidget, reason: '认不出来的框架通报也只走这一条路');
+    expect(find.text('框架通报'), findsOneWidget, reason: '标签落到兜底那个词');
+    expect(find.descendant(of: card, matching: find.text('上下文压缩了一次。')), findsOneWidget);
+  });
+
+  testWidgets('分流判据是 via、不是"note 空不空"：没带 via 的仍是用户的气泡', (tester) async {
+    await pumpChat(tester, history: [
+      evt(1, 'wake/manual', {'note': '你去看看日志'}),
+    ]);
+
+    expect(find.byKey(const ValueKey('notice-card')), findsNothing,
+        reason: '没带 via = 人打的字（看门文件那条路压根没有 via）→ 不许摆成框架卡');
+    expect(find.text('你去看看日志'), findsOneWidget);
+  });
+
   // ────────── 往上翻历史：取更早的一页 + 不跳屏 + 到头停住（修订清单 ⑮） ──────────
 
   testWidgets('滚到顶自动往前翻页：一次一页、按 seq 往回，直到日志开头', (tester) async {

@@ -178,9 +178,11 @@ describe('信任级 · 工具可见性（安全默认压过用户配置）', () 
     const v = modelVisibilityFor('external', true);
     assert.deepEqual(v, { allowOnly: EXTERNAL_TOOL_ALLOWLIST });
     assert.ok(v.allowOnly?.includes('speak'));
-    // safe_read / list_dir / rg_search 都不是 destructive，但它们能读到 MEMORIES/
+    // safe_read / rg_search 都不是 destructive，但它们能读到 MEMORIES/
     // 里关于用户的事——对一个从群里来的陌生人同样不该给。它们不在白名单里，这就是那条界线。
-    for (const name of ['safe_read', 'list_dir', 'rg_search', 'pwsh', 'safe_write', 'write_persona']) {
+    // （v42 起列目录并进 safe_read：`list_dir` 这个名字没了，但"能不能列目录"这件事
+    //  跟着 safe_read 一起被挡在白名单之外——方向是收紧。）
+    for (const name of ['safe_read', 'rg_search', 'pwsh', 'safe_write', 'write_persona']) {
       assert.ok(!v.allowOnly?.includes(name), `${name} 不该给外部来源`);
     }
   });

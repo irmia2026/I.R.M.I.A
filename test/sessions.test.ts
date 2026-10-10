@@ -15,8 +15,8 @@ import { describe, test } from 'node:test';
 
 import {
   CHANNEL_LABELS, CHAT_TYPE_LABELS, channelForNamespace, collectSessions,
-  normalizeSid, parseAliases, applyAliases, parseSid, resolveSessionName, sessionLabelOf,
-  sidLookupKeys, sidOf, upsertSession, type SessionEntry,
+  normalizeSid, parseAliases, parseMemberAliases, resolvePersonNameFromTables, applyAliases, parseSid,
+  resolveSessionName, sessionLabelOf, sidLookupKeys, sidOf, upsertSession, type SessionEntry,
 } from '../src/channel/sessions.ts';
 import { replyUrlForWake } from '../src/tools/admin.ts';
 import type { AppEvent, ChannelMessage, ChannelRead, WakeChannel } from '../src/log/types.ts';
@@ -223,6 +223,71 @@ describe('会话簿 · 名字从哪来', () => {
   test('空别名表与缺文件同样处理：不报错，退回 openid', () => {
     assert.equal(parseAliases('').size, 0);
     assert.equal(applyAliases([], new Map()).length, 0);
+  });
+});
+
+/**
+ * 发言人（`person`）→ 名字 —— src/channel/sessions.ts 的 `resolvePersonNameFromTables`
+ *
+ * 这一组锁的是 2026-10-11 修的那处缺口：她在 `aliases.md` 的 `# 群成员` 段里按段头那句
+ * "只在认人时用"写下 `1269541505 = OWNER（用户）`，而框架原来只查合成出来的
+ * `qq:c2c:<id>` / `onebot:c2c:<id>` 两个键——**她写在正确位置的身份声明一个字都没被看见**，
+ * 于是用户第一次在 OneBot 群里露面时，那一行显示成机器发的一次性占位名「群友A（群昵称：用户）」，
+ * 她当众回他"这会儿光一串号我还认不了你"（现场见 data/events 的 seq 41686 / 41733）。
+ */
+describe('发言人 → 名字 · 人写的三处', () => {
+  const QQ = '1269541505';
+  const OWNER = '用户（OWNER）';
+
+  test('只有群成员别名（裸 id）也能认出来：这是原来断掉的那一档', () => {
+    const memberAliases = parseMemberAliases(`# 该群成员\n${QQ} = OWNER（用户）（02:27 GUI 亲口认领）`);
+    assert.equal(typeof memberAliases.get(QQ), 'object', '成员那一段进的是**另一张表**，不是会话表');
+    assert.equal(parseAliases(`${QQ} = OWNER（用户）`).size, 0, '同一行不该进会话别名表（键不是 sid）');
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, memberAliases), 'OWNER');
+  });
+
+  test('权威顺序：联系人表 > 她会话别名 > 她群成员别名；查不到就 null（不编名字）', () => {
+    const c2c = new Map([[`onebot:c2c:${QQ}`, '她会话里认的']]);
+    const memberAliases = new Map([[QQ, { name: '她群成员段认的' }]]);
+    // ① 联系人表（人声明的事实）压过她自己写的两处
+    assert.equal(resolvePersonNameFromTables(QQ, new Map([[`onebot:c2c:${QQ}`, OWNER]]), c2c, memberAliases), OWNER);
+    // ② 会话别名（更具体：那条记录说的是"这个人从这扇单聊门来过"）压过群成员段
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, c2c, memberAliases), '她会话里认的');
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, memberAliases), '她群成员段认的');
+    // ③ 三处都没有 = null——占位名那一档**不在这里**（它要读盘，由 real-loop 接在最后）
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, undefined), null);
+    assert.equal(resolvePersonNameFromTables('', new Map([[`onebot:c2c:${QQ}`, OWNER]]), undefined, undefined), null,
+      '空 person 不查表');
+    // ④ 空白名字当没有（不许把空格当名字）
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, new Map([[QQ, { name: '   ' }]])), null);
+  });
+
+  test('两条通道的 id 各自命中：官方 openid 与 OneBot QQ 号都能查', () => {
+    const contacts = new Map([
+      ['qq:c2c:E7FEC35E951B5CCF8BA66793BF6B1314', OWNER],
+      [`onebot:c2c:${QQ}`, OWNER],
+    ]);
+    assert.equal(resolvePersonNameFromTables('E7FEC35E951B5CCF8BA66793BF6B1314', contacts, undefined, undefined), OWNER);
+    assert.equal(resolvePersonNameFromTables(QQ, contacts, undefined, undefined), OWNER);
+  });
+
+  test('成员别名的解析口径与会话别名逐字对称（同一份文件、同一个 `裸 id = 名字`）', () => {
+    const text = [
+      '# 身份别名',
+      'qq:c2c:E7FE = OWNER（用户）',
+      '# 该群成员（openid，不是 sid；只在认人时用）',
+      '- 1269541505 = **OWNER（用户）**——GUI 亲口认领那次',
+      'B01F025D72D3B2075F49EFB08297D105 = 1 号',
+      '这不是别名',
+    ].join('\n');
+    const members = parseMemberAliases(text);
+    // 名字 = 第一个括号之前那一段（`splitAliasNote` 的既有口径，与会话别名**同一个**解析）。
+    // 注意她那种 `**OWNER（用户）**` 的写法：粗体标记夹着括号时，`用户）**` 会落进备注
+    // ——这不是这一版引入的，`parseAliases` 一直如此；两张表口径一致才是这里要钉的事。
+    assert.deepEqual(members.get('1269541505'), { name: 'OWNER', note: '用户）**——GUI 亲口认领那次' });
+    assert.deepEqual(members.get('B01F025D72D3B2075F49EFB08297D105'), { name: '1 号' });
+    assert.equal(members.size, 2, 'sid 那类键不进成员表；坏行照旧跳过');
+    assert.equal(parseAliases(text).size, 1, '两张表互补：会话表只收 sid 那类键');
   });
 });
 

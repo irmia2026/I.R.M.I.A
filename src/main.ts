@@ -19,20 +19,24 @@ import { basename, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
+// 值导入：工具侧写入点的**可见性判据**（表说 model 的事件省略可见性即抛，见它的注释）
+import { resolveEventVisibility } from './log/types.ts';
 import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channel/inbox.ts';
 import { ManagedProtocolService, readEndpointFromConfig, resolveServiceDir } from './services/snowluma.ts';
 import { normalizeSid, parseAliases } from './channel/sessions.ts';
 import { createNotifier } from './alert/notifier.ts';
 import { notifyStartupRecovery } from './alert/startup.ts';
 import { loadConfig, readApiKey, trustBoundaryRoot, type AppConfig } from './config/config.ts';
+import { ConfigWatcher } from './config/watcher.ts';
 import { ensurePersonaSeeds, loadPersona, type PersonaAssets } from './persona/loader.ts';
 import { ensureMemorySeeds } from './persona/memory-maintain.ts';
 import { ensureMemoryIndex } from './persona/memory-injection.ts';
 import { DsClient } from './model/ds-client.ts';
+import { McpClientPool, type McpDeclarationChange } from './mcp/client.ts';
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
 import type { ToolRegistry } from './tools/registry.ts';
-import type { MediaPoster, ReplyPoster } from './tools/admin.js';
+import type { InputNotifyPoster, MediaPoster, ReplyPoster } from './tools/admin.js';
 import { SkillManager } from './skill/skills.ts';
 import {
   HookRunner, digestProjection, hookConfigPath, loadHookConfig, protectedHookPaths,
@@ -52,6 +56,7 @@ import {
   QqOfficialChannel, createChannelReplyPoster,
 } from './channel/qq-official.ts';
 import { createWorkspaceMediaPoster } from './channel/media-poster.ts';
+import { createInputNotifyPoster } from './channel/input-notify.ts';
 import {
   ONEBOT_REPLY_SCHEME, OneBotChannel, createOneBotReplyPoster,
 } from './channel/onebot.ts';
@@ -71,7 +76,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.5';
+export const AGENT_VERSION = '0.1.0-beta.6';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -160,6 +165,84 @@ async function overdueHints(timers: TimerStore, now: () => Date): Promise<Map<st
 }
 
 // ──────────────────────────────── 编排 ────────────────────────────────
+
+/**
+ * 一次 MCP 声明面热更的**净效果**（一句话）。诊断输出与给她的通报正文**共用这一份**
+ * ——两处各写一遍必然漂移（一处改了、另一处照旧），而它们说的本来就是同一件事。
+ *
+ * 顺序即事实：`added` / `changed` 按新声明里的次序、`removed` 按旧声明里的次序
+ * （它们要直接读进给她的那句话里，顺序乱了那句话读起来就像随机抽样）。
+ * 三段各自成句，空的那段不出现（不写"删除了：无"这种机器腔）；
+ * `style` 只决定动词用"加/删/改"还是"加了/删了/改了"（前者给日志、后者给正文）。
+ */
+function describeMcpDeclChange(change: McpDeclarationChange, style: 'terse' | 'sentence' = 'terse'): string {
+  const verb = style === 'sentence'
+    ? { added: '加了 ', removed: '删了 ', changed: '改了 ' }
+    : { added: '加 ', removed: '删 ', changed: '改 ' };
+  const sep = style === 'sentence' ? '，' : '；';
+  const what = [
+    change.added.length > 0 ? `${verb.added}${change.added.join('、')}` : '',
+    change.removed.length > 0 ? `${verb.removed}${change.removed.join('、')}` : '',
+    change.changed.length > 0 ? `${verb.changed}${change.changed.join('、')}` : '',
+  ].filter((part) => part !== '').join(sep);
+  // 三个都空 = 字段变了但每个 server 的内容都没变（多半只调了次序）：如实说，别留一句空话
+  return what === '' ? '每个 server 的内容都没变' : what;
+}
+
+/**
+ * 这次改动的**身份**（幂等键里那半段）：**动了哪些 server**，不含正文。
+ *
+ * 与 `web/server.ts` 的 `mcpChangeIdentityKeyOf` 是**同一把尺子**（那边管界面上的保存、
+ * 这边管直接改文件），刻意各留一份而不是硬拉一个共享函数：两处的输入类型不同
+ * （那边是配置文档里的裸条目、这边是解析后的 `McpDeclarationChange`），
+ * 而"身份 = ±/~ 加名字集合"这条判据本身只有三行——共用一个泛型函数要靠适配器，
+ * 适配器比这三行更容易漂。**两处都改时要一起看**（测试 `test/mcp-config-hot-reload.test.ts`）。
+ */
+function mcpReloadIdentityKeyOf(change: McpDeclarationChange): string {
+  return [
+    `+${[...change.added].sort().join(',')}`,
+    `-${[...change.removed].sort().join(',')}`,
+    `~${[...change.changed].sort().join(',')}`,
+  ].join('|');
+}
+
+/**
+ * 给她的那句话（`wake/manual{via:'mcp'}` 的正文）。
+ *
+ * 三件事必须都在里面，少一件这句话就没用：
+ *   ① **变了什么**（加了/删了/改了哪些 server，逐字点名）；
+ *   ② **现在一共几个**（"现在一个都没有了"而不是"一共 0 个"——后者读起来像故障码）；
+ *   ③ **去哪儿看清单**（`mcp` 工具，不带 server）——这段通报**刻意不带工具全文**：
+ *      披露式的全部价值就是"工具不进上下文，她调用时才披露"。
+ *
+ * 第四句（"索引不会立刻跟着变"）是**这条路独有**的：热更之后索引与配置会短暂不一致
+ * （设计内，判据见 `real-loop.mcpIndexSync` 与 `HOT_RELOAD_FIELDS` ①）。
+ * 不写这一句，她读到索引里没有那个新 server 时只会得出"我记错了"或"热更没生效"。
+ *
+ * 与 web 侧 `mcpChangeWakeNoteOf` 的差别也在这第一句：那条说的是"界面刚存了配置"，
+ * 这条说的是"文件在运行期变了"——两条路的来源不同，正文里说清是哪一种，读历史的人才分得清。
+ */
+function mcpReloadNoteOf(change: McpDeclarationChange, totalAfter: number): string {
+  const total = totalAfter === 0 ? '现在一个都没有了' : `现在一共 ${totalAfter} 个`;
+  return [
+    `config.json 里的 MCP 声明改了（改动当场生效，不用重启）：${describeMcpDeclChange(change, 'sentence')}`,
+    `${total}。要看工具清单就用 \`mcp\` 工具（不带 server 看有哪些 server）。`,
+    '⚠️ 你上下文里那份 **MCP 常驻索引不会立刻跟着变**——它保持原样，等下一次上下文重大变化'
+      + '（压缩 / reset）或下次启动时才归集。所以这份通报是**追加在末尾**的：'
+      + '以它为准，别以为索引里没写就等于没有。',
+  ].join('\n');
+}
+
+/**
+ * 内容哈希做幂等键（与 `web/server.ts` 的同名函数**逐字同源**：截 16 位 = 够区分又短到人能比对）。
+ *
+ * 为什么要在这里也有一份：`dedupeKey` 是**唤醒的幂等键**，唯一性规则必须与哪条路写的无关
+ * ——同一个身份算出来的键在哪一边都得一样。那边那一份是模块私有函数（没导出），
+ * 而为一个三行的哈希去导出它、再让 main.ts 去认 web 那一层，比留这一份更绕。
+ */
+function contentKey(prefix: string, text: string): string {
+  return `${prefix}-${createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16)}`;
+}
 
 export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const write = options.out ?? ((line: string) => {
@@ -298,10 +381,15 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 后台任务管理器（design §4.21 jobs）：pwsh 的 runInBackground 从这里进出，
   // 共用它一个实例——job/* 与 wake/job 事件只有这一个写入点。
   // v27 删掉了它的别名 run_command：两个名字共用一个执行体，实测只用得上一个。
+  //
+  // **v41 起把投影也交给它**（2026-10-08 修的真缺陷）：它写的事件原先只落盘、不折投影，
+  // 而运行期读 `pending` 的是内存投影——于是 `wake/job` 成了"日志里有、循环永远看不见"的唤醒，
+  // **不起 turn**（她得等下一次重启才知道任务早完了）。纪律与 real-loop 的 `appendSync` 同一条。
   const jobManager = new JobManager({
     log,
     dataDir,
     now,
+    projection: recovery.projection,
     warn: (message) => { write(`[后台任务] ${message}`); },
   });
 
@@ -351,6 +439,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 用闭包而不是快照：注册表要在 RealLoop 之前装配，而回投目标的"值"只能来自运行中的循环。
    */
   const realLoopRef: { current: RealLoop | null } = { current: null };
+
+  /**
+   * MCP 池的句柄（惰性，装配在下面"有 key"那一支里）：退出时要**按官方关机序列**收掉它
+   * 拉起的子进程（关 stdin → 等待 → SIGTERM → SIGKILL）。少了这一步，那些 server
+   * 进程会在框架退出后变成孤儿——它们是别人的进程，不该被留在这台机器上。
+   */
+  const mcpPoolRef: { pool: McpClientPool | null } = { pool: null };
 
   /**
    * QQ 官方通道（M9）。装配条件：配置打开 + 两个环境变量非空。
@@ -409,6 +504,21 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
           return await qqReplyPoster.post(target, text);
         },
       };
+  /**
+   * **"正在输入"的投递口**（2026-10-11，用户：「只做正在输入。speak 时触发」）。
+   *
+   * 装配判据只有两条，且都在这里：
+   *   • `config.speak.inputNotify` 为真（**出厂开**）——关掉时**根本不装它**，于是
+   *     `speak` 一个请求都不发。判据落在接线层（而不是在 `speak` 里再 if 一次），
+   *     所以工具层永远不知道有这么一个开关；
+   *   • 有通道（`channels.size === 0` 时没什么可发的；装上也只是每轮白跑一次查表）。
+   *
+   * **不在这里按通道名分支**：哪条通道会发、哪个会话类型能发，全由
+   * `channel/input-notify.ts` 按**能力**（有没有 `sendInputNotify`）与通道自己的实现判。
+   * OneBot 没有这条能力 ⇒ 它上面表现为"优雅跳过"。
+   */
+  const inputNotifyPoster: InputNotifyPoster | null =
+    config.speak.inputNotify && channels.size > 0 ? createInputNotifyPoster(channels) : null;
   /**
    * 媒体投递口（`send_media`）：本机文件只允许**两个允许根**里的路径——`dataDir` 与
    * **工作根**（与 fs 工具族、`http_download` 同源），读成字节交给通道层；
@@ -500,6 +610,156 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     write(`[依赖] 探测失败：${err instanceof Error ? err.message : String(err)}`);
   });
 
+  /**
+   * MCP 客户端池（2026-10-09，**第一次真的接上**）。
+   *
+   * 在这之前 `McpClientPool` 在整个 `src/` 里**没有任何构造点**（只有测试里 new 过）
+   * ——配置里那份 `mcp.servers[]` 谁也没读过、谁也没起过。这一版把它接进主流程。
+   *
+   * **刻意不给它 `registry`**（池的选项里有这一格，这里不传）：用户拍定的口径是
+   * "只有一件内置入口工具 `mcp`，此后 MCP 都从它调用"。池一旦拿到注册表，
+   * `syncServerTools` 就会把 `mcp__{server}__{tool}` 写进模型清单——
+   * 那正好是这一版要避开的那件事（工具清单一变 = 一次全 miss ≈9.6 万 token）。
+   * 披露式的全部价值就在这一句上：**MCP 的工具不进 `tools` 段，只在她调用时进工具结果。**
+   *
+   * **不 `registerAll()`**：那是"启动期把每个 server 都拉起来"的枚举口径；池自己的纪律是
+   * **随用随起**（`ensureReady` 在 `callTool` / `listTools` 路径上按需拉起，空闲 5 分钟回收）。
+   * 启动期不起任何外部进程，也不因为某个 server 起不来而拦住启动。
+   *
+   * 没有声明任何 server 时**照旧建池**：`mcp` 入口工具要无条件常驻（清单一变就是一次全 miss），
+   * 它调用时如实回一句"没有已声明的 server"——而不是"这件工具不存在"。
+   *
+   * **建在分支之前**（真假循环都看得见它）：没有 key 的机器上「扩展 → 工具」那一页
+   * 照样要看得见 `mcp` 这件工具（与 `memory_read` / `pwsh` 同一条理由）。假循环那个池
+   * 永远不会被调用（不跑模型就不派发工具），所以它也不会拉起任何外部进程。
+   */
+  const mcpPool = new McpClientPool({
+    servers: config.mcp.servers,
+    // 生命周期事件落 mcp/server-started / mcp/server-stopped（internal）：
+    // 界面「扩展 → MCP」的运行期状态就是从这两条折出来的（mcpView）
+    //
+    // 可见性走**同一处判据**（不是手写的字面量）：这几条今天在表里都是 internal，所以这里
+    // 显式写 `internal` 是对的；而哪天有人把其中一条改成 `model`，这一处会**当场抛**，
+    // 逼他回来回答"这条到底进不进上下文"——而不是让它静默留在 internal（那正是
+    // `vision_read` / `speak` 那两个洞的形状，见 resolveEventVisibility 的注释）。
+    emit: (type, data) => { append(type, data, resolveEventVisibility(type, 'internal')); },
+    dataDir,
+    onLog: (line) => { write(`[MCP] ${line}`); },
+    // 两格池级参数（2026-10-10 接线，出厂值在 config.ts 的 mcp 段）：
+    //   · maxInFlight = **整池**在飞上限（超限如实拒绝、不排队；极多 server + 子代理并发时往上调，
+    //     逐 server 那一格管的是"别把同一个 server 打爆"，这一格管"别同时拉起 N 个别人的进程"）；
+    //   · rssSample = 是否采那个进程的 RSS（关掉后 /api/mcp 那几格如实留空；环境变量
+    //     IRMIA_MCP_RSS_SAMPLE 比它优先，见 client.ts 的 resolveRssSampler）。
+    maxInFlight: config.mcp.maxInFlight,
+    rssSample: config.mcp.rssSample,
+  });
+  mcpPoolRef.pool = mcpPool;
+  if (config.mcp.servers.length === 0) {
+    write('[MCP] config.json 里没有声明任何 server（mcp.servers[] 为空）：'
+      + '`mcp` 工具照常在她手里，调用时会如实说"没有已声明的 server"');
+  } else {
+    const names = config.mcp.servers.map((entry) => `${entry.name}${entry.disabled === true ? '（已停用）' : ''}`);
+    write(`[MCP] 已声明 ${config.mcp.servers.length} 个 server：${names.join('、')}`
+      + '（随用随起：第一次调用才拉起它，空闲 5 分钟回收；它们的工具不进她的工具清单，走 `mcp` 工具调）');
+  }
+
+  /**
+   * ──────────────────── 配置热重载（2026-10-10，MCP 声明面）────────────────────
+   *
+   * **为什么走 `ConfigWatcher` 而不是自己再写一个轮询**（用户问的那件事的答案）：
+   * `config/watcher.ts` 里那套东西是**为这件事写好的、一直没人接**（`HOT_RELOAD_FIELDS`
+   * 曾经因此被清空，理由逐字写在那一行上面）。它已经有四条必需的性质，一条都不该在第二份实现里
+   * 重新想一遍：
+   *   · **检测是两路合并**：`FileWatcher` 监听**父目录**（Windows 上"临时文件 → rename 覆盖"
+   *     这种原子写换掉了 inode，只监听文件本身会漏事件；本仓库的配置写回正是原子写）
+   *     ＋ 250ms 的 mtime/size/ino 签名轮询兜底；两路都汇进同一个 600ms 去抖窗口；
+   *   · **重载是串行的**（互斥锁链 + 两次重载间隔 ≥1s + 单次 20s 超时）：保存风暴不会把重载
+   *     叠成并发 IO，慢盘也不会把重载任务永远挂住；
+   *   · **白名单过滤只有一处实现**（`classifyConfigField`）：名单外的字段只写 warning、
+   *     不写 `config/changed`（那个事件的语义是"已生效"）；
+   *   · **失败保留旧配置**（文件头那段教义）：解析失败 ⇒ 继续按上一份好配置跑，只留一行诊断。
+   *     这一条正是用户要的"失败回退安全"的落点，而且它**天然覆盖**放行口缺失那一类：
+   *     `mcp.servers[].command` 的启动器校验在 `loadConfig` 里（`readMcpConfig` → `parseMcpServers`
+   *     → `checkStdioLauncher`），坏配置根本进不到下面这个订阅者里来。
+   *
+   * **生效粒度**：`configHash`/白名单那一层是"整字段"的（`mcp.servers` 是一个字段），
+   * 而真正决定"要不要重连某个 server"的是池的 `applyDeclarations`——它按
+   * `mcpEntryContentKey` 逐个比，**只重连真变了的**（见那个方法的注释：不打断别人的在飞调用、
+   * 不清别人的运维账）。所以"整字段替换"不会变成"整池重来"。
+   *
+   * **索引那一格刻意不动**：`mcp.servers` 进上下文的形态是**常驻索引**，而索引按既有快照机制
+   * **在重大变化点归集**（`compaction/summary` 之后 / 模板换代 / 首次）。这里要做的偏偏是它的反面
+   * ——**只追加一条尾部通报**（`wake/manual{via:'mcp'}`：加了/删了/改了哪些、现在一共几个），
+   * 索引那几个字节**一个都不改**（改了就是每轮请求前缀失配 = 缓存整段失效）。判据与代价写在
+   * `config/watcher.ts` 的 `HOT_RELOAD_FIELDS` ①与 `real-loop.mcpIndexSync` 的方法头。
+   *
+   * ──────────────────── 交接说明（2026-10-11 **已收尾**，留着是为了记住判据在哪） ────────────────────
+   *
+   * 接完热更这条线之后，"要重启才生效"那句话曾有三处互相不一致，现在三处按**同一份判据**收齐了：
+   *   · `src/web/server.ts` 的 `mcp-save` / `mcp-remove` 回执那一格 `restartRequired`
+   *     ——按**净效果**给，判据只有一处：`WebServerImpl.mcpRestartOutcome()` 的方法头
+   *     （那一节也是"将来加了不走热更的字段要登记的地方"）；
+   *   · 界面那一侧读它、不再写死（`gui/lib/pages/extensions_page.dart` 的 `_mcpWriteOutcome`：
+   *     `restartNote` 原样接在 toast 后面）；
+   *   · `test/extensions-commands.test.ts` 与 `test/mcp-decl-wake.test.ts` 钉的是新口径的三面
+   *     （有改动·接住了 ⇒ false；有改动·没人接住 ⇒ true；净效果为零 ⇒ false；
+   *     顺带写下的 `tools.disabled` 接不住 ⇒ true）。
+   */
+  const configWatcher = new ConfigWatcher({
+    configDir: process.cwd(),
+    initial: loadedConfig,
+    // `config/changed`（internal）：与 web 侧写的那条同名同形（fields + configHash）。
+    // 这里**不写** `requiresRestart`——那一条只描述"盘上改了、进程没改"的那种写盘命令；
+    // 热更这条路是真的生效了，而没生效的那些字段在 `warnings` 与下面的日志里逐条点名。
+    emit: (type: string, data: unknown, visibility: Visibility) => { append(type, data, visibility); },
+    out: write,
+  });
+  configWatcher.subscribe((change) => {
+    // ── ① 循环那一侧：如实说清"索引字节不动"（它读的是同一份就地改过的 AppConfig）──
+    if (loop instanceof RealLoop) loop.notifyConfigReloaded(change);
+    if (!change.fields.includes('mcp.servers')) return;
+    // ── ② 池那一侧：按 server 粒度重连；完了发尾部通报 ──
+    // **刻意不 await**：订阅者回调是同步接口，而重连要等关机序列（关 stdin → 等 → SIGTERM）。
+    // 配置已经生效了（就地改完才通知的），这里只是"把派生状态跟上"，它慢不该拖住重载；
+    // 失败也不吞：catch 里如实写一行。
+    void (async () => {
+      try {
+        const declChange = await mcpPool.applyDeclarations(config.mcp.servers);
+        const touched = declChange.added.length + declChange.removed.length + declChange.changed.length;
+        if (touched === 0) {
+          // 走到这里只有一种情形：`mcp.servers` 这个字段变了、但**每个 server 的内容都没变**
+          // （例如只调了数组里的次序）。按 web 侧同一把尺子"没改动就不叫她"。
+          write('[MCP] 声明面变了但每个 server 的内容都一样（多半只调了次序）：不重连、不通报');
+          return;
+        }
+        const note = mcpReloadNoteOf(declChange, config.mcp.servers.length);
+        const event = append('wake/manual', {
+          note,
+          // 与 web 侧 `wakeForMcpChange` 同一格：界面据此把它渲染成**框架卡片**而不是"用户说的话"
+          via: 'mcp',
+          // 幂等键（与 web 侧 `wakeForMcpChange` 同一格，但**不加时间片**）：取**改动的身份**
+          // （动了哪些 server），不取正文——正文里带着"现在一共几个"，拿它当键的话同一串编辑的
+          // 后几笔会各叫一次。web 侧要时间片是因为界面上的"保存"可以被连点（同一组改动重复提交）；
+          // 这条路只在**文件真的变了**时走（`ConfigWatcher` 的 diff 会滤掉"没变"的保存），
+          // 所以同一个身份就是同一件事，一个身份只该叫一次——而两次各改一个不同 server 是两个身份，
+          // 各自都会到（那是两件事，不是同一组改动的重复提交）。
+          // 前缀 `cfg-mcp` 与 web 侧的 `ui-mcp` 不同：两条路的来源不同，幂等键不该串味。
+          dedupeKey: contentKey('cfg-mcp', mcpReloadIdentityKeyOf(declChange)),
+        }, 'model');
+        // 先落库再折进投影（工具侧那条 emit 的同一条纪律）：本轮的挂起判定与前端投影
+        // 要当场看见这条唤醒，而不是等下一拍有人替我折。
+        applyOne(recovery.projection, event);
+        finalizePressure(recovery.projection, event.ts);
+        write(`[MCP] 声明面热更已生效（${describeMcpDeclChange(declChange)}）⇒ 通报 seq ${event.seq}`
+          + `（wake/manual · via=mcp）：常驻索引的字节不变，它在下一次重大变化或重启时归集`);
+      } catch (err) {
+        write(`[MCP] 声明面热更已生效，但池重建那一半失败了：${describeError(err)}`
+          + '（配置已是新的，下一次调用会按新声明走）');
+      }
+    })();
+  });
+  configWatcher.start();
+
   if (apiKey !== null) {
     const ds = new DsClient({
       baseUrl: config.models.heavy.baseUrl,
@@ -507,8 +767,16 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       heavyModel: config.models.heavy.model,
       lightModel: config.models.light.model,
     });
-    const emit = (type: string, data: unknown, visibility: Visibility = 'internal'): void => {
-      const event = append(type, data, visibility);
+    /**
+     * 工具侧的事件写入点。
+     *
+     * **可见性走 `resolveEventVisibility` 那一处判据**（省略 ⇒ 由 schema 表判；表说 `model`
+     * 的事件省略就当场抛）。原先是 `visibility: Visibility = 'internal'` 这个**恒为 internal**
+     * 的默认参数——它让"省略可见性"在两侧含义相反：表说 model、落库成 internal、渲染层不看它，
+     * 而回执照旧说"已放进你的上下文"（2026-10-11 修的 `vision_read` inline 与 `speak` 两处）。
+     */
+    const emit = (type: string, data: unknown, visibility?: Visibility): void => {
+      const event = append(type, data, resolveEventVisibility(type, visibility));
       // 工具写的事件必须**立刻**折进投影：plan 模式落下 human/asked 之后，本轮的挂起判定、
       // 前端投影与 real-loop 的挂起记账都要当场看见它（与 real-loop.appendSync 同一条纪律：
       // 先落库再改内存——而不是"等下一拍有人替我折"）。
@@ -594,6 +862,15 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       // destructive 工具的装配开关（§4.10 第三级门）：决定 http_post / http_download 这类
       // 「配置里显式开启才注册」的工具造不造出来，也决定 pwsh 的危险模式放不放行
       destructiveEnabled: destructiveTools,
+      // MCP 入口（2026-10-09）：`mcp` 工具的接线面就是池的那三个方法。
+      // **无条件传**（不是"有 server 才传"）：这一件必须常驻，理由见上面 mcpPool 的注释。
+      mcpClient: mcpPool,
+      // 披露式下**唯一还管得住 MCP 危险动作的那道门**：MCP 的工具不进注册表，
+      // `registry` 的 destructive 过滤够不着它们，所以入口那一件自己读这个开关
+      // （判据与代价见 `src/tools/mcp-entry.ts` 的文件头那张表）
+      mcpDestructiveEnabled: () => config.tools.destructiveEnabled,
+      // 单条回执上限：`mcp` 的清单披露走它（与父循环、子代理同一把尺）
+      blobOffload: { dataDir },
       // `task`（隔离子代理，design §4.21）的注册开关：**默认 false = 不注册**。
       // 判据是用户显式写的 `tools.taskEnabled`，与 destructiveEnabled 刻意**不共用**：
       // 后者是"允许她做不可自动重试的事"，前者是"多一件常驻工具"——两件事，两个开关
@@ -632,6 +909,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         replyPoster,
       }),
       ...(mediaPoster === null ? {} : { mediaPoster }),
+      // "正在输入"：只在配置开着（且装了通道）时才有这一下——关掉时连口子都不传
+      ...(inputNotifyPoster === null ? {} : { inputNotify: inputNotifyPoster }),
       onPersonaUpdated: () => {
         const fresh = loadPersona(dataDir);
         persona.identity = fresh.identity;
@@ -708,6 +987,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       destructiveEnabled: destructiveTools,
       deps,
       onNote: write,
+      // MCP 入口照旧装配（与真循环**同一个池实例**）：界面要看得见它、也要能关它。
+      // 这一支里没有任何东西会调用它（不跑模型就不派发工具），所以它不会拉起外部进程。
+      mcpClient: mcpPool,
+      mcpDestructiveEnabled: () => config.tools.destructiveEnabled,
+      blobOffload: { dataDir },
       // **刻意不接 `memoryReadRecorder`**：这条分支没有真循环（不跑模型、不派发工具），
       // 所以永远不会有一次真的记忆读取，也就没有访问账可记。`memory_read` 照旧注册
       // ——界面要看得见清单与开关（上面那条注释的理由）。
@@ -743,6 +1027,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       timers,
       now,
       ...(toolRegistry !== undefined ? { registry: toolRegistry } : {}),
+      /**
+       * **配置热更接线是活的吗**：`mcp-save` / `mcp-remove` 的回执里那一格 `restartRequired`
+       * 靠它给事实（否则那句话是假的：热更落地之后写盘即生效，不必重启）。
+       *
+       * 给的是**函数**而不是当下的快照：`stop()` 之后 `live` 会变 false，而回执问的是
+       * "此刻有没有人在接管配置变化"。判据只有一处（`ConfigWatcher.live` 的注释）。
+       */
+      configReload: () => configWatcher.live,
       // 外部依赖：GET /api/deps 读它的缓存结论，dep-install 装完就地复检并刷新它
       deps,
       // 内置协议端（v34）：界面上要能看它的状态、启停它、改它的目录。
@@ -941,7 +1233,23 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
     for (const source of sources) source.stop();
     if (webServer !== null) await webServer.close();
+    // 配置热重载：先撤监听（fs.watch 与那路 250ms 轮询），再做后面那些收尾
+    // ——退出过程中不该再有"配置变了 ⇒ 重连一个 MCP server"，那会与下面的池关机打起来。
+    configWatcher.stop();
     loop.stop();
+
+    // MCP server 是**别人的进程**：框架拉起来的就得由框架收尸（与上面协议端同一条纪律）。
+    // 走池自己的关机序列，收不掉时如实说出是哪几个——"留了一个孤儿进程"必须看得见。
+    if (mcpPoolRef.pool !== null) {
+      try {
+        const reports = await mcpPoolRef.pool.shutdown();
+        for (const report of reports) {
+          write(`[退出] MCP server ${report.name} 已停止（${report.reason}：${report.stages.join(' → ')}）`);
+        }
+      } catch (err) {
+        write(`[退出] MCP 池停止失败：${describeError(err)}`);
+      }
+    }
 
     try {
       append('session/end', detail === undefined ? { reason } : { reason, detail }, 'internal');

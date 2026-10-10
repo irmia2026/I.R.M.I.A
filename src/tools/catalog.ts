@@ -21,9 +21,11 @@ import type { JobManager } from '../runtime/job-manager.js';
 import type { EventLog } from '../log/event-log.js';
 import type { AppEvent, Projection } from '../log/types.js';
 import type { WakeChannel, MemoryRead } from '../log/types.js';
+// 值导入：vision 的 emit 适配层要**显式**给出可见性（见下面那一处注释）
+import { defaultVisibility } from '../log/types.ts';
 import type { DepsManager } from '../deps/manager.js';
 import type { DsClient } from '../model/ds-client.js';
-import type { MediaPoster, AdminEventEmitter, ChannelNameResolver, ChannelReader, ChannelSpokenReader, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
+import type { MediaPoster, AdminEventEmitter, ChannelNameResolver, ChannelReader, ChannelSpokenReader, InputNotifyPoster, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
 import type { ToolDefinition } from './types.js';
 import type { ListForModelOptions, ToolModelSpec } from './registry.js';
 import type { IsolationConfig, ToolPlanGate } from './executor.js';
@@ -39,6 +41,9 @@ import { createPwshTool } from './pwsh.ts';
 import { buildFsTools, DEFAULT_READ_ONLY_PREFIXES } from './fs/index.ts';
 import { createVisionTools } from './vision.ts';
 import { createMemoryReadTool } from './memory-tools.ts';
+import { createMcpEntryTool, type McpEntryClient } from './mcp-entry.ts';
+// 申请单目录（`<dataDir>/grants`）：只用于 `mcp` 入口回执里那句指路，不进 `tools` 段
+import { grantsDirOf } from '../grant/mcp-grant.ts';
 import { ToolRegistry } from './registry.ts';
 import { TimerStore as TimerStoreClass } from '../wake/timer-store.ts';
 
@@ -96,6 +101,47 @@ export interface ToolCatalogOptions {
    */
   taskRuntime?: TaskToolRuntimeResolver;
   /**
+   * MCP 入口（`mcp` 工具，2026-10-09 用户拍板：「增加一个内置 mcp 工具。此后 mcp 都从此工具调用。」）。
+   *
+   * **给了它就一定注册、无条件常驻**——这是这一件与 `task` / `rg_search` 那一类**相反**的地方：
+   *   · `task` 是条件注册（它只是"多一件能力"，不加也不缺什么）；
+   *   · `mcp` 是**唯一入口**：不注册 = 她一件 MCP 工具都没有（没有第二条路可走）。
+   *     而"按有没有声明 server 决定注不注册"这条判据在这里是**有害**的：声明面一变就改
+   *     `tools` 段 ⇒ 一次全 miss ≈ 9.6 万 token（实测见 `render.ts` 的 v42/v43 记录）。
+   *     所以"一个 server 都没声明"也照旧常驻，调用时由工具自己如实回一句"没有已声明的 server"。
+   *
+   * 不传 = 这个进程里没有 MCP 池（CLI 的 replay / doctor、没有 key 的假循环分支、测试台）：
+   * 那时**不注册** `mcp`，因为一件"永远报未接线"的入口只会让她反复试一条不存在的路。
+   */
+  mcpClient?: McpEntryClient | undefined;
+  /**
+   * MCP 入口那件的**危险动作开关**（`config.tools.destructiveEnabled`）。
+   *
+   * 为什么它是取值器而不是快照：同一份值在 `main.ts` 已经读了一次（`destructiveTools`），
+   * 而它决定的是"这一刻允不允许动危险动作"——取值器让宿主将来支持热更时不必回头改这里。
+   * 披露式下**这是唯一还管得住 MCP 的那道门**（MCP 的工具不进注册表，`registry` 的
+   * destructive 过滤够不着它们），理由与代价见 `tools/mcp-entry.ts` 的文件头那张表。
+   */
+  mcpDestructiveEnabled?: (() => unknown) | undefined;
+  /**
+   * 她递**申请单**的那个目录（`<dataDir>/grants`，2026-10-11 加）。
+   *
+   * 它**只影响 `mcp` 入口回执里那一句指路**（"没有 server 时你可以自己加一个"那一段），
+   * **不进 `tools` 段**——描述与参数表一个字节都没动。
+   *
+   * 三态：
+   *   • 不传 ⇒ 缺省 `<dataDir>/grants`（生产那条路）；
+   *   • 给一个字符串 ⇒ 用它（宿主自己知道那个目录在哪时）；
+   *   • **给 `null`** ⇒ 明说"这一处不知道那个目录在哪"（测试台 / 离线装配）：
+   *     回执退回改前那句"走界面「扩展 → MCP」"，**不编一个不存在的地方让她去写单子**。
+   */
+  mcpGrantsDir?: string | null | undefined;
+  /**
+   * 单条工具回执的上限（blob 外置），**与主循环同一把尺**。
+   * `mcp` 的清单披露与 `task` 的子代理回执都读它——这两条路都会产生"可能很长"的结果。
+   */
+  blobOffload?: BlobOffloadOptions | undefined;
+  /**
    * 外部依赖管理器（`src/deps/`，v30）。**探测只做一次**的来源：
    *   · `buildFsTools` 用它决定 rg_search / es_search 注不注册（没装就不注册）；
    *   · pwsh 工具用它拿默认 shell（探测到的 pwsh 7，可能是 PATH/自装目录/用户指定）。
@@ -146,6 +192,13 @@ export interface ToolCatalogOptions {
   currentWakeChannel?: () => WakeChannel['data'] | null;
   /** 回投实现（默认全局 fetch）；接了 IM 通道时换成通道自己的发送器 */
   replyPoster?: ReplyPoster;
+  /**
+   * "正在输入"的投递口（`config.speak.inputNotify` 为真时由宿主装配）。
+   *
+   * 不传 = `speak` 一次都不发那个状态——"关掉开关"这条路径因此在**接线层**就断了，
+   * 工具层不必再判一遍（也就没有"两处判据、漏一处"的余地）。
+   */
+  inputNotify?: InputNotifyPoster;
   /**
    * 图片直通是否开启（`config.vision.imagesToContext`）。
    *
@@ -288,6 +341,9 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     // 回投接线（M9）：有 IM 通道时 speak 的第三路才有地址；没有就如实跳过
     ...(options.currentWakeChannel === undefined ? {} : { currentWakeChannel: options.currentWakeChannel }),
     ...(options.replyPoster === undefined ? {} : { replyPoster: options.replyPoster }),
+    // "正在输入"（2026-10-11）：只在宿主装了它时才有这一下。**与 replyPoster 分开传**——
+    // 它们的失败语义完全不同（见 admin.ts 里 InputNotifyPoster 那段注释）。
+    ...(options.inputNotify === undefined ? {} : { inputNotify: options.inputNotify }),
     // 发言节奏与"他刚说了什么"：都只服务 speak（见 admin.ts）
     ...(options.speakTyping === undefined ? {} : { speakTyping: options.speakTyping }),
     ...(options.userSpoke === undefined ? {} : { userSpoke: options.userSpoke }),
@@ -352,7 +408,14 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
       // 图片直通的另一半（design §4.20）：`inline` 模式要写一条 image/attached 事件，
       // 因为工具结果只能是文本、塞不下图片。事件出口在这里包一层——vision 只该有
       // 写这一种事件的能力，不该拿到任意写权限。
-      emit: (type, data) => options.emit(type, data),
+      //
+      // **可见性必须由这一层给**（2026-10-11 修的一处静默失效）：vision 的窄接口
+      // （`vision.ts` 的 `VisionToolOptions.emit`）里根本没有 visibility 这一格——它只该写
+      // 这一种事件，所以"该给什么可见性"这个问题只能落在这个适配层，而答案在 schema 表里
+      // （`image/attached` = model）。原先是 `(type, data) => options.emit(type, data)`：
+      // 第三个参数被这一层吃掉，事件落成 internal，渲染层（`isModelVisible`）不看它
+      // ⇒ **回执写着"图片已放进你的上下文"，请求体里一张图都没有**（实测：input_image = 0）。
+      emit: (type, data) => options.emit(type, data, defaultVisibility(type)),
       imagesToContext: options.visionImagesToContext === true,
     }),
     // `memory_read`（用户的原话：「读记忆时能指定读对应索引的记忆，而不是用 read 工具，
@@ -366,6 +429,23 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
         : { onAccess: (data) => options.memoryReadRecorder!(data) }),
     }),
     ...buildTaskTools(options),
+    // MCP 入口（唯一一件）：见 `mcpClient` 的注释——给了接线就无条件常驻，不给就不注册。
+    // 放在 `task` 之后、shell 之前：位置只是"加进去那一次"的字节，此后不再变（v43 定的）。
+    ...(options.mcpClient === undefined
+      ? []
+      : [createMcpEntryTool({
+        client: options.mcpClient,
+        blobOffload: options.blobOffload ?? { dataDir: options.dataDir },
+        // 申请单目录（只影响**回执文本**里的指路：没有 server 时那段"你可以自己加一个"）。
+        // 缺省给 `<dataDir>/grants`；显式给 `null` = **没接线**（测试台/离线装配），
+        // 回执退回"去界面加"那句——不编一个不存在的地方让她去写单子。
+        ...(options.mcpGrantsDir === null
+          ? {}
+          : { grantsDir: options.mcpGrantsDir ?? grantsDirOf(options.dataDir) }),
+        ...(options.mcpDestructiveEnabled === undefined
+          ? {}
+          : { destructiveEnabled: options.mcpDestructiveEnabled }),
+      })]),
     ...adminKit.tools,
     ...buildShellTools(options),
   ];

@@ -27,10 +27,10 @@ import { join } from 'node:path';
 
 import type { AppEvent, MemorySelected, ModelLane } from '../log/types.js';
 import type { InputItem, RenderPersona, RenderedRequest } from '../model/render.js';
-import { NOW_LAYER_BANNER, RENDER_VERSION, clipTaskTitle, inputContentText, wakeTitle } from '../model/render.ts';
+import { NOW_LAYER_BANNER, RENDER_VERSION, clipTaskTitle, inputContentText, mcpIndexOf, wakeTitle } from '../model/render.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
 import type { TurnBlockFacts } from '../model/render.js';
-import { collectSessions, parseAliases, type SessionAlias } from '../channel/sessions.ts';
+import { collectSessions, parseAliases, parseMemberAliases, resolvePersonNameFromTables, type SessionAlias } from '../channel/sessions.ts';
 import { WarnExemptBook, type WarnExemptJudge } from '../channel/warn-exempt.ts';
 import { CONFIG_FILE_NAME, loadConfig, systemTimezone } from '../config/config.ts';
 import { readEventsReadOnly } from '../log/read-only.ts';
@@ -211,6 +211,7 @@ function rebuildContact(position: ReplayPosition, options: RebuildOptions): Cont
     alertWebhook: gate.alertWebhook,
     ...(gate.contacts === undefined ? {} : { contacts: gate.contacts }),
     ...(gate.aliases === undefined ? {} : { aliases: gate.aliases }),
+    ...(gate.memberAliases === undefined ? {} : { memberAliases: gate.memberAliases }),
   });
 }
 
@@ -235,6 +236,14 @@ export function contactFactsForReplay(input: {
   alertWebhook: boolean;
   contacts?: ReadonlyMap<string, string>;
   aliases?: ReadonlyMap<string, SessionAlias>;
+  /**
+   * 群成员别名（`# 群成员` 段的裸 id = 名字）。给不给都行：
+   * 这一档是"名字真源"里排在会话别名之后的第三档，而**第四档（群成员档案）在这一层拿不到**
+   * ——那是 `data/group-members.json`，只有运行期那份 host 读它。所以重建侧的名字可能比当时
+   * 少**最后一档**：那些**只有**机器占位名的人，重建时会写成 id。这条限制如实写在这里，
+   * 不假装重建过（design §4.13 的重建纪律）。
+   */
+  memberAliases?: ReadonlyMap<string, SessionAlias>;
 }): ContactFacts {
   const sessions = collectSessions(input.events);
   const topics = new Map<string, string>();
@@ -264,6 +273,9 @@ export function contactFactsForReplay(input: {
     sessions,
     ...(input.aliases === undefined ? {} : { aliases: input.aliases }),
     ...(input.contacts === undefined ? {} : { contacts: input.contacts }),
+    // 发言人 → 名字（v47）：与运行期同一处判据（三档人写的表；第四档在这条路上没有，见入参注释）
+    personNameOf: (person: string) =>
+      resolvePersonNameFromTables(person, input.contacts, input.aliases, input.memberAliases),
     wakeMessage,
     topics,
   };
@@ -273,6 +285,21 @@ export function contactFactsForReplay(input: {
 function readAliasesForReplay(dataDir: string): ReadonlyMap<string, SessionAlias> {
   try {
     return parseAliases(readFileSync(join(dataDir, 'workspace', 'MEMORIES', 'aliases.md'), 'utf8'));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * 同一份文件里的**群成员别名**（`# 群成员` 段的裸 id = 名字）：重建通知行那个"谁"要用。
+ *
+ * 与 `readAliasesForReplay` 同一条纪律（只读、读不到当空），与运行期的分工也一样：运行期由
+ * `real-loop.readAliasTables` 一次读、两次解析，这里为了不动既有调用点的形状，读第二次。
+ * 读不到 = 那一档没有名字 ⇒ 通知行照实回落 id（**不是**错，是如实）。
+ */
+function readMemberAliasesForReplay(dataDir: string): ReadonlyMap<string, SessionAlias> {
+  try {
+    return parseMemberAliases(readFileSync(join(dataDir, 'workspace', 'MEMORIES', 'aliases.md'), 'utf8'));
   } catch {
     return new Map();
   }
@@ -315,6 +342,8 @@ export interface RebuildOptions {
     alertWebhook: boolean;
     contacts?: ReadonlyMap<string, string>;
     aliases?: ReadonlyMap<string, SessionAlias>;
+    /** 群成员别名（`# 群成员` 段）——名字真源的第三档，缺省 = 那一档没有名字 */
+    memberAliases?: ReadonlyMap<string, SessionAlias>;
   };
   /**
    * 数据目录（v29/B2）：重建"本轮固定块"里那段**选中的记忆正文**时要从盘上按 `path:line` 现取。
@@ -437,6 +466,13 @@ export function rebuildRenderedRequest(
     // 可能还在（框架只是不再动它），照旧把它渲染进重建结果就等于让重建显示一份"她当时根本没看见"
     // 的东西——而"重建必须等于当时"是这个模块的全部意义。
     memoryIndex: options.memoryEnabled === false ? null : (options.memoryIndex ?? null),
+    // MCP 常驻索引（v46）：**取当时那一版**——最后一条 `mcp/index` 快照（`mcpIndexOf` 扫的是
+    // 本步之前的事件流，与运行期读"最后一条"同一判据）。**老轮次没有这条事件 ⇒ null ⇒
+    // 那一段整段不出现**，重建结果与当时逐字节相同（这是硬判据，不许拿现在的配置去补写）。
+    // 与技能 catalog 不同：那一个由 `RebuildOptions.skills` 从**现在**的技能目录重建
+    // （报告里那句"技能层按当前内容重建"覆盖的就是它）；索引这一版不走那条路——
+    // 它的字节只有日志里有，盘上没有对应的文件（配置 + 缓存都只代表"现在"）。
+    mcpIndex: mcpIndexOf(events).text,
     // STATE 预算（v32）：重建要用的阈值与运行期同一个来源（当时生效的那份 config.json）。
     // 缺省 = 出厂 8 KB（`deriveRequest` 的兜底）；CLI 与界面两条重建路都从这里进，口径一致。
     ...(options.stateBudgetBytes === undefined ? {} : { stateBudgetBytes: options.stateBudgetBytes }),
@@ -705,6 +741,7 @@ export async function buildReplayReport(
         alertWebhook: (loaded.config.alerts.webhookUrl ?? '') !== '',
         contacts: new Map(Object.entries(loaded.config.persona.contacts)),
         aliases: readAliasesForReplay(dataDir),
+        memberAliases: readMemberAliasesForReplay(dataDir),
       };
     } catch (err) {
       configSource = `config.json 不可用：${err instanceof Error ? err.message : String(err)}`;

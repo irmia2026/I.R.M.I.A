@@ -32,6 +32,9 @@ import type { Dirent } from 'node:fs';
 import { PATH_BOUNDARY_HINT } from './boundary.ts';
 import { resolveInsideRoot } from './fs/path-guard.ts';
 import { FS_ERROR_CODES } from './fs/types.ts';
+// 进上下文的图片型别白名单：**只有一处**（`log/types.ts`）。inline 这条路的准入判据与渲染层
+// 挑图用的是同一个函数——两处各抄一份名单，必然漂成"回执说进了、请求体里没有"（2026-10-11 修）
+import { CONTEXT_IMAGE_MEDIA_TYPES, contextImageMimeAllowed } from '../log/types.ts';
 import type { DsReasoningEffort, DsResponse } from '../model/ds-client.ts';
 import {
   TOOL_ERROR_CODES,
@@ -590,10 +593,25 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
             );
           }
           const attached: string[] = [];
+          /**
+           * 扩展名认得出、**载荷却进不去上下文**的那些（`.bmp` / `.tiff` 之类）。
+           *
+           * 为什么要单独攒一份（2026-10-11 修的一处"说了做了、其实没做"）：进上下文的型别
+           * 白名单只有 png/jpeg/gif/webp（`CONTEXT_IMAGE_MEDIA_TYPES`），而 `imageMimeOf`
+           * 认得 `image/bmp`——原先 inline 只看扩展名就把事件写下去，渲染层（`imagesOf` 的
+           * `contextImageMimeAllowed`）当场丢掉它，**而回执照旧说"图片已放进你的上下文"**。
+           * 实测：事件 1 条、请求体 input_image = 0。现在这一类不写事件，理由与出路进回执。
+           */
+          const notAdmitted: Array<{ file: string; mime: string }> = [];
           for (const file of unique) {
             const mime = imageMimeOf(file);
             if (mime === null) continue;
             const rel = posixRelative(ctx.workspaceRoot, file);
+            // 判据**只此一处**：与渲染层挑图用的同一个函数（不在本文件另抄一份白名单）
+            if (!contextImageMimeAllowed(mime)) {
+              notAdmitted.push({ file: rel, mime });
+              continue;
+            }
             options.emit('image/attached', {
               key: rel,
               mime,
@@ -602,13 +620,29 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
             attached.push(rel);
           }
           if (attached.length === 0) {
+            // 一张都没进去时**不许**说"已放进上下文"：说清是哪一张、为什么、以及她还能走哪条路
+            if (notAdmitted.length > 0) {
+              return errorResult(
+                notAdmitted.map(({ file, mime }) => `${file} 是 ${mime}，进不去上下文`).join('；')
+                + `（模型只认 ${CONTEXT_IMAGE_MEDIA_TYPES.map((t) => t.replace(/^image\//u, '')).join('/')}）——`
+                + '要看它就走转述（省略 inline，会给一段文字描述），'
+                + '或者先把它转成 png/jpeg 再 inline。',
+                VISION_ERROR_CODES.UNSUPPORTED_TYPE,
+              );
+            }
             return errorResult('没有可放进上下文的图片。', VISION_ERROR_CODES.UNSUPPORTED_TYPE);
           }
           return okResult(JSON.stringify({
             inline: true,
             attached,
+            // 部分进不去时如实列出来（进得去的那几张照旧，别让"少了一张"只能靠对路径才发现）
+            ...(notAdmitted.length === 0 ? {} : { skipped: notAdmitted }),
             hint: '图片已放进你的上下文——直接看，不用再读一遍文件。'
-              + '转述（省略 inline）会把描述写进缓存，将来能按关键词检索；直通不进缓存。',
+              + '转述（省略 inline）会把描述写进缓存，将来能按关键词检索；直通不进缓存。'
+              + (notAdmitted.length === 0
+                ? ''
+                : `（另有 ${notAdmitted.length} 张没进去：型别不在模型认的名单里，见 skipped——`
+                  + '要看它们就改用转述。）'),
           }));
         }
 

@@ -60,7 +60,7 @@ import { buildBudgetReport, buildReviewEntries, summarizeEvent } from '../cli.ts
 import { answerHuman } from '../runtime/plan-mode.ts';
 import type { AppConfig, JsonObject, JsonValue } from '../config/config.js';
 import { CONFIG_FILE_NAME, MENTION_KEYWORD_LEN_MAX, MENTION_KEYWORD_MAX, configHash, loadConfig } from '../config/config.ts';
-import { diffConfigFields } from '../config/watcher.ts';
+import { classifyConfigField, diffConfigFields } from '../config/watcher.ts';
 import { resolveRestartShell } from '../runtime/restart-shell.ts';
 import { chooseRestartPath, parseRestartPath, restartReasonText, restartTraceLine, backendEntry, BUNDLED_NODE_REL, RESTART_FAILURE_REASONS, type RestartPath } from '../runtime/restart-chain.ts';
 import { deriveRequest } from '../runtime/agent-loop.ts';
@@ -70,6 +70,15 @@ import { WarnExemptBook } from '../channel/warn-exempt.ts';
 import { installSnowLuma } from '../services/install-snowluma.ts';
 import { KEY_NAMES, isKeyName, keyStatus, writeKeyFile, type KeyName } from '../config/keys.ts';
 import { groupsForTools, groupIdOfTool, mcpGroupId, mcpServerOfTool } from '../tools/groups.ts';
+// 申请单那一套（她发起 → 待批 → 用户点批准/驳回 → 框架执行 → 回执）：
+// 唯一实现在 `grant/mcp-grant.ts`（判据、落地、卡面文案、回执与唤醒都在那里）
+import {
+  GRANT_REJECT_REASON_MAX, applyGrant, grantReceiptLine, grantsResolvedDirOf, grantsDirOf,
+  listGrants, readConfiguredServer, wakeForGrant, writeGrantOutcome,
+  type GrantApplyResult, type GrantWakeFacts,
+} from '../grant/mcp-grant.ts';
+// `desc` 那一句的来源与判据（唯一实现：索引行、申请单、界面回执三处读同一份）
+import { mcpServerDescOf, sanitizeMcpDescText } from '../mcp/description.ts';
 import {
   DEFAULT_HOOK_TIMEOUT_MS, HOOK_CONFIG_FILE_NAME, HOOK_POINTS, hookConfigPath, loadHookConfig,
   parseHookEntry, protectedHookPaths, type HookConfigEntry,
@@ -83,7 +92,7 @@ import {
 import type {
   McpConnectionHost, McpProcess, McpServerEntry, McpShutdownReport, McpToolInfo,
 } from '../mcp/client.js';
-import { aliasNoteOf, collectSessions, normalizeSid, parseAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
+import { aliasNoteOf, collectSessions, normalizeSid, parseAliases, parseMemberAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
 import { readEndpointFromConfig, resolveServiceDir, maskCredential } from '../services/snowluma.ts';
 import { loadPersona } from '../persona/loader.ts';
 import { readMemoryIndexTextReadOnly } from '../persona/memory-injection.ts';
@@ -177,6 +186,16 @@ export const MCP_TEST_TIMEOUT_DEFAULT_MS = 8_000;
 const MCP_TEST_SHUTDOWN_STDIN_WAIT_MS = 500;
 const MCP_TEST_SHUTDOWN_TERM_WAIT_MS = 1_500;
 const MCP_TEST_SHUTDOWN_KILL_GRACE_MS = 300;
+
+/**
+ * MCP 声明面被改动时那条唤醒的**幂等时间片**（秒）。
+ *
+ * 与聊天框/`/dream` 的 5 秒**同源但理由不同**：那两处挡的是"同一条消息被重复提交"，
+ * 这里挡的是"同一组改动被重复提交"（界面上连点、客户端重试）——两次提交算**一次**叫醒，
+ * 不是每次写盘都吵她一遍（`wake/manual` 的幂等键撞上时 fold 会静默丢弃，不留第二声）。
+ * **不同**的改动（改的是别的 server）各有各的键，照旧各叫一次：那是两件事。
+ */
+const MCP_WAKE_DEDUPE_SLICE_SECONDS = 5;
 
 /** 新技能骨架里「待填写」的正文提示（与 SKILL.md 的渐进披露口径一致：正文永不进上下文） */
 const SKILL_TEMPLATE_BODY_HINT = [
@@ -282,6 +301,11 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   wake: null,
   'review-resolve': null,
   answer: null,
+  // 申请单的批准/驳回（扩展页「待批」段与顶层批准卡，2026-10-11）：**短语 null**，
+  // 与 persona-approve / persona-reject 同级。判据：这条路本身就是"人在看一张卡、点一下"，
+  // 「点一下」就是决定——再加一道短语只是让人多点一次。防误触由**卡面说清后果**承担
+  // （"批准之后它会写进 mcp.servers[]、重启后生效"那几句就在卡上）。
+  'grant-decide': null,
   requeue: null,
   // 丢弃死信（运行情况页 · 死信队列）：**只标记为已处理，不删任何记录**——日志只增不改。
   // 与 requeue 同级（短语 null）：它不动能力边界，只决定"这条不再重投"。
@@ -595,6 +619,11 @@ export interface WebServerDeps {
    * 调用时机写在实现里（`afterAppend`）：**与落库同一个同步块**，中间不许有 await——
    * speak 每 100ms 回头看一眼计数，晚一拍就可能多漏一条气泡出去。
    * 不注入时照旧工作（只是没人被通报），CLI 与测试里那种装配不受影响。
+   *
+   * **MCP 那两条唤醒刻意不走这里**（2026-10-09）：那不是"人开口"，它是框架替他做的动作
+   * ——通报"有人开口了"会让打断回执把框架那句通报写成"他刚说「…」"摆给她（/dream 那处
+   * 踩过同一个坑，见下面 `'dream'` 分支的注释）。它要的是"真的起一个 turn"，而那条路
+   * 不需要本口子：`appendSync` 已经把它折进 `projection.pending`，主循环下一拍自己会认领。
    */
   noteUserSpoke?: ((seq: number, type: string, data: unknown) => void) | undefined;
   /**
@@ -605,6 +634,19 @@ export interface WebServerDeps {
    * 缺省就是触发既有那条信号路径（见实现里的注释），注入点只是为了让测试能断言"退的是哪条路"。
    */
   onRestartExit?: ((path: RestartPath) => void) | undefined;
+  /**
+   * **配置热更接线是活的吗**（2026-10-11 加）：宿主把 `ConfigWatcher.live` 递进来。
+   *
+   * 谁用它：`mcp-save` / `mcp-remove` 回执里那一格 `restartRequired`——它的**唯一含义**
+   * 就是"这次改动需不需要重启才生效"。而 `mcp.servers` 自从热更落地之后**不需要**重启，
+   * 于是这一格不能再写死 `true`（那是假话，界面会照着它让人去重启）。
+   *
+   * 为什么由宿主给、不由本模块自己判：本模块**没有** `ConfigWatcher`（它在 `main.ts` 里），
+   * 自己猜就是第二份判据。缺省 = 没接线 ⇒ 回 `restartRequired: true`（保守那一侧：
+   * 说"要重启"顶多多一次重启，说"已生效"而其实没生效是撒谎）。
+   * 判据只有一处，见 `ConfigWatcher.live` 的注释（含两个方向各错在哪）。
+   */
+  configReload?: (() => boolean) | undefined;
 }
 
 export interface WebServer {
@@ -731,6 +773,36 @@ export interface DashboardView {
     }>;
     /** 台面上还没答复的总条数（含 `cards` 之外没下发的那几件；角标与"还有 N 条"读它） */
     queued: number;
+  };
+  /**
+   * **她的申请单**（2026-10-11：skill / MCP 的增删由她发起、用户只在界面点批准或驳回）。
+   *
+   * 为什么与 `ask` **分成两个字段**（而不是把待批也塞进那一队）：`ask` 的语义是
+   * "**她在问**"（`source: 'agent'`），而待批的语义是"**他在等她点头**"（`source: 'system'`）
+   * ——`AskCardHost` 一次只弹一张卡的纪律（§6.3）会把两件事搅在一起：一张本页画不出来的
+   * 系统卡堵住她真正在问的那些问题，正是 `askCardOf` 的注释里写着要避免的那种事。
+   * ⇒ 界面那一侧按 `open` 自己弹一张**形态不同**的卡（带批准/驳回与理由输入框）。
+   *
+   * `items` 里已经答复过的那些也一并给（界面按 `outcome` 分两段摆），
+   * 因为"她申请过什么、谁批的、批完落地没有"是人回来复查时唯一看得到的地方。
+   */
+  grants: {
+    items: Array<{
+      id: string; kind: string; name: string; desc: string;
+      command: string; args: readonly string[]; envKeys: readonly string[];
+      /** 技能那一支：`scripts/` 下那些可执行内容的名字（MCP 那一支恒为空） */
+      scriptNames: readonly string[];
+      /** 技能那一支：随包带几个文件 */
+      fileCount: number;
+      reason: string; question: string; context: string;
+      askSeq: number | null; expiredAt: string | null; requestedAt: string | null;
+      outcome: 'approved' | 'rejected' | null; outcomeAt: string | null;
+      rejectReason: string | null;
+      exec: { state: string; failure?: string; landed?: string } | null;
+      picked: boolean;
+    }>;
+    /** 还没答复的（等着人点头）—— 顶层卡的队列读它 */
+    open: number;
   };
   deadLetters: number;
   suggestions: Suggestion[];
@@ -1072,21 +1144,15 @@ function parseJsonObject(text: string): Record<string, unknown> {
  *
  * 纪律：**任何碰这两个文件的读改写都必须 acquire 它**（包括 `loadConfig` 的复检——
  * 复检留下的读句柄正是卡住下一个写者的东西）。闸是可重入的吗？不是：不要嵌套 acquire。
+ *
+ * **实现与实例都在 `config/file-lock.ts`**（2026-10-11 搬过去）：这条通道多了第二个写入方
+ * ——她申请、人批准之后**框架**往 `mcp.servers[]` 里加/删一条（`grant/mcp-grant.ts` 的
+ * `withGrantConfigDoc`）。两个写入方必须排在**同一个队列**里：各自建一把锁就是那个经典洞
+ * （两条"读整份文档 → 改 → 写回"交错执行，后写的把先写的整段盖掉）。放在那个文件里、
+ * 两边都从它 import 之后，谁重写谁都不影响这一格（这条路上出过一次"整文件重写把
+ * `export const configFileLock` 连同一段逻辑一起带走"的事故）。
  */
-function createFileLock(): <T>(task: () => Promise<T> | T) => Promise<T> {
-  let tail: Promise<unknown> = Promise.resolve();
-  return <T>(task: () => Promise<T> | T): Promise<T> => {
-    const run = tail.then(task, task);
-    // 队列本身不许因为一次失败而断掉：吞掉拒绝，让下一个拿到干净的接力棒
-    tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  };
-}
-
-const configFileLock = createFileLock();
+import { configFileLock } from '../config/file-lock.ts';
 
 // ──────────────────────────────── 原子写 ────────────────────────────────
 
@@ -1101,10 +1167,89 @@ const configFileLock = createFileLock();
 
 // ──────────────────────────────── 事件读写辅助 ────────────────────────────────
 
-async function readAllEvents(log: EventLog): Promise<AppEvent[]> {
-  const events: AppEvent[] = [];
-  for await (const event of log.readAll()) events.push(event);
-  return events;
+/**
+ * 全量事件快照（按日志实例缓存 + 增量补齐）。
+ *
+ * **为什么需要它**：这条路径原来每请求都 `readAll()` 一遍——把 201 个分片、56 MB、
+ * 七万多行重读重 `JSON.parse` 一次，实测量到 **450–550 ms/请求**，而用它的端点有八条
+ * （`/api/budget`、`/api/sessions`、`/api/framework-notes`、`/api/mcp`、`/api/skills`、
+ * `/api/persona/history`、`/api/replay`、`/api/commands/*` 里那几条校验）。
+ * 界面一页 `Future.wait` 打四条，服务端只有一条 JS 线程 + `JSON.parse` 是同步的，
+ * 于是那四条**排着队各付一遍**——"一个页面等半天"就是这么来的。
+ *
+ * **为什么不破坏正确性**：日志是只增的（seq 单调、分片只追加），所以"全量"这个快照
+ * 可以一次读进来、之后只补 `upToSeq` 之后的增量。`latestSeq()` 与磁盘之间没有中间态：
+ * 它读的是已落盘的最大 seq。
+ *
+ * **内存**：整份 71.5k 事件实测约 84 MB 堆——与"每请求临时物化一份然后丢掉"的峰值同量级，
+ * 省掉的是每请求重复 parse 与随之而来的 GC 压力。进程本来就常驻数 GB（MCP + 模型），
+ * 这点增量换掉每请求半个 CPU 秒是划算的。
+ *
+ * **为什么 key 是 EventLog 实例**：生产上一个进程只有一份日志，但测试里同时开着好几份
+ * （各自 mkdtemp）。用 `WeakMap` 按实例分桶，实例被回收时缓存跟着走——不会串味，
+ * 也不会把临时目录的数据留在内存里。
+ *
+ * **为什么要有 `inflight`**：界面一页并发打四条时，四条会同时走到这里，四条都看到
+ * "还没同步"就各读一遍（雷群）。只留一个在飞的 promise，后到的等它。
+ */
+interface EventSnapshot {
+  /** 已同步到的 seq；`0` = 还没读过 */
+  upToSeq: number;
+  /** 全量事件（seq 升序）；每次增量补齐后**换新数组**，旧引用不会被就地改写 */
+  events: readonly AppEvent[];
+  /** 正在进行的补齐（并发合流用）；null = 没有在飞的 */
+  inflight: Promise<readonly AppEvent[]> | null;
+}
+
+const eventSnapshots = new WeakMap<EventLog, EventSnapshot>();
+
+/**
+ * 取"截至此刻的全量事件"。首次调用全量读盘，此后只读 `upToSeq` 之后的增量。
+ *
+ * 返回值**只读**：调用方一律照着只读用（`buildReviewEntries` / `pairedRecoveries` /
+ * `fold` / `answerHuman` …），没有一处就地改它。类型标 `readonly` 是为了把这条纪律
+ * 写进签名里——想改的人会在编译期被拦下，而不是在运行期把缓存污染掉。
+ *
+ * 同一实例上返回的**数组引用稳定**（没有新增事件时就是同一个对象），所以调用方
+ * 顺手拿它当 React/Flutter 那种"依赖引用变化"的判据也是安全的。
+ */
+export async function allEventsOf(log: EventLog): Promise<readonly AppEvent[]> {
+  const existing = eventSnapshots.get(log);
+  const snapshot: EventSnapshot = existing ?? { upToSeq: 0, events: [], inflight: null };
+  if (existing === undefined) eventSnapshots.set(log, snapshot);
+
+  const latest = log.latestSeq();
+  // 正常路径（没有新事件）：零 IO、零 parse，直接给同一份引用
+  if (latest <= snapshot.upToSeq) return snapshot.events;
+  if (snapshot.inflight !== null) return snapshot.inflight;
+
+  // 日志被换掉/截断（测试里重建日志、或运维换了一份 events/）：从 1 重新读，
+  // 不然会把新日志的增量接到旧日志的尾部，拼出一份谁也没写过的历史
+  const from = latest < snapshot.upToSeq ? 1 : snapshot.upToSeq + 1;
+
+  const inflight = (async (): Promise<readonly AppEvent[]> => {
+    const fresh: AppEvent[] = [];
+    for await (const event of log.readRange(from)) fresh.push(event);
+    const merged = from === 1 ? fresh : [...snapshot.events, ...fresh];
+    snapshot.events = merged;
+    snapshot.upToSeq = merged.length > 0 ? merged[merged.length - 1]!.seq : snapshot.upToSeq;
+    return merged;
+  })();
+
+  snapshot.inflight = inflight;
+  try {
+    return await inflight;
+  } finally {
+    snapshot.inflight = null;
+  }
+}
+
+/**
+ * 全量事件（旧调用点的门面）：语义与过去逐字节一致，只是**同一实例上不再每请求重读**。
+ * 保留这个名字是因为八处调用点读起来仍然是"我要全量"；增量与缓存藏在 {@link allEventsOf} 里。
+ */
+async function readAllEvents(log: EventLog): Promise<readonly AppEvent[]> {
+  return allEventsOf(log);
 }
 
 /**
@@ -1939,6 +2084,12 @@ export function buildDashboard(input: {
   events: AppEvent[];
   now: Date;
   personaRoot: string;
+  /**
+   * 申请单目录（`<dataDir>/grants`）：**只有它**能让"她刚写完、还没被拾取"那一小段窗口
+   * 在界面上看得见（判据取事件，盘上那份只补这一段，见 `grant/mcp-grant.ts` 的 `listGrants`）。
+   * 不给也能算（那一小段窗口就不显示）——所以它是可选参数。
+   */
+  grantsDir?: string;
 }): DashboardView {
   const p = input.projection;
   const nowMs = input.now.getTime();
@@ -1990,6 +2141,11 @@ export function buildDashboard(input: {
     degraded: p.degraded === null ? null : { ...p.degraded },
     waitingHuman: p.waitingHuman === null ? null : { ...p.waitingHuman },
     ask: askCardOf(p),
+    // 申请单（她递的）：判据取事件，盘上那份只补"还没被拾取"那一段（见 `listGrants` 的注释）
+    grants: (() => {
+      const items = listGrants(input.grantsDir ?? '', input.events, p.humanAsks);
+      return { items, open: items.filter((item) => item.outcome === null && item.picked).length };
+    })(),
     deadLetters: p.deadLetters.length,
     suggestions: buildSuggestions(p, input.events, nowMs),
     hourly,
@@ -2015,6 +2171,21 @@ export function buildDashboard(input: {
  */
 const ASK_CARD_MAX = 5;
 
+/**
+ * 一张申请单**她发起时**那份内容指纹（`grant/requested.contentHash`）。
+ *
+ * 为什么执行那一步要把它读回来：批准那一刻要**重算**一次再比（判"这份单子在审阅期间
+ * 被改过没有"，照人格提案的 `diffHash` 那条纪律）。读不到（老事件缺这一格）时给空串——
+ * 那时判据退化成"不比对内容"，由落地那一步的第二次校验兜住（**宁可照旧执行，也不许
+ * 因为读不到凭据就把人批过的事默默丢掉**）。
+ */
+function requestedHashOf(events: readonly AppEvent[], id: string): string {
+  for (const event of events) {
+    if (event.type === 'grant/requested' && event.data.id === id) return event.data.contentHash;
+  }
+  return '';
+}
+
 function askCardOf(p: Projection): DashboardView['ask'] {
   const mine = p.humanAsks.filter(ask => ask.source === 'agent');
   return {
@@ -2039,7 +2210,8 @@ function askCardOf(p: Projection): DashboardView['ask'] {
 export function buildBudgetView(input: {
   dataDir: string;
   config: AppConfig;
-  events: AppEvent[];
+  /** 只读：这条路上只折叠，不改事件（共享快照直接喂进来，就地改会污染别人） */
+  events: readonly AppEvent[];
   now: Date;
   range: 'today' | '7d';
 }): BudgetView {
@@ -2419,8 +2591,36 @@ function aliasesUnder(dataDir: string): ReadonlyMap<string, SessionAlias> {
   }
 }
 
+/**
+ * 同一份 `aliases.md` 里**群成员那一段**（`裸 id = 名字`）：重放预览要用它。
+ *
+ * 为什么必须补这一支（2026-10-11，v47 那条线的尾巴）：名字真源有四档（用户手写的联系人表 >
+ * 她的会话别名 > 她的**群成员别名** > 群成员档案里那个自动占位名），而重建侧能拿到的只有前三档。
+ * 这条预览路径原来只传了前两档（`contacts` + `aliases`），于是**只有群成员别名**的人在这里
+ * 解析不出名字 ⇒ 预览的「预警：」「点名：」两行写成裸 openid，而**当时**运行期（`real-loop`
+ * 那一侧读同一张表）写的是名字。预览的全部价值就是"她当时到底收到了什么"，
+ * 同一句话两个写法等于把复盘证据改掉了——而且不报错。
+ *
+ * 与 CLI 的重放同一条口径、同一份文件、同一个解析器：那边是 `runtime/replay.ts` 的
+ * `readMemberAliasesForReplay`（`parseMemberAliases`），走 `contactFactsForReplay` 的
+ * `memberAliases` 入参。判据只有一处（`sessions.ts` 的 `resolvePersonNameFromTables`），
+ * 这里只是把第三档**喂进去**——不在这里另写一套查表。
+ *
+ * 第四档（`data/group-members.json` 的自动占位名）在这一层**拿不到**：它只有运行期那份 host
+ * 读盘才有。所以重建侧的名字可能比当时少最后一档，这一条如实记在 `contactFactsForReplay`
+ * 的入参注释里，不假装重建过（design §4.13 的重建纪律）。
+ */
+function memberAliasesUnder(dataDir: string): ReadonlyMap<string, SessionAlias> {
+  try {
+    return parseMemberAliases(readFileSync(join(dataDir, 'workspace', 'MEMORIES', 'aliases.md'), 'utf8'));
+  } catch {
+    return new Map();
+  }
+}
+
 export function buildReplay(input: {
-  events: AppEvent[];
+  /** 只读：见 buildBudgetView 的同一句——事件来自共享快照 */
+  events: readonly AppEvent[];
   turn: number;
   step: number;
   personaRoot: string;
@@ -2517,6 +2717,10 @@ export function buildReplay(input: {
     alertWebhook: (input.config.alerts.webhookUrl ?? '') !== '',
     contacts: new Map(Object.entries(input.config.persona.contacts)),
     aliases: aliasesUnder(replayDataDir),
+    // 名字真源的**第三档**（`aliases.md` 的 `# 群成员` 段，裸 id = 名字）：与 CLI 的重放同源
+    // （`readMemberAliasesForReplay` → `contactFactsForReplay` 的 `memberAliases`）。
+    // 漏了它，只有群成员别名的人在这条预览里写成裸 id，而当时运行期写的是名字（见函数注释）。
+    memberAliases: memberAliasesUnder(replayDataDir),
   });
   // **走 `deriveRequest`**（与运行期、与 CLI 的重放同一个函数）：这条路径原来自己手拼渲染输入，
   // 于是少了「会话：」「点名：」这类要从事件/配置算出来的字段——重放出来的请求与当时发出去的不是
@@ -3045,7 +3249,30 @@ class WebServerImpl implements WebServer {
             events,
             now: this.deps.now(),
             personaRoot: this.deps.personaRoot,
+            grantsDir: grantsDirOf(this.deps.dataDir),
           }));
+          return;
+        }
+        /**
+         * 申请单那一屏（扩展页「待批」段与顶层批准卡的数据源）。
+         *
+         * 为什么另开一个端点而不是只放在 dashboard 里：这份清单**每次现读**（判据取事件 +
+         * 盘上那段窗口），而 dashboard 是十秒一拉的宽屏；待批那段要在**人点完批准之后**
+         * 立刻消失（不能等下一次轮询），所以界面对它单独拉一次。
+         * 两个端点共用 `listGrants`（一处实现，两处读同一份字节）。
+         */
+        case '/api/grants': {
+          const items = listGrants(
+            grantsDirOf(this.deps.dataDir),
+            await readAllEvents(this.deps.log),
+            this.deps.projection.humanAsks,
+          );
+          sendJson(res, 200, {
+            items,
+            open: items.filter((item) => item.outcome === null && item.picked).length,
+            dir: grantsDirOf(this.deps.dataDir),
+            resolvedDir: grantsResolvedDirOf(this.deps.dataDir),
+          });
           return;
         }
         case '/api/events':
@@ -4448,6 +4675,210 @@ class WebServerImpl implements WebServer {
         });
         return;
       }
+      case 'grant-decide': {
+        // 用户在界面上对一张**她的申请单**点头或摇头（2026-10-11）。
+        //
+        // 这个端点**不新开审批原语**：它内部就是 `answerHuman`（与 `POST /api/commands/answer`
+        // 逐字同一份实现）——写 `human/answered`（驳回时理由在 `reject:<理由>` 里）+ 精确配对的
+        // `askSeq`。之后才轮到本通道自己的那一步：**框架执行**（`resolveGrant`）。
+        //
+        // ⚠ 顺序是判据，不能换：**先答复、再执行**。执行失败时日志里仍然留着"人批准过"这个
+        // 事实（他确实点了），而"批了但没装成"由 `grant/resolved.exec` 那一格如实说。
+        // 反过来（先执行、后答复）一旦答复写失败，就会出现"配置被改了、但没有任何人批准过它"。
+        //
+        // 幂等靠**事件状态**：`answerHuman` 找不到那张还在台面上的 `human/asked` 就报错
+        // （`askSeq 不在台面上`），所以第二次点批准不会重复落地——不靠内存记账。
+        const id = typeof payload['id'] === 'string' ? payload['id'].trim() : '';
+        if (id === '') throw badRequest('缺少 id（申请单号，就是 data/grants 下那个文件名）');
+        const decision = payload['decision'];
+        if (decision !== 'approve' && decision !== 'reject') {
+          throw badRequest('decision 只能是 approve 或 reject');
+        }
+        const reasonRaw = typeof payload['reason'] === 'string' ? payload['reason'].trim() : '';
+        if (reasonRaw.length > GRANT_REJECT_REASON_MAX) {
+          throw badRequest(`理由最多 ${GRANT_REJECT_REASON_MAX} 字，收到 ${reasonRaw.length} 字`);
+        }
+        if (decision === 'approve' && reasonRaw !== '') {
+          throw badRequest('批准不带理由（理由栏目只在驳回时用得到）');
+        }
+
+        const events = await readAllEvents(this.deps.log);
+        const item = listGrants(grantsDirOf(this.deps.dataDir), events, this.deps.projection.humanAsks)
+          .find((row) => row.id === id);
+        if (item === undefined) {
+          throw notFound(
+            `申请单 ${id} 不在清单里（可能已被处理，或还没被拾取）：先 GET /api/grants 核对`,
+            'grant-not-found',
+          );
+        }
+        if (item.outcome !== null) {
+          throw new HttpError(
+            409,
+            'grant-already-decided',
+            `申请单 ${id} 已经有结局了（${item.outcome}，${item.outcomeAt ?? '时间未知'}）：`
+            + '同一个决定只可能有一次终局，这一张不用再点。',
+          );
+        }
+        if (!item.picked || item.askSeq === null) {
+          throw new HttpError(
+            409,
+            'grant-not-picked',
+            `申请单 ${id} 还没被框架拾取（${item.requestedAt === null ? '它刚写下来，或它没通过校验' : '缺 askSeq'}）：`
+            + '等下一拍（心跳每拍都会扫一次那个目录）再点。',
+          );
+        }
+        /**
+         * **第二次点同一张卡 ⇒ 到这里就 409，不进 `answerHuman`。**
+         *
+         * 为什么非要先拦一道（2026-10-11 实测发现的洞）：`answerHuman` 的幂等判据是"那条
+         * `human/asked` 还在不在台面上"（`openHumanAsks`）。**她问的**那些提问答复一次就出队，
+         * 那条判据管用；但待批这条路上的提问是 `source: 'system'`——它一旦被某一轮认领、那一轮
+         * 因此挂起，`answerHuman` 就会从"挂起中的提问"那一支把它再认下一次
+         * （`scan.waiting ?? scan.answered?.suspension`，见 `plan-mode.ts` 的选择顺序）。
+         * 实测（`_tmp/dbg-idem.ts`）：第二次点仍然 `ok: true`，又写了一条 `human/answered`。
+         * ⇒ 幂等**由这一格自己兜**：`grant/resolved` 已经落过 = 这张卡点过了。
+         * 判据是**事件状态**（进程重启之后照样成立），不是内存记账。
+         */
+        if (events.some((event) => event.type === 'grant/resolved' && event.data.id === id)) {
+          throw new HttpError(
+            409,
+            'grant-already-decided',
+            `申请单 ${id} 已经答复过了（一张单子只可能有一次终局）：`
+            + '要再看结果就刷新「待批」那一段，它会显示批准/驳回与执行结果。',
+          );
+        }
+
+        // ① 答复（复用既有通道；`reject:<理由>` 的形状读的是 `answerIntentOf` 的既有判据）
+        const answer = decision === 'approve' ? 'approve' : `reject:${reasonRaw}`;
+        const outcome = answerHuman({
+          events,
+          answer,
+          by: 'human',
+          askSeq: item.askSeq,
+          now,
+          write: (type, data, visibility) => this.appendSync(type, data, visibility).seq,
+        });
+        if (!outcome.ok) throw badRequest(outcome.error, 'grant-decide-rejected');
+
+        // ② 执行（**只有批准才执行**；驳回是"不做这件事"，没有可执行的东西）
+        const exec: GrantApplyResult = decision === 'approve'
+          ? await applyGrant({
+            dataDir: this.deps.dataDir,
+            configPath: this.configPath,
+            id,
+            requestedHash: requestedHashOf(events, id),
+            // 技能那一支的落地根：与 `skill-create` / `removeSkill` 读的是**同一个**根
+            // （`this.deps.skillsRoot ?? process.cwd()`，两处一处口径）
+            skillsRoot: this.deps.skillsRoot ?? process.cwd(),
+            now: () => now,
+          })
+          : { state: 'not-applicable' };
+
+        // ③ 留痕：`grant/resolved`（人的决定 + 框架执行的结果，两格分开）
+        const resolved = this.appendSync('grant/resolved', {
+          id,
+          askSeq: item.askSeq,
+          kind: item.kind,
+          name: item.name,
+          outcome: decision === 'approve' ? 'approved' : 'rejected',
+          by: 'human',
+          // 批准时 null（没有"批准理由"这回事）；驳回时是**人写的那句话**（允许为空串）
+          reason: decision === 'approve' ? null : reasonRaw,
+          contentHash: requestedHashOf(events, id),
+          exec,
+        }, 'internal');
+
+        /**
+         * ③b **技能装成了 ⇒ 写信任门那条凭据**（`skill/installed{by:'human'}`）。
+         *
+         * 为什么非写不可：技能目录光是存在**进不了 catalog**——信任门的凭据是日志里那条
+         * `skill/installed`（`skill/skills.ts` 的 `trustOf`），而 `by:'human'` 的语义在这里
+         * 恰好是对的：**是人批的**。不写它，她下一拍还是看不见这个技能，
+         * 而界面上会一直显示"未确认"——那正是"装了但没生效"最难查的形状。
+         *
+         * 为什么由**框架**写而不是让她自己调 `SkillManager.install`：那一路的语义是
+         * `by:'agent'`（记录"它会做什么"），**不构成信任**。人批过的东西就该由框架以人的名义落。
+         *
+         * 只对 `skill-install` 且 `exec.state === 'ok'` 写：删除不需要确认（目录都没了），
+         * 失败/拒执行更不该把一份没落地的东西标成"已确认"。
+         */
+        let skillInstalledSeq: number | null = null;
+        if (item.kind === 'skill-install' && exec.state === 'ok') {
+          const manager = new SkillManager({ baseRoot: this.deps.skillsRoot ?? process.cwd() });
+          // 凭据的**内容**由技能系统自己算（`buildInstalledData`：名字 + 路径 + 内容哈希）——
+          // 这一格不能自己拼：`contentHash` 就是信任门的变更检测凭据，拼错一个字节
+          // 就会让这个技能在下一拍变成"确认后已变更"。
+          const data = manager.buildInstalledData(item.name, 'human');
+          if (data === null) {
+            this.write(
+              `[web] 申请单 ${id} 落地成功，但 skill/installed 没写成`
+              + `（扫描器不认 ${item.name}？）：她下一拍看不见这个技能。`,
+            );
+          } else {
+            // 事件走**本进程的写入通道**（`appendSync`）而不是 `manager.install`：
+            // 后者的写入口是装配期注入的 `emit`，web 层这个 manager 手上没有它——
+            // 调它等于"记了却没人看见"（那正是最难查的那种静默失效）。
+            skillInstalledSeq = this.appendSync('skill/installed', data, 'internal').seq;
+          }
+        }
+
+        // ④ 结局落一份到她读得到的地方（写不动**不许**影响这次决定：盘已经改好了）
+        const facts: GrantWakeFacts = {
+          id, kind: item.kind, name: item.name,
+          outcome: decision === 'approve' ? 'approved' : 'rejected',
+          reason: decision === 'approve' ? null : reasonRaw,
+          exec,
+        };
+        // "要不要重启"走**那一格唯一的那份判据**（`mcpRestartOutcome` 的方法头）：
+        // 批准这条路写的就是 `mcp.servers`；驳回时什么都没写 ⇒ `changedAnything: false`
+        // （它的第一种情形：没有要生效的东西，不必重启）。
+        const restart = this.mcpRestartOutcome({
+          changedAnything: exec.state === 'ok',
+          appliedFields: ['mcp.servers'],
+        });
+        const wroteOutcome = writeGrantOutcome(this.deps.dataDir, {
+          id,
+          outcome: decision === 'approve' ? 'approved' : 'rejected',
+          by: 'human',
+          at: now.toISOString(),
+          reason: facts.reason,
+          exec,
+          note: '这份文件是框架写的（结局），不是你要交的申请单；申请单在 grants/ 下。',
+        });
+
+        // ⑤ 真唤醒（与 `wakeForMcpChange` 同一条路；发不出去也不许把一次成功的落地变成 500）
+        const wakeSeq = wakeForGrant({
+          facts,
+          nowMs: now.getTime(),
+          append: (data) => this.appendSync('wake/manual', data, 'model').seq,
+          onError: (message) => {
+            this.write(`[web] 申请单 ${id} 的结局已落库，但那条唤醒没发出去（落地不受影响）：${message}`);
+          },
+        });
+
+        sendJson(res, 200, {
+          ok: true,
+          id,
+          outcome: facts.outcome,
+          askSeq: item.askSeq,
+          answerSeq: outcome.answerSeq,
+          resolvedSeq: resolved.seq,
+          // 技能装成了的话，信任门那条凭据的 seq（没写就是 null——回执里如实说"没生效"）
+          skillInstalledSeq,
+          exec,
+          // 回执里**如实说**这几件事有没有真的发生（人在界面上会问"她知道了没"）
+          outcomeWritten: wroteOutcome,
+          woken: wakeSeq !== null,
+          wakeSeq,
+          // "要不要重启"**不在这里另写一套判据**：`mcp.servers` 那一格的判据全仓只有一处
+          // （`mcpRestartOutcome` 的方法头）。批准这条路上写的就是 `mcp.servers`，
+          // 所以直接消费它的结论——接线活着时它是 `false`（热更接住了），没接线才是 `true`。
+          restartRequired: restart.required,
+          restartNote: restart.note,
+          receipt: grantReceiptLine(facts),
+        });
+        return;
+      }
       case 'requeue': {
         const inputSeq = Number(payload['inputSeq']);
         if (!Number.isInteger(inputSeq) || inputSeq < 1) {
@@ -5570,7 +6001,7 @@ class WebServerImpl implements WebServer {
         if (name === '') throw badRequest('缺少 name（服务名，如 filesystem）');
         if (!MCP_NAME_PATTERN.test(name)) {
           throw badRequest(
-            `服务名「${name}」不合法：只允许字母、数字与 _-（工具名会合成 mcp__{服务名}__{工具名}），`
+            `服务名「${name}」不合法：只允许字母、数字、- 与 _（这个名字调用时用得到），`
             + '例如 filesystem 或 my-server',
             'bad-mcp-name',
           );
@@ -5590,32 +6021,108 @@ class WebServerImpl implements WebServer {
           }
         }
         const enabled = typeof payload['enabled'] === 'boolean' ? payload['enabled'] : true;
+        /**
+         * **这个 server 是干什么的**（2026-10-11 加，用户点名的"索引内容质量低"那一笔）。
+         *
+         * 三种形状，判据与理由写在 `mcp/description.ts` 的文件头：
+         *   • 字符串（含空串）= 人**明确写了**这一格（空串 = 他选择留空，那就存空串：
+         *     "留空"与"没提供这一格"是两件事，前者是决定，后者是旧客户端）；
+         *   • `null` = 明确清掉这一格（编辑时把描述删掉）；
+         *   • 没给（`undefined`）= **原样保留**已存的那一句（与 cwd / toolDefaults 同一条纪律：
+         *     界面上没暴露的字段不该被一次保存顺手抹掉）。
+         *
+         * **留空不做任何拦截**（人不是模型：他被允许留空），但回执里会如实说
+         * "留空之后她在索引里只看到名字"——那句话由 `$descNote` 给，界面上也照摆。
+         */
+        const descRaw = payload['desc'];
+        if (descRaw !== undefined && descRaw !== null && typeof descRaw !== 'string') {
+          throw badRequest('desc 必须是字符串（这个服务是干什么的，一句话；可以留空，但不能是别的类型）');
+        }
 
+        // 改动前的声明面（**写盘之前**的那一份）：用来判"这次到底变了没有"。
+        // 只有变了她才被叫醒一次——"保存"不等于"变了"（见 mcpChangeWakeNoteOf）。
+        let beforeServers: readonly Record<string, unknown>[] = [];
+        let beforeHadSection = false;
         const listed = await this.withConfigDoc((doc) => {
+          beforeServers = snapshotConfigServerList(doc);
+          beforeHadSection = hasConfigServerSection(doc);
           // 就地改活数组（见 readConfigServerList 的注释）：回传的也是它，用来报"现在还剩哪些"
           const servers = readConfigServerList(doc);
           const index = servers.findIndex((item) => item['name'] === name);
-          const prior: JsonObject = index >= 0 ? servers[index]! : {};
-          const entry: JsonObject = { ...prior, name, command };
-          if (Array.isArray(args)) entry['args'] = args.map((item) => `${item}`) as JsonValue;
+          const prior: Record<string, unknown> = index >= 0 ? servers[index]! : {};
+          const entry: Record<string, unknown> = { ...prior, name, command };
+          if (Array.isArray(args)) entry['args'] = args.map((item) => `${item}`);
           else if (args === null) delete entry['args'];
-          if (isRecord(env)) entry['env'] = { ...env } as JsonValue;
+          if (isRecord(env)) entry['env'] = { ...env };
           else if (env === null) delete entry['env'];
+          // desc（"它是干什么的"）：三种形状，见上面那段注释。空白串**照存**（= 人选择留空）
+          if (typeof descRaw === 'string') entry['desc'] = sanitizeMcpDescText(descRaw);
+          else if (descRaw === null) delete entry['desc'];
           // 界面上的开关写进配置的 disabled（false = 参与启动枚举）
           if (enabled) delete entry['disabled'];
           else entry['disabled'] = true;
           if (index >= 0) servers[index] = entry;
           else servers.push(entry);
-          return servers;
+          return servers as unknown as JsonValue;
         }, 'mcp.servers');
+        // 唤醒**在写盘成功之后**才发（`withConfigDoc` 抛错就是回滚，回滚了没有改动可通报）；
+        // 用的是盘上**回读**的那一份而不是内存里那句回执：它才是"配置现在是什么"的唯一真相源。
+        const afterSave = this.readConfiguredServerList();
+        const change = diffMcpDeclarations(beforeServers, afterSave.servers);
+        this.wakeForMcpChange(change);
+        // 那一句"它是干什么的"存下来之后**到底是什么**（回读盘，不拿内存里那句回执充数）：
+        // 界面据此把"留空 ⇒ 她在索引里只看到名字"这句话说准（用户点名的第二件事）
+        const savedDesc = mcpServerDescOf(
+          readConfiguredServer(this.configPath, name) ?? { name, command },
+          this.deps.dataDir,
+        );
+        /**
+         * 这一格问的是"**这次改动在活进程里生效了吗**"，所以输入必须是**净效果**：
+         * `change` 只认 `added` / `removed` / `changed`——`unchanged` 不算改动
+         * （同内容再存一次没改动任何东西，叫人去重启就是白叫，见 `mcpRestartOutcome` 的第一种情形）。
+         * 写过的字段只有 `mcp.servers`（`withConfigDoc` 只落这一条），而它是热更字段 ⇒ 常态是 `false`。
+         */
+        const restart = this.mcpRestartOutcome({
+          changedAnything:
+            change.added.length + change.removed.length + change.changed.length > 0,
+          appliedFields: ['mcp.servers'],
+        });
         sendJson(res, 200, {
           ok: true,
           name,
           enabled,
           servers: (listed as unknown as JsonObject[]).map((item) => item['name']),
           path: this.configPath,
-          // MCP 池在启动期建好（client.ts 的 registerAll），配置不在热更白名单里：如实说需重启
-          restartRequired: true,
+          /**
+           * **这次改动需不需要重启才生效**（2026-10-11 改成"按净效果给"）。
+           *
+           * `mcp.servers` 是**热更字段**（`src/config/watcher.ts` 的 `HOT_RELOAD_FIELDS`）：
+           * 这一份文件写完之后，主进程里那个订阅者会按新声明把池跟上 ⇒ **不必重启**。
+           * 只有两种情形才回 true：**这次什么都没改**（没东西要生效）之外，
+           * 写下的字段里有接不住的（今天 `mcp-save` 没有这种字段），或者热更接线没活。
+           *
+           * 判据只有一处，见 `mcpRestartOutcome` 的方法头（那里也是"将来加字段要登记的地方"），
+           * 这里与界面都不另猜一份。
+           */
+          restartRequired: restart.required,
+          /** 那一格的**人话理由**（界面原样摆）：`false` 时说"已生效"，`true` 时说清为什么 */
+          restartNote: restart.note,
+          /** 这次保存的净效果：`added` = 新加的，`updated` = 改动/写回，`unchanged` = 一个字节没动 */
+          effect: restart.effect,
+          desc: savedDesc.text,
+          descFrom: savedDesc.source,
+          /**
+           * 这一格**给人看的一句话**（界面原样摆）。留空**不拦人**（他不是模型，允许留空），
+           * 但必须如实说清后果——不写这一句，人就会以为"没填也没什么"，
+           * 而她下一次要看这个 server 是干什么的时，索引里只有名字。
+           */
+          descNote: savedDesc.text === ''
+            ? 'desc 留空了：她的**常驻索引里只会有这个名字**（索引那一行会照实写"配置里没写它做什么"）。'
+              + '补一句它做什么，索引里就多那一句。'
+            : savedDesc.source === 'config'
+              ? 'desc 已存进 config.json：她的常驻索引里那一行会带上这一句。'
+              : 'desc 是空的，索引里那一行暂时用**它自报的工具描述**顶上（会标"据它自报的工具描述"）。',
+          ...mcpWakeReceiptFields(change, beforeHadSection, afterSave),
         });
         return;
       }
@@ -5628,14 +6135,18 @@ class WebServerImpl implements WebServer {
         const name = typeof payload['name'] === 'string' ? payload['name'].trim() : '';
         if (name === '') throw badRequest('缺少 name（要删除的服务名）');
         let removed = false;
+        let beforeServers: readonly Record<string, unknown>[] = [];
+        let beforeHadSection = false;
         const listed = await this.withConfigDoc((doc) => {
+          beforeServers = snapshotConfigServerList(doc);
+          beforeHadSection = hasConfigServerSection(doc);
           const servers = readConfigServerList(doc);
           const index = servers.findIndex((item) => item['name'] === name);
           if (index < 0) return undefined;
           removed = true;
           // splice 就地改数组：删掉的条目因此真的从写回的文档里消失
           servers.splice(index, 1);
-          return servers;
+          return servers as unknown as JsonValue;
         }, 'mcp.servers');
         if (!removed) {
           throw notFound(`${name} 不在 config.json 的 mcp.servers[] 里（可能已被删除）`, 'mcp-server-not-found');
@@ -5643,9 +6154,12 @@ class WebServerImpl implements WebServer {
         const registry = this.deps.registry;
         const stale = (registry?.disabledNames() ?? []).filter((toolName) => mcpServerOfTool(toolName) === name);
         let pruned: string[] = [];
+        /** 清禁用名单那一支**真的**写进配置的字段（没写就是空数组，供下面判"要不要重启"） */
+        let pruneFields: string[] = [];
         if (stale.length > 0 && registry !== undefined) {
           pruned = registry.disabledNames().filter((toolName) => !stale.includes(toolName));
-          await this.applyConfigUpdate({ fields: { 'tools.disabled': pruned } }, phrases);
+          const pruneWrite = await this.applyConfigUpdate({ fields: { 'tools.disabled': pruned } }, phrases);
+          pruneFields = pruneWrite.fields;
           registry.setDisabled(pruned);
           const pruneEvent = this.appendSync(
             'config/changed',
@@ -5654,13 +6168,36 @@ class WebServerImpl implements WebServer {
           );
           this.write(`[web] mcp-remove 顺带清掉 ${stale.length} 条指向 ${name} 的禁用条目（seq ${pruneEvent.seq}）`);
         }
+        // 与 mcp-save 同一条：删服务也是"声明面变了"，所以也叫她一次（同样只叫一次、没删成就不叫）。
+        // 放在清禁用名单**之后**：先落完这批写盘，再发那一条唤醒，日志里的因果顺序才读得通。
+        const afterRemove = this.readConfiguredServerList();
+        const removeChange = diffMcpDeclarations(beforeServers, afterRemove.servers);
+        this.wakeForMcpChange(removeChange);
+        /**
+         * 与 `mcp-save` 同一条判据（见 `mcpRestartOutcome` 的方法头），但**输入不同**：
+         * 这条路上写过的字段可能不止一个——删一条声明之后可能**顺带**清掉 `tools.disabled`
+         * 里指向它的条目，而那一格**不在热更名单里**（它是工具装配参数，池的 `applyDeclarations`
+         * 不管它）⇒ 那一支要如实回 true，并把"为什么"写进 `restartNote`。
+         */
+        const restart = this.mcpRestartOutcome({
+          changedAnything: removeChange.added.length + removeChange.removed.length
+            + removeChange.changed.length > 0 || pruneFields.length > 0,
+          appliedFields: ['mcp.servers', ...pruneFields],
+        });
         sendJson(res, 200, {
           ok: true,
           name,
           servers: (listed as unknown as JsonObject[]).map((item) => item['name']),
           prunedDisabledTools: stale,
           path: this.configPath,
-          restartRequired: true,
+          // 与 `mcp-save` 同一条判据：删服务也是声明面热更，接线活着就不必重启；
+          // **例外**是顺带清了 `tools.disabled` 那一支——那一格接不住，如实回 true 并说清为什么。
+          restartRequired: restart.required,
+          restartNote: restart.note,
+          effect: restart.effect,
+          /** 这次写命令真的写过哪些字段（点路径）：`tools.disabled` 在里面就说明清了禁用名单 */
+          appliedFields: ['mcp.servers', ...pruneFields],
+          ...mcpWakeReceiptFields(removeChange, beforeHadSection, afterRemove),
         });
         return;
       }
@@ -6109,9 +6646,190 @@ class WebServerImpl implements WebServer {
   }
 
   /**
+   * **写盘之后**从 `config.json` 回读那份声明面（判"变了什么"、以及"现在一共几个"用）。
+   *
+   * 为什么回读盘而不是用内存里那句回执：`withConfigDoc` 的承诺是"写回后立刻 `loadConfig`
+   * 复核、失败即回滚"，所以**盘上那一份**才是"配置现在是什么"的唯一真相源；而回执里那串
+   * `servers` 是 `mutate` 就地改出来的活数组，回滚时它已经改过了（拿它去比会得出"变了"
+   * 这个错结论，然后她收到一条根本没发生的通报）。
+   *
+   * 读不出来时按**空**算、这一段标记成"没有"：通报正文因此会少一句总数（不编一个数字出来），
+   * 但**照发**——声明面确实刚被这次写命令改过，读不到盘是观测面的事，不是"没发生"。
+   */
+  private readConfiguredServerList(): {
+    servers: readonly Record<string, unknown>[];
+    hasSection: boolean;
+  } {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(this.configPath, 'utf8')) as unknown;
+    } catch {
+      return { servers: [], hasSection: false };
+    }
+    if (!isRecord(raw)) return { servers: [], hasSection: false };
+    const doc = raw as JsonObject;
+    return { servers: snapshotConfigServerList(doc), hasSection: hasConfigServerSection(doc) };
+  }
+
+  /**
+   * MCP 声明面变了 ⇒ **发一次真唤醒**（2026-10-09，用户原来的要求）。
+   *
+   * 用户原话是「添加 mcp 时，就添加时**追加在上下文尾部，发起一次唤醒**，框架提示
+   * `[发生mcp添加]` + desc + 工具全文」。单入口工具那一版之后这条要求**简化成**：
+   * 加/删/改 MCP 声明时发一次真唤醒，正文里说清"哪些 server 变了"、现在几个、去哪儿看清单
+   * ——**不再往上下文尾部塞工具全文**（清单她要时自己用 `mcp` 工具看，那是披露式的设计）。
+   *
+   * 走的是**既有那条真唤醒路径**，一处新机制都没有：`appendSync('wake/manual', …, 'model')`
+   * ——与界面聊天框、`/dream`、`webhook` 转发**同一条路**（同一套认领、幂等、崩溃恢复），
+   * 由 `fold` 折进 `projection.pending`，主循环下一拍认领 ⇒ 真起一个 turn。
+   *
+   * 三条分寸：
+   *   · **没有改动就不发**（`mcpChangeWakeNoteOf` 返回 null）：按一下"保存"没改任何东西
+   *     也叫醒她，这条通报很快就会变成噪音，而噪音的下场是被整个忽略；
+   *   · **一次保存只发一条**：同一次保存里变了几条 server 就合成**一句**（正文把那几个名字列全，
+   *     不连发）；再叠一层幂等：**同一组改动**在 5 秒内重复（界面连点、客户端重试）只通报一次。
+   *     注意这里**不是**"5 秒内所有改动并成一条"——两次各改一个不同 server 是两件事，
+   *     它们各自都该到（实测判据见 `test/mcp-decl-wake.test.ts` 的 ③/③b 两条）；
+   *   · **刻意不通报"人开口了"**（不调 `noteUserSpoke`）：这不是人说的话，是框架替他做的动作。
+   *     通报了的话，打断回执会把这段框架通报写成"他刚说「…」"摆给她——`/dream` 那处踩过同一个坑。
+   */
+  /**
+   * ═══════════════ **"需要重启"的判据（全仓唯一一处，改这一格先读这里）** ═══════════════
+   *
+   * 回执里 `restartRequired` 的字面问题只有一个：**这次改动在**本进程**里生效了吗？**
+   * 没生效才回 true。它**不是**"改了配置文件没有"，也**不是**"哪个字段变了"——
+   * 那两件事都有别的格子回答（`changedServers` / `wake` / `effect` / `appliedFields`）。
+   *
+   * 今天这个进程里的路径逐条如下（`n` = 这次写命令**真的**动过的字段数）：
+   *
+   *   · `n === 0`（这次写命令没改动任何东西：按一下保存、值原样写回）
+   *     ⇒ **不必重启**。反向那一侧错得更贵：为一次什么都没改的保存叫人去重启，
+   *     正是"这句话喊多了就不值钱"的形状（与 `changedServers: []` 同一把尺子）。
+   *
+   *   · `n > 0` 且热更接线活着（生产：`main.ts` 把 `ConfigWatcher.live` 递进来）
+   *     ⇒ **看哪些字段被动过**：只要全部落在 `HOT_RELOAD_FIELDS` 里就不必重启。
+   *     判据**不在这里另写一份**，直接读 `classifyConfigField`（`config/watcher.ts`）——
+   *     白名单多一项、少一项，这里自动跟着变，不会漂移。
+   *
+   *   · `n > 0` 且接线**没活**（夹具 / 内嵌方 / `stop()` 之后）
+   *     ⇒ **要重启**：那一刻确实没有人在配置变化之后把派生状态跟上，
+   *     说"已生效"是撒谎。保守那一侧错得起（顶多多一次重启）。
+   *
+   * ──────────────────── **今天唯一会回 true 的活路径**（将来若有人加了不走热更的字段，登记在这里） ────────────────────
+   *
+   * 今天 `mcp-save` / `mcp-remove` 唯一**不是**热更字段的写入是 `mcp-remove` 顺带清掉的
+   * `tools.disabled`（那一支：删一个 server ⇒ 把指向它的禁用名单条目一起清掉）。它是
+   * **工具装配参数**，池的 `applyDeclarations` 不管它 ⇒ 那个停用状态要重启才换得过来
+   * （代价与理由见 `HOT_RELOAD_FIELDS` 的"刻意没放回来的"那一段）。所以那一支如实回 true。
+   *
+   * 登记规则（照抄 `HOT_RELOAD_FIELDS` 的纪律）：**要在这里加一条，先答出"改了这一格，
+   * 活进程里谁接不住"**——答不出来就说明它该进热更名单，而不是该进这张表。
+   */
+  private mcpRestartOutcome(input: {
+    /** 这次写命令**真的**改动了盘上的东西没有（没改就别叫人重启） */
+    changedAnything: boolean;
+    /** 这次写命令写过的全部字段（点路径），按写入次序 */
+    appliedFields: readonly string[];
+  }): { required: boolean; note: string; effect: 'added' | 'updated' | 'unchanged' } {
+    if (!input.changedAnything) {
+      return {
+        required: false,
+        effect: 'unchanged',
+        note: '这次保存没有改动任何东西：没有要生效的东西，也就不必重启。',
+      };
+    }
+    // 接线活着才谈得上"接住了"；没接线时下面那句理由才是真的（见方法头第三种情形）
+    const woke = this.deps.configReload !== undefined && this.deps.configReload();
+    // 接不住的那些字段：同一次写命令里**可能写了不止一个**（mcp-remove 会顺带写 tools.disabled），
+    // 只要有一个不在热更名单里就要重启——盘上变了而进程没跟上，正是这一格要说的那件事。
+    // ⚠️ 这一格**永远**按字段算（不许写成 `woke ? 过滤 : []`）：接线没活时"接不住"的
+    // 是**全部**写入，把那一支写成空集恰好会把 true 说成 false（这一版第一稿就踩过，
+    // 判据的方向感：这一格宁可多说一次重启，也不许漏说）。
+    const cold = input.appliedFields.filter((field) => classifyConfigField(field) !== 'hot');
+    if (cold.length === 0 && woke) {
+      return {
+        required: false,
+        effect: 'updated',
+        note: '已生效：这份声明是热更字段（配置一写，主进程里的订阅者就按新声明把池跟上，'
+          + '只重连真变了的那几个）——不必重启进程。',
+      };
+    }
+    const hasTools = cold.includes('tools.disabled');
+    return {
+      required: true,
+      effect: 'updated',
+      note: '需要重启主进程才生效：'
+        // 两种不同的"接不住"，理由不同（见方法头）：
+        // ① 接线没活 ⇒ 这次写下的**全部**字段都没人接管（此刻 `cold` 就是全部写入）；
+        // ② 接线活着但里有不走热更的字段 ⇒ 只点名那几个。
+        //
+        // ⚠️ 这一句**长度是判据的一部分**：界面把它**原样**接在 toast 后面
+        // （`gui/lib/pages/extensions_page.dart` 的 `_mcpWriteOutcome`：`'已删除 $name：' + 这一句`），
+        // 而 toast 有字数预算（`gui/test/copy_rules_test.dart`：一串文案 100 字上限，
+        // 那是"两行 13px 正文"的量）⇒ 两句合计必须留得住。写长了不报错、只是溢出去，
+        // 所以别把它扩写成一段说明：这里保持"点名哪一格 + 一句话为什么"。
+        + (woke
+          ? `它不在热更名单里：${cold.join('、')}——`
+          : '这次写下的字段没人在本进程里接管——'
+            + `${input.appliedFields.join('、')}（热更接线没活）；`)
+        + (hasTools
+          ? '禁用名单要重启才与运行中的工具表一致。'
+          : '要重启才接管。'),
+    };
+  }
+
+  private wakeForMcpChange(change: McpDeclChange): void {
+    const after = this.readConfiguredServerList();
+    const note = mcpChangeWakeNoteOf(change, after.servers.length, after.hasSection);
+    if (note === null) return;
+    let event: AppEvent;
+    try {
+      event = this.appendSync('wake/manual', {
+        note,
+        // 来源标记：界面据此把它渲染成**框架卡片**而不是"用户说的话"（与 /dream 同一格，
+        // 见 `WakeManual.via` 的注释；界面那一侧还没加 'mcp' 分支，写在报告里）
+        via: 'mcp',
+        // **不带 person**：用户自己没开口，带人就会把关系档案注进这一轮（见 WakeManual.person）
+        //
+        // 幂等键用**改动的身份**（动了哪些 server）而不是正文：正文里带着"现在一共几个"，
+        // 拿它当键的话同一串编辑的后几笔会各叫一次（见 mcpChangeIdentityKeyOf 的注释）。
+        // 时间片与聊天框/`/dream` 同一套口径（5 秒）：连点几下算一次。
+        dedupeKey: contentKey(
+          'ui-mcp',
+          `${Math.floor(this.deps.now().getTime() / (MCP_WAKE_DEDUPE_SLICE_SECONDS * 1000))}:`
+          + mcpChangeIdentityKeyOf(change),
+        ),
+      }, 'model');
+    } catch (err) {
+      // 通报发不出去**不许**把一次成功的配置写入变成 500：盘已经写好了，回头再点一次保存
+      // 也不会补发（那时声明面已经与盘一致 ⇒ "没变"）。所以这里只留痕，如实说没叫成。
+      this.write(`[web] MCP 声明变了，但那条唤醒没发出去（配置写盘不受影响）：${describeError(err)}`);
+      return;
+    }
+    // 回执里那两格由 `mcpWakeReceiptFields` 拼（同一个 note，两处不许各拼一遍）
+    this.write(`[web] MCP 声明变了 ⇒ 唤醒 seq ${event.seq}（wake/manual · via=mcp）`);
+  }
+
+  /**
    * MCP 视图：声明（`config.json` 的 `mcp.servers[]`）+ 运行期事实（`mcp/*` 事件折叠）。
    * 本进程不持有 `McpClientPool`（它归 real-loop），所以状态**只从事件日志与注册表读**：
    * 没有启动事件就诚实地说"从未启动"，绝不臆造"正在运行"。
+   *
+   * **工具清单从事件读，注册表只作回退**（2026-10-09 修，评审缺陷 ⑤）：生产上池**刻意不拿
+   * 注册表**（拿了就会把 `mcp__*` 写进 `tools` 段，那正是披露式要避开的事），于是注册表里
+   * 一件 MCP 工具都没有 ⇒ 这三个字段（`registeredTools` / `toolsCount` / `toolDetails`）
+   * **恒为空**：真起过、真调过，扩展页照样写「注册工具 0 件」，也不给工具清单与描述。
+   * 事件是 internal（不进模型请求、零缓存代价），而"它给了什么"只有池在启动那一刻知道
+   * ⇒ 以 `mcp/server-started` 的 `toolDetails` 为准，注册表那份（真注册过时）优先覆盖描述。
+   * 旧日志里没有 `toolDetails` ⇒ 退回 `tools` 那一档（只有名字、没有描述），不许读崩。
+   *
+   * **清单与进程状态解耦**（2026-10-10 加，用户这一轮："mcp 卡片要显示 server 和工具名称"）：
+   * 从"**此刻**注册的那一份"改成"**日志里看到过的那一份**"——回收事件不再把清单清空
+   * （清空它换不来诚实：那份清单本来就带着自己的时刻，丢掉它只让人以为"这个服务没有工具"）。
+   * `registeredTools` / `toolsCount` / `toolDetails` 三个字段**一起**改口径，免得出现"卡片里
+   * 列着工具、页头写着 0 件"这种自相矛盾。另加一组只读的观测字段答"这份清单是什么时候的"：
+   * `toolList` / `toolsListAt` / `toolsFrom` / `toolsQuery` / `toolsAgeMs`——界面据此说得出
+   * "这是 3 小时前那份清单"，而旧形状（回收即清空）根本读不出这句话，人看到的只有"已停止 · 0 件"。
    */
   private async mcpView(): Promise<Record<string, unknown>> {
     const problems: string[] = [];
@@ -6125,40 +6843,197 @@ class WebServerImpl implements WebServer {
       problems.push(describeError(err));
     }
 
-    interface Seen { state: 'started' | 'stopped'; ts: string; pid: number | null; tools: string[]; reason: string | null }
+    interface SeenTool { name: string; description: string }
+    interface Seen {
+      state: 'started' | 'stopped';
+      ts: string;
+      pid: number | null;
+      tools: string[];
+      /**
+       * **日志里最后看到过的**那份工具清单（旧日志为空数组 ⇒ 退回 `tools` 那一档）。
+       *
+       * 与 `state` 解耦（2026-10-10 加，用户这一轮点名要"每个 server 下面看得到工具名"）：
+       * 清单只在启动那一刻进日志，而池默认空闲 5 分钟就回收 ⇒ 人点开这一页时 server 多半
+       * **没在跑**。以前 `stopped` 那一支把这份清单清成空数组，于是"它给过哪些工具"在这页上
+       * 随回收一起消失，只留下一句"0 件"。清空**换不来诚实**：这份清单本来就带着自己的时刻，
+       * 把时刻一起摆出来就是诚实的；把清单丢掉只会让人以为"它没有工具"。
+       */
+      toolDetails: SeenTool[];
+      /** 上面那份清单是哪一次启动时看到的（ISO）；从没启动过就是 null */
+      toolsSeenAt: string | null;
+      reason: string | null;
+      /** 启动耗时（ms）；旧日志没有这一格 ⇒ null（不编） */
+      startMs: number | null;
+      /** 上一次回收到现在这个进程活了多久（ms）；没有就是 null */
+      uptimeMs: number | null;
+      /** 在飞峰值（启动那条路上恒为 0，回收那条路上才是整个生命周期的峰值） */
+      inFlightPeak: number | null;
+      /** 回收前最后一次采到的 RSS（MB）；没采到就是 null */
+      rssMb: number | null;
+      /** 最近一次资源采样（`mcp/server-resource`，2026-10-10 加） */
+      rss: { rssMb: number | null; source: string; sampledAtMs: number | null } | null;
+    }
+    /**
+     * 事件里的一格可能是任何形状（旧日志、手写事件、将来改了字段）——按数据读，不按承诺读。
+     * 认不出就是空数组：宁可少显示，也不许把 `[object Object]` 摆到人面前。
+     */
+    const seenToolsOf = (raw: unknown): SeenTool[] => {
+      if (!Array.isArray(raw)) return [];
+      const out: SeenTool[] = [];
+      for (const item of raw) {
+        if (!isRecord(item)) continue;
+        const name = item['name'];
+        if (typeof name !== 'string' || name === '') continue;
+        const description = item['description'];
+        out.push({ name, description: typeof description === 'string' ? description : '' });
+      }
+      return out;
+    };
     const latest = new Map<string, Seen>();
     for (const event of await readAllEvents(this.deps.log)) {
       if (event.type === 'mcp/server-started') {
-        const data = event.data as unknown as { name?: unknown; pid?: unknown; tools?: unknown };
+        const data = event.data as unknown as {
+          name?: unknown; pid?: unknown; tools?: unknown; toolDetails?: unknown; startMs?: unknown;
+        };
         if (typeof data.name !== 'string') continue;
+        const tools = Array.isArray(data.tools) ? data.tools.filter((item): item is string => typeof item === 'string') : [];
+        const toolDetails = seenToolsOf(data.toolDetails);
         latest.set(data.name, {
           state: 'started',
           ts: event.ts,
           pid: typeof data.pid === 'number' ? data.pid : null,
-          tools: Array.isArray(data.tools) ? data.tools.filter((item): item is string => typeof item === 'string') : [],
+          // 两档只说一件事：详情缺失（旧日志）时用名字补齐，描述留空
+          tools: tools.length > 0 ? tools : toolDetails.map((tool) => tool.name),
+          toolDetails: toolDetails.length > 0
+            ? toolDetails
+            : tools.map((name) => ({ name, description: '' })),
+          // 启动事件落库即"清单被拉到过"（握手与 tools/list 都在启动这条路上，
+          // 它没成功就压根不会有这条事件）——哪怕清单是空的，也是**问过**了。
+          toolsSeenAt: event.ts,
           reason: null,
+          startMs: typeof data.startMs === 'number' ? data.startMs : null,
+          // 新的这次启动把上一条生命周期的那几个数清掉（它们答的是"上一个进程"，别混着读）
+          uptimeMs: null,
+          inFlightPeak: null,
+          rssMb: null,
+          // RSS 采样是**另一条事件**、可能还没落（异步）：沿用这一条之前的采样值没有意义
+          //（上一轮那个进程的数），所以清掉——"还没采到"就该显示成没采到
+          rss: null,
         });
       } else if (event.type === 'mcp/server-stopped') {
-        const data = event.data as unknown as { name?: unknown; reason?: unknown };
+        const data = event.data as unknown as {
+          name?: unknown; reason?: unknown; uptimeMs?: unknown; inFlightPeak?: unknown; rssMb?: unknown;
+        };
         if (typeof data.name !== 'string') continue;
+        const previous = latest.get(data.name);
         latest.set(data.name, {
           state: 'stopped',
           ts: event.ts,
           pid: null,
           tools: [],
+          // 清单与它的观看时刻**跟着上一次启动留着**（见 `Seen.toolDetails` 的注释）：
+          // 回收带走的只是那个进程，带不走"它给过什么"这条事实。
+          toolDetails: previous?.toolDetails ?? [],
+          toolsSeenAt: previous?.toolsSeenAt ?? null,
           reason: typeof data.reason === 'string' ? data.reason : null,
+          // 回收这条事件把"上一次启动"的观测量收在一处：列表页读 `lastStarted` 那几个字段即得
+          startMs: previous?.startMs ?? null,
+          uptimeMs: typeof data.uptimeMs === 'number' ? data.uptimeMs : null,
+          inFlightPeak: typeof data.inFlightPeak === 'number' ? data.inFlightPeak : null,
+          rssMb: typeof data.rssMb === 'number' ? data.rssMb : null,
+          rss: previous?.rss ?? null,
         });
+      } else if (event.type === 'mcp/server-resource') {
+        /**
+         * 资源采样（2026-10-10 加）：**它不改 `state`**——采样答的是"那一个进程占了多少内存"，
+         * 而"它还在不在跑"由 started/stopped 两条答。改 state 会让一条观测事件
+         * 把一个已经回收的 server 说成"正在运行"。
+         */
+        const data = event.data as unknown as {
+          name?: unknown; rssMb?: unknown; rssSource?: unknown; sampledAtMs?: unknown;
+        };
+        if (typeof data.name !== 'string') continue;
+        const previous = latest.get(data.name);
+        if (previous === undefined) continue;
+        previous.rss = {
+          rssMb: typeof data.rssMb === 'number' ? data.rssMb : null,
+          source: typeof data.rssSource === 'string' ? data.rssSource : 'unavailable',
+          sampledAtMs: typeof data.sampledAtMs === 'number' ? data.sampledAtMs : null,
+        };
       }
     }
 
     const registryNames = this.deps.registry?.names() ?? [];
     const mcpToolNames = registryNames.filter((name) => name.startsWith(MCP_NAME_PREFIX));
-    // 工具描述从注册表现取：扩展页展开一个服务时要摆"它提供了什么"，
-    // 只有名字的话人看不出这个服务是干什么的（事件里记的清单同样只有名字）。
+    // 工具描述：注册表现取优先（真注册过才有），没有就用事件里那份（server 自报的原话）
     const describe = (name: string): string => this.deps.registry?.get(name)?.description ?? '';
     const servers = configured.map((entry) => {
       const seen = latest.get(entry.name) ?? null;
-      const tools = registryNames.filter((name) => name.startsWith(`${MCP_NAME_PREFIX}${entry.name}__`));
+      const registered = registryNames.filter((name) => name.startsWith(`${MCP_NAME_PREFIX}${entry.name}__`));
+      const prefix = `${MCP_NAME_PREFIX}${entry.name}__`;
+      // "它是干什么的"那一句（2026-10-11 加）：**声明优先、缓存兜底**，来源一起给出去
+      // （界面据此把"这一句是它自报的"与"这一句是配的"分开摆——判据在 `mcp/description.ts`）
+      const desc = mcpServerDescOf(entry, this.deps.dataDir);
+      // 注册表那一份（有的话）与事件那一份按短名对齐：注册过就用注册表的名字与描述
+      const detailed = new Map<string, { name: string; fullName: string; description: string }>();
+      for (const full of registered) {
+        const short = full.slice(prefix.length);
+        detailed.set(short, { name: short, fullName: full, description: describe(full) });
+      }
+      for (const tool of seen?.toolDetails ?? []) {
+        const known = detailed.get(tool.name);
+        if (known !== undefined) {
+          if (known.description === '') known.description = tool.description;
+          continue;
+        }
+        detailed.set(tool.name, { name: tool.name, fullName: `${prefix}${tool.name}`, description: tool.description });
+      }
+      const toolDetails = [...detailed.values()];
+      /**
+       * 事件里那一份（旧日志只有名字 ⇒ 描述留空）补成与注册表那份同一形状：
+       * 下面对外只给一种元素形状（`{name, fullName, description}`），界面不必分两档读。
+       */
+      const enrichSeen = (tools: SeenTool[]): Array<{ name: string; fullName: string; description: string }> =>
+        tools.map((tool) => ({
+          name: tool.name,
+          fullName: `${prefix}${tool.name}`,
+          description: tool.description,
+        }));
+      /**
+       * 下面那几格答的是"**它给过哪些工具**"（2026-10-10 加，用户这一轮的原话是
+       * "mcp 卡片要显示 server 和工具名称"）。与 `runningNow` 分开的理由是一条判据：
+       * **清单是事实，进程状态是另一件事实**——服务被回收（生产常态：空闲 5 分钟）之后
+       * 页面上仍然该看得见它的工具名，只是必须说清"这是哪一刻的清单"。
+       *
+       * 于是 `toolDetails` / `toolsCount` / `registeredTools` 这一组从"此刻注册的那一份"
+       * 改成"日志里看到过的那一份"：以前它们被回收事件清空，人点开扩展页（那时多半已经回收）
+       * 永远只看到"0 件"。**三个字段口径一起改**是刻意的——只改一个就会出现"卡片里列着工具、
+       * 页头写着 0 件"这种自相矛盾，而那一页的全部价值就在"说的和看到的是同一件事"。
+       * 描述仍然以注册表现取优先（真注册过时它更新），够不着就用事件里 server 自报的原话。
+       *
+       * 三格各答一件事，`toolsFrom` 把话说死，界面不必自己猜形状：
+       *   · `live`  —— 日志里最后一条是"起来了"，这份清单就是它现在给的；
+       *   · `cached`—— 服务已经回收/崩溃，清单是上一次起来时拉的（`toolsListAt` 那一刻）；
+       *   · `none`  —— 没有清单（停用 / 从未起来 / 起来过但一件工具都没给，这三者靠
+       *                `toolsQuery` 与 `state` 分开）。
+       * 顺序有意：先判"有没有清单"（「没看到过」与「问过、是空的」是两件事），再判这份清单新不新。
+       * 还有一处**必须**先判在跑：服务此刻在跑、而它这次一件工具都没给（`live` 且空）时，
+       * 不能拿上一次那份来充数——"此刻没有"就是此刻的答案，回收之后再回退到旧清单才对。
+       */
+      const observedTools = toolDetails.length > 0
+        ? toolDetails
+        : (seen?.state === 'started' ? [] : enrichSeen(seen?.toolDetails ?? []));
+      const hasList = seen !== null && seen.toolsSeenAt !== null && observedTools.length > 0;
+      const toolsFrom: 'live' | 'cached' | 'none' =
+        hasList ? (seen.state === 'started' ? 'live' : 'cached') : 'none';
+      /**
+       * 清单时刻（ISO）。与"有没有工具"**无关**：拉到过就有时刻（空清单也是问过了），
+       * 所以它用 `seen` 那一格而不是 `hasList`——这一格正是"这份清单是何时的答案"。
+       */
+      const toolsListAt = seen !== null && seen.toolsSeenAt !== null && seen.toolsSeenAt !== ''
+        ? seen.toolsSeenAt
+        : null;
+      const toolList = toolsFrom === 'none' ? [] : observedTools;
       return {
         name: entry.name,
         command: entry.command,
@@ -6167,23 +7042,96 @@ class WebServerImpl implements WebServer {
         env: entry.env ?? {},
         cwd: entry.cwd ?? null,
         disabled: entry.disabled === true,
+        /**
+         * "它是干什么的"（那一句会进她的常驻索引）+ 它是哪来的。
+         *
+         * 三态（`descFrom`）：`config` = 人（或人批过的她）写的声明；`cache` = **它自报的
+         * 工具描述**兜底（界面必须把那句"据它自报"摆出来）；`absent` = 两处都没有
+         * ⇒ 索引里那一行**只写名字**（界面照实说这一格是空的，不编一句）。
+         */
+        desc: desc.text,
+        descFrom: desc.source,
+        descIsDeclared: desc.source === 'config',
         state: entry.disabled === true ? 'disabled' : seen === null ? 'never-started' : seen.state,
         lastAt: seen === null ? null : seen.ts,
         pid: seen === null ? null : seen.pid,
         stopReason: seen === null ? null : seen.reason,
-        registeredTools: tools,
-        toolsCount: tools.length,
-        toolDetails: tools.map((name) => ({
-          // 短名（去掉 mcp__{server}__ 前缀）：在它自己的服务卡里不必再重复一遍命名空间
-          name: name.slice(`${MCP_NAME_PREFIX}${entry.name}__`.length),
-          fullName: name,
-          description: describe(name),
-        })),
+        registeredTools: toolList.map((tool) => tool.fullName),
+        toolsCount: toolList.length,
+        toolDetails: toolList,
+        /**
+         * 这一份清单是**什么时候**看到的（2026-10-09 同批加）：清单只在启动那一刻进事件，
+         * 而 server 可能早就回收了。人看"它给了什么"时得知道那是哪一刻的答案——空 = 没看到过。
+         *
+         * ⚠️ 口径（2026-10-10 明确）：与 `toolsListAt` **同一个数**（这一格是它的老名字，
+         * 留着不删是因为界面与别处的读法已经在用它）。两处口径以前有一处会打架：清单来自
+         * 注册表回退（`toolDetails` 非空）而启动事件里没有可读时刻时，老写法让它为空——
+         * 同一张卡上"有清单"与"不知道清单是哪一刻的"两个结论并列。现在只留一个答案。
+         */
+        toolsSeenAt: toolsListAt,
+        // ── 工具清单（2026-10-10 加；界面那张卡的"server → 工具名"两层就吃这几格）──
+        /**
+         * **日志里最后看到过的那份清单**（与 `runningNow` 无关）：界面据此在回收之后
+         * 仍然列得出工具名。拿不到就是空数组，且此时 `toolsFrom === 'none'`。
+         */
+        toolList,
+        /** 这份清单是**哪一刻**看到的（ISO）；`null` = 从没看到过（不是"零件"） */
+        toolsListAt,
+        toolsFrom,
+        /**
+         * 这次启动**问过工具清单没有**——把两种"空"分开：
+         *   · `ok`    —— 拿到了清单（件数看 `toolList.length`）；
+         *   · `empty` —— 起来了、握手过了、`tools/list` 回了空 ⇒ 这个服务当前不提供工具；
+         *   · `unknown` —— 启动事件里没有可读的时刻（旧日志的怪形状）：不知道问没问过。
+         * 从未起来过的服务不写这三档，`state` 那一格已经说了（旧形状的启动事件照样认成 `ok`）。
+         */
+        toolsQuery: seen === null ? null
+          : seen.toolsSeenAt === null ? 'unknown'
+            : toolList.length > 0 ? 'ok' : 'empty',
+        /**
+         * 这份清单**是多久以前看到的**（ms，按本进程的时钟算）。
+         *
+         * 为什么由服务端算：界面手里只有时刻字符串，拿它减本机时钟就多一处口径
+         * （时钟不同源、页面开久了这行字会过期）。代价写在明处：它是**响应生成那一刻**的年龄，
+         * 刷新页面才更新——界面读即刻值，所以不设"要刷新"的陷阱。
+         */
+        toolsAgeMs: toolsListAt === null ? null : Math.max(0, this.deps.now().getTime() - Date.parse(toolsListAt)),
+        // ── 资源观测（2026-10-10 加；全部从 internal 事件折出来，池不在这条链上）──
+        /**
+         * 最近一次启动耗时（spawn → 握手 + 清单，ms）。
+         * 这个数答的是用户这一轮的原问题之一："冷启动到底多慢"——以前只有"启动事件发生在哪一刻"。
+         */
+        lastStartMs: seen?.startMs ?? null,
+        /**
+         * 最近一次采样到的 RSS（MB）与它是什么时候采的。
+         * `rssSource === 'unavailable'` ⇒ **没采到**（不是 0 MB）；`rssSampledAt` 为空 = 这一轮还没采过。
+         *
+         * ⚠️ 口径：它是**启动后不久那一次**采样（回收事件里带的是"最后一次采到的"值），
+         * **不是**回收瞬间的内存——进程一退出就没有 RSS 可读了。
+         */
+        rssMb: seen?.rss?.rssMb ?? seen?.rssMb ?? null,
+        rssSource: seen?.rss?.source ?? null,
+        rssSampledAt: seen?.rss?.sampledAtMs === null || seen?.rss?.sampledAtMs === undefined
+          ? null
+          : new Date(seen.rss.sampledAtMs).toISOString(),
+        /** 上一个进程活了多久（ms）——与"回收理由"一起读才看得出是空闲回收还是起来就崩 */
+        uptimeMs: seen?.uptimeMs ?? null,
+        /** 在飞请求峰值（回收事件带的才是整个生命周期的峰值） */
+        inFlightPeak: seen?.inFlightPeak ?? null,
+        /**
+         * **最近一次回收时间**（ISO）。它就是 `mcp/server-stopped` 的 `ts`——
+         * "回收救回多少内存"要把它与 `rssMb` 一起读（判据：调研稿 §3.2 ④）。
+         */
+        lastReclaimedAt: seen !== null && seen.state === 'stopped' ? seen.ts : null,
         // 「在跑」的判据是**日志**：最后一次是 started 才算，进程可能早退了。
         // pid 不能当判据——它是当时那个进程的 pid，此刻还成不成立没有任何记录能证明。
         runningNow: entry.disabled !== true && seen !== null && seen.state === 'started',
       };
     });
+    // 顶层的两个数（界面页头那一行）：注册表为空时（生产常态）以事件里那份为准——
+    // 写"工具 0 件"而每个卡片里列着工具，是最容易让人不再相信这一页的那种自相矛盾。
+    const seenToolNames = servers.flatMap((server) => server.registeredTools);
+    const effectiveTools = mcpToolNames.length > 0 ? mcpToolNames : seenToolNames;
     return {
       configured: configured.map((entry) => ({
         name: entry.name,
@@ -6191,10 +7139,13 @@ class WebServerImpl implements WebServer {
         args: entry.args ?? [],
         env: entry.env ?? {},
         disabled: entry.disabled === true,
+        // 那一句"它是干什么的"（与 servers[] 里那一格同一份；这里给一份是因为
+        // 界面有些地方只读 configured 那一层）
+        desc: mcpServerDescOf(entry, this.deps.dataDir).text,
       })),
       servers,
-      registeredTools: mcpToolNames,
-      registeredCount: mcpToolNames.length,
+      registeredTools: effectiveTools,
+      registeredCount: effectiveTools.length,
       runningCount: servers.filter((server) => server.runningNow).length,
       problems,
     };
@@ -6696,6 +7647,198 @@ function setJsonPath(doc: JsonObject, path: string, value: JsonValue): void {
 // ──────────────────────────── 技能「已忽略」备忘 ────────────────────────────
 
 /**
+ * 一个 MCP server 条目**语义上的样子**（比较用；`mcp-save` / `mcp-remove` 的"变没变"判据）。
+ *
+ * 为什么不直接比较配置文档里那两段 JSON：那样读到的是**存法**，不是**声明**。同一个声明
+ * 可以有两种写法（`env: {}` 与不写 `env`；键序不同），而它们对 `McpClientPool` 是同一件事
+ * ——界面每次"添加"都带一个空 `env`（见 `extensions_page.dart` 的保存分支），存进去就成了
+ * `env: {}`。照字面比，"这次编辑其实改了 command"与"这次只是把空袋子写实了"分不开，
+ * 于是**每次保存都叫醒她一次**——正是这一条要防的噪音。
+ *
+ * 归一化只做三件有依据的事，一件多的都不做：
+ *   · 键排序（键序在 JSON 里无意义）；
+ *   · 递归丢掉空对象（`{}`：`env`/`tools` 这种"袋子"空着与不写等价）；
+ *   · 其余**逐字节留原样**（`false` / `0` / 空字符串都是真声明，一个都不许吞）。
+ *
+ * 递归是必要的：`toolDefaults` / `tools` 里同样会出现空对象。
+ */
+function normalizeMcpEntry(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeMcpEntry(item));
+  if (!isRecord(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    const normalized = normalizeMcpEntry(value[key]);
+    if (isRecord(normalized) && Object.keys(normalized).length === 0) continue;
+    out[key] = normalized;
+  }
+  return out;
+}
+
+/** 一个条目的归一化指纹（比较"同不同"只此一处，两处各写一遍迟早漂移） */
+function mcpEntryFingerprint(value: unknown): string {
+  return JSON.stringify(normalizeMcpEntry(value));
+}
+
+/** 从配置文档里那串**裸**条目里挑出 name 字符串的那些（非对象/无名的交给 `parseMcpServers` 去报） */
+function serverNameOf(raw: unknown): string | null {
+  if (!isRecord(raw)) return null;
+  const name = raw['name'];
+  return typeof name === 'string' && name !== '' ? name : null;
+}
+
+/**
+ * 这一次保存**到底改了什么**——净效果，不是"按了几个键"。
+ *
+ * 为什么按名字两两对比而不是记流水账：同一次保存里 `mcp-save` 只动一条，而"改了什么"
+ * 的判据必须与"盘上现在是什么"对得上（写回被回滚时不许留下一条假通报）。
+ * 更关键的是**改回原样不算改动**：把 `enabled` 切过去再切回来，声明面与原来逐字节相同，
+ * 就没必要叫她（`unchanged` 这一格专门给这条判据留的）。
+ *
+ * 顺序即事实：`removed` 按"原来在第几个"、`added` / `changed` 按"现在在第几个"
+ * ——它们要直接读进给她的那句话里，顺序乱了那句话读起来就像随机抽样。
+ */
+interface McpDeclChange {
+  added: string[];
+  removed: string[];
+  /** 名字还在、声明变了（command / args / env / enabled 都算，凡进配置的都算） */
+  changed: string[];
+  /** 名字还在、声明也逐字段相同（**这种不叫醒她**："保存"不等于"变了"） */
+  unchanged: string[];
+}
+
+function diffMcpDeclarations(before: readonly unknown[], after: readonly unknown[]): McpDeclChange {
+  const beforeFp = new Map<string, string>();
+  const beforeOrder: string[] = [];
+  for (const raw of before) {
+    const name = serverNameOf(raw);
+    if (name === null) continue;
+    beforeFp.set(name, mcpEntryFingerprint(raw));
+    beforeOrder.push(name);
+  }
+  const afterFp = new Map<string, string>();
+  const afterOrder: string[] = [];
+  for (const raw of after) {
+    const name = serverNameOf(raw);
+    if (name === null) continue;
+    afterFp.set(name, mcpEntryFingerprint(raw));
+    afterOrder.push(name);
+  }
+  const out: McpDeclChange = { added: [], removed: [], changed: [], unchanged: [] };
+  for (const name of afterOrder) {
+    const prior = beforeFp.get(name);
+    if (prior === undefined) out.added.push(name);
+    else if (prior === afterFp.get(name)) out.unchanged.push(name);
+    else out.changed.push(name);
+  }
+  for (const name of beforeOrder) {
+    if (!afterFp.has(name)) out.removed.push(name);
+  }
+  return out;
+}
+
+/**
+ * 这次保存**该不该叫她**、以及该叫什么（给她的那句话的全文）。
+ *
+ * 两句话的分界（与 `declaredMcpServers` 那一格同口径）：**一个 server 都没变 ⇒ 不叫她**；
+ * 变了一条以上 ⇒ 叫一次，正文里把"变了什么"逐字说清。返回 null = 什么也不做。
+ */
+function mcpChangeWakeNoteOf(change: McpDeclChange, totalAfter: number, hasMcpSection: boolean): string | null {
+  const touched = change.added.length + change.removed.length + change.changed.length;
+  if (touched === 0) return null;
+  // 一句话说清"变了什么"：三段各自成句，空的那段不出现（不写"删除了：无"这种机器腔）
+  const what = [
+    change.added.length > 0 ? `加了 ${change.added.join('、')}` : '',
+    change.removed.length > 0 ? `删了 ${change.removed.join('、')}` : '',
+    change.changed.length > 0 ? `改了 ${change.changed.join('、')}` : '',
+  ].filter((part) => part !== '').join('，');
+  // 一个都没剩时说"现在一个都没有"，而不是"一共 0 个"——后者读起来像个故障码
+  const total = totalAfter === 0
+    ? '现在一个都没有了'
+    : hasMcpSection
+      ? `现在一共 ${totalAfter} 个`
+      : `现在一共 ${totalAfter} 个（配置里那一段还没写过）`;
+  return [
+    `你手边的 MCP 声明改了：${what}。${total}。`,
+    '要看工具清单就用 `mcp` 工具（不带 server 看有哪些 server）。',
+  ].join('\n');
+}
+
+/**
+ * 这次改动的**身份**（幂等键里那半段）：**动了哪些 server**，不含正文。
+ *
+ * 为什么不拿正文当键（第一版正是这么写的，探针当场测出）：正文里带着"现在一共几个"，
+ * 于是**同一组改动**在两次提交之间会凑出两句不同的话（数字不一定一样）、两个不同的键
+ * ⇒ 本该被幂等吃掉的那一次照旧叫醒她。而"动了谁"才是这次改动稳定不变的那部分。
+ *
+ * ⚠️ 它**不是**"把 5 秒内的所有编辑并成一条"：两次各改一个不同的 server 是两个身份、
+ * 两个键，各自都会到（那是两件事，不是同一组改动的重复提交）。
+ */
+function mcpChangeIdentityKeyOf(change: McpDeclChange): string {
+  return [
+    `+${[...change.added].sort().join(',')}`,
+    `-${[...change.removed].sort().join(',')}`,
+    `~${[...change.changed].sort().join(',')}`,
+  ].join('|');
+}
+
+/**
+ * 回执里"叫没叫她"那两格（`mcp-save` / `mcp-remove` 共用）。
+ *
+ * 为什么要如实回：人在界面上点完保存，下一个问题必然是"她知道了没"。而"没叫她"有两种
+ * 完全不同的原因（这次没改动 / 这条通报撞上了幂等时间片），界面与人都得能分辨。
+ */
+function mcpWakeReceiptFields(
+  change: McpDeclChange,
+  beforeHadSection: boolean,
+  after: { servers: readonly Record<string, unknown>[]; hasSection: boolean },
+): { changedServers: string[]; wake: string } {
+  const note = mcpChangeWakeNoteOf(change, after.servers.length, after.hasSection);
+  const changedServers = [...change.added, ...change.removed, ...change.changed];
+  if (note === null) {
+    return {
+      changedServers,
+      wake: beforeHadSection === after.hasSection
+        ? '这次声明面没变，没叫她'
+        : '这次只补了配置里那段声明的位置，没叫她',
+    };
+  }
+  return {
+    changedServers,
+    wake: '已按既有那条真唤醒路径（wake/manual）通报她一次：'
+      + '与聊天框同一条路（她下一拍真的起一个 turn，正文进那一轮的请求体）；'
+      + '同一组改动 5 秒内重复只通报一次，不会连发。',
+  };
+}
+
+/**
+ * `config.json` 里**有没有** `mcp.servers` 这一段（盘上/文档里的事实，不解析、不校验）。
+ *
+ * 为什么要单独判一次：`readConfigServerList` 会**就地补**出这个键（改配置时需要的副作用），
+ * 所以"改完之后一定有这一段"这件事本身不说明原来有没有。而"原来一个都没有"与"原来那段
+ * 根本没写过"在她那一格是两句不同的话（见 `declaredMcpServers`），通报里也不能含糊。
+ */
+function hasConfigServerSection(doc: JsonObject): boolean {
+  const mcpRaw = doc['mcp'];
+  if (!isRecord(mcpRaw)) return false;
+  return Array.isArray((mcpRaw as JsonObject)['servers']);
+}
+
+/**
+ * 配置文档里那串**声明**的一份浅拷贝（判"变没变"用；`push`/`splice` 改不到它）。
+ *
+ * 元素是引用，但比较只看**内容**（`mcpEntryFingerprint` 是当场算出来的），所以浅拷贝够用。
+ * 缺这一段/形状不对 ⇒ 空数组：这是"还没声明过任何 server"的正常态，不是错误
+ * （真错在 `parseMcpServers` 那一层，它在写盘之后会响）。
+ */
+function snapshotConfigServerList(doc: JsonObject): readonly Record<string, unknown>[] {
+  const mcpRaw = doc['mcp'];
+  if (!isRecord(mcpRaw)) return [];
+  const servers: unknown = (mcpRaw as JsonObject)['servers'];
+  if (!Array.isArray(servers)) return [];
+  return (servers as unknown[]).filter((item): item is Record<string, unknown> => isRecord(item));
+}
+
+/**
  * 取配置文档里 `mcp.servers` 那份**活数组**（就地改它，写回时改的就是它）。
  *
  * 为什么必须返回活引用：`mcp.servers` 是对象数组，`splice`/`push` 只作用于数组本身；
@@ -6706,7 +7849,7 @@ function setJsonPath(doc: JsonObject, path: string, value: JsonValue): void {
  * 形状不对时直接抛：`mcp.servers` 不是数组意味着整份配置本来就过不了 `parseMcpServers`，
  * 那台机器根本起不来——这里"尽力而为"地改成数组，等于把一处响亮的错误悄悄咽掉。
  */
-function readConfigServerList(doc: JsonObject): JsonObject[] {
+function readConfigServerList(doc: JsonObject): Record<string, unknown>[] {
   const mcpRaw = doc['mcp'];
   let target: JsonObject;
   if (mcpRaw === undefined || mcpRaw === null) {
@@ -6720,7 +7863,7 @@ function readConfigServerList(doc: JsonObject): JsonObject[] {
   const serversRaw = target['servers'];
   if (serversRaw === undefined || serversRaw === null) {
     target['servers'] = [];
-    return target['servers'] as unknown as JsonObject[];
+    return target['servers'] as unknown as Record<string, unknown>[];
   }
   if (!Array.isArray(serversRaw)) {
     throw badRequest('config.json 的 mcp.servers 不是数组：先手工修好它再来改服务');
@@ -6730,7 +7873,7 @@ function readConfigServerList(doc: JsonObject): JsonObject[] {
   for (const [index, item] of serversRaw.entries()) {
     if (!isRecord(item)) throw badRequest(`mcp.servers[${index}] 不是对象：先手工修好它再来改服务`);
   }
-  return serversRaw as unknown as JsonObject[];
+  return serversRaw as unknown as Record<string, unknown>[];
 }
 
 /**
@@ -6836,7 +7979,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.5' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.6' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

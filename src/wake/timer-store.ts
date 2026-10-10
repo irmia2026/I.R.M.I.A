@@ -616,6 +616,19 @@ export class TimerStore {
     return all.map((e) => ({ ...e }));
   }
 
+  /**
+   * 现在几点（毫秒）——**与调度用的是同一个时钟**（`deps.now`）。
+   *
+   * 为什么要把它露出来（2026-10-08，`timer action=wait`）：那一个动作要把"多久之后"算成一个
+   * 绝对时刻（`at = 现在 + 时长`），而"现在"只能有一处。工具层自己 `new Date()` 的话，
+   * 两种时钟一旦分岔（测试注入的时钟、宿主给 `--data-dir` 场景的固定时钟），
+   * 算出来的 `at` 与调度器认的时刻就不是一回事——排出去的唤醒会在错的时刻响，
+   * 而那种错从回执上完全看不出来。判据收在这里：**排定时器的那个时钟就是报时刻的那个时钟**。
+   */
+  nowMs(): number {
+    return this.deps.now().getTime();
+  }
+
   get(id: string): StoredTimerEntry | null {
     const entry = this.#entries.get(id);
     return entry === undefined ? null : { ...entry };

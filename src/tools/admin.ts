@@ -38,7 +38,7 @@ import { dirname, isAbsolute, resolve, sep } from 'node:path';
 
 import type { StoredTimerEntry, TimerSetInput, TimerStore } from '../wake/timer-store.js';
 import type { ChannelMessage, Visibility, WakeChannel } from '../log/types.js';
-import { defaultVisibility } from '../log/types.ts';
+import { contextImageSkipText, defaultVisibility, isImageAttachment, type ContextImageSkipReason } from '../log/types.ts';
 // 默认等待线只此一份（config.ts）：回执里说的时长必须与 real-loop 落 human/expired 的判定线同源
 import { DEFAULT_ASK_HUMAN_TIMEOUT_MIN } from '../config/config.ts';
 // 回投地址的 scheme 与解析口都属于通道层（`qq:<chatType>:<chatId>`、`onebot:<chatType>:<chatId>`），
@@ -551,6 +551,35 @@ export interface ReplyPoster {
   post(target: ReplyTarget, text: string): Promise<ReplyOutcome>;
 }
 
+/**
+ * **"正在输入"的投递口**（`speak` 开口之前那一次）。
+ *
+ * 与 `ReplyPoster` 分成两个口子，不是形式主义——它们对失败的**态度不同**：
+ *   • `ReplyPoster` 失败 = **话没送到**，回执必须如实说，她据此决定要不要重说；
+ *   • 这个口子失败 = **什么都不影响**，话照旧说（用户 2026-10-11 的口径：「失败绝不影响说话」）。
+ * 合成一个口子的话，"正在输入发不出去"迟早会被写进那条投递回执里，读起来就像"她这次没说成"。
+ *
+ * 三态也是为这件事分的（`sent` / `skipped` / `failed`）：工具层不需要报给模型（那不是她的动作），
+ * 但**测试与日志要能分清**"没接这条能力"和"接了但没发成"——差一个词，排障方向差很远。
+ */
+export type InputNotifyPostResult =
+  | { status: 'sent'; channel: string }
+  | { status: 'skipped'; reason: string }
+  | { status: 'failed'; reason: string };
+
+export interface InputNotifyPoster {
+  notify(target: ReplyTarget): Promise<InputNotifyPostResult>;
+}
+
+/**
+ * 通道没接这条能力（或它不是个像样的实现）时，兜底返回的那一个。
+ *
+ * 为什么工具层还要自己兜一层（`speak` 那边已经 try/catch 了）：注入的实现是**外部代码**
+ * （测试替身、将来的第二条通道），一个永远不 resolve 的 `notify` 会把 `speak` 卡在开口之前
+ * ——那正是"不许因此让 speak 变慢"这条纪律要挡住的事。所以在**开口前**加一道硬预算。
+ */
+export const INPUT_NOTIFY_HARD_TIMEOUT_MS = 5_000;
+
 /** 官方文件类型：1=图片 2=视频 3=语音 4=文件（与通道层同一套口径） */
 export type MediaFileType = 1 | 2 | 3 | 4;
 
@@ -609,6 +638,14 @@ export interface AdminToolsOptions {
   userSpoke?: () => { text: string; wakeSeq: number } | null;
   /** 回投实现，默认用全局 fetch */
   replyPoster?: ReplyPoster;
+  /**
+   * "正在输入"的投递口（**不配 = 一次都不发**）。
+   *
+   * 装配层的判据只有一条：`config.speak.inputNotify` 为真才装它。于是"关掉开关就一句话都不发"
+   * 这件事发生在**接线层**，而不是在 `speak` 里多写一个 if——工具层因此永远不必知道
+   * 有这么个开关，也就不会出现"两个地方各判一次、其中一个漏了"。
+   */
+  inputNotify?: InputNotifyPoster;
   /** persona 写入后的副作用钩子：刷新人格缓存、重算 personaHash */
   onPersonaUpdated?: (payload: PersonaUpdatedPayload) => void;
   /** 清单变更后的副作用钩子：投影/注入层据此刷新 */
@@ -704,6 +741,67 @@ export type AdminToolName = (typeof ADMIN_TOOL_NAMES)[number];
  */
 export const TIMER_TOOL_NAME = 'timer';
 
+/**
+ * `timer action=wait` 的**上限**（分钟）：12 小时。防呆，不是能力边界。
+ *
+ * 为什么要有它（用户 2026-10-08：「上限要写清（例如最长几小时，防呆）」）：
+ * `wait` 的全部价值是"**过一会儿再叫我**"——一个拍内的短等（几分钟到几小时）。
+ * 没有上限时，一个手滑的 `minutes: 100000` 会排出一条七年后的唤醒：它在表里躺一辈子、
+ * 每次 `list` 都占一行，而她要的多半是"明天这时看一眼"（那件事本来就该用 `set` 的 `at`/`cron`，
+ * 值也写得更明白）。所以超限**当场报参数错并指路**，不静默夹到上限——
+ * 夹掉之后她以为排的是自己说的那个时长，那比报错坏得多。
+ *
+ * 12 这个数的来历：跨一夜（睡/下班）与跨半天都在里面，而"更长"的等待用 `set` 表达得更准
+ * （带时区的绝对时刻、或者 cron 的周期语义）。
+ */
+export const TIMER_WAIT_MAX_MINUTES = 12 * 60;
+
+/** `wait` 的理由（`reason`）上限：它进的是到点那一轮的上下文，太长等于每轮都在为它付费 */
+export const TIMER_WAIT_REASON_MAX = 200;
+
+/**
+ * `wait` 排出来的那条定时器的 payload 标记（判"重复 wait"的判据就写在它上面）。
+ *
+ * 为什么 payload 要有标记而不是"看表里有没有条目"：表里同时躺着 set 布防的、cron 周期的、
+ * 以及框架自己排的（记忆整理那种），"她排过一次 wait"必须**认得出来**才谈得上不重复布防。
+ *
+ * 三个字段各有用处，**一个都不能少**：
+ *   · `kind`：这一类条目的身份（`isMemoryMaintainPayload` 认的是另一个 kind，不会串）；
+ *   · `note`：到点叫她的**理由**——`render.ts` 的 `wake/timer` 渲染只从 `payload.note` 取
+ *     那一句话（复用既有渲染，不另写一套），她到点看见的就是它；
+ *   · `sid`：她在**哪个会话**里排的这一条（"同一会话/同一理由不重复布防"的另一半；
+ *     没有 IM 会话的那一拍是 null）。
+ */
+export const TIMER_WAIT_PAYLOAD_KIND = 'wait';
+
+export interface TimerWaitPayload {
+  kind: typeof TIMER_WAIT_PAYLOAD_KIND;
+  /** 到点叫她的理由（没有理由时空串） */
+  note: string;
+  /** 她在哪个会话里排的（没有可回投会话时为 null） */
+  sid: string | null;
+}
+
+/**
+ * 这一条定时器表项是不是 `wait` 排的？是就给出它的 payload，不是给 `null`。
+ *
+ * **判据只此一处**：布防时用它构造、去重时用它识别（`timerWaitPayloadOf` 的两个调用点都在
+ * `waitTimerAction` 里）。读的是任意来源的 payload（表里可能是 `set` 的、框架自己排的、
+ * 或者是手改 `data/timers.json` 留下的乱七八糟形状），所以每一格都过类型检查——
+ * 形状不对一律当"不是 wait"，绝不猜。
+ */
+export function timerWaitPayloadOf(payload: unknown): TimerWaitPayload | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+  if (record['kind'] !== TIMER_WAIT_PAYLOAD_KIND) return null;
+  const sid = record['sid'];
+  return {
+    kind: TIMER_WAIT_PAYLOAD_KIND,
+    note: typeof record['note'] === 'string' ? record['note'] : '',
+    sid: typeof sid === 'string' && sid !== '' ? sid : null,
+  };
+}
+
 // ──────────────────────────────── read_channel 的注入点 ────────────────────────────────
 
 /**
@@ -758,7 +856,34 @@ export interface ChannelMessageView {
   seq?: number;
   ts: string;
   attachments?: Array<{ type: string; url?: string; name?: string }>;
+  /**
+   * 这一条消息里**图片**逐张的去向（宿主算好的事实，见 `real-loop` 的
+   * `prepareAimedContextImages`）。
+   *
+   * **有它 = 这一条点名她**（判据在宿主手里，只一处：`imageAimedAtHer`——群聊认 @ / 提及、
+   * 私聊无条件）。于是这一条走"点名例外"：图按现有准入装配进上下文（`read_channel` 的
+   * handler 写 `image/attached`，渲染层注入 `input_image`）；缺席的那些消息一条都不装配，
+   * 那一行只给地址，由她自己决定值不值得看（2026-10-11 用户拍板的两条）。
+   *
+   * **站位与 `attachments` 里图片的顺序逐个对齐**（只含图、不含文件）——渲染层就是按这个
+   * 顺序把状态写进那一行的（见 `renderReadBatch`）。
+   */
+  contextImages?: ContextImageFact[];
 }
+
+/**
+ * 一条消息里**一张图**的去向（宿主算好；只出现在点名她的那些消息上）。
+ *
+ * 三种结局各有一种写法，**没有第四种**（"静默丢掉"不是一种）：
+ *   · `ready`   = 宿主已经验过字节与型别（拿渲染 loader 自己那个函数），装配后一定进得去；
+ *   · `denied`  = 准入判据挡的，带**理由码**（渲染层用 `contextImageSkipText` 翻成人话——
+ *     与预热留痕用的是同一份文案，两处不会各说各的）；
+ *   · `over`    = 这一次读的图片名额用完了（上限见 real-loop 的 `READ_CHANNEL_CONTEXT_IMAGE_MAX`）。
+ */
+export type ContextImageFact =
+  | { state: 'ready'; key: string; mime: string; name?: string }
+  | { state: 'denied'; reason: ContextImageSkipReason }
+  | { state: 'over' };
 
 /**
  * 她自己在这个会话里**说出去的一段话**（由 `speak` 的投递回执 `speak/sent` 归并而来）。
@@ -830,6 +955,42 @@ export const SELF_SPEAK_LABEL = '（我）';
 export const MENTION_ROW_MARK = '▶ ';
 
 /**
+ * 附件那一格里**一张图**的写法（`read_channel` 那一行的唯一实现）。
+ *
+ * 为什么图必须带上地址（2026-10-11 用户拍板的那条：默认**纯文字 + 给足引用**）：默认那条路
+ * 一张图都不装配进上下文，于是这一行就是她唯一的线索——只印一个 `［图］`，她连"这是哪张、
+ * 值不值得看"都判不了，更没法自己去看（`vision_read` 要一个**本地文件**：先把地址交给
+ * `http_download` 存下来，再读它）。地址就是附件那条事实本身（`attachments[].url`），
+ * 与唤醒那条路印的是**同一份**（见 render.ts 的 `renderAttachments`：`[image: 名字] 地址…`）。
+ *
+ * `fact` 有货 = 这一条**点名她**（判据在宿主，只一处）：那就还要说清**进没进上下文**——
+ * 进去了写"已带进上下文"，没进就照实写理由（准入门槛那几条翻人话用的是留痕那一份
+ * `contextImageSkipText`；名额用完的写"没带"，框后另有一句报总数）。
+ *
+ * 三种形态各自的字节（逐字钉在 test/read-channel-images.test.ts 里）：
+ *   · 默认那条路：`［图 https://…］`
+ *   · 点名 + 进去了：`［图 https://…（已带进上下文）］`
+ *   · 点名 + 没进：`［图 https://…（没带进上下文：<理由>）］`
+ * 地址缺席（平台没给）时省掉中间那一格，其余一个字不变——不印一个假的空地址。
+ */
+function imageCellText(
+  attachment: { type: string; url?: string; name?: string },
+  fact: ContextImageFact | undefined,
+): string {
+  const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
+  const where = url === '' ? '' : ` ${url}`;
+  if (fact === undefined) return `［图${where}］`;
+  switch (fact.state) {
+    case 'ready':
+      return `［图${where}（已带进上下文）］`;
+    case 'denied':
+      return `［图${where}（没带进上下文：${contextImageSkipText(fact.reason)}）］`;
+    case 'over':
+      return `［图${where}（没带进上下文：这一次读的图片名额用完了）］`;
+  }
+}
+
+/**
  * 出站到某个会话**成功之后**回执里的那一句 —— 说清"凭什么能确认它发出去了"。
  *
  * 用户 2026-10-07 报的现象：「report 貌似不进 channel？她老是不知道自己的 report 已经发出去了
@@ -846,10 +1007,124 @@ export const MENTION_ROW_MARK = '▶ ';
  * 为什么写成常量而不是在 `speak` / `report` 里各拼一遍：两个工具的路由不同、**判据必须同一句**
  * ——她据这句话决定要不要再发。两处各写一遍，迟早一句改了另一句没改，而"她以为没发出去"
  * 这种误判正是这次要修的病害本身。
+ *
+ * 2026-10-08 用户的口径：「**speak 和 report 工具发送成功的回执应该明确，成功投递，
+ * 不必重复发送**」。原来那一句写的是"不用再发一遍"——意思对，但**没有一个她能一眼认出的词**：
+ * 她在回执里扫的是"成功没有、要不要再发"，而"已送达凭据"这四个字看起来像一条内部记录。
+ * 所以这一句现在**开头就是结论**（`投递成功`），并把用户点名的那四个字原样写进去
+ * （`不必重复发送`，逐字，不许改写成"不用再发"——她认的就是这一串）。
+ * 失败/被拒那一侧**不许出现它**（`test/delivery-receipt.test.ts` 逐字钉着两侧）。
  */
 export const SENT_CREDENTIAL_NOTE =
-  '已送达凭据：这个会话的"我说过什么"里已经有这一篇了（`read_channel` 里那一行行首是 `（我）`），'
-  + '不用再发一遍';
+  '投递成功（**不必重复发送**）：这个会话的"我说过什么"里已经有这一篇了'
+  + '（`read_channel` 里那一行行首是 `（我）`）——它是"已经发出去了"的证据，不是"我想发"。';
+
+/**
+ * 回执里引用她送出去的那段原文时最多引几个字（**中文计字口径**，与 speak 的硬门同一把尺）。
+ *
+ * 为什么要有这个数：`report` 允许 64000 字，把整篇抄进回执等于把这一篇**再付一次 token**
+ * （回执进历史、之后每轮重发）。锚点的用处是"她一眼认得出这是哪一篇"，
+ * 一句开头就够；超出的部分在回执里说清"全文多少字、这里只引开头"。
+ */
+export const SENT_ANCHOR_MAX = 40;
+
+/**
+ * 回执里那个**可核对的锚点**：送出去的到底是哪一句/哪一篇（`speak` 与 `report` 共用）。
+ *
+ * 用户 2026-10-08 的第二条：「送出的是哪一句（可核对的锚点）」。她要能拿这一行去核对自己
+ * 刚才说了什么——回执里只有一个"ok"时，她既不知道发出去的是哪一版措辞（分段会摘标点），
+ * 也不知道自己有没有说漏。
+ *
+ * 引的是**实际出站的字节**（`speak` 传切分后拼起来的那一段、`report` 传原样正文），
+ * 不是她原本想说的那一份：核对的落点是"那边收到了什么"（`read_channel` 读回来的也是它）。
+ *
+ * **引用时压成一行、字数按原文算**（两个不同的量，刻意分开）：
+ *   · 引文压平空白，因为回执里一行就是一行（多行正文会把结论挤散）；
+ *   · 而"全文 N 字"用原文的**中文计字**（`charCount`，与回执上面那条
+ *     `日志/前端：… 共 M 字` 同一把尺）——两处各算一次会出现"68 字"与"67 字"并存，
+ *     她核对时先要判"哪个数是准的"，那正是这条锚点不该带来的负担。
+ *
+ * `noun` 只有两个字（`句` / `篇`）：一段聊天话是"这一句"，一篇报告是"这一篇"——
+ * 措辞的判据仍然只在这里一处，两个调用点不各写一遍。
+ */
+export function sentAnchorNote(text: string, noun: '句' | '篇'): string {
+  const flat = text.replace(/\s+/gu, ' ').trim();
+  const chars = charCount(text);
+  // 截断按**引文**那串判：她看到的就是它，超过 40 字就该说"这里只引开头"
+  const clipped = charCount(flat) > SENT_ANCHOR_MAX;
+  const head = clipped ? `${[...flat].slice(0, SENT_ANCHOR_MAX).join('')}…` : flat;
+  return `送出的就是这一${noun}（可核对）：「${head}」`
+    + (clipped ? `（全文 ${chars} 字，这里只引开头）` : '');
+}
+
+/**
+ * 出站**真的送进了某个会话**之后，回执里那两行 —— `speak` 与 `report` **唯一的共用实现**。
+ *
+ * 两行各答一个问题，缺一条她就会去重发：
+ *   ① **送出去的是哪一句**（`sentAnchorNote`：可核对的锚点）；
+ *   ② **凭什么能确认送到了**（`SENT_CREDENTIAL_NOTE`：下一轮 `read_channel` 里读得到，
+ *      所以不必重复发送）。
+ *
+ * 为什么收成一个函数而不是让两个工具各拼两行：用户点名这两句要**逐字一致**
+ * （「能共用就共用，别两处各写一套」）——她在两个工具的回执里看到的是同一个判据，
+ * 才谈得上"照着它决定要不要再发"。目标（发到哪儿、几条气泡）仍由调用方那一行说，
+ * 因为两条路的目标来源本来就不同（`speak` 是回投地址、`report` 还带 HTTP 状态）。
+ */
+export function sentReceiptLines(input: { text: string; noun: '句' | '篇' }): string[] {
+  return [sentAnchorNote(input.text, input.noun), SENT_CREDENTIAL_NOTE];
+}
+
+/**
+ * 出站**失败/被拒**之后，回执里那两行 —— 同样只有这一处实现（`speak` 与 `report` 共用）。
+ *
+ * 用户 2026-10-08 的口径：「**失败/被拒 ⇒ 明说不必重试或说明为什么可以重试**
+ * （与"成功"明确区分，别含糊）」。三件事必须同时说清：
+ *   ① **失败了**（开头就是"失败"，与成功那份开头就是"投递成功"形成对照）；
+ *   ② **已经发出去几条收不回来**（`speak` 会断在半路，`report` 是整篇一条）；
+ *   ③ **还要不要试**——判断来自 `deliveryAdvice`（平台错误码背后的性质：权限类再试也一样、
+ *      网络类可稍后再试、其余按"不必重试"处理）。
+ *
+ * 判据不在这里另写一份：整段失败与半路失败的分支都走 `deliveryAdvice`，
+ * 而"这一篇没送达"这句必须点明**本机那一段不算送达**（否则她会把对话流里那条记录
+ * 读成"他已经收到了"）。
+ */
+export function deliveryFailureLines(input: {
+  /** 目标怎么说（`发往 X` / `投递`）；调用方拼好，两条路的目标来源不同 */
+  where: string;
+  /** 这一次一共要发几条（`speak` = 切出来的段数；`report` = 1） */
+  total: number;
+  /** 真的送成了几条（收不回来了的那些） */
+  sent: number;
+  /** 平台/通道给的原因 */
+  reason: string;
+}): string[] {
+  // 整段没发出去（`sent === 0`）时**换一句更直白的话**：分段的账（"第 N 条起"）在一条都没成的时候
+  // 读起来像"只差一个数"，而她要的判断是"外面一个字都没有"。所以：
+  //   · 半路断的（`sent > 0`）⇒ 照旧报段账（她已经说出去了几句，这个数必须准）；
+  //   · 一条都没成、且本来只有一条 ⇒ "这一条没有送达……不等于他收到了"（本机那份不算送达）；
+  //   · 一条都没成、本来有多条 ⇒ 也报段账（她从"共 M 条"看得出这是整段失败）。
+  const head = input.sent > 0 || input.total > 1
+    ? `${input.where}失败：第 ${input.sent + 1} 条起未发出（共 ${input.total} 条）。${input.reason}`
+    : `${input.where}失败：这一条没有送达（对话流里那一段只是本机记录，不等于他收到了）。${input.reason}`;
+  return [head, deliveryAdvice(input.reason, input.sent)];
+}
+
+/**
+ * 本轮**没有 IM 会话可发**时的回执 —— `speak` 与 `report` 共用这一句（只有名词不同）。
+ *
+ * 它不是失败，也**不是成功投递**：本机对话流那一份永远落下了（人在界面能看见），
+ * 而 IM 那一跳根本没发生。所以这一段里**不许出现**"不必重复发送"（那会让她以为外面收到了），
+ * 但必须给出去路：要它真的到那边，带 `to` 再发一次——**那不是重发，是第一次发到会话**。
+ *
+ * 为什么一定要说"下一轮翻那个会话不会看到这一篇"：凭据写的是**会话坐标**，这一轮没有坐标，
+ * 所以她下一轮读回来时它**真的不在**——先说清，她才不会把"读不到"读成"框架忘了记"，
+ * 也就不会为了"补上那一篇"反复发。
+ */
+export function localOnlyNote(noun: '发言' | '报告'): string {
+  return `投递：本轮没有 IM 会话可发（跳过）；但${noun}已经在对话流里了，人在界面能看见。`
+    + '这一轮没有会话坐标，所以没写"已送达某会话"的凭据：下一轮你翻那个会话时不会看到这一篇。'
+    + '要它真的到那边，带 `to` 再发一次。';
+}
 
 /**
  * 把"她在这个会话里说过的话"与外部消息**按时间轴交错**成一批（read_channel 唯一的合批实现）。
@@ -1190,6 +1465,52 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
   const replyTargetOf = options.replyTargetOf ?? derivedReplyTargetOf(options.currentWakeChannel);
 
   /**
+   * **开口之前那一次"正在输入"**（用户 2026-10-11 拍板：「只做正在输入。speak 时触发」）。
+   *
+   * 位置就是全部语义：它在**第一个字出去之前**、在打字停顿之前发出去——对方先看到"正在输入"，
+   * 再看到话。所以它必须在循环之前调一次，且**一次 speak 最多一次**（不是每段一条：
+   * 那样对方会看到状态反复重启，而且要多花 N 次被动窗口）。
+   *
+   * 反过来，这条纪律同样硬：**它慢、它失败、它根本不存在，都不许影响说话**。
+   * 所以这里有三层兜底，缺一层就会出现"她开口前先卡住"：
+   *   ① 没配 `inputNotify`（关着开关）⇒ 立刻返回，一次网络都不发；
+   *   ② 注入的实现抛异常/返回 rejected ⇒ catch 掉（这一段只值一行注释：它不改任何结果）。
+   *   ③ 注入的实现**永远不 resolve**（外部代码，不可信）⇒ `INPUT_NOTIFY_HARD_TIMEOUT_MS`
+   *      到点就往下走。注意 `speak` 的总预算里**不扣**这段：它最多值 5 秒，而 speak 本身
+   *      `timeoutMs` 是 120 秒，扣或不扣都不改变"能不能说完"这件事（写在这里是让你知道
+   *      这个数有意留白了，不是忘了）。
+   *
+   * 返回 void：三种结果对 speak 的处理**完全一样**（照旧说话），所以它没有"失败"这个出口。
+   * 要观测"到底发没发出去"看**通道侧**那两处：`QqOfficialChannel.snapshot().inputNotify`
+   * 的三个计数（attempts/sent/failed，只读、不改事件契约）与失败时那一行 `log.warn`。
+   */
+  const notifyTypingBeforeSpeaking = async (target: ReplyTarget): Promise<void> => {
+    const poster = options.inputNotify;
+    if (poster === undefined) return;
+    const timerRef: { handle: NodeJS.Timeout | null } = { handle: null };
+    try {
+      // 结果**有意丢弃**：三种结果对这次发言的处理完全一样（照旧说话），所以这里连一个分支都没有。
+      // 留痕在通道侧（`QqOfficialChannel.sendInputNotify` 的 `log.warn` 与 `snapshot().inputNotify`
+      // 那两个数）——**不往事件日志里写新类型**：日志类型表（`log/types.ts`）是只读契约，
+      // 这条零成本的可选动作不配在它上面开一个新事件。
+      await Promise.race([
+        poster.notify(target),
+        new Promise<void>((resolve) => {
+          // ⚠️ **刻意不 unref**（理由与 `channel/input-notify.ts` 里那个计时器逐字相同）：
+          // 这一段可能发生在一次**同步流程的最前面**（没有别的活着的句柄），unref 之后事件循环
+          // 会在到点之前判空退出，于是这个 Promise 永远不 settle、`speak` 卡在"开口之前"。
+          // 宁可多持 5 秒的引用，也不接受"她开口前卡住"这件事有任何一条路径。
+          timerRef.handle = setTimeout(() => { resolve(); }, INPUT_NOTIFY_HARD_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      // 注入的实现是外部代码：它抛异常也只是"这一次没有正在输入"，一个字都不许冒泡出去
+    } finally {
+      if (timerRef.handle !== null) clearTimeout(timerRef.handle);
+    }
+  };
+
+  /**
    * 解析发言目标（speak / report **共用一份**）。
    *
    * 两条路：不带 `to` → 回本轮叫醒她的那个会话；带 `to` → 发到指定会话。
@@ -1412,34 +1733,40 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     },
   };
 
-  // ── 定时器：一件工具、三个动作（v35 合并）──
+  // ── 定时器：一件工具、四个动作（v35 合并；`wait` 于 2026-10-08 补上）──
   //
   // 合并前是三件（`set_timer` / `cancel_timer` / `list_timers`），四天实测合起来只有 8 次调用
   // （set 2 / list 6 / cancel 0），却常驻 269 token（三份 name + description + schema，
   // 每一步请求都在付）。合并的根据与取舍见 docs/tools-audit.md §3.4 与 docs/design.md §4.18。
   //
-  // **三个能力一个都不能丢**，尤其是：
+  // **能力一个都不能丢**，尤其是：
   //   · `list`——她真的在用（三件里调用最多的一件）；
   //   · `cancel`——误排之后唯一的撤销出口（零调用不等于没用：删了它只剩徒手改
   //     `data/timers.json` 一条路，而那是她的核心资产）。
   //   合并的是**入口**，不是能力。
   //
-  // **名字取中性的 `timer`，不保留 `set_timer`**：三个动作里"设"只占一个，一件叫 `set_timer`
+  // **`wait` 是第四个动作，也是最不像"定时器"的那个**（2026-10-08 用户的口径
+  // 「timer 提供一个 wait」）：她要表达的其实是"**过一会儿再叫我**"——`set` 要她自己算
+  // 一个绝对时刻（还得处理时区），而那正是她一次次算错、或者干脆在原地反复 read_channel 的那件事。
+  // 它与 `set` **共用同一张表、同一条唤醒路径**（`wake/timer`），区别只在于"时长"由框架算成 `at`；
+  // 语义与上限写在下面对 `waitTimerAction` 的注释里。
+  //
+  // **名字取中性的 `timer`，不保留 `set_timer`**：动作里"设"只占一个，一件叫 `set_timer`
   // 的工具去 `list` 是名字与动作打架——她得多记一条"列定时器藏在 set_timer 底下"，而
-  // `list` 恰恰是三者里最常用的。中性的名词对三个动作一视同仁，也让 `action` 读起来自然。
+  // `list` 恰恰是其中最常用的。中性的名词对所有动作一视同仁，也让 `action` 读起来自然。
   //
   // **判据只做一处**：`action` 是同一个枚举（下面的 TIMER_ACTIONS）、同一个必填校验
-  // （readTimerAction），三个动作共用同一组参数读取（optionalString / requiredString）、
+  // （readTimerAction），所有动作共用同一组参数读取（optionalString / requiredString）、
   // 同一个结果出口（okResult / errorResult）与同一个异常兜底（errorResultFromThrown）。
-  // 不允许出现"三个分支各说各话"——那种不一致只有她撞上时才会被发现。
+  // 不允许出现"几个分支各说各话"——那种不一致只有她撞上时才会被发现。
   //
   // **action 必填、没有默认动作**：这是合并带来的唯一新失败模式（少写一个字段），
-  // 而"默认成 set"会让 `timer {at: …}` 这种漏写静默生效成布防。必填 + 一条说清三个取值的
+  // 而"默认成 set"会让 `timer {at: …}` 这种漏写静默生效成布防。必填 + 一条说清取值的
   // 报错，比一个猜出来的默认动作安全。（她原来的习惯写法 `set_timer {at: …}` 现在会得到
   // 一句"缺少必填参数 action"，改一次就好。）
 
-  /** 一条调用的三个动作。取值即 `action` 的枚举，报错文案也从它拼出来（不手写第二份） */
-  const TIMER_ACTIONS = ['set', 'cancel', 'list'] as const;
+  /** 一条调用的四个动作。取值即 `action` 的枚举，报错文案也从它拼出来（不手写第二份） */
+  const TIMER_ACTIONS = ['set', 'wait', 'cancel', 'list'] as const;
   type TimerAction = (typeof TIMER_ACTIONS)[number];
 
   /**
@@ -1447,7 +1774,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
    *
    * 缺字段走 `requiredString`（"缺少必填参数 action"，与全仓其它工具同一条措辞）；
    * 非法取值单独判——`requiredString` 只保证"有个非空字符串"，而 `action=frobnicate`
-   * 必须报"只能是 set / cancel / list"，否则她只会看到一句语焉不详的失败。
+   * 必须报"只能是 set / wait / cancel / list"，否则她只会看到一句语焉不详的失败。
    */
   const readTimerAction = (args: Record<string, unknown>): TimerAction => {
     const action = requiredString(args, 'action', { maxLength: 16 });
@@ -1455,10 +1782,160 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       throw new ToolArgumentError(
         'action',
         `timer 的 action 只能是 ${TIMER_ACTIONS.join(' / ')}，收到 ${JSON.stringify(action)}：`
-        + 'set 布防、cancel 撤销、list 列出当前未触发的。',
+        + 'set 布防、wait 过一会儿叫醒你、cancel 撤销、list 列出当前未触发的。',
       );
     }
     return action as TimerAction;
+  };
+
+  /**
+   * 读 `wait` 的时长（秒或分）。**读不出一个正整数就当场报参数错**，不猜、不兜底。
+   *
+   * 猜的代价不是"差一点"：把 `0` 或 `0.5` 兜成 1 秒等于排了一次立刻唤醒，
+   * 而她以为排的是半分钟——那种错只有到点之后才会发现，且看起来像"定时器不准"。
+   */
+  const readWaitAmount = (
+    args: Record<string, unknown>,
+    field: 'seconds' | 'minutes',
+  ): number | undefined => {
+    const raw = args[field];
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
+      throw new ToolArgumentError(
+        field,
+        `${field} 必须是正整数（单位${field === 'seconds' ? '秒' : '分钟'}），`
+        + `收到 ${JSON.stringify(raw)}——例：${field === 'seconds' ? '90' : '10'}。`,
+      );
+    }
+    return raw;
+  };
+
+  /**
+   * 读 `wait` 的"到点叫我的理由" —— **从既有的 `payload` 读，不新开一个字段**。
+   *
+   * 为什么不新开 `reason`（2026-10-08 的取舍，两条理由都成立）：
+   *   • **它本来就是同一件事**：`set` 的 payload 一直是"到期时回注给未来的你的那个东西"，
+   *     而 `render.ts` 的 `wake/timer` 渲染就是从 `payload.note` 取"到点要做什么"那一句。
+   *     再开一个字段等于让同一个位置有两个名字（她还得记住"set 用 payload、wait 用 reason"）；
+   *   • **工具清单是常驻开销**：多一格 schema 就是每次请求都多付一份
+   *     （`test/tool-catalog.test.ts` 那条总量线上是实打实的 token）。
+   *
+   * 两种写法都收：**一个字符串**（最自然：`payload: "看看邮件回来没有"`）或者
+   * **带 `note` 的对象**（与 `set` 的既有写法一致）。其余形状**当场报参数错**——
+   * 静默丢掉理由比报错坏得多：她到点会看到一行只有 id 的 `[定时器触发]`，
+   * 而以为自己写下的那句话还在。
+   */
+  const readWaitReason = (raw: unknown): string => {
+    if (raw === undefined || raw === null) return '';
+    const text = typeof raw === 'string'
+      ? raw
+      : typeof raw === 'object' && !Array.isArray(raw) && typeof (raw as Record<string, unknown>)['note'] === 'string'
+        ? String((raw as Record<string, unknown>)['note'])
+        : null;
+    if (text === null) {
+      throw new ToolArgumentError(
+        'payload',
+        'wait 的 payload 要写一句"到点叫你的理由"：给字符串（`"看看邮件回来没有"`），'
+        + `或者与 set 同形给 \`{"note":"…"}\`。收到 ${safeJson(raw)}。`,
+      );
+    }
+    const trimmed = text.trim();
+    if (charCount(trimmed) > TIMER_WAIT_REASON_MAX) {
+      throw new ToolArgumentError(
+        'payload',
+        `wait 的理由 ${charCount(trimmed)} 字，超过上限 ${TIMER_WAIT_REASON_MAX} 字：`
+        + '它进的是到点那一轮的上下文，写一句"到点做什么"就够（细节写进 STATE.md，到点再读）。',
+      );
+    }
+    return trimmed;
+  };
+
+  /**
+   * action=wait：**排一次"到点唤醒我"**（2026-10-08 用户的口径：「timer 提供一个 wait」）。
+   *
+   * 语义（逐条，判据都在这里）：
+   *   • **不是让模型在原地等**——工具立刻返回，框架只是**在同一拍里排了一次唤醒**，
+   *     她这一拍该收尾就收尾。原地阻塞会白烧步数与 token，而"反复 read_channel"正是
+   *     那样烧出来的（用户报的那个现象）。
+   *   • **复用既有的 timer 语义**（同一个 `TimerStore`、同一个 `wake/timer` 事件、同一条
+   *     唤醒路径）：不另造一套"等待"机制，也不另建一张表。`list` 看得到它、`cancel` 撤得掉它。
+   *   • **payload 只认 `note` 那一格**：`render.ts` 的 `wake/timer` 渲染就是从 payload.note
+   *     取"到点要做什么"的那句话——理由给进去，她到点看见的就是它（不另写一套渲染）。
+   *   • **同一会话 + 同一理由不重复布防**：判据是**定时器表本身**（`timers.list()` 里
+   *     还没触发的那条），不是进程内的另一张表——重启后照样判得出来，而"叠一堆到点唤醒"
+   *     恰恰是这条要防的。
+   */
+  const waitTimerAction = async (
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+  ): Promise<ToolHandlerResult> => {
+    const seconds = readWaitAmount(args, 'seconds');
+    const minutes = readWaitAmount(args, 'minutes');
+    if (seconds === undefined && minutes === undefined) {
+      return errorResult(
+        'timer 的 action=wait 需要 seconds 或 minutes 之一（多久之后叫醒你）：'
+        + `seconds 单位秒、minutes 单位分钟，上限 ${TIMER_WAIT_MAX_MINUTES} 分钟`
+        + `（${TIMER_WAIT_MAX_MINUTES / 60} 小时），更远的唤醒用 action=set 带 at 或 cron。`,
+        TOOL_ERROR_CODES.invalidArgs,
+      );
+    }
+    if (seconds !== undefined && minutes !== undefined) {
+      return errorResult(
+        'seconds 与 minutes 二选一：它们是同一个时长的两种单位，两个都给我不知道按哪个算。'
+        + '本次没有布防。',
+        TOOL_ERROR_CODES.invalidArgs,
+      );
+    }
+    const totalSeconds = seconds ?? (minutes as number) * 60;
+    const durationText = seconds === undefined
+      ? `${minutes} 分钟`
+      : seconds >= 120 ? `${seconds} 秒（约 ${Math.round(seconds / 60)} 分钟）` : `${seconds} 秒`;
+    if (totalSeconds / 60 > TIMER_WAIT_MAX_MINUTES) {
+      return errorResult(
+        `wait 的时长 ${durationText}，超过上限 ${TIMER_WAIT_MAX_MINUTES} 分钟`
+        + `（${TIMER_WAIT_MAX_MINUTES / 60} 小时）：那是"排一个远期闹钟"，用 action=set 带 at`
+        + '（带时区的 ISO 8601）或 cron 排更合适。本次没有布防。',
+        TOOL_ERROR_CODES.invalidArgs,
+      );
+    }
+    const reason = readWaitReason(args['payload']);
+    // "同一会话"的判据与 speak 的隐式目标**同一条派生路**（不另造一套"当前会话"的算法）：
+    // 没有可回投的会话时是 null（本机/心跳那一拍），那时按"没有会话"这一档去重。
+    const sid = replyTargetOf(ctx)?.url ?? null;
+    const existing = timers.list().find((entry) => {
+      const wait = timerWaitPayloadOf(entry.payload);
+      return wait !== null && wait.sid === sid && wait.note === reason;
+    });
+    if (existing !== undefined) {
+      // 如实说"已经有一个到点唤醒了"，**不叠第二条**：她要的是"到点叫我"这件事成立一次，
+      // 而不是排 N 个一样的闹钟（到点会被连着叫 N 次，每一次都是一整轮 turn）。
+      return okResult(
+        `已经有一个到点唤醒了：id=${existing.timerId}，到点 ${existing.at}`
+        + (reason === '' ? '' : `，理由「${reason}」`)
+        + `——同一个${sid === null ? '理由' : '会话、同一个理由'}不重复布防，本次没有新增。\n`
+        + `要改时间就先 action=cancel（timer_id=${existing.timerId}）再 wait；`
+        + '要看现在排了什么用 action=list。这一拍照旧收尾就行。',
+      );
+    }
+    // "现在"只有一处：排定时器的那个时钟（`TimerStore.nowMs`，见那里的注释）
+    const at = new Date(timers.nowMs() + totalSeconds * 1000).toISOString();
+    const payload: TimerWaitPayload = { kind: TIMER_WAIT_PAYLOAD_KIND, note: reason, sid };
+    const result = await timers.set({ at, payload });
+    if (!result.ok) {
+      return errorResult(`定时器未布防：${result.error}`, TOOL_ERROR_CODES.invalidArgs);
+    }
+    const entry = timers.get(result.id);
+    const due = entry === null ? at : entry.at;
+    return okResult([
+      `到点唤醒已排好：id=${result.id}，${durationText}之后（${due}）以 wake/timer 唤醒你。`,
+      reason === ''
+        ? '到点你看到的是那一行 [定时器触发]（这条没写理由，只有 id 可认）——'
+          + '想留下"到点要做什么"就把那句话填进 payload，它会原样出现在那一行。'
+        : `到点你会看到：[定时器触发] ${reason}（计划时刻 ${due}）——那时接着做。`,
+      '**这一拍不用等**：现在就收尾（它是框架在同一拍里排的一次唤醒，与心跳、外部事件'
+      + '走的是同一条唤醒路径——到点正常叫醒你，不是让你在这里守着）。',
+      `撤销用 action=cancel 加 timer_id=${result.id}；看当前排了什么用 action=list。`,
+    ].join('\n'));
   };
 
   /** action=set：布防（at 一次性 / cron 周期，两者给定时以 at 为准——TimerStore 的既有语义） */
@@ -1510,32 +1987,48 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     void args;
     const entries = timers.list();
     if (entries.length === 0) {
-      return okResult('当前没有任何未触发的定时器。布防用同一条工具的 action=set（at 一次性 / cron 周期）。');
+      return okResult(
+        '当前没有任何未触发的定时器。布防用同一条工具的 action=set（at 一次性 / cron 周期）；'
+        + '只想"过一会儿叫我"就用 action=wait（seconds/minutes + reason）。',
+      );
     }
     return okResult(`定时器 ${entries.length} 个（按到期先后）：\n${entries.map(describeTimer).join('\n')}`);
   };
 
   const timer: ToolDefinition = {
     name: TIMER_TOOL_NAME,
-    // 58 token（<60 的那条收紧线钉着这一件，见 test/tool-catalog.test.ts）：三个动作一句一个，
+    // <60 token（那条收紧线钉着这一件，见 test/tool-catalog.test.ts）：四个动作一句一个，
     // list 列出什么、cancel 拿什么去撤都写在这份说明书里——她看到的就是这一份。
+    //
+    // **上限那个数、单位、理由怎么写都不写在这里**：总描述是常驻前缀，而"上限是多少、
+    // 理由填哪个字段"她只在真去排 `wait` 时才需要——它们写在 `seconds` / `minutes` /
+    // `payload` 的参数描述里（参数不进单件描述那份预算，而她两处都看得到：schema 与描述一起进清单）。
+    // 同一条纪律见 `read_channel` 的瘦身记录（那件 98/100 距硬门只剩 2 token 的教训）。
     description:
-      '定时器：到点以 wake/timer 唤醒你自己（不是提醒用户）。'
-      + 'action 三选一：set 布防（at 一次性 / cron 周期）；'
-      + 'list 列出未触发的（含周期下一拍、按到期先后、带 id）；'
-      + 'cancel 按 id 撤销，id 见回执。',
+      '定时器：到点以 wake/timer 唤醒你自己（不是提醒用户）。action 四选一：'
+      + 'set 布防（at 一次性 / cron 周期）；wait 定时叫醒你；'
+      + 'list 列出未触发的（带 id）；cancel 按 id 撤销。',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: [...TIMER_ACTIONS],
-          description: 'set 布防 / cancel 撤销 / list 列出未触发的',
+          description: 'set 布防 / wait 定时叫醒你 / cancel 撤销 / list 列出未触发的',
         },
         at: { type: 'string', description: 'set：带时区的 ISO 8601 绝对时刻，例 2026-09-30T14:00:00+08:00' },
         cron: { type: 'string', description: 'set：五段 cron（分 时 日 月 周），例 "0 9 * * 1-5"' },
-        payload: { description: 'set：到期时回注给未来的你的任意 JSON 值' },
-        timer_id: { type: 'string', description: 'cancel：要撤的那个 id（set 与 list 的回执里都有）' },
+        payload: {
+          description: 'set：到期时回注给未来的你的任意 JSON 值。'
+            + 'wait：写一句"到点叫你的理由"（字符串）',
+        },
+        seconds: { type: 'number', description: 'wait：时长，单位秒（与 minutes 二选一）' },
+        minutes: {
+          type: 'number',
+          description: `wait：时长，单位分钟（与 seconds 二选一；`
+            + `最长 ${TIMER_WAIT_MAX_MINUTES} = ${TIMER_WAIT_MAX_MINUTES / 60} 小时，更远的用 set 带 at/cron）`,
+        },
+        timer_id: { type: 'string', description: 'cancel：要撤的那个 id（各动作的回执里都有）' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -1543,12 +2036,13 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     executionMode: 'parallel',
     sideEffect: 'idempotent',
     timeoutMs: 5_000,
-    handler: async (rawArgs): Promise<ToolHandlerResult> => {
+    handler: async (rawArgs, ctx): Promise<ToolHandlerResult> => {
       try {
-        // 一处入口：参数是对象 → 读出动作 → 分派。三个动作的结果形状因此完全一致
+        // 一处入口：参数是对象 → 读出动作 → 分派。四个动作的结果形状因此完全一致
         const args = argsRecord(rawArgs, TIMER_TOOL_NAME);
         const action = readTimerAction(args);
         if (action === 'set') return await setTimerAction(args);
+        if (action === 'wait') return await waitTimerAction(args, ctx);
         if (action === 'cancel') return await cancelTimerAction(args);
         return listTimersAction(args);
       } catch (err) {
@@ -1713,6 +2207,12 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         let imNote: string | null = null;
         /** 一段都没开始发之前不许取消——见循环开头那段说明 */
         let started = false;
+        // **开口之前那一次"正在输入"**：一次 speak 至多一次，且在第一个字出去之前
+        //（在打字停顿之前）。它绝不改变这次发言的结果——见 `notifyTypingBeforeSpeaking`。
+        // 两个条件缺一不可：有目标（没目标就没有会话可显示状态）且**真打算说话**
+        //（走到这里说明过了硬门、目标也合法）。被硬门退回的那次一个字都不发，
+        // 那就不该先亮一个"正在输入"再什么都不说。
+        if (target !== null && segments.length > 0) await notifyTypingBeforeSpeaking(target);
         for (let index = 0; index < segments.length; index += 1) {
           const segment = segments[index]!;
           // 每段开头都回头看一眼"他是不是又开口了"，而不是只在等待里看。
@@ -1739,7 +2239,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
               }
             }
           }
-          emit('message/assistant', { text: segment, toolCalls: [] });
+          // 可见性**必须显式给**（2026-10-11 修的一处静默失效）：`message/assistant` 在 schema
+          // 表里是 model，而工具侧写入点省略可见性时会落成 internal ⇒ 她说过的话在历史里没有
+          // 独立形态（请求体里只剩 `speak` 那次 function_call 的参数，那不是"我说过什么"的形态）。
+          emit('message/assistant', { text: segment, toolCalls: [] }, defaultVisibility('message/assistant'));
           emit('speak/sent', { channel: 'log', chars: segment.length } satisfies SpeakSentPayload);
           emitted += 1;
           started = true;
@@ -1807,13 +2310,19 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           const where = targetLabel === '' ? '投递' : `发往 ${targetLabel}`;
           // 说清"这一跳整个断了"，而不是"第 N 条失败"——后者读起来像"再试一次也许就成了"。
           // 实测（2026-10-01 群聊那轮）：她连着换了五次措辞，每次都撞同一堵墙，
-          // 因为回执只报了事实、没给"这条路通不通"的判断。
-          lines.push(`${where}失败：第 ${sent + 1} 条起未发出（共 ${segments.length} 条）。${imFailure}`);
-          lines.push(deliveryAdvice(imFailure, sent));
+          // 因为回执只报了事实、没给"这条路通不通"的判断。**判据与 report 同一处**
+          // （`deliveryFailureLines`）：半路失败、整篇失败、以及"还要不要试"三件事一起说。
+          lines.push(...deliveryFailureLines({
+            where,
+            total: segments.length,
+            sent,
+            reason: imFailure,
+          }));
         } else if (target === null) {
           // 说清"跳过的只是 IM 那一跳"：话已经落在对话流里，别让她读成"整条发言失败了"——
           // 实测她读到旧措辞（"本轮无回投地址，跳过"）后以为他收不到，把同一句再说四遍。
-          lines.push('投递：本轮没有 IM 会话可发（跳过）；但发言已经在对话流里了，人在界面能看见');
+          // 与 `report` **同一句**（`localOnlyNote` 里记着为什么这一段不许写"不必重复发送"）。
+          lines.push(localOnlyNote('发言'));
         } else if (sent === segments.length) {
           // 三路都发完，逐段落的都是"本机对话流"那份回执；这一条是**IM 那一路走通了**的凭据
           // ——补上整篇文本与段数，`read_channel` 才能把"她在这个会话里说过什么"读回来
@@ -1824,19 +2333,20 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // ——read_channel 要回答的是"那边到底收到了什么"。代价是相邻两句之间没有标点
           //（原句的句号被摘了），读起来是连着的；宁可她读到自己那口气的原样，也不替她补一个
           // 她没打过的标点（那是往"她说过的话"里加字）。
+          const deliveredText = deliveredSegments.join('');
           emit('speak/sent', deliverToSession({
             sid: target.url,
             chars,
-            text: deliveredSegments.join(''),
+            text: deliveredText,
             parts: segments.length,
             ...spokenKey,
           }) satisfies SpeakSentPayload);
           lines.push(targetLabel === ''
             ? `投递：已送达 ${target.url}（${sent} 条）`
             : `已发往 ${targetLabel}（sid ${target.url}）：${sent} 条`);
-          // 与 `report` **逐字同一句**：她据它决定要不要再说一遍，两处口径分岔就是"同一个事实、
-          // 两种说法"（`SENT_CREDENTIAL_NOTE` 的注释里记着为什么必须同一句）。
-          lines.push(SENT_CREDENTIAL_NOTE);
+          // 回执的最后两行是**她要不要再发一遍的判据**（锚点 + 凭据），与 `report`
+          // **逐字同一份实现**（`sentReceiptLines` 的注释里记着为什么必须同一句）。
+          lines.push(...sentReceiptLines({ text: deliveredText, noun: '句' }));
         }
         // 降级提醒单独一行，且**排在投递结论之后**：先答"发没发出去"，再答"发成什么样"。
         // 它只在通道明确带回降级事实时出现（例如 markdown 被拒、按纯文本发的）——
@@ -1890,8 +2400,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         const level = readNotifyLevel(args);
         const chars = text.length;
         const lines: string[] = [];
-        // 整段发：不切分、不加工格式
-        emit('message/assistant', { text, toolCalls: [] });
+        // 整段发：不切分、不加工格式。可见性显式给（与 speak 那条同一条理由，见上）
+        emit('message/assistant', { text, toolCalls: [] }, defaultVisibility('message/assistant'));
         emit('speak/sent', { channel: 'log', chars } satisfies SpeakSentPayload);
         lines.push(`日志/前端：已记录 ${chars} 字（整段）`);
         if (notifier === undefined) {
@@ -1916,7 +2426,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // 正文原样出站（与 speak 同一条判据）：报告里写 `[@1 号]` 也好、写官方那一串
         // `<qqbot-at-user id="…" />` 也好，都只是正文的一部分——框架不改写、也不拒发。
         if (target === null) {
-          lines.push('投递：本轮没有 IM 会话可发（跳过）；报告已经在对话流里了，人在界面能看见');
+          // 与 `speak` 同一句（`localOnlyNote`）：本机那一份到了、IM 那一跳根本没发生，
+          // 所以这里**不许**出现"不必重复发送"——要它到那边就带 `to` 再发一次。
+          lines.push(localOnlyNote('报告'));
         } else {
           const outcome = await replyPoster.post(target, text);
           if (outcome.ok) {
@@ -1940,24 +2452,23 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             lines.push(resolved.label === ''
               ? `投递：已送达 ${target.url}（HTTP ${outcome.status}）`
               : `已发往 ${resolved.label}（sid ${target.url}，HTTP ${outcome.status}）`);
-            // 回执的最后一句**就是她的判据**：这条已经出去了，下一轮要核对它就读那一行
-            //（SENT_CREDENTIAL_NOTE 的注释里记着三种"看不到自己发过"的失效各是什么样）。
-            lines.push(`${SENT_CREDENTIAL_NOTE}（${target.url}）`);
+            // 回执的最后两行**就是她的判据**：送出的是哪一篇（锚点）、以及这条已经出去了
+            //（凭据 + "不必重复发送"）。与 `speak` **逐字同一份实现**（`sentReceiptLines`）。
+            lines.push(...sentReceiptLines({ text, noun: '篇' }));
             const note = degradeLineOf(outcome.note);
             if (note !== null) lines.push(note);
           } else {
             // 失败/被拒：**不写凭据**（"没发出去"不算"她报告过"），但要把原因留痕在本行里
             // ——她会照这条换个方式再试；而下一轮 `read_channel` 里没有那一行，正是"没出去"
-            // 的如实反映，不是"框架忘了记"。
-            lines.push(`${resolved.label === '' ? '投递' : `发往 ${resolved.label}`}：失败——${outcome.reason}。`
-              + '这条没有送达（对话流里那一段只是本机记录，不等于他收到了）。');
+            // 的如实反映，不是"框架忘了记"。**要不要重试的判断与 `speak` 同源**
+            // （`deliveryFailureLines`）：这一件以前只报原因、不给判断，于是同一堵墙她会反复撞。
+            lines.push(...deliveryFailureLines({
+              where: resolved.label === '' ? '投递' : `发往 ${resolved.label}`,
+              total: 1,
+              sent: 0,
+              reason: outcome.reason,
+            }));
           }
-        }
-        // 没有可发会话时也说清"凭什么能确认"：凭据写的是**会话坐标**，这一轮没有坐标，
-        // 所以下一轮读这个会话**不会**看到这一篇——她据此知道"该往哪儿补发"，而不是以为发过了。
-        if (target === null) {
-          lines.push('这一轮没有会话坐标，所以没写"已送达某会话"的凭据：'
-            + '下一轮你翻那个会话时不会看到这一篇。要它真的到那边，带 `to` 再发一次。');
         }
         return okResult(`报告已处理：\n${lines.map((line) => `- ${line}`).join('\n')}`);
       } catch (err) {
@@ -2203,6 +2714,14 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     // 绝不写会话名（那会让"谁说的"消失），也绝不写 openid（32 位乱码认不出是同一个人）。
     const alias = makePersonAliaser(resolvePersonName);
     const notes: string[] = [];
+    /**
+     * 两个**整批**才说一次的计数（逐行缀一句太贵，而这两件都是"整个框"的事）：
+     *   · `addressOnly` = 框里有"只给了地址"的图（默认那条路）⇒ 框后指一次"怎么自己看"；
+     *   · `overCount`  = 因为**这一次读的名额**没带进来的张数 ⇒ 如实报数（用户要的
+     *     「超了如实说'还有 k 张没带'」）。
+     */
+    let addressOnly = false;
+    let overCount = 0;
     for (const item of batch) {
       const when = shortLocalTime(item.ts, timezone);
       // "点了她的那条"的标记：加在整行最左边（见上面 `mentioned` 的说明）
@@ -2215,8 +2734,25 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         continue;
       }
       const label = alias(item.person, item.nickname);
+      // 图片那一格：**逐个**对上宿主给的事实（它只含图、顺序与这里的图一致）。
+      // 判据用 `isImageAttachment` 而不是 `a.type === 'image'`：那是全仓"这是不是一张图"的
+      // 唯一实现（MIME `image/png` 与 OneBot 的段类型裸标签 `image` 都算），写窄了会让
+      // 另一种形态的图掉进"文件"那一格、连地址都拿不到。
+      const facts = item.contextImages;
+      let imageAt = 0;
       const attach = (item.attachments ?? [])
-        .map((a) => (a.type === 'image' ? '［图］' : `［文件${a.name === undefined ? '' : ` ${a.name}`}］`))
+        .map((a) => {
+          if (!isImageAttachment(a)) return `［文件${a.name === undefined ? '' : ` ${a.name}］`}`;
+          const fact = facts?.[imageAt];
+          imageAt += 1;
+          if (fact === undefined) {
+            // 默认那条路：这一条没点名她（或图片直通没开）⇒ 只给地址，由她自己决定值不值得看
+            if (typeof a.url === 'string' && a.url.trim() !== '') addressOnly = true;
+            return imageCellText(a, undefined);
+          }
+          if (fact.state === 'over') overCount += 1;
+          return imageCellText(a, fact);
+        })
         .join('');
       const text = item.text.replace(/\s+/gu, ' ').trim();
       lines.push(`${at}${when} ${label}：${attach}${text}`);
@@ -2227,11 +2763,63 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       if (typeof note === 'string' && note.trim() !== '') notes.push(`· ${when} ${label}：${note.trim()}`);
     }
     lines.push('[/external_event]');
+    // 只给了地址的那些图：一次性说清"为什么只有地址、想看得走哪条路"。
+    // 为什么必须说：地址是**临时直链**（腾讯富媒体带 rkey，过期后服务端拒绝下载），而这一屏
+    // 会永远留在历史里——不说这一句，她下一次读到这一行时只会以为图还在那儿。
+    // 措辞与唤醒那条路的附件行同源（render.ts 的 renderAttachments："想看就现在下载"）。
+    if (addressOnly) {
+      lines.push('（框里的图只给了地址：那是临时直链，过期就取不到了——想看就把地址交给 '
+        + 'http_download 存下来，再 vision_read 读那个文件。）');
+    }
+    // 名额用完的那些：如实报数（地址都在各自那一行里，一条都没丢）。判据是这一屏自己数出来的
+    // `overCount`——它由宿主按**这一次读**的名额标记（见 real-loop 的 `contextImageBudget`）。
+    // 这一句**自带出路**（不复用上面那句）：超上限的那一屏可能一张"只给地址"的图都没有，
+    // 指过去会指个空（"地址都在各自那一行里"是这里唯一必须说清的事）。
+    if (overCount > 0) {
+      lines.push(`（其中 ${overCount} 张图这次没带进上下文：一次读带不了那么多——`
+        + '地址都在各自那一行里，想看就把地址交给 http_download 存下来，再 vision_read 读那个文件。）');
+    }
     if (notes.length > 0) {
       lines.push(`框架对其中 ${notes.length} 条的提示（不属于框里的内容）：`);
       lines.push(...notes);
     }
     return lines;
+  };
+
+  /**
+   * **点名例外**（2026-10-11 用户拍板）：这一屏里"冲她来的"那些消息，图片按现有准入
+   * **装配进上下文**。
+   *
+   * 工具结果是文本、塞不下图片，所以与 `vision_read` 的 inline 走**同一条出口**：写一条
+   * `image/attached` 事件，渲染层看到它就把本地字节作为 `input_image` 注入
+   * （见 render.ts 的 `imagesOf` 与 `case 'image/attached'`）。可见性**显式给**
+   * `defaultVisibility('image/attached')`（＝`model`）：省略的话事件落在 internal，
+   * 写下去等于没人看得见（`ask_human` 的 `human/asked` 是同一个理由，见 `AdminEventEmitter`）。
+   *
+   * 为什么"装配"这一步在**工具层**而不是宿主：装配是"**这一屏**"的事，而"这一屏给她哪几条"
+   * 由下面 handler 里那五个分支定（宿主只回"最近 limit 条"）。分工是：宿主给事实
+   * （哪张能进、为什么不能进、名额怎么发），工具层只做两件——把 `ready` 的装上去、
+   * 把结论写进那一行。宿主那边一条事实都不产出时（图片直通关着 / 上限为 0 / 没点名她），
+   * 这里自然一个事件都不写。
+   *
+   * 调用点**与 `renderReadBatch` 同一处、紧挨着**：那一行写的"已带进上下文"就是这里写下去
+   * 的那些事件（`test/read-channel-images.test.ts` ②从请求体那一侧钉住这处耦合）。
+   */
+  const attachAimedImages = (batch: readonly ReadChannelItem[]): void => {
+    for (const item of batch) {
+      if (isChannelSpoken(item)) continue;
+      for (const fact of item.contextImages ?? []) {
+        if (fact.state !== 'ready') continue;
+        emit('image/attached', {
+          key: fact.key,
+          mime: fact.mime,
+          ...(fact.name === undefined ? {} : { name: fact.name }),
+          // 留痕那一栏（不渲染进上下文）：这条图不是她自己点名要的（`vision_read` 的 inline），
+          // 而是"读这一屏时**点名她的那条**带进来的"——复盘时两件事必须分得开。
+          note: `read_channel：${item.sid} 里点名你的那条（${item.messageId}）`,
+        }, defaultVisibility('image/attached'));
+      }
+    }
   };
 
   const readChannel: ToolDefinition = {
@@ -2250,10 +2838,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     // 留在描述里的每一句都仍然是**她据此决定行为**的：读什么、含她自己的话（怎么认）、
     // 已读只按她真看过的那些推进、没有新消息时回什么（并给她出路）。
     description:
-      '看某个会话的消息（**也包括你自己在这个会话说过的话**，行首 `（我）`）。'
-      + '默认只给未读里**点你的那些**和它们之前十条，看过的那几条标记已读。'
-      + '想看更早的给 before 往回翻（每页 50 条，不动已读）。没有新消息时明说，'
-      + '想接着说就直接 speak。',
+      '看某个会话的消息（**也包括你自己说过的**，行首 `（我）`）。'
+      + '默认只给未读里**点你的那些**和它们之前十条，看过的标记已读；'
+      + '想看更早的给 before 往回翻（每页 50 条，不动已读）。没有新消息时明说，想接着说就 speak。',
     parameters: {
       type: 'object',
       properties: {
@@ -2318,6 +2905,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // ⚠️ **这里不 emit `channel/read`、也不动 readState**：往回翻旧消息既不能把已读位置
           // 退回去、也不能把旧消息重新标成未读（"已读"只按"读到最新"推进，见 sessions.ts 的
           // applyChannelRead）。这是用户 2026-10-08 那条口径的落点，也是本工具唯一的"只读"路径。
+          //
+          // 点名例外**两条路都适用**：翻页看到的那几条里点了她的，图同样按现有准入装配
+          // （一次翻页最多带几张由宿主按这次读的名额定，见 real-loop 的 contextImageBudget）。
+          attachAimedImages(batch);
           return okResult([
             `${sid} 从 ${cursorText(cursor.before)} 往前 ${batch.length} 条`
             + `（本机时间，正序；**翻页不改已读**）· ${whereOf(messages[0]!)}`,
@@ -2337,8 +2928,12 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         }
         const messages = await channelReader(sid, limit);
         if (messages.length === 0) {
+          // 第一句就是结论（2026-10-08 用户的口径）：这个会话里**一条都没有**，所以照实说
+          // "没有新消息"，紧接着把两种可能说清（还没有过消息 / sid 写错了一位）——
+          // 少了后半句，她只会知道"没有"，不知道该不该去核对 sid。
           return okResult(
-            `${sid} 里没有取到消息（这个会话可能还没有过消息，或者 sid 写错了一位）。`
+            `没有新消息：${sid} 里没有取到消息`
+            + '（这个会话可能还没有过消息，或者 sid 写错了一位）。'
             + '外部会话清单上现在有哪些会话，看当前状态层那一段。',
           );
         }
@@ -2439,19 +3034,25 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         //    "这一批里最新那条也在已读位之内"才算读到最新——`newestSeq` 就是判它的那个数。
         if (unread.length === 0 && !calledThisTurn) {
           const times = bumpReadRepeat(ctx?.turn ?? 0, sid);
-          // 措辞里点明"这个位置含你自己发出去的那些"：她刚 report/说过话、回头核对时，最怕把
+          // 措辞里点明"你自己发出去的那些不算新消息"：她刚 report/说过话、回头核对时，最怕把
           // 「没有新消息」读成"我那一篇不在里面"——那正是"重复发"的触发条件（`SENT_CREDENTIAL_NOTE`）。
+          //
+          // 2026-10-08 用户的口径：「**read_channel，如果没有消息就直接回执没有新消息**」
+          // ——回执的**第一句就是这四个字**（`没有新消息`），句号之前不许再堆任何东西：
+          // 她要的是一眼可判的结论，而"这个位置含…"/"另有 N 条…"这类话都会让她怀疑自己漏了什么。
+          // 只有**确实还有没给她看的未读**时才允许提数量，而这一支里一条都没有（见下面
+          // `display.length === 0` 那一支：那里带 N，这里不带）——两种情形因此措辞可分。
           const mine = spoken.length === 0
             ? ''
-            : '；这个位置含你自己发出去的那些，它们在下面那一屏里（行首 `（我）`）';
+            : '；你自己发出去的那些（行首 `（我）`）不算新消息';
           const way = moreBelow
             ? `要看更早的（连没点你的那些）就翻页：带上 ${cursorText(pageBelow)} 重读一次`
               + `（每页 ${READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。`
             : '想看更早的没有了——这个会话能看到的就这些。';
           const head = times <= 1
-            ? `${sid} 没有新消息：你已经读到最新了（停在 seq=${newestSeq}${mine}）。`
+            ? `没有新消息：${sid} 你已经读到最新了（停在 seq=${newestSeq}${mine}）。`
               + `不必再翻一遍——${way}想接着说就直接 speak，回不回、说什么都由你。`
-            : `${sid} 还是没有新消息：这一轮你已经读过它 ${times} 次，再读返回的还是同一段`
+            : `没有新消息：${sid} 这一轮你已经读过它 ${times} 次，再读返回的还是同一段`
               + `（停在 seq=${newestSeq}${mine}）。${way}想说话直接 speak 就行。`;
           return okResult(head);
         }
@@ -2541,13 +3142,21 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         if (display.length === 0) {
           // 走到这里只有一种情形：这个会话里**只剩"没点她"的新话**（提及一条都没有，
           // 她自己也没在里头说过新的）。**不改已读位**（一条都没给她看，凭什么说看过了），
-          // 但**必须指路**——"没有点你的新消息"不带出路，她会以为这里什么都没有。
-          const asked = pool.filter((item) => !isChannelSpoken(item)).length;
+          // 但**必须指路**——"没有新消息"不带出路，她会以为这里什么都没有。
+          //
+          // 2026-10-08 用户的口径：「read_channel，如果没有消息就直接回执没有新消息」
+          // 并补了一句：**有未读但都跟她无关时**仍如实说"没有新消息"，但可以附一句
+          // 「另有 N 条你没看（翻页可看）」——**措辞必须与"确实什么都没有"区分开**。
+          // 判据就在这个 N 上：确实什么都没有那一支（上面 `unread.length === 0`）**不带数**，
+          // 这一支**一定带数**（走到这里说明 `unread.length > 0`，而这些未读一条都没点她，
+          // 见 `mentionDigest`：`notShown` 至少是那几条）。她把两句话一比就知道是哪种。
+          //
+          // 数量取 `notShown`（"比这一屏更新的、还没给她看的"）而不是 `asked`（取数窗口里
+          // 所有外部消息）：后者把**她已经读过**的旧话也算进去，那就是在虚报"你漏了 N 条"。
           return okResult(
-            `${sid} 没有点了你的新消息`
-            + `（这里攒着 ${asked} 条没点你的新话，先不摆出来）。`
-            + `想看就翻页：带上 ${cursorText(pageBelow)} 重读一次`
-            + `（每页 ${READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读），`,
+            `没有新消息：${sid} 这些新话一条都没点你，先不摆出来`
+            + `——另有 ${notShown} 条你没看，想看就翻页：带上 ${cursorText(pageBelow)} 重读一次`
+            + `（每页 ${READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。`,
           );
         }
 
@@ -2565,6 +3174,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           ? `另有 ${notShown} 条你还没看——往上翻页：带上 ${cursorText(pageBelow)} 重读一次`
             + `（每页 ${READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）`
           : null;
+        // 点名例外（2026-10-11 用户拍板）：这一屏里点了她的那些，图按现有准入装配进上下文。
+        // **必须在 renderReadBatch 之前**：那一行写的"已带进上下文"指的就是这里写下去的事件。
+        attachAimedImages(display);
         return okResult([
           `${sid} 最近 ${display.length} 条${composition}（本机时间，正序；已标记读过 seq=${shownUpTo}）`
           + ` · ${whereOf(anchor)}`,

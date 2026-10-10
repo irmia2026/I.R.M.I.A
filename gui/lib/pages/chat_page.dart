@@ -42,6 +42,35 @@ const double _kSideCardWidth = 420;
 /// 与 Web 端每批 200 同档（`web/pages/logs.js` 的 BATCH）。
 const int _kHistoryPage = 200;
 
+/// 认不出来的框架通报也叫这个名字（[frameworkNoticeLabel] 的兜底）。
+///
+/// 它是一条**兜底**而不是一个"待补的洞"：新来源（`via: 'compact'` 之类）第一次出现时，
+/// 界面照旧把它摆成框架卡片，只是标签先落到这个词——**界面一行都不用改**。
+const String kFrameworkNoticeLabel = '框架通报';
+
+/// 框架通报（`wake/manual` 里 `via` 有值的那一类）在卡片头上写什么标签。
+///
+/// **判据不在这里**——"是不是框架通报"只看 `via` 有没有值，那一处在 [_ChatPageState._consume]
+/// 里（`via.isNotEmpty`，一处，别在别处再写第二遍）。这张表只负责"这一种来源叫什么名字"：
+/// 认不出来的一律叫 [kFrameworkNoticeLabel]，于是**新增一种 `via` 不必回来改界面**。
+///
+/// 为什么不反过来（按 via 逐个建容器/版式）：那正是原先把 `via == 'dream'` 写死在分支里的
+/// 毛病——`'mcp'` 补上时没人回来改，那条框架通报就落进了"有 note = 用户的话"那一支
+/// （用户 2026-10-09 的截图：他自己"说"了一段 MCP 通报）。文案会改、来源会加，
+/// 只有"是不是框架通报"这一层是稳定的。
+String frameworkNoticeLabel(String via) {
+  switch (via) {
+    // 界面的 /dream 动作：那条 note 是框架替她拼的整理指令
+    case 'dream':
+      return '做梦';
+    // MCP 声明面被改（加/删/改 server）：正文是"哪些 server 变了、现在几个"
+    case 'mcp':
+      return 'MCP 声明变更';
+    default:
+      return kFrameworkNoticeLabel;
+  }
+}
+
 enum _ItemKind { text, tool, channel, mention, boundary, injection }
 
 /// 会话流里的一条：文本气泡、**一次工具调用**、**一条从消息适配器进来的消息**，
@@ -556,18 +585,27 @@ class _ChatPageState extends State<ChatPage> {
         return false; // 唤醒输入的渲染镜像，不上屏
       case 'wake/manual': {
         final note = (data['note']?.toString() ?? '').trim();
-        // **框架的动作走框架卡片**（用户 2026-10-04 的口径：/dream 那条蓝气泡该包装成框架卡片）。
-        // 判据是事件里带的 via，不是 note 的内容——文案会改，来源不会。
-        if (data['via'] == 'dream') {
+        // **判据只有这一处：`via` 有值 = 框架通报**——框架替他做的那个动作留下的通报
+        // （界面的 /dream、MCP 声明面被改……）。用户自己在输入框里打的话从来不经过这一格：
+        // 看门文件那条路（`src/wake/sources.ts`）只搬 note / dedupeKey / person，压根没有 via。
+        //
+        // 为什么**不按 via 的值分流**：原先这里写死成 `via == 'dream'`，2026-10-09 补上
+        // `'mcp'` 时就漏了一次——那条通报落进下面"有 note = 用户的话"那一支，被摆成右侧
+        // 蓝气泡（用户当天截的图：他自己"说"了一段 MCP 通报）。**文案会改、来源会加**，
+        // 只有"是不是框架通报"这一层是稳定的；以后再加 `'compact'`（压缩通报）这类
+        // **不必回来改界面**：一样走同一张框架卡，标签由 [frameworkNoticeLabel] 兜底。
+        // 往这里加分支之前先读这一段：这一格只该有这一个判断。
+        final via = (data['via']?.toString() ?? '').trim();
+        if (via.isNotEmpty) {
           _sink.add(_BubbleItem.text(
             side: 'sys',
-            text: '做梦',
+            text: frameworkNoticeLabel(via),
             detail: note.isEmpty ? null : note,
             ts: ts,
           ));
           return true;
         }
-        // 空 note = 界面上按了「立即唤醒」：那是**框架的动作**，不是谁说的话 → 走提醒卡（居中）。
+        // 空 note = 界面上按了「立即唤醒」：那是**框架的动作**，不是谁说的话 → 走提醒卡（靠右）。
         // 有 note = 用户在输入框里打的话 → 仍是他自己的右侧气泡：人说的话才用气泡。
         if (note.isEmpty) {
           // 谁按的这一下也算信息（`person` 是用户时更该说清）
@@ -1235,6 +1273,9 @@ class _BubbleRow extends StatelessWidget {
 
 /// 一次工具调用在界面上长什么样：卡片 + 左侧状态色条 + 名字 + 参数 + 结果。
 ///
+/// 名字那一格写的是**她调的谁家的哪一件**：MCP 调用摆成 `mcp/server/tool`
+/// （判据在 [_mcpToolLabel] 一处），别的工具照旧只写工具名。
+///
 /// 三条约束：
 ///   ① **一个块，不是一行**：她的动作是成串的，行会把它们散成一堆碎字。
 ///   ② **原地变身**：跑的时候转圈，回执到了原地换成结果与耗时，不新起一条。
@@ -1253,7 +1294,11 @@ class _ToolBlock extends StatelessWidget {
     final name = item.toolName ?? 'tool';
     // speak / report 是她**说话**的出口：标签形态，与别的工具分开
     final isSpeech = name == 'speak' || name == 'report';
-    final label = isSpeech ? '<$name>' : name;
+    // **这一版只改这一格**：卡头上的名字。MCP 调用写成 `<mcp>/<server>/<tool>`
+    // （见 [_mcpToolLabel]），别的工具与改之前逐字相同。
+    // 版式、字号、参数行、展开方式一概没动——用户看过之后的口径是
+    // 「不能复用原来 mcp 的卡片吗？就只改个显示的名字而已」。
+    final label = isSpeech ? '<$name>' : _mcpToolLabel(name, item.toolArgs);
     final args = (item.toolArgs ?? '').trim();
     final result = (item.toolResult ?? '').trim();
     final folding = result.length > 180 || result.contains('\n');
@@ -1971,8 +2016,6 @@ IconData _toolIcon(String name) {
     case 'safe_read':
     case 'read_blob':
       return Icons.description_outlined;
-    case 'list_dir':
-      return Icons.folder_open_rounded;
     case 'rg_search':
     case 'es_search':
       return Icons.search_rounded;
@@ -2004,6 +2047,57 @@ IconData _toolIcon(String name) {
     default:
       return Icons.extension_outlined;
   }
+}
+
+/// MCP 入口工具的名字（`src/tools/mcp-entry.ts` 的 `MCP_ENTRY_TOOL_NAME`）。
+///
+/// **判据就是它**：她的工具清单里没有 `mcp__{server}__{tool}` 那一批（那是注册表形态），
+/// 一次 MCP 调用落到日志里恒是 `name: 'mcp'` + `arguments: {server, tool, args}`
+/// （本机 data/events 实测：`{"server": "obscura", "tool": "browser_navigate", "args": {...}}`）。
+const String _kMcpEntryName = 'mcp';
+
+/// 名字里那两枚斜杠（`mcp/obscura/browser_navigate`）。
+///
+/// 用户 2026-10-10 看过第一版之后的口径：「不能复用原来 mcp 的卡片吗？就只改个显示的名字而已」
+/// ——所以这里**只是一个名字**：短、朴素、不加样式。斜杠与 `mcp__{server}__{tool}`
+/// 那种命名空间写法同源（读起来就是一条路径），也不必解释一个新记号。
+const String _kMcpLabelSep = '/';
+
+/// 卡头上那个名字：**`mcp` 才拆**，其余工具原样返回（与改动之前逐字相同）。
+///
+/// 「原来那张卡片 + 只改名字」：这张卡片的版式、字号、参数行、展开方式一概没动，
+/// 这里只决定名字那一格印什么字。
+///
+/// 兜底是**照旧显示工具名**：`arguments` 不是合法 JSON、缺 `server` / `tool`、
+/// 或者那两格不是字符串（数字、null、空串）⇒ 返回 `mcp`，不报错、也不会显示 `undefined` / `null`。
+/// 只拆到一半（只给 `server`，那是"看它有哪些工具"而不是调用）也**不拼半个层级**：
+/// `mcp/obscura` 看着像一次完整的调用。
+///
+/// server 与 tool 都是外部 server 给的不可信字符串：这里只做"拼成一行名字"，
+/// 不改变它们的字符，也不额外截断——版式该不该收由卡片那一行自己管。
+String _mcpToolLabel(String name, String? arguments) {
+  if (name != _kMcpEntryName) return name;
+  final raw = (arguments ?? '').trim();
+  if (raw.isEmpty) return name;
+  Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return name; // 不是合法 JSON：当没这回事，照旧显示工具名
+  }
+  if (decoded is! Map) return name;
+  final server = _asText(decoded['server']);
+  final tool = _asText(decoded['tool']);
+  if (server == null || tool == null) return name;
+  return '$name$_kMcpLabelSep$server$_kMcpLabelSep$tool';
+}
+
+/// 一格字符串字段。非字符串（数字、对象、null）与空白串都不算有值——
+/// **认不出就不写**，不把 `undefined` / `null` 摆到名字上。
+String? _asText(Object? value) {
+  if (value is! String) return null;
+  final text = value.trim();
+  return text.isEmpty ? null : text;
 }
 
 /// 参数压成一行可读文本（`key=value  key2=value2`）。

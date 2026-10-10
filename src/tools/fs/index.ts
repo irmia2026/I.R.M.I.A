@@ -1,9 +1,10 @@
 /**
  * Irmia Agent — 文件系工具包入口
  *
- * 对外只有一个注册函数：`fsTools(registry)`。**八件常驻 + 两件条件注册**：
+ * 对外只有一个注册函数：`fsTools(registry)`。**七件常驻 + 两件条件注册**：
  * `rg_search` 与 `es_search` 各自探测到引擎才被造出来（v30：rg 也改成条件注册了，
  * 它原先的"TS 逐行扫描降级"已经删掉，理由见 search-tools.ts 的文件头）。
+ * v42 删掉了 `list_dir`（常驻八件 → 七件），列目录并进 `safe_read`（传目录即列目录）。
  *
  * 注册前做一遍契约自检（design.md §4.18「工具设计五原则」中可机械校验的部分）：
  *   • name 非空且在本次注册内唯一；
@@ -23,7 +24,7 @@ import {
   createSafeRollbackTool,
   createSafeWriteTool,
 } from './edit-tools.ts';
-import { createListDirTool, createReadBlobTool, createSafeReadTool } from './read-tools.ts';
+import { createReadBlobTool, createSafeReadTool } from './read-tools.ts';
 import { createEsSearchTool, createRgSearchTool, searchGateOf, type SearchEngineGate } from './search-tools.ts';
 import { estimateTokens, MAX_DESCRIPTION_TOKENS } from '../registry.ts';
 import type { DepsManager, DepName } from '../../deps/manager.ts';
@@ -34,9 +35,16 @@ export { createEnv, resolveGuarded, runProcessDefault, DEFAULT_READ_ONLY_PREFIXE
 export {
   BLOB_DIR_NAME,
   BLOB_ID_PATTERN,
-  createListDirTool,
+  DIR_DEPTH_DEFAULT,
+  DIR_DEPTH_MAX,
+  DIR_DEPTH_MIN,
+  DIR_ENTRIES_DEFAULT,
+  DIR_ENTRIES_MAX,
   createReadBlobTool,
   createSafeReadTool,
+  renderDirectoryListing,
+  type DirListing,
+  type DirListingOptions,
 } from './read-tools.ts';
 export { ENGINE_LINE_PREFIX, createEsSearchTool, createRgSearchTool, searchGateOf, type SearchEngineGate } from './search-tools.ts';
 export {
@@ -157,7 +165,7 @@ export async function buildFsTools(
     'es',
   );
 
-  const tools: ToolDefinition[] = [createSafeReadTool(env), createListDirTool(env)];
+  const tools: ToolDefinition[] = [createSafeReadTool(env)];
   if (rgGate.available) {
     tools.push(createRgSearchTool(env, rgGate));
     note(`[工具] rg_search 已注册（引擎 ${rgGate.command}，${rgGate.label}）`);

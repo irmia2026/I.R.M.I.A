@@ -29,7 +29,7 @@ export type TurnTrust = 'owner' | 'self' | 'trusted' | 'external';
 /**
  * 外部来源能看到的**全部**工具——**严格白名单**，不是"非 destructive 的那些"。
  *
- * 为什么不能只靠 `includeDestructive: false`：`safe_read` / `list_dir` / `rg_search` 都不是
+ * 为什么不能只靠 `includeDestructive: false`：`safe_read` / `rg_search` 都不是
  * destructive，但它们能读到工作根里 `MEMORIES/` 的内容——那里面有关于用户的事。对一个从群里
  * 来的陌生人，这些同样不该给。留下的是四件"说话与看"的能力：
  *

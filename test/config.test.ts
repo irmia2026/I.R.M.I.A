@@ -33,6 +33,8 @@ import {
   type ModelLaneConfig,
   MENTION_KEYWORD_MAX,
 } from '../src/config/config.ts';
+import { DEFAULT_MAX_IN_FLIGHT } from '../src/mcp/client.ts';
+import { STDIO_LAUNCHER_ALLOWLIST_ENV } from '../src/mcp/launcher-guard.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
 
@@ -58,6 +60,222 @@ function reorderKeysDeep(value: JsonValue): JsonValue {
   }
   return value;
 }
+
+/**
+ * 在"本进程里那个启动器放行口环境变量是什么"这件事上跑一段代码，跑完**还原原值**。
+ *
+ * `undefined` = 删掉它（模拟"没继承那个变量的启动路径"：旧环境 / 计划任务 / 别的账户）。
+ * 形状与 `test/mcp-launcher-assembly.test.ts` 的 `withEnvHatch` 同一份理由：装配期那条路
+ * （`loadConfig` → `parseMcpServers` → `checkStdioLauncher`）内部读的就是 `process.env`
+ * ⇒ **宿主机上恰好有没有那个变量**会改变本文件几条用例的结论（用户的机器上它是**用户级**
+ * 变量，任何新终端都带着它）。用例自己设、跑完还原，结论才只取决于用例给出的那两个事实。
+ */
+async function withEnvHatch<T>(value: string | undefined, body: () => Promise<T>): Promise<T> {
+  const before = process.env[STDIO_LAUNCHER_ALLOWLIST_ENV];
+  if (value === undefined) delete process.env[STDIO_LAUNCHER_ALLOWLIST_ENV];
+  else process.env[STDIO_LAUNCHER_ALLOWLIST_ENV] = value;
+  try {
+    return await body();
+  } finally {
+    if (before === undefined) delete process.env[STDIO_LAUNCHER_ALLOWLIST_ENV];
+    else process.env[STDIO_LAUNCHER_ALLOWLIST_ENV] = before;
+  }
+}
+
+// ──────────────────────────────── MCP 声明面（2026-10-09） ────────────────────────────────
+
+test('mcp.servers：默认空、合法的声明面收下、非法形状当场报配置错（不静默回退）', async (t) => {
+  // ① 默认：**空数组**（不是"没有这个键"）——`mcp` 入口工具要靠它区分
+  //    "确实一个都没声明"与"读不出来"（见 tools/mcp-entry.ts 的回执文案）
+  const dir = await freshDir(t);
+  assert.deepEqual((await loadConfig(dir)).config.mcp.servers, [], '默认一个都不声明');
+
+  // ② 合法声明：字段逐个落到解析结果上（含可选的 cwd / env / disabled / 三属性）
+  const full = await freshDir(t);
+  await writeRawConfig(full, {
+    mcp: {
+      servers: [
+        { name: 'github', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'] },
+        {
+          name: 'files',
+          command: 'node',
+          args: ['server.js'],
+          cwd: 'C:\\tools',
+          env: { TOKEN: 'x' },
+          disabled: true,
+          requestTimeoutMs: 5000,
+          toolDefaults: { sideEffect: 'none', executionMode: 'parallel' },
+          tools: { read_file: { sideEffect: 'none' } },
+        },
+      ],
+    },
+  });
+  const parsed = (await loadConfig(full)).config;
+  assert.deepEqual(parsed.mcp.servers.map((entry) => entry.name), ['github', 'files']);
+  assert.deepEqual(parsed.mcp.servers[0]?.args, ['-y', '@modelcontextprotocol/server-github']);
+  assert.equal(parsed.mcp.servers[1]?.disabled, true);
+  assert.equal(parsed.mcp.servers[1]?.cwd, 'C:\\tools');
+  assert.deepEqual(parsed.mcp.servers[1]?.env, { TOKEN: 'x' });
+  assert.equal(parsed.mcp.servers[1]?.toolDefaults?.sideEffect, 'none');
+  assert.equal(parsed.mcp.servers[1]?.tools?.['read_file']?.sideEffect, 'none');
+
+  // ③ 非法：**当场报配置错**（不是静默当成空数组）。两类各一条：
+  //    · servers 不是数组；· 名字不合规（字符集 ^[A-Za-z0-9_-]{1,128}$ 是硬约束：入口按这个名字调用）
+  const badShape = await freshDir(t);
+  await writeRawConfig(badShape, { mcp: { servers: '不是数组' } });
+  await assert.rejects(() => loadConfig(badShape), (err: unknown) => {
+    assert.ok(err instanceof ConfigError, `要抛 ConfigError（实际 ${String(err)}）`);
+    assert.match(err.message, /mcp\.servers/u, '错误信息要带定位');
+    return true;
+  });
+
+  const badName = await freshDir(t);
+  await writeRawConfig(badName, { mcp: { servers: [{ name: '有中文的名字', command: 'x' }] } });
+  await assert.rejects(() => loadConfig(badName), /mcp\.servers\[0\]\.name/u,
+    '名字不合规要报到**下标那一格**（界面写错时能一眼看出是哪一条）');
+
+  // ④ 出厂文档那一份也要有这一段（`docs/operations.md §1` 的"怎么写声明"要有权威出处）
+  const defaults = defaultConfig(dir);
+  // 三格全局格（2026-10-10 加第三格 extraLaunchers）：整池在飞上限 + RSS 采样开关 + 启动器放行口
+  assert.deepEqual(defaults.mcp, {
+    servers: [], maxInFlight: DEFAULT_MAX_IN_FLIGHT, rssSample: true, extraLaunchers: [],
+  });
+  assert.equal(
+    defaults.mcp.maxInFlight, DEFAULT_MAX_IN_FLIGHT,
+    '出厂默认值与池的常量同一个数（判据：两处各写一遍迟早漂，这条断言把它钉住）',
+  );
+  const text = await readFile(join(dir, CONFIG_FILE_NAME), 'utf8');
+  assert.match(text, /"mcp": \{/u, '首次生成的配置文档里要有 mcp 段（带注释的那种）');
+  assert.match(text, /\\"command\\": \\"uvx\\"/u, '注释里要给一条照着抄的声明样例');
+  assert.match(text, /不要写 `npx`/u,
+    '样例不许再教人写 npx（Windows 上它只有 .cmd 垫片，我们的 spawn 不经 shell ⇒ 根本起不来）');
+  assert.match(text, /node <绝对路径>\/cli\.js/u, '要给出这一台机器上真起得来的那几种写法');
+  assert.match(text, /MCP server 声明/u, '注释里要说清这一段是干什么的');
+  // 注释要把两格新参数讲清楚：语义（如实拒绝，不排队）、什么时候往上调、关掉 RSS 之后是什么样
+  assert.match(text, /maxInFlight（整池同时在飞的 MCP 请求上限，出厂 8）/u);
+  assert.match(text, /\*\*如实拒绝\*\*/u, '要说清超限是拒绝不是排队');
+  assert.match(text, /子代理并发起来之后是典型场景/u, '要给出"极多 MCP 时该往哪调"的那句提示');
+  assert.match(text, /rssSample（是否采那个 server 的 RSS，出厂 true）/u);
+  assert.match(text, /≈0\.95 s/u, 'RSS 采样在 Windows 上的实测成本要留在注释里（整棵树那条路）');
+  assert.match(text, /整棵进程树|整棵树/u, 'RSS 那一格的口径要写清是"整棵树"，不是"根进程那一个"');
+});
+
+/**
+ * `mcp.extraLaunchers`（2026-10-10 加）：把「显式放行自定义启动器」从环境变量搬进配置文件。
+ *
+ * 这一条钉的是**语义与优先级**（用户报的"拴在环境变量上，不够干净"那件事）：
+ *   · 缺省 = `[]`（旧配置照旧能跑，行为与这一格存在之前逐字相同）；
+ *   · 写了就收下，并**归一**（trim + 小写：Windows 上 `Obscura` 与 `obscura` 是同一个程序，
+ *     而白名单那一侧按小写判——两处不一致 = "配了却不生效"）；
+ *   · 它**真的参与** `servers[].command` 的放行判据（同一个文件里写的放行当场生效）；
+ *   · 环境变量仍然**优先级最高**（它从前的行为一个字节都没改）。
+ *
+ * 环境变量那两格**显式传参**而不是设 `process.env`：测试不许被宿主真的设了那个变量影响
+ * （与 `mcp-launcher-guard.test.ts` 的 `NO_ENV` 同一条纪律）。
+ *
+ * 而**装配期那条路读的是 `process.env`**（`loadConfig` → `checkStdioLauncher(…, process.env, …)`），
+ * 所以下面 ④ 与 ⑤ 两段各自用 `withEnvHatch` 把那一个变量**设成确定值**再跑：
+ *   ④ 删掉它 ⇒ 必须抛（宿主机设没设都不改变这条结论）；
+ *   ⑤ 设成这条声明要用的 `obscura` ⇒ 必须过（这一格优先级最高，判据见 `launcher-guard.ts`）。
+ * 两个方向都在本用例里给出，而不是"只测没设的那一个方向"——用户这台机器上它是**用户级**变量，
+ * 只测一个方向的话，任何新终端跑 `npm test` 都会带着它、把这条用例弄红（2026-10-11 实测踩到）。
+ */
+test('mcp.extraLaunchers：默认空、归一后收下、当场放行同文件里的自定义启动器（环境变量优先）', async (t) => {
+  // ① 缺省：空数组。旧配置（只有 servers）照旧跑，启动器判据只有默认表 + 环境变量
+  const dir = await freshDir(t);
+  assert.deepEqual((await loadConfig(dir)).config.mcp.extraLaunchers, [],
+    '出厂/缺省必须留空：填一个具体名字等于替使用者放行一个他可能根本没有的程序');
+
+  // ② 归一：trim + 小写（判据是 `launcherNameOf` 也按小写比）
+  const norm = await freshDir(t);
+  await writeRawConfig(norm, { mcp: { extraLaunchers: ['  Obscura ', 'my-server.EXE'] } });
+  assert.deepEqual((await loadConfig(norm)).config.mcp.extraLaunchers, ['obscura', 'my-server.exe'],
+    '每个元素 trim + 小写（不归一就会出现"配了却不生效"）');
+
+  // ③ **判据真的接上了**：同一个文件里写放行 + 写一条用它的 server ⇒ 那份配置合法。
+  //    这一条是这一格存在的全部理由（用户实测的那条路：obscura 不在默认表里 ⇒ 整机起不来）
+  const wired = await freshDir(t);
+  await writeRawConfig(wired, {
+    mcp: { extraLaunchers: ['obscura'], servers: [{ name: 'priv', command: 'obscura', args: ['serve'] }] },
+  });
+  const parsed = (await loadConfig(wired)).config;
+  assert.deepEqual(parsed.mcp.servers.map((entry) => entry.name), ['priv'], '放行口与 servers 同源同文件 ⇒ 当场合法');
+
+  // ④ 反证：**不写那一格**时同一条声明照旧被拒，而且错误信息要给"去哪放行"的两条路。
+  //    这一段**自己把环境变量删掉**：装配期那条路读的是 `process.env`，不删的话"宿主机上
+  //    恰好设了 `IRMIA_MCP_STDIO_ALLOWLIST=obscura`"会让这一条**静默变成假绿**（不抛了）。
+  const noExit = await freshDir(t);
+  await writeRawConfig(noExit, { mcp: { servers: [{ name: 'priv', command: 'obscura' }] } });
+  await withEnvHatch(undefined, async () => {
+    await assert.rejects(() => loadConfig(noExit), (err: unknown) => {
+      assert.ok(err instanceof ConfigError, `要抛 ConfigError（实际 ${String(err)}）`);
+      assert.match(err.message, /mcp\.servers\[0\]\.command/u, '错误信息要带定位');
+      assert.match(err.message, /mcp\.extraLaunchers/u, '要指出配置文件里那一条放行路');
+      assert.match(err.message, /IRMIA_MCP_STDIO_ALLOWLIST/u, '也要指出环境变量那一条（优先级最高）');
+      return true;
+    });
+  });
+
+  // ⑤ 反方向：**环境变量那一格设上** ⇒ 同一份配置（只有 servers、没有配置格）装配得过。
+  //    这一条钉的是"环境变量优先级最高"那句话：装配期确实读得到它，而且它单独就够用。
+  const envOnly = await freshDir(t);
+  await writeRawConfig(envOnly, { mcp: { servers: [{ name: 'priv', command: 'obscura' }] } });
+  await withEnvHatch('obscura', async () => {
+    const allowed = (await loadConfig(envOnly)).config;
+    assert.deepEqual(allowed.mcp.servers.map((entry) => entry.name), ['priv'],
+      '环境变量那一格在装配期生效（配置格里是空的——放行只来自环境变量）');
+    assert.deepEqual(allowed.mcp.extraLaunchers, [], '生效配置里那一格保持空：放行不是从它来的');
+  });
+
+  // ⑥ 非法形状：**当场报配置错**（不静默丢、不静默回退空数组）
+  for (const [bad, where] of [
+    [{ extraLaunchers: 'obscura' }, 'mcp.extraLaunchers'],
+    [{ extraLaunchers: [123] }, 'mcp.extraLaunchers[0]'],
+    [{ extraLaunchers: [''] }, 'mcp.extraLaunchers[0]'],
+    [{ extraLaunchers: ['   '] }, 'mcp.extraLaunchers[0]'],
+  ] as const) {
+    const badDir = await freshDir(t);
+    await writeRawConfig(badDir, { mcp: { servers: [], ...bad } });
+    await assert.rejects(() => loadConfig(badDir), (err: unknown) => {
+      assert.ok(err instanceof ConfigError, `要抛 ConfigError（实际 ${String(err)}）`);
+      assert.equal((err as ConfigError).where, where, '错误信息要带定位');
+      return true;
+    }, `非法形状必须报错：${JSON.stringify(bad)}`);
+  }
+});
+
+test('mcp 两个全局格：缺省 = 出厂值；写了就收下；形状不对当场报配置错（不静默回退）', async (t) => {
+  // ① 缺省：旧配置文件（只有 servers）照旧能跑 —— 加格不给旧文件添麻烦
+  const dir = await freshDir(t);
+  assert.equal((await loadConfig(dir)).config.mcp.maxInFlight, DEFAULT_MAX_IN_FLIGHT);
+  assert.equal((await loadConfig(dir)).config.mcp.rssSample, true);
+
+  // ② 写明：逐个落到解析结果上
+  const full = await freshDir(t);
+  await writeRawConfig(full, { mcp: { servers: [], maxInFlight: 16, rssSample: false } });
+  const parsed = (await loadConfig(full)).config;
+  assert.equal(parsed.mcp.maxInFlight, 16, '整池在飞上限（超限如实拒绝，不是排队）');
+  assert.equal(parsed.mcp.rssSample, false, '关掉 RSS 采样（那几格如实留空，不是填 0）');
+
+  // ③ 非法形状：**当场抛 ConfigError 并带 where**——写 0 会让一件 MCP 调用都发不出去，
+  //    而"配置看起来生效了"是最难查的那一类故障（与逐 server 的 maxInFlight 同一判据）
+  for (const [bad, where] of [
+    [{ maxInFlight: 0 }, 'mcp.maxInFlight'],
+    [{ maxInFlight: -1 }, 'mcp.maxInFlight'],
+    [{ maxInFlight: 1.5 }, 'mcp.maxInFlight'],
+    [{ maxInFlight: '8' }, 'mcp.maxInFlight'],
+    [{ rssSample: 'false' }, 'mcp.rssSample'],
+    [{ rssSample: 1 }, 'mcp.rssSample'],
+  ] as const) {
+    const badDir = await freshDir(t);
+    await writeRawConfig(badDir, { mcp: { servers: [], ...bad } });
+    await assert.rejects(() => loadConfig(badDir), (err: unknown) => {
+      assert.ok(err instanceof ConfigError, `要抛 ConfigError（实际 ${String(err)}）`);
+      assert.equal((err as ConfigError).where, where, '错误信息要带定位');
+      return true;
+    }, `非法形状必须报错：${JSON.stringify(bad)}`);
+  }
+});
 
 // ──────────────────────────────── 「她被怎么称呼」 ────────────────────────────────
 

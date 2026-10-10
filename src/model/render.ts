@@ -11,7 +11,7 @@
  * 5. 遮蔽点冻结：compaction/summary 之后，被覆盖区间恒渲染为摘要形态。
  */
 import type { AppEvent, ChannelMessage, ModelLane } from '../log/types.js';
-import { humanAskSourceOf, isImageAttachment, contextImageAdmission, contextImageMimeAllowed } from '../log/types.ts';
+import { humanAskSourceOf, isImageAttachment, contextImageAdmission, contextImageMimeAllowed, JOB_WAKE_EXCERPT_CHARS } from '../log/types.ts';
 import type { ContextImageChosen } from '../log/types.ts';
 import { noteForFlagged, ruleNoteFor, type InjectionWarnFacts } from '../channel/injection.ts';
 import type { WarnExemptJudge } from '../channel/warn-exempt.ts';
@@ -19,13 +19,286 @@ import { SELF_BRIEF, renderAskNote, renderContactNote, renderInjectionNote, rend
 import { DEFAULT_SOFT_RATIO } from '../runtime/budget-guard.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import {
-  HISTORY_HEAD_ITEMS, hashOf, segmentOfText,
-  type ContextBreakdown, type ContextSegment,
+  HISTORY_HEAD_ITEMS, hashOf, sectionFactOf, segmentOfText,
+  type ContextBreakdown, type ContextSectionFact, type ContextSegment,
 } from './context-audit.ts';
 import { estimateTokens } from '../tools/registry.ts';
 
 /**
  * 渲染模板版本：任何模板变更必须递增并接受一次缓存全 miss。
+ *
+ * v49（**历史那一侧不再收"重投集合"：` · 重投` 只出现在她要开口的那一拍**，2026-10-10）：
+ *      **改的是什么（一处判据）**：交给 `renderEvents`（历史那一侧）的集合换成 `NO_REQUEUED`
+ *      （空集）；当前输入那一侧（`renderWake` 的第 3 个参数）**照旧收真集合**。
+ *      **为什么**：`requeuedSeqsOf` 是**从当前事件流全量重算**的，不看那条 `input/requeued`
+ *      发生在第几拍 ⇒ 一条**后来的** requeue（崩溃重投 / 人审答复 `reason:'human-answered'`）
+ *      会让它盖住的那条 wake **在它已经进历史之后**被补上标记——同一个事件序列，先渲染成
+ *      `[界面消息] …`，之后又渲染成 `[界面消息 · 重投] …`。**那件事本身就该避免**：
+ *      "只追加"（本文件头铁律 2）要求历史 item 的字节**永不被改写**，而它正是被改写的那个。
+ *      ⇒ 修法是"标记只属于它被递的那一拍"。**不许**改用"按覆盖点截断 `requeuedSeqsOf`"
+ *      那种做法：那会让同一份日志在不同轮渲染出不同字节，把"同一份日志重建同一份请求"弄坏。
+ *
+ *      ⚠️ **一处必须写明的更正（我先前的归因是错的，别照它读）**：本机 03:17:50 那一次
+ *      `input=54396 / hit=16512 / miss=37884` 的**主因不是**上面那条追溯改写，而是——
+ *      那条 requeue 把 `wake/manual`（**上下文压缩通报**，seq 72233）**又递了一次**，
+ *      而它早已在历史里（遮蔽点之后），于是请求里**同一个包裹出现两遍**：
+ *      历史那条在 `[1]`，新递的那条**插在它后面**（`[42]` 附近，与"本轮新增的工具往来"同段）
+ *      ⇒ **它之后的一切都错位**，前缀从插入点起失守。判据（改后逐项对照 1245/14 与 1246/1）：
+ *      修复之后两拍的**第一处不同仍在 `[42]`**，而 `[1]` 那条历史 item 与改前**逐字节相同**
+ *      ⇒ 那条追溯改写**没有**造成这次的 miss（它造成的是"历史被改写"这件事本身）。
+ *      照用户的口径，"**重投一条已经被遮蔽的框架通报**"该不该发生是**另一个问题**
+ *      （归唤醒那条线），**不在这一版**——这一版只把"历史永不被改写"这一条钉死。
+ *
+ *      **为什么必须递增（判据）**：① 模板的**入参语义**变了（历史那一侧渲染出的字节变了）；
+ *      ② 从此**历史 item 永不被改写**——"只追加"在渲染层的最后一处漏洞补上了。
+ *      代价如实说：**所有历史里含被重投过 wake 的会话**，前缀会变**一次**
+ *      （全量日志口径：99 个被重投的 wake、其中 73 个是"已进历史之后才被标"）。
+ *      **没实测的**：这一改对 cacheHit 的实际改善（那 73 次的收益）没有实测——
+ *      因为本次现场那次 miss 的主因是上面那条插入，修完它**不会**消失。
+ *
+ * v48（**MCP 索引那一行长出"它是干什么的"那一截**，2026-10-11 用户点名的
+ *      「她刚加入的 obscura，索引内容质量低」那一笔）：
+ *      索引里一个 server 原来是 `- obscura —— 启用，工具清单还没拉过（要看就调 mcp 工具）`
+ *      ——三个事实（名字/状态/工具数）都在，**但没有一个字说它是干什么的**。
+ *      这一版把它改成 `- obscura —— <desc> —— 启用，已见 3 件工具`，三种写法**没有一种会编**：
+ *        ① `config.mcp.servers[].desc`（**声明**，权威；新字段，老配置缺这一格照旧可用）；
+ *        ② 落盘清单缓存里 server 自报的第一句工具描述（**推断**，行上必须带
+ *           `（据它自报的工具描述）` 这个标注——不标注就等于假造一条声明）；
+ *        ③ 两处都没有 ⇒ `（配置里没写它做什么）`，**照实说这一格是空的**（不省掉那一截：
+ *           省掉之后索引读起来与改动前逐字相同，那正是用户抱怨的那一行）。
+ *      判据与整段理由的唯一实现在 `src/mcp/description.ts`；读的是 `mcpIndexView`
+ *      （`persona/assets.ts`），渲染的仍是日志里那条 `mcp/index` 快照（v46 的冻结机制一个字没动）。
+ *      **为什么必须递增**：这一行**逐字节进请求前缀**（长期记忆层那段里）。
+ *      代价如实说：`mcp/index` 快照按版本换代**重建一次** = 一次索引段字节变化
+ *      （**不是 `tools` 段全 miss**——这一版一个工具都没加、一个字的 schema 都没动）。
+ *      同时 `McpIndexSnapshot` 多了一格 `descClauseVersion`（**行模板**版本，与 `version` 分开）：
+ *      只动行模板的那类改动若混进 `version` 去判"该不该重建"，会在这一版自己的生命周期里
+ *      **每拍都判过期、每拍都重建一次**；分开之后是"重建一次，然后照旧冻结"。
+ *
+ * v47（**通知行上的"谁"走名字真源**，2026-10-11 用户报「她在群里没认出我」那一笔）：
+ *      两行通知原来把发言人写成**裸 id**，而同一份上下文里 `read_channel` 那一行写的是名字
+ *      ——同一个人两个名字，她照着通知行把人认错了。现场逐字证据（10-10 01:25 她的心跳自述，
+ *      `data/events/000000070784.jsonl`）：此刻层那行是
+ *      `· 清漪粉丝群（…）（群聊@）· 1269541505 —— 曾试图打探/注入 1 次`，
+ *      而她写下"**那个叫 1269541505 的想伸手**"——1269541505 就是用户本人（她的
+ *      `aliases.md` 里两条都记着），于是用户当场从界面补了一句「1269541505就是我啊」。
+ *      这一版只动"那一格写什么"：
+ *      ① 此刻层 `预警：` 那一行的发言人（`renderInjectionNote`）与点名那句
+ *         （`renderMentionNote` 的「这次是 …」）改用**宿主注入的那一个判据**
+ *         （`ContactFacts.personNameOf` = `real-loop.personNameOf`：用户手写的联系人表 >
+ *         她的会话别名 > 她的群成员别名 > 群成员档案）；**认不出照实回落那串 id，绝不编名字**。
+ *      ② 判据一处：`read_channel` 每行那个"谁"、唤醒正文的 `personLabel`、话题概括、这两行通知
+ *         ——五处问的是同一个函数，所以同一份上下文里同一个人只有一个名字。
+ *      ③ 会话名与发言人**是同一个值**时（会话名没解析出来、退回了那串 id）不再重复写两遍：
+ *         那一格换成解析出来的名字。
+ *      为什么必须递增：此刻层与唤醒正文（提及那一轮的通知）都动了字节，与 v46 的记录不可比。
+ *      不传判据的调用点（旧测试、子代理、诊断脚本）渲染出来与 v46 **逐字节相同**。
+ *
+ * v46（**MCP 也要有一份"常驻索引"在上下文里**，与技能 catalog 同源同位；索引在
+ *      **重大变化点冻结**，增删只追加在末尾，2026-10-10 用户的设计）：
+ *      用户的原话（逐字）：「虽然有了入口，但是**还是需要有对应的索引存在**。**mcp 的存在类同
+ *      skill**。不过**入口不是自己读而是我们的统一 mcp 工具**。」「**增删进入上下文的方式依然
+ *      还是。追加在末，固定位置，直到上下文重大变化时归集到正确的索引位置。**」
+ *      这一版落成四件事：
+ *      ① **索引段**：`renderMemoryLayer` 里多一段，与技能 catalog **同段素材、同一个位置**
+ *         （长期记忆层 = 请求头部那段 developer 消息；顺序：技能目录 → MCP 索引 → 早期摘要）。
+ *         每行 = 名字 + 启用/停用 + 已见工具数（标明来源）+ 一句"要看工具就调 mcp 工具"；
+ *         **空的时候整段不出现**（与 `skillCatalog` 的 null 语义逐字一致）。
+ *         **一个工具名都不在这段里**——工具清单仍然按需（`mcp` 工具的第二层回执）。
+ *      ② **冻结**：素材**只来自日志里那条 `mcp/index` 快照**（真实来源是"配置 + 落盘清单缓存"，
+ *         由 `persona/assets.ts` 的 `mcpIndexView` 造、`real-loop` 的 `mcpIndexSync` 落库）。
+ *         **不许每轮从实时配置现渲染**——那样"加一个 server"会立刻改掉请求前缀（缓存整段失效），
+ *         与 ③ 的意图正好相反。判据：**两次重大变化之间，索引那一段的字节不变**。
+ *      ③ **归集**：只有在重大变化点（`compaction/summary`：自动压缩 / 界面 reset）才重建索引。
+ *         判据落在 `mcpIndexSync`（它的文件头写着三种重建触发点与"为什么配置改动不是触发点"）。
+ *      ④ **旧日志逐字节重建**：`mcp/index` 是**新事件**，老日志里没有它 ⇒ 渲染出来与当时
+ *         逐字节相同（缺省即整段不出现）。`replay` 按"最后一条 `mcp/index`"取回当时那一版，
+ *         所以带这一段的**新**轮次也重建得回来。
+ *      为什么必须递增（**判据**）：这一段进的是 `input` 的**长期记忆层**——它是 input 的
+ *      **第一条 item**，也就是整个请求体的**最大公共前缀**里最靠前的那一格（本文件 §4.13
+ *      铁律 1）。它多几行，之后**每一个**请求的头部字节都变，缓存一次全 miss、下一轮整份
+ *      重编码。与 v38 / v34 / v30（都动了头部或层序）同一性质：**定版本号就是让这次全 miss
+ *      可解释、可复盘**（`replay` 的 renderVersion 三指纹会如实报"当时的模板与当前不同"），
+ *      而不是被读成"缓存坏了"。
+ *      **代价只付一次、而且是可控的**：索引段是**有界的小文本**（一个 server 一行，server
+ *      数是人手配的），一次全 miss 之后它在两次重大变化之间逐字节稳定 ⇒ 前缀重新稳定。
+ *      **配置里一个 server 都没有时**：索引段是空串、整段不出现 ⇒ 那些部署的请求体
+ *      **除版本号之外**与 v45 逐字节相同（判据：`test/mcp-index.test.ts` 的空配置那一条）。
+ *      同时递增的还有 `mcp/index` 事件的 `version` 那一格（快照的度量衡）：模板换代 ⇒
+ *      旧快照与当前模板不是同一把尺子 ⇒ `mcpIndexSync` 下一次当场重建它。
+ *
+ * v45（**取消「light 选取资产」这条机制**：任务卡上不再有「本任务相关资产」那一行，
+ *      装置自述第⑰段不再许诺"框架会挑几条放在你任务旁边"，2026-10-09 用户拍板）：
+ *      用户的理由（口径逐字）：**准确率太低**——他抽 18 条看过：一半合理，系统性误判是
+ *      "去群里说一声"被匹到一个私有工具、"另一个实例"被匹到 `gh`。
+ *      这一版做的是**删**，三处一起（删一半留一半就是两套说法打架）：
+ *      ① **运行期**：`real-loop` 每轮那一次 `prefetchAssetsLine()`（读 `MEMORIES/assets.md` →
+ *         把索引喂给 light → 渲染成此刻层那一行）连同 `selectAssets` / `buildAssetPickRequest` /
+ *         `renderAssetsLine` 一起**删掉**（判据：删完 `npx tsc --noEmit` 与全量测试都不再有
+ *         引用）。于是**请求体里不再有那一行**，也不再产生 `origin='persona/assets'` 的
+ *         `budget/consumed`（那一笔 light 账随选取一起没了）。
+ *      ② **instructions**：`SELF_BRIEF` 第⑰段那句"**干活时框架会挑几条放在你任务旁边**"是
+ *         **假承诺**（评审点名过），改成与新行为一致的说法——清单不进上下文、也没有谁替她挑，
+ *         要用哪件由她自己照清单（与 SKILL.md）去读。
+ *      ③ **保留（一个字节都没动）**：`MEMORIES/assets.md`（她自己的清单，她维护）、
+ *         `persona/assets.ts` 的**事实层**（技能目录 / MCP 声明 / PATH 探测）、那条常驻规矩
+ *         （"先读说明再用，不许凭名字猜调"）。
+ *      **为什么必须递增（判据）**：②落在 `instructions` 里——它是请求体的**最大公共前缀**
+ *      （本文件 §4.13 铁律 1 与 `self-brief.ts` 的文件头）：改它一个字，之后**每一个**请求的
+ *      头部字节都变，缓存一次全 miss、下一轮整份重编码。与 v38（自述改一句）、v37、v34 同一性质：
+ *      **定版本号就是让这次全 miss 可解释、可复盘**（`replay` 的 renderVersion 三指纹会如实报
+ *      "当时的模板与当前不同"），而不是被读成"缓存坏了"。
+ *      **①也动字节，但走的是另一条口径**：那一行原来进此刻层（每步都发）。本次之后**新的一轮
+ *      里它不出现**⇒ 与"当时挑出过资产的旧轮次"逐字节不可比（`replay` 的 renderVersion 指纹
+ *      会把这件事显式报出来，这正是它该干的事）。
+ *      **旧日志照旧逐字节重建**（这一条是硬判据，别动）：`memory/selected.assets` 那条账、
+ *      `RenderInput.taskCard.assets` 那一格、`replay.ts` 的 `assetsFromEvents` 与 `web/server.ts`
+ *      的 `assetsLineAt` **全部留着**——它们是"读事件、不改写历史"的那条路；
+ *      `test/replay.test.ts` 的 v34 那条用例（造一条带 `assets` 的旧事件 → 重建 == 当时）
+ *      仍然绿，证明这次删的是**新的行**，不是**过去的字节**。
+ *      **基线（`test/heartbeat-real-wake.test.ts` 的两个精确指纹）照规矩重取**：`instructions`
+ *      变了 ⇒ 它必然变（取数过程与对照实验记在那个文件头部）。触发面只有 `instructions` 一处
+ *      （工具清单一个字没动，`tools` 段与 v44 逐字节相同）。
+ *
+
+ * v44（**工具清单不再恒定：非用户/非她自己发起的轮次按信任级收窄**，2026-10-09 复核后修）：
+ *      这一版修的是 `docs/mcp-chain-review.md` 查出的第 1 条——"文档写着有门、代码里没有"：
+ *      `modelVisibilityFor()`（`runtime/trust.ts:148`，外部轮次 ⇒ 严格白名单四件）在 `src/**` 里
+ *      **零调用点**，生产传的是 `real-loop.ts` 里恒为 `{ includeDestructive }` 的那一份
+ *      ⇒ **群里任何人 @ 她的那一轮，`mcp` 出现在工具清单里、也调得动**，而 config 现状
+ *      `destructiveEnabled: true` ⇒ MCP 侧所有破坏性工具在这条路上放行。`trust.ts` 整个模块
+ *      的立意（"硬约束放在工具清单那一层，她连看都看不到"）在这条路上不成立。
+ *      **判据（为什么必须递增）**：`tools` 段是请求体最前面的稳定前缀（§4.13 铁律 1），而这一版
+ *      让它的**内容随本轮的信任级变**：
+ *        · `external`（群里的人 / 陌生单聊 / webhook）⇒ `allowOnly` 四件白名单，**没有 `mcp`**
+ *        · `trusted`（单聊里记过名字的熟人）⇒ `includeDestructive:false`，`mcp` 仍在、destructive 不在
+ *        · `owner` / `self` ⇒ 照旧读配置（与 v43 逐字节相同）
+ *      所以"同一条历史前缀"在同一个人换档时（用户说话 ↔ 群里有人 @）会失配一次。
+ *      **代价是知情接受的**：2026-10-04 用户定过"工具清单恒定"（实测依据：清单随会话变会让
+ *      之后整段历史的前缀缓存失效，同签名 85.2% / 换签名 41.2%）。这里推翻的是"随会话变"那一半
+ *      ——现在只随**信任级**（四档）变，同一档内所有轮次逐字节相同；而安全那半边压过这个百分数。
+ *      **另有一道执行期门不变**：`authz` 按场景判（`mcp` 名单外 = 本机类，客人 + 硬拒绝档拒调），
+ *      两道门管的是两件事（"看不看得见"与"调不调得动"），都在。
+ *      **测试台的已知盲区照旧**（v43 记下的那条）：`test/fixtures/real-wake-rig.ts` 交给 RealLoop 的
+ *      注册表默认是空的 ⇒ 那两条指纹用例看不见工具名的变化。本版给台子加了 `registerTools` 一格，
+ *      真链路的判据落在 `test/tool-catalog.test.ts`（假通道造一条群消息 → 真 RealLoop → 假模型记请求体）。
+ *      实测：`heartbeat-real-wake` 那两条基线（都是 `wake/manual` = owner 档）**一个字节没变**
+ *      （`28eed0dd9858ed11` / `9e49e6f9e0fb41a6`）⇒ 这一版的字节变化**只发生在非用户轮次上**。
+ *
+ * v43（**加一件内置工具 `mcp`：MCP 的唯一入口**，2026-10-09 用户拍板
+ *      「增加一个内置 mcp 工具。此后 mcp 都从此工具调用。」）：
+ *      这一版把 MCP **第一次真的接上**（在那之前 `config.json` 里连 `mcp` 键都没有，
+ *      `McpClientPool` 在 `src/` 里**零构造点**——只有测试 new 过它），并且把调用面收成**一件**：
+ *      ① 配置面：`AppConfig` 多一段 `mcp.servers[]`（`config/config.ts` 的 `McpConfig`），
+ *         装配期读一次；声明面从此有了正经的家（`real-loop` 的事实层也改读它，
+ *         不再自己读盘——两处各读一次盘迟早会出现"池里有、她那一格说没有"）。
+ *      ② 接线：`main.ts` 建 `McpClientPool` 并交给 catalog 的 `mcpClient`，
+ *         **刻意不给池 registry**（给了它就会把 `mcp__{server}__{tool}` 写进 `tools` 段，
+ *         那正是这一版要避开的），也**不 `registerAll()`**（随用随起是池自己的纪律）。
+ *      ③ 入口工具 `mcp`（`src/tools/mcp-entry.ts`）：三条路由由"填了哪几格"决定
+ *         ——不带 `server` 看有哪些 server、带 `server` 看它有哪些工具、`server`+`tool` 就是调用。
+ *         **披露式**：MCP 的清单只在她调用时以**工具结果**进入上下文，一件都不进 `tools` 段。
+ *      为什么必须递增（**判据**，与 v17「工具清单瘦身」、v40/v41/v42 同一性质）：`tools` 段是
+ *      请求体**最前面的稳定前缀**（本文件 §4.13 铁律 1），而这一版往它里面**加了一件**
+ *      （`mcp`：name 1 + desc 33 + params 76 = **110 token**）⇒ tools 段整段前缀失配，
+ *      之后每一个请求的头部字节都变。这不是"顺手改一句"：加之前先删了 `list_dir`（v42，−212）
+ *      腾的就是这一笔。**加它的代价只付这一次**——此后它的 description / parameters
+ *      **一个字节都不许再改**（改了就是又一次全 miss ≈9.6 万 token，实测口径见 §9.1：
+ *      那一轮 inputTokens 100719 / cacheHit 96128），要补说明就往回执里补，不往描述里补。
+ *      实测账（口径 = `listForModel({ includeDestructive: true })`，与 `registry.catalogTokens` 同源）：
+ *        · 有 `es.exe`：**23 件 / 5370 → 24 件 / 5480（+110）**，上界 5500 下余 **20**
+ *        · 逐件：`mcp` 110（name 1 / desc 33 / params 76），其余件一个字节没动
+ *        · 描述距硬门（100）余 **67**；`test/tool-catalog.test.ts` 三条线（<10 / <60 / 5500）全绿
+ *      一处**知情的口径收窄**（写在这里防暗坑）：`mcp` 不是 `destructive`（标成它就会默认不进
+ *      模型清单 ⇒ 她一件 MCP 都没有），所以 `planMode` 那道门（只拦 `sideEffect:'destructive'`
+ *      的调用）**不再逐次拦 MCP 的破坏性动作**。顶上它的是一处更硬的门：入口自己按
+ *      `resolveToolAttributes` 判这一次是不是危险动作，没开 `tools.destructiveEnabled` 就**拒调**
+ *      （`mcp-entry.ts` 的文件头有那张"四道门各自怎么办"的表，含 `authz` / `trust` 两条结论）。
+ *      判据没放宽，但**这一次那两个指纹看不见它**（实测，不是推断）：`requestFingerprint` 的口径是
+ *      `instructions` + **请求体里那一串工具名** + 剥掉此刻层的 items，而 `test/fixtures/real-wake-rig.ts`
+ *      交给 RealLoop 的是 `registry: new ToolRegistry()`（**空注册表**，`:228`）⇒ 那两条用例的请求体里
+ *      `tools` 一直是 `[]`，工具名的变化它一直看不见（v42 删 `list_dir` 时"不该变"的结论也因此是
+ *      **碰巧成立**，不是被判据挡住的）。证据：这一版改完之后复跑
+ *      `_research/heartbeat-real-wake-baseline.mjs`，三个哈希与 v38 那一篇记的值**逐字相同**
+ *      （非心跳拍 `28eed0dd9858ed11`、混批 `9e49e6f9e0fb41a6`、纯心跳拍 `2443213a5a7496e5`）
+ *      ⇒ 所以 `BEFORE_*` 两个常量**照旧不动**（改它反而是造假）。"生产那份请求体的工具名变了"
+ *      由 `test/mcp-entry.test.ts` 直接钉（那里的注册表是**生产口径**的 `buildCatalogRegistry`）。
+ *      ——这一条同时记下一个**测试台的已知盲区**（rig 的空注册表），后续谁要动工具清单，
+ *      别指望那两个指纹替你看见。
+ *
+ * v42（**删掉 `list_dir`、列目录并进 `safe_read`、`pwsh` 补半句指路**，2026-10-09 用户拍板
+ *      「删掉 `list_dir`，加入 mcp 工具」——前半件）：
+ *      删除依据是实测（`data/events/**` 全部 `tool/call`）：`list_dir` **201 次 / 5264 次总量**、
+ *      近 24h 仅 1 次，却常驻 **212 token**（name 2 / desc 40 / params 170）；列目录这件事交给
+ *      `pwsh` 没有损失（`pwsh` 671 次）。腾出的常驻开销是留给**后面的 `mcp` 入口**的
+ *      （那一件要约 113 token，不在这一版里）。
+ *      三条一起落地（删工具**不等于删能力**）：
+ *      ① `safe_read` 传目录时**直接列出目录内容**（`renderDirectoryListing`，与旧 `list_dir`
+ *         同一套渲染、同一套上限：`[D]/[F]/[L]/[?]` + 大小 + 修改时间、按名排序、默认不列
+ *         隐藏项、默认 200 条 / 上限 5000、超量如实截断并给"怎么缩小范围"的指路）。
+ *         **列目录的渲染从此只有一份实现**——这正是历史上 13 次 `list_dir` 失败与 1 次
+ *         `safe_read` 传目录的病根（"文件还是目录要先猜对工具"）。
+ *      ② `safe_read` 多一个参数 `depth`（实测旧 `list_dir` 的 `depth` 用了 **136/201** 次，
+ *         是它使用率最高的非默认参数）；条数上限复用既有的 `limit`（旧 `max_entries` 43 次
+ *         里绝大多数是**调小**），因此没有为它新增常驻参数。
+ *      ③ `pwsh` 的描述补「列目录用 Get-ChildItem」；同批把「危险命令会被拒并说明原因」这句
+ *         **从描述挪进 `command` 的参数描述**——描述那条 <60 的收紧线当时只剩 7 token 余量，
+ *         半句话要花 6，两件事放同一格必然顶线（挪进参数**不省**常驻开销，参数 schema 同样
+ *         随每次请求发送，只是让那条线重新有余量）。
+ *      为什么必须递增（**判据**，与 v17「工具清单瘦身」、v40 / v41 同一性质）：工具清单是请求体
+ *      **最前面的稳定前缀**（本文件 §4.13 铁律 1），而这一版动的是它的字节——
+ *        · **删了一件**（`list_dir`）⇒ 工具数 24 → 23（有 `es.exe` 档）/ 23 → 22（无引擎档），
+ *          tools 段**整段前缀失配**；
+ *        · `safe_read` 的 `description` 与 `parameters`（新增 `depth`、`path` / `limit` 改口径）、
+ *          `pwsh` 的 `description` 与 `parameters` 逐字节进**每一条**请求的 tools 段；
+ *        · **可见历史**也动了：`fs/path-guard.ts` 那句「是目录」的拒绝（它过去指向 `list_dir`，
+ *          现在指向 `safe_read` / `pwsh`）、`search-tools.ts` 的两条失败回执、以及
+ *          `persona/memory-access.ts` 的「记忆文件不在盘上」回执（它过去教她用 `list_dir`，
+ *          工具一删那句话就指向一个不存在的工具）——它们都是 `tool/result` 正文，
+ *          下一轮起作为历史进 input，改一个字，引用到它的历史字节就与当时不同。
+ *      判据没放宽：`test/heartbeat-real-wake.test.ts` 的那两个精确指纹走 `requestFingerprint`
+ *      （`instructions` + **工具名** + 剥掉此刻层的 items），工具描述/参数与工具回执**都不在它的
+ *      口径里**——所以它**不该变**（`list_dir` 不在它的工具名口径里，已核）。
+ *      "描述有没有逼近硬门"照旧由 `test/tool-catalog.test.ts` 的三条断言守着
+ *      （实测：safe_read 82 / pwsh 51，全清单 **5370 < 5500**；旧值 5497）。
+ *      实测账（口径 = `listForModel({ includeDestructive: true })`，与 `registry.catalogTokens` 同源）：
+ *        · 有 `es.exe`：**24 件 / 5497 → 23 件 / 5370（−127）**
+ *        · 无 `es.exe`：**23 件 / 5015 → 22 件 / 4888（−127）**
+ *        · 逐件：`list_dir` −212、`safe_read` +78（desc 76→82、params 209→281）、`pwsh` +7（desc 53→51、params 158→167）
+ *      一处**权限语义变更**（知情接受，方向是收紧）：`list_dir` 原来在 `SOCIAL_TOOLS` 里，
+ *      并进 `safe_read` 之后**客人 + 硬拒绝档列不了目录**了——`safe_read` 不能进那张名单
+ *      （它能读到 MEMORIES/ 里关于用户的事）。硬拒绝默认是关的，所以影响只在那一档，
+ *      理由与出处写在 `runtime/authz.ts` 的 `SOCIAL_TOOLS` 下。
+ *
+ * v41（**投递回执说清"成功、不必重复发送"；`read_channel` 没有新消息就直说；`timer action=wait`；
+ *      `wake/job` 带正文**，2026-10-08 用户的四条口径）：
+ *      ① 「**speak 和 report 工具发送成功的回执应该明确，成功投递，不必重复发送**」——
+ *         `SENT_CREDENTIAL_NOTE` 改成开头就是结论（`投递成功`）+ 用户点名的那四个字，
+ *         并新增共用的锚点那一句（"送出的就是这一句/这一篇"）；失败那一侧由
+ *         `deliveryFailureLines` 统一给出"不必重试 / 还可以再试"的判断（`report` 以前不给判断）；
+ *      ② 「**read_channel，如果没有消息就直接回执没有新消息**」——回执第一句就是这四个字；
+ *         只有"有未读但没点她"那一支才带 `另有 N 条你没看`（措辞因此可分：带 N / 不带 N）；
+ *      ③ 「**timer 提供一个 wait**」——`timer` 多一个动作（`wait`：排一次到点唤醒，不阻塞本拍）
+ *         与三个参数（`seconds` / `minutes` 两个单位、`payload` 兼作"到点叫你的理由"）；
+ *      ④ 「**后台任务回执、timer 提醒，这类得是真唤醒**」——`wake/job` 那一行从"只有 jobId
+ *         + 指向一个**不存在**的 job 查询工具"改成**带结果正文**（开头一截 + 全文字节数 + 文件路径，
+ *         见 `JOB_WAKE_EXCERPT_CHARS`）；`wakeTitle` 另给一行摘要（命令 + 退出码），
+ *         不让多行输出撑断任务卡。**同一批必须一起修的还有产生侧**
+ *         （`runtime/job-manager.ts`：事件落库后当场折进投影——原来只写盘，于是
+ *         `wake/job` 在运行期**永远不起 turn**，那条缺陷的判据与证据在 `test/job-wake.test.ts`）。
+ *      为什么必须递增（**判据**）：这批改动落在两处都进请求字节的地方——
+ *        · **工具清单**（本文件 §4.13 铁律 1：它是请求体最前面的稳定前缀）：`timer` 的
+ *          `description` / `parameters`、以及 `speak` / `read_channel` 的 `description` 逐字节进
+ *          **每一条**请求的 tools 段（`read_channel` 顺带按同一条纪律从 74 压到 67）；
+ *        · **可见历史**：工具回执是 `tool/result`、`wake/job` 是可见的唤醒行，两者下一轮起就作为
+ *          历史进 input——改一个字，凡是引用到它的历史字节就与当时不同。
+ *      与 v40（read_channel 的两条口径 + 它的参数表）、v17（工具清单瘦身）同一性质：
+ *      **定版本号就是让这次全 miss 可解释、可复盘**（`replay` 的 renderVersion 三指纹会如实报
+ *      "当时的模板与当前不同"），而不是被读成"缓存坏了"。
+ *      判据没放宽：`test/heartbeat-real-wake.test.ts` 的那两个精确指纹走 `requestFingerprint`
+ *      （`instructions` + **工具名** + 剥掉此刻层的 items），工具描述/参数与工具回执**都不在它的
+ *      口径里**，所以它**不该变**；"描述有没有逼近硬门"照旧由 `test/tool-catalog.test.ts` 的三条
+ *      断言守着（实测：speak 55 / timer 52 / read_channel 67，全清单 5497 < 5500）。
  *
  * v40（**`read_channel` 的两条口径 + 它的参数表**，2026-10-08 用户的要求）：
  *      用户原话：「**read_channel 提供一下翻页吧**」「read_channel 默认行为应该是读到未读消息。
@@ -46,9 +319,11 @@ import { estimateTokens } from '../tools/registry.ts';
  *      判据没放宽：`test/heartbeat-real-wake.test.ts` 的那两个精确指纹走 `requestFingerprint`
  *      （`instructions` + 工具名 + 剥掉此刻层的 items），**工具描述与参数不在它的口径里**，
  *      所以它**不该变**，也**没有重取**；而"描述有没有逼近硬门"照旧由
- *      `test/tool-catalog.test.ts` 的 <60 / 距硬门 <10 两条断言守着（实测 74/100）。
+ *      `test/tool-catalog.test.ts` 的 <60 / 距硬门 <10 两条断言守着（当时实测 74/100；
+ *      v41 起 67/100——同一批把它的描述压短了）。
  *
- * v39（**「本任务相关资产」那一行里她的说明不再是整段**，2026-10-07 用户的要求）：
+ * v39（**「本任务相关资产」那一行里她的说明不再是整段**，2026-10-07 用户的要求；
+ *      **v45 起这一行本身没了——这一篇留作历史，别当现状读**）：
  *      那一行由 `persona/assets.ts` 的 `renderAssetsLine` 渲染，进**此刻层任务卡**——
  *      于是**每一步都发**。实测（`data/events` 全量 111 条带 assets 的 `memory/selected`）：
  *      最长 527 字符、中位 125、均值 144。最长那条里 335 个字符是她在 `说明：` 那一格里
@@ -128,7 +403,8 @@ import { estimateTokens } from '../tools/registry.ts';
  *      为什么必须递增：此刻层任务卡那一行的字节变了（只要这一轮的首条输入是 `wake/channel`），
  *      与 v34 的记录逐字节不可比。代价是一次缓存全 miss，只落在"渠道叫醒"的那些轮上。
  *
- * v34（**数字资产那一行进此刻层任务卡** + 装置自述补第⑰段，2026-10-06 用户的设计）：
+ * v34（**数字资产那一行进此刻层任务卡** + 装置自述补第⑰段，2026-10-06 用户的设计；
+ *      **v45 起那一行不再由框架挑、也不再出现——这一篇留作历史**）：
  *      两处一起改，因为它们本来就是一条设计（她得先知道有这份清单，才看得懂任务旁边那一行）：
  *      ① **此刻层**：任务卡多一行 `本任务相关资产：Obscura（D:\…\obscura.exe）· gh（已在 PATH）`
  *         ——紧跟 `当前任务：…` 之后、`未完成计划：` 之前，**只读**（不动她的 todo、不产生任何
@@ -343,7 +619,64 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '40';
+export const RENDER_VERSION = '49';
+
+// ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
+
+/**
+ * 日志里**最后一条** `mcp/index` 快照的位置与内容（没有就是 `seq: 0 / text: null`）。
+ *
+ * 为什么要这么一个"扫一遍事件数组"的小函数，而不是让两个调用方各扫一遍：
+ *   ① **它是那一段字节的唯一来源**。`render` 是纯函数（缓存铁律 1：不读配置、不读文件、
+ *      不读时钟），它读不到配置、也读不到 `<dataDir>/mcp-cache/`，只能读事件；
+ *      运行期（`real-loop`）与重建（`replay`）因此必须用**同一份判据**取出同一串字节，
+ *      否则"同一份日志重建同一份请求"这条承诺当场作废（重建出来的会少一整段）。
+ *   ② **写入侧也要它**（`RealLoop.mcpIndexSync` 判"该不该重建"用的就是这里的
+ *      `version` 与 `coveredSeq`）——两处各写一份判据，迟早漂成"重建了但渲染不认"。
+ *
+ * `coveredSeq` 是最后一条 `compaction/summary` 的 seq：**"上下文重大变化"在本仓库里的唯一凭据**
+ * （自动压缩、人工 `/compact`、界面 reset 都写它）。判据是"快照早于它 ⇒ 该归集了"。
+ *
+ * 复杂度是 O(事件数)：与 `real-loop` 里既有的几条扫描（`handleCompactionWake` 等）同一口径，
+ * 都在轮首那一拍跑，不在每个 step 上跑。
+ */
+export interface McpIndexPoint {
+  /** 最后一条 `mcp/index` 的 seq；没有这种事件时为 0 */
+  seq: number;
+  /** 那一条的 `data.text`；没有那种事件时为 null（调用方据此整段不出现） */
+  text: string | null;
+  /** 那一条写的是哪一代模板（它的 `version`）：与 `RENDER_VERSION` 不等 ⇒ 这份快照该重建 */
+  version: string | null;
+  /**
+   * 那一条写的索引**行模板**版本（`MCP_INDEX_DESC_CLAUSE_VERSION`）。
+   *
+   * 与 `version` 分开判（判据写在那个常量的注释里）：`version` 只答"渲染模板换没换代"，
+   * 而"这一行怎么拼"是另一件事——只动行模板的那类改动若混进 `version` 去判，
+   * 会在**这一版自己的生命周期里**每拍都判"过期"，于是每拍重建一次索引。
+   * `0` = 那一格还没有（老快照：行里没有 `desc` 那一截）⇒ 当场重建一次，之后照旧冻结。
+   */
+  descClauseVersion: number;
+  /** 最后一条 `compaction/summary` 的 seq；没有时为 0 */
+  coveredSeq: number;
+}
+
+export function mcpIndexOf(events: readonly AppEvent[]): McpIndexPoint {
+  const point: McpIndexPoint = { seq: 0, text: null, version: null, descClauseVersion: 0, coveredSeq: 0 };
+  for (const event of events) {
+    if (event.type === 'mcp/index') {
+      // 后出现的覆盖先出现的（只追加的日志里 seq 升序，取最后一条就是"现在生效的那一版"）
+      point.seq = event.seq;
+      point.text = event.data.text;
+      point.version = event.data.version;
+      // 缺这一格的老快照按 0 算（= 行里没有 desc 那一截）⇒ 该重建一次（判据在那个常量的注释里）
+      const clause = event.data.descClauseVersion;
+      point.descClauseVersion = typeof clause === 'number' && Number.isFinite(clause) ? clause : 0;
+    } else if (event.type === 'compaction/summary') {
+      point.coveredSeq = event.seq;
+    }
+  }
+  return point;
+}
 
 /**
  * 哪次工具调用没有回执时，补给它（也补给她）的那句话。
@@ -491,9 +824,16 @@ function itemText(item: InputItem): string {
  */
 function segmentOfItems(items: readonly InputItem[]): ContextSegment & { items: number } {
   let tokens = 0;
-  for (const item of items) tokens += estimateTokens(itemText(item));
+  let bytes = 0;
+  for (const item of items) {
+    const text = itemText(item);
+    tokens += estimateTokens(text);
+    bytes += Buffer.byteLength(text, 'utf8');
+  }
   return {
     tokens,
+    // 字节数按**文字**算（与 tokens 同一串输入；哈希仍按整段 JSON——口径不同是刻意的）
+    bytes,
     hash: hashOf(JSON.stringify(items)),
     items: items.length,
   };
@@ -591,13 +931,19 @@ export interface RenderInput {
     /**
      * 本任务相关资产那一行（v34；`MEMORIES/assets.md` 里挑出来的 ≤3 条，**已渲染好的文本**）。
      *
-     * 为什么是"渲染好的文本"而不是条目数组：条目 → 那一行要看清单文件，而渲染层不读文件
-     * （缓存铁律 1）；而且"选了哪几条"这件事只有拿得到 light 的宿主算得出来（与 contact /
-     * machine / usage 同一条纪律——渲染层只排版）。
+     * ⚠ **v45 起没有生产写入方**（2026-10-09 用户拍板取消「light 选取资产」这条机制）：
+     * `real-loop` 不再挑、也不再传值（传的恒为空串），所以此刻层里那一行**不会再出现**。
+     * **这一格为什么不连根拔掉**：它是**逐字节重建旧日志**那条路要用的——
+     * `memory/selected.assets`（v34 起搭着记忆索引的账落库）里记着当时那一行，
+     * 重放（`runtime/replay.ts`）与界面预览（`web/server.ts`）都从**事件**取回它；
+     * 删掉这一格就等于改写历史（旧日志重建出来会比当时少一整行，见 `test/replay.test.ts`）。
+     *
+     * 为什么是"渲染好的文本"而不是条目数组：要条目就得读清单文件，而渲染层不读文件系统
+     * （缓存铁律 1）；当年"选了哪几条"也只有拿得到 light 的宿主算得出来（与 contact /
+     * machine / usage 同一条纪律——渲染层只排版）。这一条对**重建**同样成立：事件里存的就是文本。
      *
      * 它是**只读提示**：不改任务卡其余字段、不动她的 todo、也不产生任何"已读/已选"状态。
-     * 缺省 / 空串 = 整行不出现（与引入它之前逐字节相同：清单不存在、没挑出相关的、
-     * 或者这一拍不是"要干活"的一拍，三种情形都走这一支）。
+     * 缺省 / 空串 = 整行不出现（v45 起生产上恒为这一支：与引入它之前逐字节相同）。
      */
     assets?: string;
   } | null;
@@ -642,6 +988,25 @@ export interface RenderInput {
    * SKILL.md 正文永不在此出现：那是渐进披露第二层，模型自己用 safe_read 读（M7-4）。
    */
   skillCatalog?: string | null;
+  /**
+   * MCP 索引文本（**与技能 catalog 同源同性质**：状态层素材，进长期记忆层那一段）。
+   *
+   * 2026-10-10 加，用户的设计原话：「虽然有了入口，但是**还是需要有对应的索引存在**。
+   * **mcp 的存在类同 skill**。不过**入口不是自己读而是我们的统一 mcp 工具**。」
+   *
+   * 素材由调用方给，且**必须来自日志里那条 `mcp/index` 快照**（`real-loop` 的 `mcpIndexSync`
+   * 是唯一写入点）——**不许每轮从实时配置现渲染**：那样加一个 server 就会立刻改掉请求前缀，
+   * KV 缓存整段失效，而用户的设计恰恰相反（增删只追加在末尾，到重大变化点才归集）。
+   * "索引字节在两次重大变化之间不变"这条判据因此落在调用方，渲染层只负责排位置。
+   *
+   * 这一段只回答"**有哪些 server**"（名字 + 启用/停用 + 工具数 + 一句"要看工具就调 mcp 工具"）：
+   * **一个工具名都不在这段里**——工具清单按需披露（`mcp` 工具的第二层回执），
+   * 写进来就等于把 v43 那一版的披露式入口白做了。
+   *
+   * null/缺省/空串 = 那一刻没有 server（或调用方没给：重放、诊断、子代理），**该段整体不出现**
+   * ——与 `skillCatalog` 的 null 语义逐字一致。
+   */
+  mcpIndex?: string | null;
   /**
    * 记忆索引文本（B2：`MEMORIES/INDEX.md` 的渲染形态）。
    *
@@ -780,6 +1145,20 @@ export function render(input: RenderInput): RenderedRequest {
     }
   }
 
+  /**
+   * **请求体构造点**：这一次渲染看得见的最大事件 seq（含本轮唤醒）。
+   *
+   * 它**不是请求体的一部分**（`ds-client.buildRequestBody` 只发 model / input / instructions /
+   * tools / reasoning / max_output_tokens / text / temperature / top_p——`context` 一个字节都不进
+   * 请求），所以加它**不需要动 `RENDER_VERSION`**。它纯粹是观测，用途写在
+   * `ContextBreakdown.builtAtSeq`：让缓存哨兵把归因窗口切在"构造点"而不是"上一次调用的完成点"
+   * （2026-10-09 18:07 与 19:17 两次误报"原因不明"，根子就是窗口按完成点切的）。
+   * 它是事件的纯函数 ⇒ 重放与界面预览拿到的是同一个数。
+   */
+  let builtAtSeq = coveredUpToSeq;
+  for (const e of events) if (e.seq > builtAtSeq) builtAtSeq = e.seq;
+  if (wakeEvent !== null && wakeEvent.seq > builtAtSeq) builtAtSeq = wakeEvent.seq;
+
   const instructions = renderInstructions(persona);
 
   // 通道消息各自的框架话（注入预警），按 messageId 归各自那条——**不能共用一个上下文**：
@@ -799,11 +1178,31 @@ export function render(input: RenderInput): RenderedRequest {
   //    **记忆索引不在这里**（v30 起）：它是唯一"她写一笔记忆就重建一次"的素材，放头部等于
   //    她越勤快、整段历史越容易从第 1 条起作废（实测与理由见本文件头 v30 那条）；
   //    它现在在固定块里（下面 ③）。头部只剩这两样真正低频的东西。
-  const memoryLayer = renderMemoryLayer(latestSummary, coveredUpToSeq, input.skillCatalog ?? null);
-  if (memoryLayer !== '') items.push({ type: 'message', role: 'developer', content: memoryLayer });
-  const memorySegment = segmentOfItems(items.slice(memoryStart));
+  const memoryLayer = renderMemoryLayer(
+    latestSummary, coveredUpToSeq, input.skillCatalog ?? null, input.mcpIndex ?? null,
+  );
+  if (memoryLayer.text !== '') items.push({ type: 'message', role: 'developer', content: memoryLayer.text });
+  const memorySegment = {
+    ...segmentOfItems(items.slice(memoryStart)),
+    // 分节事实（观测）：技能目录 / MCP 索引 / 早期摘要各一条，见 `ContextSectionFact`
+    ...(memoryLayer.sections.length === 0 ? {} : { sections: memoryLayer.sections }),
+  };
 
   // ② 事件流：未被遮蔽的 model 事件按 seq 升序，只追加不改写
+  //
+  //    **`requeued` 在这一侧传空集**（v49，2026-10-10）：它只属于"**这一拍把它当新输入递给
+  //    她**"那一次渲染（下面 ③ 的 `renderWake` 照旧收真集合），**历史里那条 item 的字节
+  //    必须保持它首次进历史时的样子**——那时它还不是"重投"。
+  //
+  //    为什么（机制，实测不是推断）：`requeuedSeqsOf` 是**从当前事件流全量重算**的，不看那条
+  //    `input/requeued` 发生在第几拍 ⇒ 一条**后来的** requeue（崩溃重投 / 人审答复
+  //    `reason:'human-answered'`）会让它盖住的那条 wake 在**它已经进历史之后**被补上 ` · 重投`
+  //    ——同一个事件序列先渲染成 `[界面消息] …`、之后又渲染成 `[界面消息 · 重投] …`。
+  //    这是"只追加"（本文件头铁律 2）在渲染层的最后一处漏洞：**历史 item 从此永不被改写**。
+  //
+  //    ⚠️ 别把这一改读成"03:17 那次 37,884 miss 的修法"：那次的主因是**同一条框架通报被重投
+  //    了第二遍、插在历史中间**（本文件头 v49 那一篇有逐项对照），与这里的标记无关。
+  //    判定重投的信号一个字没少——它在 ③ 那一拍（她要开口的那一拍）照旧出现。
   const requeued = requeuedSeqsOf(events);
   // 首 step 的本轮输入**不在** events 里（见 agent-loop 的协同契约），但它的图片同样要进
   // 上下文——所以算注入窗口时把它一起算进去，否则"刚收到的那张图"恰好是唯一漏掉的那张。
@@ -814,7 +1213,7 @@ export function render(input: RenderInput): RenderedRequest {
   );
   const historyStart = items.length;
   items.push(...renderEvents(
-    events, coveredUpToSeq, requeued, images, input.channelRender, channelNotes,
+    events, coveredUpToSeq, NO_REQUEUED, images, input.channelRender, channelNotes,
     input.mentionNotice ?? null, input.warnExempt ?? null,
   ));
   const historyItems = items.slice(historyStart);
@@ -930,6 +1329,8 @@ export function render(input: RenderInput): RenderedRequest {
     tools,
     context: {
       renderVersion: RENDER_VERSION,
+      // 构造点（观测字段，不进请求体）：见上面那段注释与 `ContextBreakdown.builtAtSeq`
+      builtAtSeq,
       instructions: segmentOfText(instructions),
       tools: {
         tokens: tools.reduce(
@@ -945,6 +1346,13 @@ export function render(input: RenderInput): RenderedRequest {
         ...historySegment,
         // 前段哈希：历史每步都在追加尾巴（正常），只有**前段被改写**才算缓存破坏
         headHash: hashOf(JSON.stringify(historyItems.slice(0, HISTORY_HEAD_ITEMS))),
+        // 前 N 条**逐条**事实（2026-10-10 加，观测）：`headHash` 只说"前段变了"，这一格说
+        // "变的是第几条、变了多少字节"。哈希/字节按**该条 item 的 JSON** 算——与 `headHash`
+        // 同一串输入，所以"第 3 条变了"能直接解释 `headHash` 为什么变。
+        // 现场（2026-10-09 19:17）：一条后来的 `input/requeued` 给历史**第 1 条**补了 ` · 重投`，
+        // 37,884 token 全 miss——有这一格就是一眼的事。
+        headItems: historyItems.slice(0, HISTORY_HEAD_ITEMS)
+          .map((item, index) => sectionFactOf(`#${index + 1}`, JSON.stringify(item))),
       },
       state: turnBlockSegment,
       now: nowSegment,
@@ -983,28 +1391,45 @@ export function renderInstructions(persona: RenderPersona): string {
 // ── 状态层 ──
 
 /**
- * 长期记忆层（头部，低频变化）：技能目录 + 最近摘要。
+ * 长期记忆层（头部，低频变化）：技能目录 + MCP 索引 + 最近摘要。
  *
- * 为什么这两样放头部：它们是**真正跨轮稳定**的长期素材——技能目录只在技能被确认时变，
- * 摘要只在上下文压缩时变，两者都是低频事件，代价可接受；放头部能撑住一整段可命中的前缀。
+ * 为什么这三样放头部：它们是**真正跨轮稳定**的长期素材——技能目录只在技能被确认时变，
+ * MCP 索引只在**重大变化点**（压缩 / reset）重建，摘要只在上下文压缩时变；三者都是低频事件，
+ * 代价可接受；放头部能撑住一整段可命中的前缀。
  *
  * **记忆索引不在这里**（v30 起在固定块里）：它看着像"只在记忆增删时重建"，实际上她写一笔
  * 记忆就重建一次；放头部时那份波动会打掉**整段历史**（实测与理由见本文件头 v30 那条、
  * 以及 docs/memory-injection.md §8）。头部只留"变了就是大事"的东西。
+ *
+ * **三段的顺序是刻意的**（v46）：技能目录与 MCP 索引是同一类东西（"这台机器上现成有什么"，
+ * 用户 2026-10-06 的口径：skill / mcp / path 都是数字资产），所以它们**挨着**排在最前
+ * ——第一个是最长的公共前缀，第二个紧跟着它；摘要带着"覆盖至 seq N"这种会随压缩变动的
+ * 东西，排最后（它一变，损失封顶在它自己那一段）。
  */
 function renderMemoryLayer(
   latestSummary: string | null,
   coveredUpToSeq: number,
   skillCatalog: string | null,
-): string {
+  mcpIndex: string | null,
+): { text: string; sections: ContextSectionFact[] } {
   const sections: string[] = [];
+  // 分节事实（2026-10-10 加，纯观测）：同一段文本顺手量一次，回答"是哪一节变了、变了多少字节"。
+  // **它一个字节都不进请求**——`text` 仍是下面 join 出来的那一串（与加它之前逐字节相同）。
+  const facts: ContextSectionFact[] = [];
+  const push = (name: string, text: string): void => {
+    if (text === '') return;
+    sections.push(text);
+    facts.push(sectionFactOf(name, text));
+  };
   // 技能索引（design §4.19 渐进披露第 1 层）：只有名称与描述，正文按需 safe_read
-  const skills = (skillCatalog ?? '').trim();
-  if (skills !== '') sections.push(skills);
+  push('skills', (skillCatalog ?? '').trim());
+  // MCP 索引（v46）：与技能 catalog 同段素材、同一个位置。只有"有哪些 server"，
+  // 工具清单按需（`mcp` 工具）——判据与理由见 `RenderInput.mcpIndex`。
+  push('mcp', (mcpIndex ?? '').trim());
   if (latestSummary !== null) {
-    sections.push(`[早期历史摘要 · 覆盖至 seq ${coveredUpToSeq}]\n${latestSummary}`);
+    push('summary', `[早期历史摘要 · 覆盖至 seq ${coveredUpToSeq}]\n${latestSummary}`);
   }
-  return sections.join('\n\n');
+  return { text: sections.join('\n\n'), sections: facts };
 }
 
 /**
@@ -1107,7 +1532,11 @@ function renderNowLayer(
   // 预警（v25）：最近 24 小时谁被示过警。**有示警才出现**（没有就整段不出现，不写"0 次"）。
   // 它在说一件跨多轮的事：那些"想指挥你"的话不只是一次打扰，而是有人在试——她该能看见这件事
   // 持续存在，而不是靠回忆。语气与消息旁边那句框架提示同源（判断还给她，见 renderInjectionNote）。
-  const warnText = renderInjectionNote(injection, Date.parse(now)).trim();
+  //
+  // 名字真源（v47）：人那一格走 `contact.personNameOf`（宿主注入的那**一个**判据，与 read_channel
+  // 每行那个"谁"、点名那句是同一个函数）——否则群里那一行会写成裸 QQ 号/openid，而她刚在同一份
+  // 上下文里从消息行读到过那个人的名字（见 v47 那一篇）。
+  const warnText = renderInjectionNote(injection, Date.parse(now), contact?.personNameOf ?? null).trim();
   if (warnText !== '') fields.push(`预警：\n${warnText}`);
 
   if (contact !== null) {
@@ -1138,11 +1567,14 @@ function renderNowLayer(
   // 它与上面那串字段之间留一个空行：字段表是"一眼扫的事实"，任务卡是"要读的一段"。
   if (taskCard) {
     // 本任务相关资产（v34）：**排在未完成计划之前**，与任务标题同属"这一轮要做什么"那一组。
-    // 一行、只读、≤3 条（上限在 persona/assets.ts 的 renderAssetsLine 里，这里只排版）。
+    // **v45 起这一段是"旧日志重建"用的**：运行期不再给值（`taskCard.assets` 恒为 undefined ⇒
+    // `assetsLine` 恒为空串 ⇒ 那一行不出现）；只有重放/界面预览从 `memory/selected.assets`
+    // 取回**当时那一行**时，才会再渲染一次。渲染层这一处**一个字都没改**——改它就会把历史
+    // 的字节改掉（那正是"逐字节重建"要防的事）。
     //
-    // 为什么在这一层、且在任务卡里：① 它跟着**任务**走——任务完，任务卡消失，这一行自然消失
-    //（不进历史、不受压缩影响：它每次都由任务卡现渲染）；② 一轮之内它逐字节不变（light 只在
-    // 轮首选一次，deps 每步原样转手），所以同一轮后续 step 照旧命中前缀。
+    // 当年为什么在这一层、且在任务卡里：① 它跟着**任务**走——任务完，任务卡消失，这一行自然
+    // 消失（不进历史、不受压缩影响：它每次都由任务卡现渲染）；② 一轮之内它逐字节不变（light
+    // 只在轮首选一次，deps 每步原样转手），所以同一轮后续 step 照旧命中前缀。
     // 空串 = 整行不出现（不写"暂无"、不写"0 条"）。
     const assets = (taskCard.assets ?? '').trim();
     const assetsLine = assets === '' ? '' : `\n${assets}`;
@@ -2026,6 +2458,9 @@ function timerPayloadsOf(events: AppEvent[]): Map<string, unknown> {
  *
  * 为什么要标出来：重投后渲染出的字节与首次**完全相同**，她分不清"新话"与"重放的话"，
  * 于是会对一句已经答过的话重新作答（实测：重启打断 turn 后，她反复纠结"那杯红茶我答过了"）。
+ *
+ * ⚠️ **它只服务"这一拍的新输入"那一侧**（v49 起）：历史那一侧一律传 {@link NO_REQUEUED}
+ * ——理由与现场写在 `render()` ② 那一段的注释里。
  */
 function requeuedSeqsOf(events: AppEvent[]): Set<number> {
   const out = new Set<number>();
@@ -2035,6 +2470,17 @@ function requeuedSeqsOf(events: AppEvent[]): Set<number> {
   }
   return out;
 }
+
+/**
+ * 历史那一侧**永远**看到的"重投集合"：空集（v49）。
+ *
+ * 提成常量而不是每拍 `new Set()`：① 省一次分配（它每步都走一遍，而内容永远相同）；
+ * ② 更重要的是**它得有个名字**——"这里为什么是空的"是一个判据，不是一个笔误，
+ * 下一个人顺手把真的集合接回来之前，先读 {@link requeuedSeqsOf} 上那句与 `render()` ② 那一段。
+ *
+ * **不许被复用为"这一拍的重投集合"**：那一侧要的是真集合（`renderWake` 的第 3 个参数）。
+ */
+const NO_REQUEUED: ReadonlySet<number> = new Set<number>();
 
 /**
  * 唤醒输入的**标题形态**：给人看的一行摘要（任务卡标题、交接笔记条目、资产选取的任务描述用）。
@@ -2077,6 +2523,18 @@ export function wakeTitle(e: AppEvent, timerPayloads?: Map<string, unknown>): st
     if (text !== '') return text;
     const count = e.data.attachments?.length ?? 0;
     return count > 0 ? `（发了 ${count} 个附件，没写字）` : '（空消息）';
+  }
+  if (e.type === 'wake/job') {
+    // 任务完成那条的**标题**：一行摘要（命令 + 退出码）。**正文不在这里**——它在 `renderWake`
+    // 里（结果正文是多行的，她要在请求里原样看到）。两件事从 v41 起分开，与 v35 对
+    // `wake/channel` 的处理同一条纪律：标题要能塞进任务卡那一行（`当前任务：…`）与
+    // assets 的 200 字窗口，正文该在的地方是输入本身。
+    const command = (e.data.command ?? '').replace(/\s+/gu, ' ').trim();
+    const code = e.data.exitCode === undefined
+      ? ''
+      : `（退出码 ${e.data.exitCode === null ? '未知' : e.data.exitCode}）`;
+    const what = command === '' ? '' : `：${command}`;
+    return `[后台任务完成] ${e.data.jobId}${what}${code}`;
   }
   return renderWake(e, timerPayloads);
 }
@@ -2127,8 +2585,35 @@ export function renderWake(
       return `[文件变化] ${e.data.kind}：${e.data.path}`;
     case 'wake/intention':
       return `[意图到期] ${e.data.content}`;
-    case 'wake/job':
-      return `[后台任务完成] ${e.data.jobId}（用 job 查询工具看结果）`;
+    case 'wake/job': {
+      // **这一行必须带正文**（2026-10-08 用户的口径：「后台任务回执、timer 提醒，这类得是真唤醒」
+      // ——判据是"真的起 turn，且那一条内容出现在当轮请求体里"）。
+      // 判据只在这里一处：事件里有什么就摆什么，**不读盘、不读时钟**（渲染层是纯函数）。
+      // 事件里那几格由 `runtime/job-manager.ts` 的 `#wakeDataOf` 填（只有它知道输出在哪）。
+      const data = e.data;
+      const where = data.command === undefined || data.command === ''
+        ? data.jobId
+        : `${data.jobId}：${data.command}`;
+      // `null` = 没跑完就被结算（重启孤儿/被杀）——写成"未知"而不是 0，别让她读成成功
+      const code = data.exitCode === undefined
+        ? ''
+        : `（退出码 ${data.exitCode === null ? '未知（没跑完就被结算）' : data.exitCode}）`;
+      // 全文怎么取：给她**能用的那条路**（`safe_read` 读本机文件）。
+      // 原来这里写的是"用 job 查询工具看结果"——**那个工具根本不存在**（注册表里没有它，
+      // `test/job-wake.test.ts` 有一条断言钉着），那句话等于让她去够一个够不着的东西；
+      // 而输出本来就在盘上，读文件是她已有的能力。
+      const readHint = data.outputFile === undefined || data.outputFile === ''
+        ? ''
+        : `，要全文（或重读）就用 safe_read 读 ${data.outputFile}`;
+      if (data.outputExcerpt === undefined) {
+        return `[后台任务完成] ${where}${code}\n（这次没有留下输出正文${readHint}）`;
+      }
+      const size = data.outputBytes === undefined ? '' : ` ${data.outputBytes} 字节`;
+      const head = data.outputTruncated === true
+        ? `结果正文（**只给了开头 ${JOB_WAKE_EXCERPT_CHARS} 字**${size === '' ? '' : `，全文${size}`}${readHint}）：`
+        : `结果正文（全文${size}${readHint}）：`;
+      return `[后台任务完成] ${where}${code}\n${head}\n${data.outputExcerpt}`;
+    }
     case 'wake/channel': {
       // 渲染走 `renderExternalEvent`——**唯一实现**，与 `read_channel` 取回旧消息时同一份：
       // 一条消息一个包裹、名字尽量带上、正文与整块都有上限、注入预警附在框外（见那个函数）。

@@ -103,9 +103,10 @@ export interface RigOptions {
   /**
    * 数字资产事实层里 MCP 那一格的覆盖点（v34）：**配置声明了哪些 server**（只有名字）。
    *
-   * 不传时真 RealLoop 走 `declaredMcpServers(dataDir)`（读 `<dataDir>/../config.json` 的
-   * `mcp.servers`）。台子不写那份配置（临时目录），所以不传就是"读不到配置面"（`undefined`）
-   * 那一支；要测"配置里声明了 server"就传它。
+   * 不传时真 RealLoop 走 `declaredMcpServers(config)`——读的是**配置对象**的 `mcp.servers`
+   *（2026-10-09 起；以前它读 `<dataDir>/../config.json`，那份文件现在只服务 CLI 与界面）。
+   * 台子给的是 `defaultConfig()`，所以不传就是"一个都没声明"（`[]`）那一支；
+   * 要测"读不到配置面"（`undefined`）得用 `patchConfig` 把那一格改成读不出结论的形状。
    */
   mcpServers?: readonly string[];
   /**
@@ -122,6 +123,24 @@ export interface RigOptions {
    * 不传 = 没有钩子（`runWakeHooks` 返回 null，与大多数用例无关）。
    */
   hooks?: HookRunner;
+  /**
+   * 往台子的注册表里放几件工具（**2026-10-09 加**，v44 那一版留下的洞的补丁）。
+   *
+   * 为什么需要它：台子交给 RealLoop 的是 `registry: new ToolRegistry()`——**空注册表**。
+   * 于是两条指纹用例的请求体里 `tools` 一直是 `[]`，而 `modelVisibility` 这条路上的任何口径
+   * （清单恒定、按信任级收窄、includeDestructive 名单）都**看不见**：改前改后都是同一个空数组。
+   * v43 的注释把这件事记成一个"已知盲区"（`render.ts` 那一篇），但盲区不该一直留着——
+   * 判据要求在**真链路的请求体**里看到工具清单的差异，那就得让真链路里有工具。
+   *
+   * 传的是定义清单（`ToolDefinition` 的形状子集）：名字与 `sideEffect` 是判据要用的两格，
+   * 其余（描述、参数表、handler）由台子补齐。**不传 = 与以前逐字节相同**（空注册表）。
+   */
+  registerTools?: readonly {
+    name: string;
+    sideEffect?: 'none' | 'idempotent' | 'destructive';
+    executionMode?: 'parallel' | 'exclusive';
+    description?: string;
+  }[];
 }
 
 /** 心跳事件的数据形状（与 `HeartbeatSource` 落库时逐字段一致） */
@@ -217,6 +236,22 @@ export async function makeRealWakeRig(options: RigOptions = {}): Promise<RealWak
   } as unknown as DsClient;
 
   let nowMs = options.nowMs ?? Date.parse(RIG_NOW);
+  // 注册表：默认空（与以前逐字节相同）。给了 `registerTools` 就按定义装进去——
+  // `listForModel` 只看 name/description/parameters/sideEffect，所以描述与参数表给最小合规值即可。
+  const registry = new ToolRegistry();
+  for (const spec of options.registerTools ?? []) {
+    registry.register({
+      name: spec.name,
+      description: spec.description ?? `${spec.name} 测试台工具`,
+      parameters: { type: 'object', properties: {} },
+      sideEffect: spec.sideEffect ?? 'none',
+      // 与 catalog 里的默认同口径（`parallel`）：只读/无副作用的小件不该被串行屏障拖住
+      executionMode: spec.executionMode ?? 'parallel',
+      // 这几件在台子上永远不会被真的执行（不派发工具调用），超时值只是让 register 通过
+      timeoutMs: 30_000,
+      handler: async () => ({ content: `${spec.name} 是台子上的空工具` }),
+    });
+  }
   const loop = new RealLoop({
     log,
     dataDir: config.dataDir,
@@ -224,7 +259,7 @@ export async function makeRealWakeRig(options: RigOptions = {}): Promise<RealWak
     now: () => new Date(nowMs),
     timezone: RIG_TZ,
     ds,
-    registry: new ToolRegistry(),
+    registry,
     persona: PERSONA,
     config,
     out: (line) => lines.push(line),

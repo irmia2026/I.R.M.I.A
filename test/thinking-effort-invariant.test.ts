@@ -1,15 +1,19 @@
 /**
  * 思考（reasoning）的两条钉子 —— 用户的口径（2026-10-06）：
  *
- *   ① **`budget/consumed.reasoningTokens` 落库**：**六个写入点每一个都写**，值永远是数字
+ *   ① **`budget/consumed.reasoningTokens` 落库**：**每个写入点都写**，值永远是数字
  *      （没产思维链 = `0`，不是 `undefined`、不缺字段）。
- *      六个点 = `runtime/agent-loop.ts` 的 `accountStep`（成功）/ `failStep`（失败）
- *      + 四个 light 模块：注入判定、话题概括、资产挑选、记忆整理。
+ *      写入点 = `runtime/agent-loop.ts` 的 `accountStep`（成功）/ `failStep`（失败）
+ *      + 三个 light 模块：注入判定、话题概括、记忆整理。
+ *      （**2026-10-09 起是三个**：资产挑选那一处随「light 选取资产」这条机制一起取消了，见下。）
  *   ② **档位不提供更改**：light 一律 `low`、heavy 一律 `high`。
  *      **判据是逐个调用点断言**（下表 + 源码扫描），不是抽样：
- *      `injection-judge` / `topic` / `assets` / `memory-maintain`（合并 + 日记）/ `vision_read`
- *      五处 light 全 `low`，`agent-loop` 的 heavy 全 `high`；
- *      源码里出现**第七处**模型调用而没进表 ⇒ 这条测试先红。
+ *      `injection-judge` / `topic` / `memory-maintain`（合并 + 日记）/ `vision_read`
+ *      四处 light 全 `low`，`agent-loop` 的 heavy 全 `high`；
+ *      源码里出现**新的一处**模型调用而没进表 ⇒ 这条测试先红。
+ *      **`persona/assets.ts` 从这张表里删掉了**（v45，2026-10-09 用户拍板取消「light 选取资产」：
+ *      准确率太低）：那个文件现在**一次模型调用都没有**——扫描那一条会如实报"它扫不到了"，
+ *      所以这里连它的行一起删（留着就等于让判据指向一个不存在的调用点）。
  *
  * 两条同源：②决定服务端产不产思维链，①把它产了多少记下来。所以钉在同一个文件里。
  *
@@ -38,7 +42,6 @@ import { loadConfig } from '../src/config/config.ts';
 import { EventLog } from '../src/log/event-log.ts';
 import { emptyProjection, type AppEvent, type Projection } from '../src/log/types.ts';
 import type { DsClient, DsRequest, DsResponse, DsStreamResult } from '../src/model/ds-client.ts';
-import { selectAssets } from '../src/persona/assets.ts';
 import { maintainMemory } from '../src/persona/memory-maintain.ts';
 import { runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
@@ -134,20 +137,6 @@ function channelMessage(seq: number, person: string, text: string): AppEvent {
   } as unknown as AppEvent;
 }
 
-/** 她那份资产清单（`selectAssets` 只认 `<dataDir>/workspace/MEMORIES/assets.md`） */
-function writeAssetsDoc(dataDir: string, content: string): void {
-  const memDir = join(dataDir, 'workspace', 'MEMORIES');
-  mkdirSync(memDir, { recursive: true });
-  writeFileSync(join(memDir, 'assets.md'), content, 'utf8');
-}
-
-const TWO_USABLE_ASSETS = [
-  '# 数字资产',
-  '',
-  '- [path] rg ｜ 全文检索 ｜ 已在 PATH',
-  '- [path] ffmpeg ｜ 转码与抽帧 ｜ 已在 PATH',
-].join('\n');
-
 /** 一份够老（超过 TTL）的流水账：记忆整理便会真去调 light */
 function writeOldEpisode(dataDir: string): void {
   const dir = join(dataDir, 'workspace', 'MEMORIES', 'episodes');
@@ -193,23 +182,6 @@ test('① 话题概括：这一笔 light 账带 reasoningTokens', async (t) => {
   assert.equal(consumed.length, 1, '一次概括一条账');
   assert.equal(consumed[0]!.data.lane, 'light');
   assertCarriesReasoningTokens(consumed[0]!, 77, '话题概括');
-});
-
-test('① 资产挑选：这一笔 light 账带 reasoningTokens', async (t) => {
-  const { dir, log, projection } = await makeLog(t);
-  writeAssetsDoc(dir, TWO_USABLE_ASSETS);
-  const { ds, requests } = fakeLightDs([{ answer: '{"picks":[1]}', reasoningTokens: 19 }]);
-
-  const selection = await selectAssets(dir, {
-    ds, task: '搜一下这个仓库里的 todo', log, projection, now: () => NOW, turn: 1,
-  });
-  assert.equal(selection.by, 'model', '挑中了才走记账那条路');
-  assert.equal(requests.length, 1);
-
-  const consumed = consumedOf(await collect(log));
-  assert.equal(consumed.length, 1, '一次挑选一条账');
-  assert.equal(consumed[0]!.data.lane, 'light');
-  assertCarriesReasoningTokens(consumed[0]!, 19, '资产挑选');
 });
 
 test('① 记忆整理：每一笔 light 账都带 reasoningTokens（合并与日记各一条）', async (t) => {
@@ -379,14 +351,6 @@ async function driveTopic(t: TestContext): Promise<DsRequest[]> {
   return requests;
 }
 
-async function driveAssets(t: TestContext): Promise<DsRequest[]> {
-  const { dir, log, projection } = await makeLog(t);
-  writeAssetsDoc(dir, TWO_USABLE_ASSETS);
-  const { ds, requests } = fakeLightDs([{ answer: '{"picks":[1]}' }]);
-  await selectAssets(dir, { ds, task: '搜一下这个仓库里的 todo', log, projection, now: () => NOW, turn: 1 });
-  return requests;
-}
-
 async function driveMemoryMaintain(t: TestContext): Promise<DsRequest[]> {
   const { dir, log, projection } = await makeLog(t);
   writeOldEpisode(dir);
@@ -480,12 +444,6 @@ const MODEL_CALL_SITES: ModelCallSite[] = [
     efforts: ['low'],
   },
   {
-    source: 'src/persona/assets.ts',
-    where: 'persona/assets.ts（资产挑选，light）',
-    drive: driveAssets,
-    efforts: ['low'],
-  },
-  {
     source: 'src/persona/memory-maintain.ts',
     where: 'persona/memory-maintain.ts（记忆整理：合并 + 日记，light）',
     drive: driveMemoryMaintain,
@@ -505,7 +463,7 @@ const MODEL_CALL_SITES: ModelCallSite[] = [
   },
 ];
 
-test('② 六处调用点逐个断言：light 一律 low、heavy 一律 high', async (t) => {
+test('② 五处调用点逐个断言：light 一律 low、heavy 一律 high', async (t) => {
   for (const site of MODEL_CALL_SITES) {
     const requests = await site.drive(t);
     assert.equal(
@@ -565,7 +523,6 @@ test('② 清单是全的：源码里每一处模型调用都有人在表里认�
     ['src/channel/injection-judge.ts', 1],
     ['src/channel/topic.ts', 1],
     ['src/main.ts', 1],
-    ['src/persona/assets.ts', 1],
     ['src/persona/memory-maintain.ts', 1],
     ['src/runtime/agent-loop.ts', 1],
     ['src/tools/vision.ts', 1],

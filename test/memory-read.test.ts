@@ -197,12 +197,14 @@ test('memory_read：line 缺省/为 0 都被拒（行号是 1-based，不许猜�
   assert.equal(zero.error?.code, FS_ERROR_CODES.INVALID_ARGS);
 });
 
-test('memory_read：文件不在 → NOT_FOUND，且给下一步', async (t) => {
+test('memory_read：文件不在 → NOT_FOUND，且给下一步（v42：出口是 safe_read，不是已删的 list_dir）', async (t) => {
   const h = await fixture(t);
   const res = await h.tool.handler({ path: 'MEMORIES/nope.md', line: 1 }, h.ctx);
   assert.equal(res.isError, true);
   assert.equal(res.error?.code, FS_ERROR_CODES.NOT_FOUND);
-  assert.match(res.content, /list_dir/u, '要给一个可执行的下一步');
+  // 指路必须指向**存在的**那件工具：list_dir 在 v42 删了，回执再提它就是"教她调一个不存在的工具"
+  assert.match(res.content, /safe_read/u, '要给一个可执行的下一步');
+  assert.doesNotMatch(res.content, /list_dir/u, 'list_dir 已经删了，回执不许再指向它');
 });
 
 // ──────────────────────────────── ③ 读整篇被拒 ────────────────────────────────

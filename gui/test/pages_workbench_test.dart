@@ -193,6 +193,9 @@ void main() {
         },
         '/api/skills': skills,
         '/api/mcp': mcp,
+        // 扩展页的 `mcp` 那一屏读两个端点（第二个是她的申请单，2026-10-11 加）：
+        // 不给它就会走一次 null 响应，那一段被当成"读失败"（实测：这一页 4 条用例一起红）
+        '/api/grants': <String, dynamic>{'items': <dynamic>[], 'open': 0},
         '/api/tools': tools,
         '/api/hooks': hooks,
       };
@@ -595,6 +598,27 @@ void main() {
     expect(post.body['args'], ['server.mjs', '--root', 'D:/work']);
     expect(post.body['env'], {'ROOT': 'D:/work'});
     expect(post.body['enabled'], isTrue);
+    // v48：那一格"它是干什么的"**照原样发**（这里没填 ⇒ 发空串）。界面**不替人补一句**
+    // ——那正是"框架替人编"；空串的后果由服务端回执如实说（"她在索引里只看到名字"）。
+    expect(post.body['desc'], '');
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('扩展页：desc 那一格填了就随 mcp-save 一起发（它是她索引里那一句）', (tester) async {
+    await pumpPage(tester, (state) => ExtensionsPage(state: state));
+    await tester.tap(find.byKey(const ValueKey('ext-item-mcp')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('mcp-add')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.enterText(find.byKey(const ValueKey('mcp-field-name')), 'obscura');
+    await tester.enterText(find.byKey(const ValueKey('mcp-field-command')), 'node');
+    await tester.enterText(
+        find.byKey(const ValueKey('mcp-field-desc')), '读本机浏览器历史与当前标签页');
+    await tester.tap(find.text('保存'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(_lastApi!.posts.last.body['desc'], '读本机浏览器历史与当前标签页');
     await tester.pump(const Duration(seconds: 5));
   });
 
@@ -635,6 +659,49 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
     expect(_lastApi!.posts.last.body['timeoutMs'], 45000);
     await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('扩展页：MCP 表单文案按元工具口径（不许再教 mcp__服务名__工具名 那套）', (tester) async {
+    // 用户 2026-10-09 拍定：MCP 只有一件内置入口工具 `mcp`——工具**不**注册成
+    // `mcp__{server}__{tool}`。这一条锁的是**界面上那句话不许再教废弃的那套**，
+    // 以及四件实现里真有的事（空闲回收 / 启动器白名单 / env 继承 / 开关语义）都被说出来。
+    await pumpPage(tester, (state) => ExtensionsPage(state: state));
+    await tester.tap(find.byKey(const ValueKey('ext-item-mcp')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('mcp-add')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final dialog = find.byType(AlertDialog);
+    expect(dialog, findsOneWidget);
+    Finder inDialog(String text) =>
+        find.descendant(of: dialog, matching: find.textContaining(text));
+
+    // ① 元工具口径：调用走内置的 mcp 工具（不是"每件 MCP 工具进她的清单"）
+    expect(inDialog('内置的 mcp 工具'), findsOneWidget);
+    // ② 废弃说法一个都不许留在界面上
+    expect(inDialog('mcp__'), findsNothing, reason: '工具名不再合成，对话框里不该提 mcp__服务名__工具名');
+    expect(inDialog('合成'), findsNothing);
+    // ③ 服务名 = 给这个 server 起的名字（调用时用得到），不是"工具名前缀"
+    expect(inDialog('调用时用得到'), findsOneWidget);
+    // ④ 启动器白名单（加一个 server = 在这台机器上多跑一个进程，command 不是随便填）
+    expect(inDialog('白名单'), findsOneWidget);
+    // ④′ 示例按"本机真起得来"排：npx 在 Windows 上起不来（只有 .cmd 垫片、启动器不经 shell），
+    //     所以它不再排第一个——这一条锁的是提示里先给能起的写法、并明说 npx 起不来。
+    //     （长度受 copy_rules_test.dart 的 100 字闸约束：这条提示现在 98 字，超了那条闸会当场拦下。）
+    expect(inDialog('uvx …'), findsOneWidget, reason: 'command 提示要先给本机能起的写法');
+    expect(inDialog('npx 在 Windows 上起不来'), findsOneWidget, reason: '本机实测起不来的写法要明说，别让人照着试');
+    // ⑤ env 是"追加"，不是"只给这些"（池把 entry.env 合进 process.env，client.ts 的 spawner）
+    expect(inDialog('继承主进程的环境变量'), findsOneWidget);
+    // ⑥ 开关 = 参与/不参与拉起，与"随主进程启动"无关（生产**不** registerAll）
+    expect(inDialog('配置留着但不起进程'), findsOneWidget);
+    // ⑦ 空闲 5 分钟回收是真机制（src/mcp/client.ts 的 DEFAULT_IDLE_RECLAIM_MS + 扫描器）
+    expect(inDialog('空闲 5 分钟回收'), findsOneWidget);
+
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('扩展页：忽略清单里指向空气的名字不显示（备忘只增不减，界面不该跟着涨）', (tester) async {

@@ -27,6 +27,146 @@ List<Map<String, dynamic>> _maps(Object? v) =>
 
 List<String> _strings(Object? v) => v is List ? v.map((e) => '$e').toList() : const [];
 
+/// 一件 MCP 工具在界面上要用的三格（卡片那两层「服务 → 工具名」就吃它）。
+///
+/// [short] 是 server 自报的短名，[full] 是 `mcp__{server}__{name}` 全名——**短名给人看、
+/// 全名给人对**：日志与 `工具` 页签里出现的都是全名，没有它这一页就没法和别处对上号。
+class _McpTool {
+  const _McpTool({required this.short, required this.full, required this.description});
+
+  final String short;
+  final String full;
+  final String description;
+}
+
+/// 「这个服务给过哪些工具」——一张卡上关于清单的**全部结论**都从这一处算出来。
+///
+/// 为什么收成一个零件而不是散在构建函数里：这句话有四个互相牵制的部分（清单来自哪里、
+/// 哪一刻看到的、这次到底问没问过、能不能点开看），分开写就会出现"卡片说 12 件、展开里
+/// 列了 3 件"这种自相矛盾——而用户要的正是"一眼看清层级"。
+///
+/// 读数分两档，**新旧后端都要能读**：界面与主进程是两个可执行文件，界面先升、后端还跑着
+/// 上一版 dist 是常态。新后端给 `toolList`/`toolsFrom`/`toolsListAt`/`toolsQuery`（口径见
+/// `src/web/server.ts` 的 `mcpView`）；没有这几格时按老形状回退到 `toolDetails` / `registeredTools`，
+/// 并按 `state` 推出来源（在跑 = 此刻的、已停 = 上一次的）。回退那一档**说得出的话少一些**：
+/// 老后端不给"问没问过"，所以那种情况下 `query` 一律为空，界面不猜。
+class _McpTools {
+  _McpTools(Map<String, dynamic> server)
+      : disabled = server['disabled'] == true,
+        state = '${server['state'] ?? 'never-started'}',
+        reason = '${server['stopReason'] ?? ''}',
+        declaredCount = _int(server['toolsCount']),
+        listAt = server['toolsListAt'] is String
+            ? server['toolsListAt'] as String
+            : (server['toolsSeenAt'] is String ? server['toolsSeenAt'] as String : ''),
+        from = '${server['toolsFrom'] ?? ''}',
+        query = server['toolsQuery'] is String ? server['toolsQuery'] as String : '',
+        ageMs = server['toolsAgeMs'] is num ? (server['toolsAgeMs'] as num).toInt() : null {
+    final raw = _maps(server['toolList']).isNotEmpty
+        ? _maps(server['toolList'])
+        : (_maps(server['toolDetails']).isNotEmpty
+            ? _maps(server['toolDetails'])
+            : [
+                // 最老的一档：只有全名，没有描述（`registeredTools` 是名字清单）
+                for (final full in _strings(server['registeredTools']))
+                  {'name': _mcpShortName(full), 'fullName': full, 'description': ''},
+              ]);
+    items = [
+      for (final tool in raw)
+        _McpTool(
+          short: '${tool['name'] ?? ''}',
+          full: '${tool['fullName'] ?? ''}',
+          description: '${tool['description'] ?? ''}',
+        ),
+    ];
+  }
+
+  final bool disabled;
+  final String state;
+  final String reason;
+  final int declaredCount;
+  final String listAt;
+  final String from;
+  final String query;
+  final int? ageMs;
+  late final List<_McpTool> items;
+
+  /// 这份清单是**此刻**的（服务在跑），还是上一次运行时留下的
+  bool get live => from == 'live' || (from.isEmpty && items.isNotEmpty && state == 'started');
+
+  /// 这次启动**问过工具清单**没有：`ok` / `empty` / 空（老后端不给这一格，或者根本没起来过）
+  String get asked => query.isNotEmpty
+      ? query
+      : (items.isNotEmpty
+          ? 'ok'
+          : (state == 'started' || state == 'stopped' ? 'unknown' : ''));
+
+  /// 有没有一份能摆出来的清单
+  bool get hasList => items.isNotEmpty;
+
+  /// 卡片标题右边那枚徽章的数：老后端只给"此刻注册的"计数（`toolsCount`），新后端与清单同源。
+  /// 取大值是有意的——**少说一件**比"徽章写着 3 件、展开里列着 5 件"好。
+  int get badgeCount => declaredCount > items.length ? declaredCount : items.length;
+
+  /// 折叠态那行摘要。四种空各说各的：**别把"没拉过"说成"0 件"**。
+  String get summary {
+    if (hasList) {
+      final when = _stamp(listAt);
+      final tail = when.isEmpty ? '' : ' · ${live ? '取于' : '上次取于'} $when';
+      return '${live ? '工具' : '上次运行时的工具'} ${items.length} 件$tail';
+    }
+    if (asked == 'empty') return '工具清单取回来了：这个服务当前不提供工具。';
+    if (state == 'disabled') return '已停用：工具清单不会更新（要试就点开关放开它）。';
+    if (state == 'never-started') return '从未启动过，还没有工具清单（点「测试连接」看它给什么）。';
+    return '拿不到这个服务的工具清单：日志里没有可读的启动记录。';
+  }
+
+  /// 展开态第一行：说清这份清单**是哪一刻的**，以及会不会过期。
+  String get heading {
+    final when = _stamp(listAt);
+    if (!hasList) return '它提供的工具';
+    final mark = live ? '取于' : '上次取于';
+    return when.isEmpty
+        ? '它提供的工具（${items.length} 件）'
+        : '它提供的工具（${items.length} 件 · $mark $when）';
+  }
+
+  String get staleNote => _mcpStaleNote(ageMs, live: live, reason: reason);
+
+  /// 展开态里那句如实的空态（**四种空各说各的**：拉过是空的 / 已停用 / 从未启动 / 记录不完整）
+  String get emptyLine {
+    if (asked == 'empty') return '它起来了、握手过了，工具清单是空的：这个服务当前不提供工具。';
+    if (state == 'disabled') return '已停用，清单也不在手上：放开这个开关、重启主进程再看。';
+    if (state == 'never-started') return '还没看到过清单：它没起来过（或者起来了但握手没走完）。';
+    return '日志里没有可读的工具清单记录——不知道它有没有工具。';
+  }
+}
+
+/// 全名 `mcp__{server}__{tool}` → 短名。名字不合这个形状就原样返回（按数据读，不按承诺读）。
+String _mcpShortName(String fullName) {
+  final at = fullName.lastIndexOf('__');
+  return at >= 0 && at + 2 < fullName.length ? fullName.substring(at + 2) : fullName;
+}
+
+/// 描述那一栏的字数上限：MCP 的描述常常是整段英文，摊开会把一屏塞满。
+/// 超了截断并留一个可见的「…」（界面 chrome 不渲染 Markdown，也不做 tooltip 悬停那一套）。
+const int _kMcpDescChars = 88;
+
+String _mcpClip(String text, [int max = _kMcpDescChars]) =>
+    text.length <= max ? text : '${text.substring(0, max)}…';
+
+/// "这份清单多旧"：超过一天就直说一句，别让人把几天前的清单当成此刻的。
+String _mcpStaleNote(int? ageMs, {required bool live, required String reason}) {
+  if (ageMs == null || live) return '';
+  // 崩溃与空闲回收分开说：前者是"它出过事"（下一次调用会重新拉起），后者是"没人用它"
+  if (reason == 'crashed') return '服务上次是崩掉的，这份清单是崩之前拉的：再拉起会刷新。';
+  if (reason == 'shutdown') return '主进程上次退出前它被收掉了，这是那时的那份清单。';
+  final days = ageMs ~/ 86400000;
+  if (days >= 1) return '这份清单已经放了 $days 天：服务重新起来之后以那时拉的为准。';
+  if (ageMs >= 3600000) return '这份清单是一小时以前取的：服务早回收了，下次拉起会刷新。';
+  return '服务回收了，这是它上一次运行时给的那份清单。';
+}
+
 /// 超时展示词：0 是"没有超时"，不是"0 秒"
 String _ms(Object? v) {
   final n = _int(v);
@@ -297,7 +437,8 @@ ButtonStyle _textButtonStyle() => TextButton.styleFrom(
 
 /// 弹窗里的一个输入框（带一行标签与提示）。MCP / Hooks 那两张表单字段多，
 /// 统一成一个零件，免得每处都要重写一遍 `InputDecoration` 的七个参数。
-Widget _dialogField(TextEditingController controller, String label, String hint, {int maxLines = 1, Key? fieldKey}) {
+Widget _dialogField(TextEditingController controller, String label, String hint,
+    {int maxLines = 1, Key? fieldKey, String? helper}) {
   return Builder(builder: (context) {
     final scheme = Theme.of(context).colorScheme;
     return Padding(
@@ -322,11 +463,245 @@ Widget _dialogField(TextEditingController controller, String label, String hint,
               border: const OutlineInputBorder(),
             ),
           ),
+          // 那一格下面的一行补充（MCP 的 desc 用它说清"留空之后她在索引里只看到名字"）
+          if (helper != null && helper.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(helper, style: TextStyle(fontSize: 11, height: 1.4, color: scheme.onSurfaceVariant)),
+            ),
         ],
       ),
     );
   });
 }
+
+// ──────────────────── 申请单（她发起 · 用户只做审批，2026-10-11） ────────────────────
+
+/// 一张**待批**的申请单：她递单子（`<dataDir>/grants/<id>.json`）⇒ 框架挂出这条待批
+/// ⇒ 用户在这里点「批准」或「驳回」（驳回可以写理由，写给谁看的是她）。
+///
+/// 三条纪律，与人格提案、`ask_human` 那两条同源（design §6 防伪）：
+///   · **卡上的每一个字都是界面写死的**（标题、按钮、那一行说明）——她的原话只出现在
+///     「她写的理由」那一行里，而且服务端已经洗净（去控制字符、压成一行、封顶）；
+///   · 摆出来的字段全部来自 `GET /api/grants`（框架算的：命令、风险、执行结果），
+///     界面**不推断**任何一格；
+///   · 驳回理由**允许留空**（人不该被一个必填项挡住驳回），留空时回执里说的是
+///     "人驳回了，没有给理由"——那是一句真话，不是"未批准、未拒绝"。
+class GrantPendingCard extends StatelessWidget {
+  const GrantPendingCard({
+    super.key,
+    required this.grant,
+    required this.reasonController,
+    required this.onApprove,
+    required this.onReject,
+    this.busy = false,
+  });
+
+  final Map<String, dynamic> grant;
+
+  /// 驳回理由的输入框（**由外面持有**：重读那一屏不该把它清空——人打了一半的字还在）
+  final TextEditingController reasonController;
+  final Future<void> Function() onApprove;
+  final Future<void> Function() onReject;
+
+  /// 这一张正在提交（两枚按钮都禁用，防连点出两次决定）
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final id = '${grant['id'] ?? ''}';
+    final name = '${grant['name'] ?? ''}';
+    final kind = '${grant['kind'] ?? ''}';
+    final desc = '${grant['desc'] ?? ''}';
+    final command = '${grant['command'] ?? ''}';
+    final args = _strings(grant['args']);
+    final envKeys = _strings(grant['envKeys']);
+    final reason = '${grant['reason'] ?? ''}';
+    final context_ = '${grant['context'] ?? ''}';
+    final expiredAt = grant['expiredAt'];
+    final isAdd = kind == 'mcp-add';
+    // 技能那一支：`scripts/` 下那些**可执行内容**——方案稿 D8 要的就是这一行**单列**
+    // （装技能 = 引入可执行内容，而本机上真发生过：`skills/anysearch/scripts/` 里有一批脚本）
+    final scriptNames = _strings(grant['scriptNames']);
+    final isSkill = kind == 'skill-install' || kind == 'skill-remove';
+    final title = switch (kind) {
+      'mcp-add' => '她想加一个 MCP 服务',
+      'mcp-remove' => '她想删掉一个 MCP 服务',
+      'skill-install' => '她想装一个技能',
+      'skill-remove' => '她想删掉一个技能',
+      _ => '她递了一张申请单',
+    };
+
+    return Container(
+      key: ValueKey('grant-$id'),
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: cs.outlineVariant),
+        boxShadow: IrmiaTheme.hairline,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(title,
+                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+              _badge(isAdd || kind == 'skill-install' ? '新增' : '删除',
+                  isAdd || kind == 'skill-install' ? cs.primary : IrmiaTheme.danger),
+              _badge('待批', IrmiaTheme.warn),
+              if (expiredAt != null) _badge('超时未答', IrmiaTheme.sleep),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _monoText(name.isEmpty ? id : name),
+          if (isSkill && scriptNames.isNotEmpty)
+            // **风险点单列一行**（方案稿 D8）：这几个文件是会被跑起来的东西
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(Icons.warning_amber_rounded, size: 14, color: IrmiaTheme.warn),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '它会带 ${scriptNames.length} 个可执行脚本（scripts/）：${scriptNames.join('、')}'
+                      '——装了之后她会照这个技能的指示做。',
+                      style: const TextStyle(fontSize: 12.5, height: 1.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (isAdd) ...[
+            // 「它是干什么的」摆在最前：用户这一轮抱怨的正是"审批时看不出它是干什么的"
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                desc.isEmpty ? '（这份申请单里没写它是干什么的）' : desc,
+                style: TextStyle(fontSize: 12.5, height: 1.5, color: cs.onSurface),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: _monoText([command, ...args].where((s) => s.isNotEmpty).join(' ')),
+            ),
+            if (envKeys.isNotEmpty)
+              _small('它会拿到这几个环境变量（值不显示）：${envKeys.join('、')}'),
+          ],
+          if (reason.isNotEmpty) _small('她写的理由：$reason'),
+          if (context_.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: DetailFold(
+                child: Text(context_, style: TextStyle(fontSize: 12, height: 1.6, color: cs.onSurfaceVariant)),
+              ),
+            ),
+          const SizedBox(height: 8),
+          // 批准**不带**理由输入框（没有"批准理由"这回事）；驳回**带**一格，而且允许留空。
+          TextField(
+            key: ValueKey('grant-reason-$id'),
+            controller: reasonController,
+            maxLines: 2,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: const TextStyle(fontSize: 12.5),
+            decoration: const InputDecoration(
+              isDense: true,
+              hintText: '驳回理由（可以不写；写了她下一拍就能看到）',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              TextButton(
+                key: ValueKey('grant-reject-$id'),
+                onPressed: busy ? null : () => unawaited(onReject()),
+                style: TextButton.styleFrom(foregroundColor: cs.onSurfaceVariant),
+                child: const Text('驳回'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonal(
+                key: ValueKey('grant-approve-$id'),
+                onPressed: busy ? null : () => unawaited(onApprove()),
+                child: const Text('批准'),
+              ),
+              const Spacer(),
+              _small('批准之后由框架写进 config.json 的 mcp.servers[]（失败会回滚原文件）'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 已经答复过的那一张（批准或驳回 + 框架执行的结果）——摆在这里是为了"她申请过什么、
+/// 谁批的、批完落地没有"能在同一屏里回看，而不是只留在日志里。
+class GrantDoneRow extends StatelessWidget {
+  const GrantDoneRow({super.key, required this.grant});
+
+  final Map<String, dynamic> grant;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final id = '${grant['id'] ?? ''}';
+    final name = '${grant['name'] ?? ''}';
+    final kind = '${grant['kind'] ?? ''}';
+    final outcome = '${grant['outcome'] ?? ''}';
+    final approved = outcome == 'approved';
+    final exec = grant['exec'] is Map ? (grant['exec'] as Map).cast<String, dynamic>() : const <String, dynamic>{};
+    final state = '${exec['state'] ?? ''}';
+    // 四态各说各的：**"批了但没装成"不许读成"装上了"**（判据在 grant/mcp-grant.ts 的 exec 那一格）
+    final execText = switch (state) {
+      'ok' => '框架已写进配置',
+      'failed' => '执行没成功：${exec['failure'] ?? '（没有原因）'}',
+      'skipped-stale' => '没执行：这份单子在审阅期间被改过',
+      'skipped-invalid' => '没执行：${exec['failure'] ?? '落地复核没过'}',
+      'not-applicable' => '驳回（没有执行）',
+      _ => '',
+    };
+    final rejectReason = '${grant['rejectReason'] ?? ''}';
+    return Padding(
+      key: ValueKey('grant-done-$id'),
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _badge(approved ? '已批准' : '已驳回', approved ? IrmiaTheme.ok : IrmiaTheme.danger),
+              Text('${kind == 'mcp-add' ? '加' : '删'} $name',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              Text(_stamp(grant['outcomeAt']),
+                  style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+            ],
+          ),
+          if (execText.isNotEmpty) _small(execText),
+          if (!approved)
+            _small(rejectReason.isEmpty ? '驳回时没有写理由。' : '驳回理由：$rejectReason'),
+        ],
+      ),
+    );
+  }
+}
+
 
 /// 弹窗关掉之后再销毁控制器。
 ///

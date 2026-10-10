@@ -51,7 +51,7 @@ class SettingsPage extends StatefulWidget {
 /// 标记——beta 只体现在这里与包名/说明里；后端那边对同一版号的口径是 `AGENT_VERSION`
 /// （不带 v，见 src/main.ts）。
 /// ⚠️ 别把具体版号抄进注释：出包脚本只改这一行的字面量、不改注释，抄一处就留一处对不上。
-const guiVersion = 'v0.1.0-beta.5';
+const guiVersion = 'v0.1.0-beta.6';
 
 /// 锚点侧栏宽度（AstrBot 的左侧 section 导航）
 const _railWidth = 180.0;
@@ -3260,7 +3260,7 @@ class _SettingsPageState extends State<SettingsPage> {
           // 定位件：设置页上「详情」不止一处，用例要的是"信任范围卡里这一处"
           key: const ValueKey('trust-rules-fold'),
           child: Text(
-            '它管 fs 工具族（safe_read / safe_write / edit_file / list_dir / rg_search 等）与 pwsh：'
+            '它管 fs 工具族（safe_read / safe_write / safe_edit / rg_search 等）与 pwsh：'
             '前者经同一条路径判定，后者的 workdir 与命令行里的路径一起受管。'
             '它与 destructive 开关、pwsh 命令黑名单是各自独立的三道门——这一条管的是范围，'
             '不代替那两道。\n'

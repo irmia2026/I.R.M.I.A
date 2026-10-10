@@ -91,25 +91,45 @@ import { heartbeatData, makeRealWakeRig, requestFingerprint } from './fixtures/r
  *      指纹立刻变成 `5ed7666c43648133` ⇒ 指纹对层外敏感，所以上面那一条不是"指纹太粗"。
  *      脚本与打印：`_tmp/probe-v39-control.mts`（未跟踪）。
  * `RENDER_VERSION` 随之递增到 39（见 `render.ts` 顶部那一篇）。
+ *
+ * **2026-10-09 重取（v45 取消「light 选取资产」：装置自述第⑰段那句假承诺换掉）**：
+ * 这一版把 `SELF_BRIEF` 第⑰段里"干活时框架会挑几条放在你任务旁边"那句删了（机制被用户取消，
+ * 留着就是假承诺），而它在 `instructions` 里 ⇒ 指纹的两个数必然变：
+ *   非心跳拍 `28eed0dd9858ed11` → `89212e1efad4970a`
+ *   混批     `9e49e6f9e0fb41a6` → `9e4330b5ab89cd62`
+ * 重取的证据是**对照实验**（`git stash push` 把工作区改动整个收走、复跑
+ * `_research/heartbeat-real-wake-baseline.mjs`，再 `git stash pop` 装回来复跑一次）：
+ *   · 收走之后打出来的正是上面那**两个旧值**（一字不差）⇒ 除本次改动之外没有任何别的字节变化；
+ *   · 装回来之后是新值；两次都没有出现"多一条/少一条请求"（`heavy 1 次、light 0 次`）。
+ * 同一批（别人那条线：压缩判定留痕）给每一拍**末尾**加了一条 `compaction/decision`，
+ * 所以下面那三张事件类型表也跟着补上它——**它不是 v45 带来的差异**（对照实验两次都有它，
+ * 而"事件序列与改动前一字不差"这条判据本身仍然成立：两张表在两次运行里都吻合）。
+ * 纯心跳拍那两个数（`5d9fbcbdef496c25`）也一并随 `instructions` 变了；
+ * `RENDER_VERSION` 随之递增到 45（见 `render.ts` 顶部那一篇）。
  */
 
 /** 改动前：非心跳拍（单条 `wake/manual`） */
 const BEFORE_MANUAL_TYPES = [
   'wake/manual', 'budget/rollover', 'snapshot/checkpoint', 'turn/start', 'input/claimed',
   'memory/selected', 'step/start', 'message/assistant', 'budget/consumed', 'step/end', 'turn/end',
+  // `compaction/decision` 是**别人那条线**（压缩判定留痕，2026-10-09）加的收尾事件，与 v45 无关：
+  // 本次对照实验里它出现两次都出现（改动前/改动后各一次）⇒ 它不是 v45 带来的差异。
+  'compaction/decision',
 ];
-const BEFORE_MANUAL_FINGERPRINT = '28eed0dd9858ed11';
+const BEFORE_MANUAL_FINGERPRINT = '89212e1efad4970a';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
 const BEFORE_MIXED_TYPES = [
   'wake/heartbeat', 'wake/manual', 'budget/rollover', 'snapshot/checkpoint', 'turn/start', 'input/claimed',
   'memory/selected', 'step/start', 'message/assistant', 'budget/consumed', 'step/end', 'turn/end',
+  'compaction/decision',
 ];
-const BEFORE_MIXED_FINGERPRINT = '9e49e6f9e0fb41a6';
+const BEFORE_MIXED_FINGERPRINT = '9e4330b5ab89cd62';
 
-/** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**，请求数 0（这就是要修的那个形态） */
+/** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [
   'wake/heartbeat', 'budget/rollover', 'snapshot/checkpoint', 'turn/start', 'input/claimed', 'turn/end',
+  'compaction/decision',
 ];
 
 /** 一次整拍：落一条唤醒 → 跑一拍（生产定时器回调与 `tick()` 是同一份逻辑） */

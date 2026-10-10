@@ -67,7 +67,7 @@ import { sidOf } from '../channel/sessions.ts';
 import { openTodoItems } from '../persona/todo-state.ts';
 import type { EventLog } from '../log/event-log.js';
 import type {
-  AppEvent, AppEventType, MemorySelected, ModelLane, Projection, TurnEndReason, WakeSource,
+  AppEvent, AppEventType, CompactionDecision, MemorySelected, ModelLane, Projection, TurnEndReason, WakeSource,
 } from '../log/types.js';
 import { defaultVisibility, type ContextImageChosen } from '../log/types.ts';
 import {
@@ -94,6 +94,154 @@ import type { HookRunner } from '../hook/hooks.js';
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 const ORIGIN = 'runtime/agent-loop';
+
+// ──────────────────── 工具软提醒：连续重复调用（唯一一处实现） ────────────────────
+
+/**
+ * 同参数连续调用到第几次开始提醒（"超过 3 次" = 第 4 次，严格大于）。
+ *
+ * 判据（全部只在本节实现，别在别处再数一遍）：
+ *   · 数的是**同一 turn 内**的**连续**调用，从最近一次"换了工具名"起算；
+ *   · 同参数 = 工具名 + `canonicalArgumentsOf`（键排序、去 undefined；**字符串大小写与空白不归一**
+ *     ——没有依据说明 `a` 与 `A` 是同一个参数，把不同的参数当同一个就变成误报）；
+ *   · 本阈值与 {@link REPEAT_TOOL_THRESHOLD} **各算各的**，两条同时命中只提醒一次。
+ */
+export const REPEAT_SAME_ARGS_THRESHOLD = 3;
+
+/** 同工具（参数不计）连续调用到第几次开始提醒（"超过 5 次" = 第 6 次，严格大于） */
+export const REPEAT_TOOL_THRESHOLD = 5;
+
+/**
+ * 提醒的**间隔**：第一次跨过阈值之后，至少再隔这么多次调用才提醒下一次（不是每次都提醒）。
+ *
+ * 为什么必须有它：这是**常驻进她上下文**的东西，每一次后续调用都插一句就是刷屏——刷屏的提示
+ * 等于没有提示。所以现场读数是「同一串同参数的第 4、7、10…次各一句」（两条阈值都跨过时也
+ * 只算一句；第 5、6 次没有第二句，第 6 次那句并进第 7 次）。
+ *
+ * "至少"两个字是 ⑥b 那条用例逼出来的：两条阈值各有各的跨点，若各按各的间隔复算，同一次调用
+ * 会被两条判据同时判成"该提醒"，紧接着的下一次又被另一条判成"该提醒"——第 6、7 次连着两句，
+ * 正是这条规则要防的。所以间隔按**上次真提醒的位置**算（见 {@link RepeatGuard.reminderDueAt}）。
+ */
+export const REPEAT_REMINDER_STRIDE = 3;
+
+/** 一次调用的连续重复计数（纯事实，由 {@link RepeatGuard} 维护） */
+export interface RepeatCount {
+  /** 工具名 */
+  tool: string;
+  /** 规范化入参 */
+  argsKey: string;
+  /** 同工具连续第几次（含本次） */
+  toolRepeats: number;
+  /** 其中同参数连续第几次（含本次） */
+  sameArgRepeats: number;
+}
+
+/**
+ * 连续重复调用的计数器（**turn 级状态**：判据就是"同一 turn 内、同一串连续调用"）。
+ *
+ * 为什么是一个类而不是"在 recordToolResult 里数一数"：调用顺序在 `executeCalls` 里**成批推进**
+ * （同一步的并行调用各自落库，交接顺序由执行器的提交链保证），所以顺序判据必须在**执行之前**
+ * 由唯一一处算定——在这里。落库那一侧只负责把算好的那句话贴到回执上。
+ */
+class RepeatGuard {
+  private tool: string | null = null;
+  private argsKey = '';
+  private toolRepeats = 0;
+  private sameArgRepeats = 0;
+  /** 本 turn 记过的调用次数（提醒间隔以它为坐标） */
+  private calls = 0;
+  /** 上一次真提醒发生在第几次调用（0 = 还没提醒过） */
+  private remindedAtCall = 0;
+
+  /** 记一次调用，返回它此刻的连续重复计数（换了工具名即重新起算） */
+  note(tool: string, argsKey: string): RepeatCount {
+    this.calls += 1;
+    if (tool !== this.tool) {
+      this.tool = tool;
+      this.argsKey = argsKey;
+      this.toolRepeats = 1;
+      this.sameArgRepeats = 1;
+    } else {
+      this.toolRepeats += 1;
+      this.sameArgRepeats = argsKey === this.argsKey ? this.sameArgRepeats + 1 : 1;
+      this.argsKey = argsKey;
+    }
+    return { tool, argsKey, toolRepeats: this.toolRepeats, sameArgRepeats: this.sameArgRepeats };
+  }
+
+  /**
+   * 本次调用该不该提醒（唯一判据）。**两条阈值各算各的**：
+   *   · 同参数：`sameArgRepeats >= REPEAT_SAME_ARGS_THRESHOLD + 1`（第 4 次起）；
+   *   · 同工具：`toolRepeats >= REPEAT_TOOL_THRESHOLD + 1`（第 6 次起）。
+   *
+   * 跨过之后按 {@link REPEAT_REMINDER_STRIDE} 的间隔复用，且间隔从**上一次真提醒**起算——
+   * 两条阈值都到点时也只算一句（同一句提示不必说两遍），且两句之间至少隔 `STRIDE - 1` 次调用。
+   * 读数是「同一串同参数」：第 4、7、10… 次（第 5、6 次不带第二句；第 6 次那句并进第 7 次）。
+   */
+  reminderDueAt(count: RepeatCount): boolean {
+    const crossedSameArgs = count.sameArgRepeats > REPEAT_SAME_ARGS_THRESHOLD;
+    const crossedTool = count.toolRepeats > REPEAT_TOOL_THRESHOLD;
+    if (!crossedSameArgs && !crossedTool) return false;
+    // 最近一次提醒之后还不足间隔：不提醒（这一句就是"别刷屏"）
+    if (this.remindedAtCall !== 0 && this.calls - this.remindedAtCall < REPEAT_REMINDER_STRIDE) return false;
+    this.remindedAtCall = this.calls;
+    return true;
+  }
+}
+
+/**
+ * 规范化的入参：递归排序对象键、丢掉 `undefined`，数组保序（顺序是参数的一部分）。
+ *
+ * **刻意不做**的三件事：不折叠大小写、不裁剪空白、不解析数字/字符串的等价（`"1"` ≠ `1`）——
+ * 没有依据说明那些是不同的写法表达了同一个意图，而归一过头会把"不同的参数"判成"同一个参数"，
+ * 于是提醒在她**正在换参数试探**的时候响起来，正好把该提示的场景变成误报。
+ *
+ * 入参不是合法 JSON 时退**原文**：原文相同 = 每次都拿着同一份（含坏掉的）参数在试，算同参数；
+ * 原文不同 = 判不出来，宁可不算同参数。`tool/call` 落的就是这份原文（schema §4）。
+ */
+export function canonicalArgumentsOf(rawArguments: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch {
+    return rawArguments;
+  }
+  return canonicalValue(parsed);
+}
+
+function canonicalValue(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(item => canonicalValue(item)).join(',')}]`;
+  const doc = value as Record<string, unknown>;
+  const parts: string[] = [];
+  // 键排序：`{"a":1,"b":2}` 与 `{"b":2,"a":1}` 是同一个参数（JSON 对象无序）
+  for (const key of Object.keys(doc).sort()) {
+    // 丢掉 undefined：它等于"这个键不在"，JSON 里本来也表达不出来
+    if (doc[key] === undefined) continue;
+    parts.push(`${JSON.stringify(key)}:${canonicalValue(doc[key])}`);
+  }
+  return `{${parts.join(',')}}`;
+}
+
+/**
+ * 软提醒的正文（**逐字**：这是进她上下文的东西，措辞改动要当成行为改动看）。
+ *
+ * 五件必须说清的事，缺一件这句提示就会误导她：
+ *   ① 这是连续第几次调这个工具、其中同参数几次（她据此判断"我是不是卡住了"）；
+ *   ② 重复调用过多，考虑检查参数或重新决定策略（软提醒的唯一诉求）；
+ *   ③ **两条正当出路**：需要等 ⇒ `timer wait`；需要重新想 ⇒ 直接停下重新规划。
+ *      没有这两句，她收到"别重复"之后只剩"硬着头皮再试一次"这一条路；
+ *   ④ **豁免说明**：逐个处理不同目标（多文件 `safe_read`、逐个 `safe_check`）也会命中"同工具"，
+ *      那是**有意的重复**，不是错——不说这句她会以为自己违规了；
+ *   ⑤ 短：它随那一步的结果常驻上下文。
+ */
+export function repeatCallReminder(count: RepeatCount): string {
+  return `[框架提示] 这是连续第 ${count.toolRepeats} 次调用 \`${count.tool}\``
+    + `（其中同参数 ${count.sameArgRepeats} 次）。重复调用工具过多，考虑检查参数或重新决定策略：`
+    + '需要等就用 `timer wait`，需要重新想就直接停下重新规划。'
+    + '（如果你是在逐个处理不同的目标，忽略这条。）';
+}
 
 // ──────────────────────────────── 对外类型 ────────────────────────────────
 
@@ -189,6 +337,18 @@ export interface AgentLoopDeps {
    */
   skillCatalog?: string | null;
   /**
+   * MCP 索引文本（v46：与技能 catalog **同源同性质**的状态层素材，见 render.ts 的
+   * `RenderInput.mcpIndex` 与 `mcp/index` 事件）。
+   *
+   * **它必须来自日志里那条快照**，不许每轮从实时配置现渲染：这一段在请求头部（最大公共前缀
+   * 的第一格），现渲染会让"加一个 server"立刻改掉前缀——而用户的设计是"增删只追加在末尾、
+   * 到重大变化点才归集"。判据与三种重建触发点写在 `real-loop` 的 `mcpIndexSync` 上。
+   *
+   * 循环层只转手（与 `skillCatalog` 同一条纪律）；缺省/null/空串 = 该段整体不出现
+   * （老日志、子代理、诊断都是这一支 ⇒ 渲染结果与引入它之前逐字节相同）。
+   */
+  mcpIndex?: string | null;
+  /**
    * 记忆索引文本（B2：`MEMORIES/INDEX.md` 的渲染形态，见 docs/memory-injection.md §3）。
    *
    * 由**宿主**读盘并组装（索引文件是机制生成的，正文不在里面——只有路径 + 一行摘要 + `!pinned`）；
@@ -205,14 +365,18 @@ export interface AgentLoopDeps {
    */
   turnBlock?: TurnBlockFacts | null;
   /**
-   * 本任务相关资产那一行（v34；`persona/assets.ts` 的 `renderAssetsLine` 渲染好的文本）。
+   * 本任务相关资产那一行（v34；`persona/assets.ts` 渲染好的文本）。
    *
-   * 由**宿主**在轮首算好（读 `MEMORIES/assets.md`、跑一次 light 选 ≤3 条），循环层每步原样
-   * 转手——与 `contact` / `machine` / `usage` 同一条纪律：渲染层不读文件、不调模型，只排版。
-   * 它进的是**此刻层的任务卡**（`当前任务：…` 后面那一行）：任务完、任务卡消失，这一行自然消失。
+   * ⚠ **v45 起没有生产写入方**（2026-10-09 用户拍板取消「light 选取资产」这条机制）：
+   * `real-loop` 不再读 `MEMORIES/assets.md`、不再跑那一次 light、也不再传值（传的恒为空串）；
+   * 于是此刻层任务卡里**不会有那一行**。
    *
-   * 缺省/null/空串 = 整行不出现（清单不存在、没挑出相关的、这一拍不必干活、
-   * 或者老调用点根本没给）：渲染结果与引入它之前逐字节相同。
+   * **这一格为什么不连根拔掉**：它是**逐字节重建旧日志**那条路要用的——
+   * `memory/selected.assets`（v34 起搭着记忆索引的账落库）里记着当时那一行，
+   * 重放（`runtime/replay.ts` 的 `assetsFromEvents`）与界面预览（`web/server.ts` 的
+   * `assetsLineAt`）都从**事件**取回它，再经这里转手给渲染层。删掉这一格就等于改写历史。
+   *
+   * 缺省/null/空串 = 整行不出现（v45 起生产上恒为这一支：渲染结果与引入它之前逐字节相同）。
    */
   assetsLine?: string | null;
   /**
@@ -364,6 +528,11 @@ export type MemorySelector = (input: {
    * 与 `indexHash` 同一条纪律：只记结论（那一行渲染好的文本），不记清单全文。
    *
    * 可选：不传 = 这一轮没有那一行（老调用点、子代理、诊断都走这一支，事件形状与之前一致）。
+   *
+   * ⚠ **v45 起这一格只由"重建"那一侧用**（2026-10-09 取消「light 选取资产」这条机制）：
+   * 运行期不再产生那一行（`real-loop` 的 `planMemorySelection` 不再给 `assets`），所以**新写的
+   * 事件里不会有这一格**；而这个字段、以及"事件里有它就照样渲染"这条读法**一个字都没删**——
+   * 旧日志（v34–v44 那些轮）重放/预览时仍然逐字节重建得出当时那一行。见 `render.ts` 的 v45 那一篇。
    */
   assets?: string;
 };
@@ -410,6 +579,11 @@ export interface RequestDerivation {
   softHint?: string | null;
   /** 技能 catalog（状态层素材，见 AgentLoopDeps.skillCatalog） */
   skillCatalog?: string | null;
+  /**
+   * MCP 索引（**与技能 catalog 同段素材**，见 AgentLoopDeps.mcpIndex）：只回答"有哪些 server"，
+   * 工具清单按需（`mcp` 工具）。重建时必须给**当时那一版**（`replay` 从 `mcp/index` 事件取）。
+   */
+  mcpIndex?: string | null;
   /** 记忆索引（长期记忆层素材，见 AgentLoopDeps.memoryIndex） */
   memoryIndex?: string | null;
   /** 本轮固定块（见 AgentLoopDeps.turnBlock）：**一轮之内逐字节不变**的那一段 */
@@ -565,6 +739,9 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     lane: input.lane,
     // 技能索引：与 events/persona 并列的渲染输入，重放走同一份 deriveRequest 才不会漂移
     skillCatalog: input.skillCatalog ?? null,
+    // MCP 索引（v46）：**与技能索引同段素材、同一个位置**（长期记忆层里紧挨着它）。
+    // 它的字节只有一处来源——日志里那条 `mcp/index` 快照（见 AgentLoopDeps.mcpIndex）。
+    mcpIndex: input.mcpIndex ?? null,
     // 记忆索引（B2）：进**本轮固定块**（指针表，v30 起；v29 时在长期记忆层）。它同 deriveRequest
     // 的其它素材一样由调用方给——重放时从盘上读 INDEX.md，与当时同源。心跳轮给空串（不注入）。
     memoryIndex: input.memoryIndex ?? null,
@@ -661,6 +838,16 @@ class TurnRunner {
    * 与软阈值提示同一条尾部 developer 通道：只追加，不改已渲染历史。
    */
   private readonly hookContext: string[] = [];
+  /**
+   * 本 turn 的**连续重复调用**计数（工具软提醒）。判据是"同一 turn 内、从最近一次换了工具名起算"，
+   * 所以它是一份 turn 级状态：turn 换一个 `TurnRunner` 实例（`runTurn` 每次新建），跨 turn 自然重置。
+   *
+   * 计数在 {@link executeCalls} 里按调用顺序推进（唯一一处），提醒文本按 callId 暂存在
+   * {@link repeatReminders}，由 {@link recordToolResult} 贴到那一条回执的正文末尾。
+   */
+  private readonly repeatGuard = new RepeatGuard();
+  /** callId → 该次回执末尾要追加的软提醒（`executeCalls` 写入，`recordToolResult` 取走即删） */
+  private readonly repeatReminders = new Map<string, string>();
 
   constructor(deps: AgentLoopDeps, wakeEvents: readonly AppEvent[]) {
     this.deps = deps;
@@ -679,7 +866,11 @@ class TurnRunner {
     const reason = await this.runInner();
     // 压缩点：本 turn 已结算，但可见历史仍然超过阈值——把交接笔记写成 compaction/summary，
     // 让它成为下一轮请求里的「早期历史」（闸蔽点后的事件逐字节保留）
-    await this.maybeCompact();
+    const decision = await this.maybeCompact();
+    // 判定的留痕：**每 turn 一行**（连"为什么不压"一起）。写在这里而不是各条 return 之前——
+    // 判据只允许有一个出口，见 {@link compactionDecision}。`sync: false`（观测类）：它不是承诺，
+    // 丢了下次拿同一份日志还能再算一遍，不值得一次 fsync。
+    this.write('compaction/decision', decision, { sync: false });
     return reason;
   }
 
@@ -838,93 +1029,60 @@ class TurnRunner {
    *
    * 另外两条纪律不变：历史只可遮蔽、不可改写（老摘要留在现场，渲染取最大的 coveredUpToSeq，
    * 于是新摘要把老摘要自己也遮蔽进去，见 §13 遮蔽规则）。
+   *
+   * **2026-10-09 改：判据收成一处、每 turn 留痕一行。** 这个方法原来有五条静默 return
+   * （没配压缩 / 阈值没过 / 遮蔽点回退 / 折叠反而更大 / 闸门没过），"这一拍为什么不压"在
+   * 日志里一个字都没有。现在判定搬进 {@link compactionDecision} 这个**纯函数**（判据只在那里
+   * 写一遍），它回一份完整结论；本方法只做"结论是 wrote 就落摘要"这一件事，结论再由
+   * {@link TurnRunner.run} 写成一条 `compaction/decision`（一 turn 一行——连不压的那些拍也写，
+   * 否则"为什么没压"照样是个沉默）。
+   *
+   * **`covered` / `priorCovered` 一律从结论里读，不在这里重算**：重算一次就多出一份判据，
+   * 而两份判据迟早在某个边界上给出两个数（留痕那一行与摘要里报的条数对不上，事后读日志
+   * 就得猜哪个是真的）。
+   *
+   * 本方法自己**不写留痕事件**：留痕在 `run()` 里写，于是"一 turn 一行"与"这一拍压没压"
+   * 是两个独立的事实，不会因为将来多一条 return 就又漏一条账。
    */
-  private async maybeCompact(): Promise<void> {
-    const cfg = this.deps.compaction;
-    if (cfg === undefined) return;
-    // 本 step 自己写下的事件（message/assistant、tool/result…）要先进快照：
-    // 阈值判定与笔记内容都只认日志，不认内存态拼装
+  private async maybeCompact(): Promise<CompactionDecisionView> {
+    // 本 step 自己写下的事件（`message/assistant`、`tool/result`…以及**本 turn 的 `turn/end`**）
+    // 要先进快照：阈值判定与遮蔽点都只认日志，不认内存态拼装。
+    // **这一句不能省**（2026-10-09 把判据搬进 `compactionDecision` 时省掉过，代价很具体）：
+    // `endTurn` 的 `write` 只落库、不推快照，所以少了它，判定看到的是**少了 `turn/end`** 的那份
+    // 快照 ⇒ `compactionCoveredUpToSeq` 的 ② 找不到本 turn 的结束点、退回本 turn 的
+    // `turn/start` seq ⇒ 遮蔽点落在**这一轮的唤醒之前**：叫醒她的那句话被遮掉，而她对那句话的
+    // 回答留在现场（正是 §4.13 那条"不能劈开他问的那句与她答的那段"要防的东西）。
+    // 回归用例：`test/compaction-decision-wake.test.ts` 的遮蔽点那两条。
     await this.syncEvents();
-
-    // 触发阈值：**口径不变**（"未被已有摘要遮蔽的可见历史"越过阈值就压一次）。
-    // 刻意**不**用下面的新遮蔽点来量——那样量的是"压完之后还剩多少"，而压完必然几乎为零，
-    // 于是阈值永远越不过去，等于把自动压缩关掉（第一版就是这么写的，被回归测试逮住）。
-    // "压完之后剩多少"是 ④ 的收益闸门要回答的问题，不是触发阈值的口径。
-    if (estimateHistoryTokens(this.events) <= cfg.thresholdTokens) return;
-
-    // 遮蔽点：**本 turn 的 `turn/end`**（`includeInFlightTurn`，2026-10-06 改）。
-    // 交接发生在 turn 收尾之后，所以把刚跑完的这一轮一起折进笔记是安全的——而留着它
-    // 才是真正贵的那一笔：实测 2026-10-06 21:40 那次，留在现场的正是本 turn 的
-    // 44,281 token 可见历史（真实 72,096 token，估算低估 1.63×），交接后第一次调用
-    // 因此付了 72,096 未命中。
-    const covered = compactionCoveredUpToSeq(this.events, this.turnStartSeq, 0, true);
-
-    // ── ④乙 物理上界与单调性（**与甲是两件事，各管各的**）──
-    //
-    // 这一条不判"划不划算"，只判"这次折叠本身是不是一个合法的、不退步的动作"：
-    //   • 遮蔽点不得回退（回退 = 把已经不在现场的内容又变回现场，可见前缀凭空变长）；
-    //   • 折叠的结果不得比折叠前更大（那种"压缩"把请求撑大，是纯粹的负收益）。
-    // 两条都现场可判、失败了就**什么都不动**（不写事件、不改上下文）——静默退化成
-    // "这一拍不压"，下一拍照旧按阈值再来一次。真正的硬上界（整个请求放不放得下）不在这里，
-    // 那是 budget-guard 与渲染层的事（见 docs/design.md 的请求装配）。
-    const previousCovered = compactionCoveredUpToSeq(this.events, this.turnStartSeq, 0, false);
-    const beforeTokens = estimateHistoryTokens(this.events);
-    const afterTokens = estimateHistoryTokens(this.events, covered);
-    if (covered < previousCovered || afterTokens > beforeTokens) return;
-
-    // ── ④甲 收益闸门 ──
-    //
-    // 量的东西：**已有摘要的覆盖点之后、本次要折进去的那一段**（`priorCovered → covered`）。
-    //
-    // 参照点必须取**已有摘要的覆盖点**（`priorCovered`），不能取"上一个 `turn/end`"：
-    // 两者不是一回事——没有摘要时 `turn/end` 也在，可那时还没有"上一次交接"，拿它当参照
-    // 会把整段累积的可见历史（正是把阈值推过线的那批料）排除在度量之外，闸门就永远说"不够"。
-    // （这一条走了两次弯路才定下来，两次的实测数都留在 `_research/probe-handoff-mask.mts` 的输出里。）
-    //
-    // 为什么不量"整条还没折的可见历史"：那会把**还留在现场的尾部**也算进来，于是任何一次
-    // 折叠都"够本"，闸门等于没装。要的是 reasonix 那句"新闭合的历史 ≥ 一个 recent tail"：
-    // 刚折完立刻再折（那一段是 0）必须被拦住。
-    //
-    // **第一次折叠不受它管**（`priorCovered === 0`）：没有"上一次交接"就没有"新闭合的历史"；
-    // 这一次折叠的收益是**整条历史**（阈值刚被它推过），拿增量卡它只会让第一次永远压不动。
-    const priorCovered = compactionCoveredUpToSeq(this.events, this.turnStartSeq, 0, false) === 0
-      // 还没有任何摘要 ⇒ 参照点就是 0（`maybeCompact` 的第一次折叠）
-      ? 0
-      : this.priorSummaryCoverage();
-    if (priorCovered > 0
-      && estimateMaskedTokens(this.events, priorCovered, covered) < RECENT_TAIL_TOKENS) return;
+    // 判定**只算一次**，而且是在一处算的（见 {@link compactionDecision}）：这里拿到的是结论，
+    // 它同时喂给 ① 这条留痕事件、② 下面写摘要要用的 covered/priorCovered。
+    const decision = compactionDecision({
+      events: this.events,
+      turn: this.turn,
+      turnStartSeq: this.turnStartSeq,
+      cfg: this.deps.compaction ?? null,
+    });
+    if (decision.reason !== 'wrote') return decision;
 
     // 笔记：渲染不出来（或空）时**落机械替代文本**，不许留空。
     // 留白会被读成"那段时间什么都没发生"，然后她按这个印象编下去（reasonix 的
     // mechanicalFoldDigest 就是为这一条写的）。所以 `summary` 字段在任何路径上都非空。
     //
-    // 报的条数用**与闸门同一个参照点**（`priorCovered`）：那句"有 N 条往来被折进来了"
+    // 报的条数用**与闸门同一个参照点**（`previousCoveredUpToSeq`）：那句"有 N 条往来被折进来了"
     // 说的必须是"这一段里有多少条"，参照点换个值就会报一个对不上的数。
-    const note = renderHandoffNote(this.events, handoffOptionsOf(cfg));
+    // 这两个数**从结论里读**，不在这里重算——重算就会与留痕那一行写成两个数（两份判据）。
+    const priorCovered = decision.previousCoveredUpToSeq ?? 0;
+    const covered = decision.coveredUpToSeq ?? 0;
+    // `deps.compaction` 在这里必非空：结论能走到 `wrote`，只可能是 `compactionDecision` 里
+    // `cfg !== null` 那一支——类型系统看不出这层关系（它只看见一个属性），所以这里断言。
+    const note = renderHandoffNote(this.events, handoffOptionsOf(this.deps.compaction!));
     const summary = note.text.trim() === ''
       ? mechanicalSummaryText(countMaskedEvents(this.events, priorCovered, covered))
       : note.text;
 
     this.write('compaction/summary', { coveredUpToSeq: covered, summary }, { sync: true });
     this.log.flush();
-  }
-
-  /**
-   * 已有摘要的覆盖点（`0` = 还没压过）。
-   *
-   * 与 {@link compactionCoveredUpToSeq} 的 ① 同一份判据——**只取摘要的 `coveredUpToSeq`**，
-   * 不掺"上一个 `turn/end`"。④ 的参考点必须是"上一次交接折到哪"，而不是"上一轮跑到哪"：
-   * 两者在没有摘要时相差极大（前者 0、后者是上一轮的结束），混用会让闸门把整段累积的可见
-   * 历史排除在度量之外，于是永远说"不够"，自动压缩再也触发不了。
-   */
-  private priorSummaryCoverage(): number {
-    let covered = 0;
-    for (const event of this.events) {
-      if (event.type === 'compaction/summary' && event.data.coveredUpToSeq > covered) {
-        covered = event.data.coveredUpToSeq;
-      }
-    }
-    return covered;
+    return decision;
   }
 
   // ── 工具执行 ──
@@ -952,6 +1110,20 @@ class TurnRunner {
     }
 
     if (allowed.length === 0) return over.length;
+
+    // 工具软提醒（连续重复调用）：**计数在这个位置**、按 allowed 的**调用顺序**推进。
+    //
+    // 为什么在这里而不是在 `recordToolResult` 里"数回执"：那一步是并发的（一组 parallel 调用
+    // 各自跑完提交），在那里数就会让"连续"取决于谁先跑完——同一批同样的调用，两次运行可能
+    // 得出不同的第 N 次。执行之前、按模型给的顺序算一次，判据才是确定的、可测的。
+    //
+    // 只数 allowed：超限那部分**未派发**（上面已记 over-limit），不是"她调了"。
+    for (const call of allowed) {
+      const count = this.repeatGuard.note(call.name, canonicalArgumentsOf(call.arguments));
+      if (this.repeatGuard.reminderDueAt(count)) {
+        this.repeatReminders.set(call.callId, repeatCallReminder(count));
+      }
+    }
 
     const ctx: ExecutionContext = {
       registry: this.deps.registry,
@@ -1033,6 +1205,27 @@ class TurnRunner {
       const outcome = await offloadIfLarge(result.content, offload);
       data['content'] = outcome.content;
       if (outcome.contentRef !== undefined) data['contentRef'] = outcome.contentRef;
+    }
+
+    // 工具软提醒（连续重复调用）落点：**追加在这一条 tool/result 的正文末尾**。
+    //
+    // 为什么是这里（而不是走 softHint 那条尾部 developer 通道）：
+    //   · 她当场就看得到——贴在"那一次调用的回执"上，与它描述的事实同一段；
+    //   · 只进这一次、只进这一条：softHint 是**请求级**的，而这一步之后本 turn 还有若干步，
+    //     挂在那儿的提示会在同一轮里反复重播，变成常驻开销（用户明确否掉了这条）；
+    //   · 它**落库**（内容在事件里定形，见下），所以重放/界面预览看到的是同一句话。
+    //
+    // **为什么必须在写事件之前贴、而不是"渲染时现算"**：重放不重跑工具，它只有日志。
+    // 现算就得在渲染层再数一遍连续调用——那正是"判据分两处写"的形状（两处迟早分岔）。
+    // 贴进 content 之后判定与文本同源，`deriveRequest` 那条重建路径不用改一行。
+    // 这不违反「事件写下即定形」：定形的**时刻**就是这里，此后无人再回来改它。
+    //
+    // 放在 blob 外置**之后**：万一这一次回执大到被外置，content 只剩头部预览，
+    // 提醒若在之前追加就会被截掉——它是这一条回执里唯一"框架对她说的话"，不能被截。
+    const reminder = this.repeatReminders.get(call.callId);
+    if (reminder !== undefined) {
+      this.repeatReminders.delete(call.callId);
+      data['content'] = `${String(data['content'] ?? result.content)}\n\n${reminder}`;
     }
 
     this.write('tool/result', data, { sync: true });
@@ -1141,6 +1334,12 @@ class TurnRunner {
       cacheMissTokens: Math.max(0, inputTokens - cacheHit),
       // 轮号只服务固定块的"形状差异"判据（块只在每轮第 1 步发，跨轮的块哈希本就不可比）
       turn: this.turn,
+      // **请求体构造点**（= `context.builtAtSeq`）：这条请求渲染时看得见的最大事件 seq。
+      // 事件窗口优先用它（见 `context-audit.detectCacheBreak`）——`seq` / `ts` 是调用**结束**的时刻，
+      // 在飞久的调用会把真正的原因挡在窗口外，那正是 2026-10-09 两次误报"原因不明"的机制。
+      ...(request.context.builtAtSeq === undefined
+        ? {}
+        : { builtAtSeq: request.context.builtAtSeq }),
     };
     // 第 4 个参数是**事件序列**：归因要用"两次调用之间发生了什么"（重启 / 她改了资产 / 工具清单 /
     // 压缩）来解释每一段指纹为什么变，判据只在 `context-audit.ts` 一处（见 `segmentCause`）。
@@ -1164,6 +1363,8 @@ class TurnRunner {
       finishReason: finishReasonOf(result, interrupted),
       tokensTodayAccum: this.projection.budget.tokensToday + inputTokens + usage.outputTokens,
       context: request.context,
+      // 构造点的**镜像**：读日志的人一眼能看到"这一拍是什么时候装出来的"（ts 是结束时刻）
+      ...(request.context.builtAtSeq === undefined ? {} : { contextBuiltAtSeq: request.context.builtAtSeq }),
       // 只在真破坏时出现：没有它就代表"这次与上次的冻结前缀一致"（不是"没查"）
       ...(cacheBreak === null ? {} : { cacheBreak }),
     };
@@ -1488,6 +1689,9 @@ class TurnRunner {
       model: args.model,
       softHint: args.softHint,
       skillCatalog: this.deps.skillCatalog ?? null,
+      // MCP 索引（v46）：与技能索引同段素材。**整轮原样转手**（deps 装配点上定下，
+      // 而它的字节来自日志里那条 `mcp/index` 快照——一轮之内、两次重大变化之间都不会变）。
+      mcpIndex: this.deps.mcpIndex ?? null,
       memoryIndex: this.deps.memoryIndex ?? null,
       // 本轮固定块：deps 里那一份是**轮首定下**的（宿主装配 deps 时算一次），
       // 每步原样转手——她 turn 内改了 STATE 要等下一轮才在自己的上下文里看见，
@@ -1535,6 +1739,151 @@ class TurnRunner {
 }
 
 // ──────────────────────────────── 压缩点（唯一一份口径） ────────────────────────────────
+
+/**
+ * 压缩判定的**结论**：一份纯数据，喂给两个消费方——留痕事件（`compaction/decision`）
+ * 与"结论是 `wrote` 就落摘要"（{@link TurnRunner} 的 `maybeCompact`）。
+ *
+ * 为什么要把结论做成一等值、而不是"判据散在五处 return 里"：
+ *   · **一 turn 一行留痕**要求"每一条出口都带着同一批字段"，散着写就一定会漏（加第六条
+ *     判据时最容易忘的就是补账）；
+ *   · 产线要能回答"这一拍为什么不压"——`reason` 直接给结论，那几格数给它证据；
+ *   · 事后重放/测试可以只调这一个函数，不必跑一遍 turn。
+ *
+ * `historyTokens` / `thresholdTokens` 恒有；后三格只在判据真的走到那一步时才有（见
+ * {@link CompactionDecision} 的字段口径）——阈值没过时"遮蔽点在哪"还不是一个成立的事实，
+ * 编一个 0 填进去就是伪造一次判定。
+ */
+export interface CompactionDecisionView {
+  turn: number;
+  historyTokens: number;
+  thresholdTokens: number;
+  reason: CompactionDecision['data']['reason'];
+  coveredUpToSeq?: number;
+  /**
+   * 闸门的**参照点**：已有摘要的覆盖点（`0` = 还没压过，这一次就是第一次折叠）。
+   *
+   * 刻意**不是** `compactionCoveredUpToSeq` 的返回值：那一个在没有摘要、且本 turn 还没结束时
+   * 会退回本 turn 的 `turn/start` seq（见 `compactionCoveredUpToSeq` 的 ②）。拿它当参照点，
+   * 闸门量出来的就只是"本 turn 自己的那一小段"，于是**第一次折叠会被永远拦下**
+   * ——2026-10-09 把判据搬进这个函数时踩的正是这一下，`test/compaction-decision-wake.test.ts`
+   * 的"第一次折叠"那两条现在正面钉着它。
+   */
+  previousCoveredUpToSeq?: number;
+  /** ④甲 闸门量：`(参照点, 遮蔽点]` 之间的可见历史规模；`threshold`/`monotonic`/`no-shrink` 时缺席 */
+  maskedTokens?: number;
+}
+
+/**
+ * 已有摘要的覆盖点（`0` = 还没压过）。
+ *
+ * 与 {@link compactionCoveredUpToSeq} 的 ① **同一份判据**——只取摘要的 `coveredUpToSeq`，
+ * 不掺"上一个 `turn/end`"、也不掺"本 turn 起始 seq"。闸门的参照点必须是"上一次交接折到哪"，
+ * 而不是"上一轮跑到哪"：两者在没有摘要时相差极大（前者 0、后者是本 turn 的起始），
+ * 混用会把整段累积的可见历史（正是把阈值推过线的那批料）排除在度量之外，
+ * 于是闸门永远说"不够"——**第一次折叠再也压不动**。
+ */
+function maxSummaryCoverage(events: readonly AppEvent[]): number {
+  let covered = 0;
+  for (const event of events) {
+    if (event.type === 'compaction/summary' && event.data.coveredUpToSeq > covered) {
+      covered = event.data.coveredUpToSeq;
+    }
+  }
+  return covered;
+}
+
+/** 判定所需的全部输入：事件快照 + 本 turn 的 `turn/start` seq + 配置（`null` = 没配压缩） */
+export interface CompactionDecisionInput {
+  events: readonly AppEvent[];
+  turn: number;
+  /**
+   * 本 turn 的 `turn/start` seq（`compactionCoveredUpToSeq` 的 ② 用它排除/纳入本 turn）。
+   * 没有进行中的 turn 时传 `null`——那时 ② 取日志里最后一条 `turn/end`。
+   */
+  turnStartSeq: number | null;
+  /** `null` 与"没有这一格"同义：压缩没配（子代理等宿主不要求压缩），判定停在第一道门 */
+  cfg: HandoffOptions & { thresholdTokens: number } | null;
+}
+
+/**
+ * **压缩判定**（唯一一份判据，2026-10-09 从 `maybeCompact` 里搬出来；纯函数、不写事件）。
+ *
+ * 五道门，顺序就是原来的顺序（判据一个字都没改，改的只是"结论怎么被看见"）：
+ *   ① `threshold` —— 没配压缩，或可见历史估算没越过阈值；
+ *   ② `monotonic` —— 遮蔽点回退（不许把已经不在现场的内容变回现场）；
+ *   ③ `no-shrink` —— 折叠完反而更大（那种"压缩"是纯粹的负收益）；
+ *   ④ `gate`      —— ④甲 收益闸门：新闭合的历史不足一个 recent tail；
+ *   ⑤ `wrote`     —— 五道全过：**压**。
+ *
+ * 为什么门与门之间的数是**惰性算**的（每道门里现算那几个数）：每一条 `estimateMaskedTokens`
+ * 都要把整份快照扫一遍，而绝大多数 turn 会在①就返回——把五道门要的数全提前算好，等于
+ * 每 turn 白扫四遍全量事件。惰性算的代价是"字段要可选"（见结论类型的注释），换来的是
+ * 绝大多数拍只做一次 `estimateHistoryTokens`。
+ *
+ * **首次折叠不受闸门管**（见 {@link CompactionDecision} 与 `RECENT_TAIL_TOKENS` 的注释）：
+ * 判据是参照点（`previousCoveredUpToSeq`）为 0 时不算闸门——但那一格的数照旧算出来写进结论
+ * （留痕要能回答"参照点当时是几"），只是不参与拦截。
+ */
+export function compactionDecision(input: CompactionDecisionInput): CompactionDecisionView {
+  const { events, turn, turnStartSeq, cfg } = input;
+  const historyTokens = estimateHistoryTokens(events);
+  // 没配压缩时阈值这一格没有真值可言：写 0 会读成"阈值 0 却不压"，那是假话
+  const thresholdTokens = cfg?.thresholdTokens ?? 0;
+  const base = { turn, historyTokens, thresholdTokens };
+
+  // ① 阈值（含"没配压缩"那一支：它连阈值都没有，归在同一个结论里）
+  if (cfg === null || historyTokens <= cfg.thresholdTokens) return { ...base, reason: 'threshold' };
+
+  // ② 遮蔽点：**本 turn 的 `turn/end`**（`includeInFlightTurn`，2026-10-06 改）。
+  // 交接发生在 turn 收尾之后，所以把刚跑完的这一轮一起折进笔记是安全的——而留着它
+  // 才是真正贵的那一笔：实测 2026-10-06 21:40 那次，留在现场的正是本 turn 的
+  // 44,281 token 可见历史（真实 72,096 token，估算低估 1.63×），交接后第一次调用
+  // 因此付了 72,096 未命中。
+  const coveredUpToSeq = compactionCoveredUpToSeq(events, turnStartSeq, 0, true);
+  // 参照点 = **已有摘要的覆盖点**（不是上面那个函数的返回值，理由见结论类型的字段注释）
+  const previousCoveredUpToSeq = maxSummaryCoverage(events);
+
+  // ── ④乙 物理上界与单调性（**与甲是两件事，各管各的**）──
+  //
+  // 这一条不判"划不划算"，只判"这次折叠本身是不是一个合法的、不退步的动作"：
+  //   • 遮蔽点不得回退（回退 = 把已经不在现场的内容又变回现场，可见前缀凭空变长）；
+  //   • 折叠的结果不得比折叠前更大（那种"压缩"把请求撑大，是纯粹的负收益）。
+  // 两条都现场可判、失败了就**什么都不动**（不写摘要、不改上下文）——退化成
+  // "这一拍不压"，下一拍照旧按阈值再来一次。真正的硬上界（整个请求放不放得下）不在这里，
+  // 那是 budget-guard 与渲染层的事（见 docs/design.md 的请求装配）。
+  // 只算一次写进结论：{@link TurnRunner} 的 maybeCompact 不再重算（重算 = 第二份判据）。
+  if (coveredUpToSeq < previousCoveredUpToSeq) {
+    return { ...base, reason: 'monotonic', coveredUpToSeq, previousCoveredUpToSeq };
+  }
+  const afterTokens = estimateHistoryTokens(events, coveredUpToSeq);
+  if (afterTokens > historyTokens) {
+    return { ...base, reason: 'no-shrink', coveredUpToSeq, previousCoveredUpToSeq };
+  }
+
+  // ── ④甲 收益闸门 ──
+  //
+  // 量的东西：**已有摘要的覆盖点之后、本次要折进去的那一段**（`previousCoveredUpToSeq → covered`）。
+  //
+  // 参照点必须取**已有摘要的覆盖点**，不能取"上一个 `turn/end`"：
+  // 两者不是一回事——没有摘要时 `turn/end` 也在，可那时还没有"上一次交接"，拿它当参照
+  // 会把整段累积的可见历史（正是把阈值推过线的那批料）排除在度量之外，闸门就永远说"不够"。
+  // （这一条走了两次弯路才定下来，两次的实测数都留在 `_research/probe-handoff-mask.mts` 的输出里。）
+  //
+  // 为什么不量"整条还没折的可见历史"：那会把**还留在现场的尾部**也算进来，于是任何一次
+  // 折叠都"够本"，闸门等于没装。要的是 reasonix 那句"新闭合的历史 ≥ 一个 recent tail"：
+  // 刚折完立刻再折（那一段是 0）必须被拦住。
+  //
+  // **第一次折叠不受它管**（参照点为 0）：没有"上一次交接"就没有"新闭合的历史"；
+  // 这一次折叠的收益是**整条历史**（阈值刚被它推过），拿增量卡它只会让第一次永远压不动。
+  // 闸门量照旧算出来（留痕要能回答"参照点当时是几、量出来多少"），但参照点为 0 时不拦。
+  const maskedTokens = estimateMaskedTokens(events, previousCoveredUpToSeq, coveredUpToSeq);
+  if (previousCoveredUpToSeq > 0 && maskedTokens < RECENT_TAIL_TOKENS) {
+    return { ...base, reason: 'gate', coveredUpToSeq, previousCoveredUpToSeq, maskedTokens };
+  }
+
+  return { ...base, reason: 'wrote', coveredUpToSeq, previousCoveredUpToSeq, maskedTokens };
+}
 
 /**
  * 交接的**收益闸门**（2026-10-06 加）：新闭合的历史不足一个 recent tail 就不写摘要。

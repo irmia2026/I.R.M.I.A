@@ -403,6 +403,53 @@ export function resolveNameForSid(
 }
 
 /**
+ * **发言人（`person`）→ 名字的唯一判据**——群里的发言人与单聊的对方都走它。
+ *
+ * 为什么需要单独一层（2026-10-11 补的一处缺口）：`resolveNameForSid` 的输入是**会话 sid**，而群消息
+ * 里拿到的是**发言人 id**；把后者变成前者要凭空合成 `qq:c2c:<id>` / `onebot:c2c:<id>` 两种键
+ * （real-loop 原来就是在这两个键上试的）。那条路只覆盖"这个人**从这扇单聊门**跟她说过话"的情形，
+ * 而群成员**可能从没私聊过她**——那正是她在 `aliases.md` 的 `# 群成员` 段里按段头那句
+ * "只在认人时用"写下裸 id 的原因（她真写了六条：`1 号`、`甲`、`丙`、`Linre`、用户的官方
+ * openid…）。而原来那一段被 `parseAliases` 丢掉（它只收 sid 那类键），于是**她写在正确位置的
+ * 身份声明，框架一条都没看见**：那些人在她眼里只剩机器发的一次性占位名（"群友A（群昵称：…）"），
+ * 而占位名发了就不改（见 group-members.ts）。缺口就是这里：**裸 id 的声明没人查**。
+ *
+ * 一个反例，免得把这一层想得比它大：用户本人 10-07 02:26 那次的映射她写在**标题行**里
+ * （`# 该群成员（…）：1269541505 = **OWNER（用户）**…`），而 `#` 是 markdown 标题/散文、
+ * 一律跳过——那一笔**这一层照样读不到**（判据见 [forEachAliasRow]，测试钉在
+ * `test/person-name.test.ts` ①b）。他后来能对上名，靠的是另写了一条 `onebot:c2c:<QQ号>`
+ * （会话键那一档）。所以这一层修的是"她按模板写的裸 id 行不许再是死信"，不是"任何写法都认"。
+ *
+ * 权威顺序（与 `group-members.ts` 文件头那份一致，人写的永远压过机器攒的）：
+ *   ① 用户手写的联系人表（`config.persona.contacts`，按合成出来的 c2c 键查）
+ *   ② 她自己的会话别名（同一批键：`onebot:c2c:<id>` / `qq:c2c:<id>`）
+ *   ③ 她自己的群成员别名（`aliases.md` 的 `# 群成员` 段，**裸 id 精确相等**）
+ *   ④ 查不到 → `null`，由调用方接最后一档（群成员档案里那个自动占位名，见
+ *      `real-loop.personNameOf`；**它不在这里**，因为"人写的 > 机器攒的"这条要靠顺序表达，
+ *      而不许把机器攒的那份混进"人写的"里——`humanSourceNameOf` 正是靠"这里返回 null"来判
+ *      "这人还没有名字、该进档案"）。
+ *
+ * 两条都是**名字**，不是身份：身份（谁能指挥她）只由 `trust.ts` 按联系人表判，这里一个字都不碰
+ * ——她给自己的群成员写了个什么名字，都不会让那个人变成用户。
+ */
+export function resolvePersonNameFromTables(
+  person: string,
+  contacts: ReadonlyMap<string, string> | undefined,
+  aliases: AliasTable | undefined,
+  memberAliases: AliasTable | undefined,
+): string | null {
+  const id = person.trim();
+  if (id === '') return null;
+  for (const namespace of ['qq', 'onebot']) {
+    const named = resolveNameForSid(`${namespace}:c2c:${id}`, contacts, aliases);
+    if (named !== null && named !== '') return named;
+  }
+  // 群成员那一段的键就是**裸 id**（没有 `:`，见 [MEMBER_KEY_RE]），所以这里精确相等地查一次
+  const member = aliasNameOf(memberAliases?.get(id));
+  return member ?? null;
+}
+
+/**
  * 名字表里一条的**名字**（别名表那条可能带着备注，这里只要名字）。
  *
  * 与 `lookupBySid` 分工：那个给纯名字表（人声明的联系人表）用，这个给她的别名表用，
@@ -473,10 +520,11 @@ export function aliasNoteOf(
  * 这张表其实记着两类东西，形态不同：
  *   • `sid`（`qq:c2c:<openid>`、`qq:group:<群id>`）——**会话**，用来显示"这是谁/哪个群"；
  *   • `member`（裸 openid）——**群成员**，她的表里单起一段（`# 群成员（openid，不是 sid…）`）。
- *     群成员不是会话（他可能从没私聊过她），而且这一段的**用途只有她本人**：在群里 @ 人时
- *     照它写官方形态 `<qqbot-at-user id="…" />`（docs/design.md §4.20.1）。
- *     **框架不消费它**——2026-10-05 移除"名字 → openid"那一跳后，这里的唯一职责是把这些行
- *     **挡在会话别名表之外**（裸 openid 对那六处消费者是纯噪音，见 [parseAliases]）。
+ *     群成员不是会话（他可能从没私聊过她），而且这一段的**用途是认人**：@ 人时她照它写官方形态
+ *     `<qqbot-at-user id="…" />`（docs/design.md §4.20.1），**以及**把裸 id 解析成人名
+ *     （见 [resolvePersonNameFromTables] 的第三档）。**名字 → openid 那一跳框架仍然不做**
+ *     （2026-10-05 移除，别从这张表倒推 openid）；它对会话别名表也依然是噪音
+ *     （见 [parseAliases]）。
  */
 export type AliasKeyKind = 'sid' | 'member';
 
@@ -533,13 +581,33 @@ function forEachAliasRow(text: string, visit: (row: AliasRow) => void): void {
  * 为什么成员不并进来（2026-10-05）：`parseAliases` 的消费者有六处（联系人显示、关系档案注入、
  * 重放、界面、看门名单），它们问的全是"**这个会话**叫什么"。裸 openid 塞进去对它们是纯噪音
  * （永远匹配不上，还会在界面上多出一排点不开的条目），改口径又要动一批不许动的文件。
- * 那一整段是**她的资产、框架不消费**（@ 时她照它写官方形态，见 docs/design.md §4.20.1）——
- * 这里唯一的职责就是**把它挡在会话表外**（形状判据见 [MEMBER_KEY_RE]）。
+ * 那一段的消费点在别处：**认人**走 `parseMemberAliases`（2026-10-11 接上，此前是死信），
+ * @ 人时她照它写官方形态（docs/design.md §4.20.1）。这里唯一的职责就是**把它挡在会话表外**
+ * （形状判据见 [MEMBER_KEY_RE]）。
  */
 export function parseAliases(text: string): Map<string, SessionAlias> {
   const out = new Map<string, SessionAlias>();
   forEachAliasRow(text, (row) => {
     if (row.kind === 'sid') out.set(row.key, row.alias);
+  });
+  return out;
+}
+
+/**
+ * 群成员别名（`# 群成员` 那一段的 `裸 id = 名字`）——**只服务"认人"**。
+ *
+ * 与 {@link parseAliases} **逐字对称**：同一份文件、同一个 [forEachAliasRow] 解析、只挑另一类键。
+ * 两张表分开而不是合成一张，是因为它们的**键空间不同**：会话那张的键是 sid（一定含 `:`），
+ * 这张的键是平台给的发言人 id（一定不含）——合成一张会让 `resolveNameForSid` 那种"按 sid 查"
+ * 的调用方多出一批永远匹配不上的条目（六个消费者全都要改口径）。
+ *
+ * 消费点**只有一处**：`resolvePersonNameFromTables` 的第三档（见那里的权威顺序）。它**不**参与
+ * "名字 → openid"那一跳（2026-10-05 已移除），也不参与任何身份判定。
+ */
+export function parseMemberAliases(text: string): Map<string, SessionAlias> {
+  const out = new Map<string, SessionAlias>();
+  forEachAliasRow(text, (row) => {
+    if (row.kind === 'member') out.set(row.key, row.alias);
   });
   return out;
 }

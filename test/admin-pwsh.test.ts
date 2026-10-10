@@ -527,11 +527,11 @@ describe('timer：一件工具三个动作（v35 把 set_timer / cancel_timer / 
     assert.equal(noAction.error?.code, 'E_INVALID_ARGS');
     assert.match(noAction.content, /action/);
 
-    // ② 给了但不是三个取值之一：必须把三个取值摆出来，否则她只能瞎试
+    // ② 给了但不是四个取值之一：必须把四个取值摆出来，否则她只能瞎试
     const badAction = await toolkit.byName('timer').handler({ action: 'frobnicate' }, ctx);
     assert.equal(badAction.isError, true);
     assert.equal(badAction.error?.code, 'E_INVALID_ARGS');
-    assert.match(badAction.content, /set \/ cancel \/ list/);
+    assert.match(badAction.content, /set \/ wait \/ cancel \/ list/);
 
     // ③ action=set 但 at/cron 一个都没给
     const none = await toolkit.byName('timer').handler({ action: 'set' }, ctx);
@@ -1056,8 +1056,11 @@ describe('speak：告警出口与三路投递', () => {
     assert.equal(result.isError, undefined);
     assert.match(result.content, /主动推送：失败——通道不可用/);
     // 回执不说"第 N 条失败"：那读起来像"再试一次也许就成了"，实测她为此在群聊那轮
-    // 换了五次措辞。要说清是**整段投递**断在第几条，并给出"还要不要试"的判断。
-    assert.match(result.content, /投递失败：第 1 条起未发出/);
+    // 换了五次措辞。**一条都没发出去时**（这里 2 字 = 一段）说清"这一条没有送达，
+    // 本机那一段不等于他收到了"，并给出"还要不要试"的判断（2026-10-08 用户的口径）。
+    assert.match(result.content, /投递失败：这一条没有送达/);
+    assert.match(result.content, /不等于他收到了/);
+    assert.match(result.content, /不必重试/u, `失败必须给重试判断：${result.content}`);
     assert.match(result.content, /HTTP 500/);
     assert.equal(recorder.count('speak/sent'), 1, '只有日志那一路送达');
     assert.equal((recorder.last('speak/sent') as { channel: string }).channel, 'log');

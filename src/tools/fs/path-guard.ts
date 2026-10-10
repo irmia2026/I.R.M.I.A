@@ -172,7 +172,13 @@ async function deepestExisting(target: string): Promise<{ base: string; rest: st
 export interface GuardOptions {
   /** 允许目标不存在（写入新文件场景）；false 时目标必须已存在 */
   allowMissing?: boolean;
-  /** 要求目标是目录（list_dir 用）；默认 false，即要求目标是普通文件 */
+  /**
+   * 要求目标是目录（`vision_read` 传目录时用）；默认 false，即要求目标是普通文件。
+   *
+   * v42 起 `list_dir` 已删、列目录并入 `safe_read`，所以**默认这一档不再是"列目录"的前置**：
+   * `safe_read` 走的是下面那个 `allowDirectory`（文件与目录两种都收），因为它得先拿到真实路径
+   * 才能 `stat` 出目标到底是哪一种。
+   */
   requireDirectory?: boolean;
   /**
    * 允许目标是目录——**目录与文件两种都收**，怎么用由调用方决定（`rg_search` 用：
@@ -307,7 +313,16 @@ export async function resolveInsideRoot(
     return {
       ok: false,
       code: FS_ERROR_CODES.NOT_A_FILE,
-      reason: `${effective} 是目录；查看目录内容请用 list_dir`,
+      // v42：这句话过去指向 `list_dir`，而它已经删了——**指路指到不存在的工具比不指路更坏**
+      // （她照做只会拿到一句"未知工具"）。现在的出路是 `safe_read`（传目录即列目录），
+      // 递归/隐藏/按时间排这些少数用法归 `pwsh` 的 Get-ChildItem。
+      //
+      // **一个死名字都不留**：这句回执里连"与旧 list_dir 行为一致"这种等价说明也不写。
+      // 她历史里调过 `list_dir` 201 次，回执里出现这个名字就等于把那个选项重新摆到她面前
+      // ——**对模型来说，提到名字就是可选项**，她下一个动作就会是再发一次（然后拿到"未知工具"）。
+      // 反向断言在 test/fs-tools.test.ts（防将来有人"顺手加回等价说明"）。
+      reason: `${effective} 是目录。看目录内容：把目录路径交给 safe_read（可带 depth / limit）；`
+        + '要递归、看隐藏项、按修改时间排序，用 pwsh 的 Get-ChildItem。',
     };
   }
   if (existed && !isDir && options.requireDirectory === true) {

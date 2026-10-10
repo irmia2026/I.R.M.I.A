@@ -29,9 +29,11 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { AppEvent, Projection } from '../log/types.js';
+import type { AppEvent, Projection, WakeJob } from '../log/types.js';
+import { JOB_WAKE_EXCERPT_CHARS } from '../log/types.ts';
 import type { EventLog } from '../log/event-log.js';
 import { blobPathOf, estimateTokens } from '../state/blob-store.ts';
+import { applyOne, finalizePressure } from '../state/fold.ts';
 import { JOB_LOG_SUFFIX } from '../tools/pwsh.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
@@ -91,6 +93,14 @@ export interface JobManagerDeps {
   now?: () => Date;
   /** 输出外置阈值（估算 token）；默认 DEFAULT_JOB_BLOB_THRESHOLD_TOKENS */
   blobThresholdTokens?: number;
+  /**
+   * 事件投影：**给了就当场折进去**（`#emit` 里那一段注释记着为什么非折不可——
+   * 不折的后果是 `wake/job` 只落事件、不起 turn）。
+   *
+   * 不传 = 只写日志不折（CLI 诊断、单测里只想看事件的场景）：调用方**必须自己知道**
+   * 这一份投影不会被更新，别把"没折"当成"事件没写"。
+   */
+  projection?: Projection;
   /** 诊断出口（落盘失败、索引写失败等）；默认丢弃 */
   warn?: (message: string) => void;
 }
@@ -245,7 +255,7 @@ export async function readJobOutput(dataDir: string, record: JobRecord): Promise
 type JobEventInput =
   | { type: 'job/started'; data: { jobId: string; command: string; turn: number } }
   | { type: 'job/finished'; data: { jobId: string; exitCode: number | null; outputRef: string } }
-  | { type: 'wake/job'; data: { jobId: string } };
+  | { type: 'wake/job'; data: WakeJob['data'] };
 
 /** pwsh 后台模式的回调形状（与 tools/pwsh.ts 的 JobCallbacks 结构兼容，值导入避免反向依赖） */
 export interface JobStartedInput { jobId: string; command: string; turn: number }
@@ -257,6 +267,9 @@ export class JobManager {
   readonly #now: () => Date;
   readonly #thresholdTokens: number;
   readonly #warn: (message: string) => void;
+
+  /** 事件投影（可选）：`#emit` 写完日志就把事件折进去，`wake/job` 才能变成一次真唤醒 */
+  readonly #projection: Projection | null;
 
   /** jobId → 本进程内见过的任务（started 即入表） */
   readonly #jobs = new Map<string, JobRecord>();
@@ -272,6 +285,7 @@ export class JobManager {
     this.#dataDir = deps.dataDir;
     this.#now = deps.now ?? (() => new Date());
     this.#thresholdTokens = deps.blobThresholdTokens ?? DEFAULT_JOB_BLOB_THRESHOLD_TOKENS;
+    this.#projection = deps.projection ?? null;
     this.#warn = deps.warn ?? (() => undefined);
   }
 
@@ -322,7 +336,8 @@ export class JobManager {
   async onFinished(job: JobFinishedInput): Promise<JobRecord> {
     const existing = this.#jobs.get(job.jobId);
     const finishedAt = this.#now().toISOString();
-    const output = await this.#settleOutput(job);
+    const settled = await this.#settleOutput(job);
+    const output = settled.output;
 
     const record: JobRecord = {
       jobId: job.jobId,
@@ -343,8 +358,10 @@ export class JobManager {
       'internal',
       true,
     );
-    // 唤醒是新一轮输入的来源，必须是可见事件（model），否则后台任务完成等于没发生过
-    this.#emit({ type: 'wake/job', data: { jobId: job.jobId } }, 'model', true);
+    // 唤醒是新一轮输入的来源，必须是可见事件（model），否则后台任务完成等于没发生过。
+    // **结果正文跟着它走**（见 `JOB_WAKE_EXCERPT_CHARS`）：唤醒起来的那一轮里，
+    // 她看到的就是这一截，不必再花一次调用去捞。
+    this.#emit({ type: 'wake/job', data: this.#wakeDataOf(record, settled.text) }, 'model', true);
     return record;
   }
 
@@ -380,7 +397,14 @@ export class JobManager {
         'internal',
         true,
       );
-      this.#emit({ type: 'wake/job', data: { jobId } }, 'model', true);
+      // 孤儿结算同样带正文一截（有就带）：她醒来要处理的是"这件事没有结果"，
+      // 而"没有结果"长什么样（跑到一半的日志）正是她要看的。
+      const settledOutput = await readJobOutput(this.#dataDir, record);
+      this.#emit(
+        { type: 'wake/job', data: this.#wakeDataOf(record, settledOutput.ok ? settledOutput.text : null) },
+        'model',
+        true,
+      );
       settled.push(jobId);
     }
     return settled;
@@ -405,7 +429,7 @@ export class JobManager {
    * 但**不假设它一定写成功**（磁盘满、目录被占）——缺文件时照常给一个指向该路径的引用，
    * 观测侧"文件不存在"是可解释的事实，而吞掉引用会让一个真跑过的任务看起来没输出。
    */
-  async #settleOutput(job: JobFinishedInput): Promise<JobOutput> {
+  async #settleOutput(job: JobFinishedInput): Promise<{ output: JobOutput; text: string | null }> {
     const file = job.outputRef !== undefined && job.outputRef !== ''
       ? job.outputRef
       : jobLogPathOf(this.#dataDir, job.jobId);
@@ -415,10 +439,10 @@ export class JobManager {
     try {
       text = await readFile(file, 'utf8');
     } catch {
-      return output;
+      return { output, text: null };
     }
     // 大输出外置（design §4.12 / §4.21）：阈值按估算 token 判，与 blob-store 同口径
-    if (estimateTokens(text) <= Math.max(0, this.#thresholdTokens)) return output;
+    if (estimateTokens(text) <= Math.max(0, this.#thresholdTokens)) return { output, text };
 
     try {
       const buf = Buffer.from(text, 'utf8');
@@ -431,7 +455,36 @@ export class JobManager {
     } catch (err) {
       this.#warn(`后台任务 ${job.jobId} 的输出外置失败：${err instanceof Error ? err.message : String(err)}`);
     }
-    return output;
+    // 正文**原样交回调用方**（唤醒那一截就从它切）：外置只管"全文放哪"，
+    // 与"她这一轮看见什么"是两件事——后者不该因为文件大小而变。
+    return { output, text };
+  }
+
+  /**
+   * 唤醒事件里那几个字段：**结果正文的一截** + 全文在哪（`WakeJob` 的契约）。
+   *
+   * 一篇判据，写在这里（两个产生点——正常收尾与重启孤儿结算——共用它）：
+   *   · `text === null`（输出读不到：文件没写成、盘满、被清理）⇒ **不编正文**，
+   *     只给路径；她看到的是"没有输出"，那是可解释的事实，而不是一句假的空结果；
+   *   · 截断在**码点**上切（`[...text]`），不切坏多字节字符；
+   *   · **空正文与"没有输出"不是一回事**：空串照样带上（渲染层据此说"这次没有输出"）。
+   */
+  #wakeDataOf(record: JobRecord, text: string | null): WakeJob['data'] {
+    const data: WakeJob['data'] = { jobId: record.jobId };
+    if (record.command !== '') data.command = record.command;
+    if (record.exitCode !== undefined) data.exitCode = record.exitCode;
+    const file = record.output?.file;
+    if (file !== undefined && file !== '') data.outputFile = file;
+    if (text === null) return data;
+    const bytes = Buffer.byteLength(text, 'utf8');
+    data.outputBytes = bytes;
+    if ([...text].length > JOB_WAKE_EXCERPT_CHARS) {
+      data.outputExcerpt = [...text].slice(0, JOB_WAKE_EXCERPT_CHARS).join('');
+      data.outputTruncated = true;
+    } else {
+      data.outputExcerpt = text;
+    }
+    return data;
   }
 
   /** 写诊断索引。失败只告警——索引是给人看的旁证，不是真相源（真相在事件日志） */
@@ -455,11 +508,21 @@ export class JobManager {
   }
 
   /**
-   * 事件写盘。`sync` 由调用方定：started/finished/wake 都是"世界已经变了"的声明，
-   * 走 fsync；这样进程在写完事件后立刻被杀，重启侧看到的状态仍与外部世界一致。
+   * 事件写盘 + **当场折进投影**。`sync` 由调用方定：started/finished/wake 都是"世界已经变了"
+   * 的声明，走 fsync；这样进程在写完事件后立刻被杀，重启侧看到的状态仍与外部世界一致。
    *
    * 入参用判别联合而不是宽松的 `(type: string, data: unknown)`：事件负载就是 schema
    * （log/types.ts），多写一个字段就多一处与契约漂移的口子。这里不做类型逃逸。
+   *
+   * **为什么要折投影**（2026-10-08 修的真缺陷，用户这一句要治的正是它
+   * 「后台任务回执、timer 提醒，这类得是真唤醒」）：运行期读 `pending` 的是**内存投影**
+   * （`RealLoop.tickOnce` 读 `projection.pending`），而事件写盘与折投影是两步——
+   * 只写盘不折，`wake/job` 就成了一条"日志里有、循环永远看不见"的唤醒：
+   * **不起 turn**，她要等到下一次进程重启（recover 会把整份日志重新折一遍）才知道任务早就完了。
+   * 实测形状：这条路上原来只有 `log.append`，而其它每个写唤醒的入口
+   * （`RealLoop.appendSync` / `main` 的工具 `emit` / `web/server` / `channel/topic` …）
+   * 都走 `applyOne`——只有这里漏了。纪律与 `RealLoop.appendSync` **同一条**
+   * （先落库、再改内存，顺序不可反），连 `finalizePressure` 一起（预算压力按事件时刻结算）。
    */
   #emit(event: JobEventInput, visibility: 'internal' | 'model', sync: boolean): void {
     const seq = this.#log.nextSeq();
@@ -470,6 +533,10 @@ export class JobManager {
         ? { ...base, type: 'job/finished', data: event.data }
         : { ...base, type: 'wake/job', data: event.data };
     this.#log.append(envelope, { sync });
+    if (this.#projection !== null) {
+      applyOne(this.#projection, envelope);
+      finalizePressure(this.#projection, envelope.ts);
+    }
   }
 }
 

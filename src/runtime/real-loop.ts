@@ -40,7 +40,9 @@ import { arch, platform as osPlatform, release as osRelease } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import type { AppEvent, BudgetLayer, PendingInput, Projection, TurnEndReason, WakeChannel } from '../log/types.js';
-import { isImageAttachment, isTopLevelEvent } from '../log/types.ts';
+import { isImageAttachment, isTopLevelEvent, defaultVisibility } from '../log/types.ts';
+// 申请单那一套（她发起 → 待批 → 用户点 → 框架执行）：唯一实现在 `grant/mcp-grant.ts`
+import { settleGrants } from '../grant/mcp-grant.ts';
 import {
   contextImageAdmission,
   contextImageSkipText,
@@ -56,13 +58,11 @@ import type { EventLog } from '../log/event-log.js';
 import type { DsClient } from '../model/ds-client.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import {
-  CONFIG_FILE_NAME,
   DEFAULT_ASK_HUMAN_TIMEOUT_MIN,
   DEFAULT_WORKSPACE_DIR_NAME,
   trustBoundaryRoot,
   type AppConfig,
 } from '../config/config.ts';
-import { parseMcpServers } from '../mcp/client.ts';
 import type { PersonaAssets } from '../persona/loader.js';
 import { applyOne, finalizePressure, wakeSourceOf } from '../state/fold.ts';
 import { saveProjectionCache } from '../state/projection-cache.ts';
@@ -71,12 +71,15 @@ import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, m
 // 回投能力的唯一判据在 tools/admin（speak 第三路用它）：这里读同一个函数，
 // 免得「提示词告诉她能发」与「实际能不能发」变成两套口径。
 import {
-  collectSessions as collectSessionsFromLog, normalizeSid, parseAliases, resolveNameForSid, sidOf,
+  collectSessions as collectSessionsFromLog, normalizeSid, parseAliases, parseMemberAliases,
+  resolveNameForSid, resolvePersonNameFromTables, sidOf,
   upsertSession as upsertSessionInto, type SessionAlias as KnownSessionAlias, type SessionEntry as KnownSession,
 } from '../channel/sessions.ts';
-import type { ChannelMessageView, ChannelSpoken } from '../tools/admin.js';
+import type { ChannelMessageView, ChannelSpoken, ContextImageFact } from '../tools/admin.js';
 import {
   CONTEXT_IMAGE_HARD_BYTES,
+  attachmentPath,
+  compressedPath,
   ensureAttachment,
   readAttachmentImage,
   readFileImage,
@@ -84,7 +87,10 @@ import {
 import { deliveredToSid, replyableWakeChannel } from '../tools/admin.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
 import type { MachineFacts, RenderChannelContext, RenderImageRef, TurnBlockFacts, UsageFacts } from '../model/render.ts';
-import { wakeTitle } from '../model/render.ts';
+import { RENDER_VERSION, mcpIndexOf, wakeTitle } from '../model/render.ts';
+// 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
+// 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
+import type { ConfigReloadOutcome } from '../config/watcher.js';
 import {
   ASK_HUMAN_BLOCKED_BY, DEFAULT_HUMAN_TIMEOUT_MS, PlanMode,
   humanTimeoutElapsed, scanSuspension, type Suspension,
@@ -100,14 +106,16 @@ import { holdsGroupBatch } from './group-batch.ts';
 import type { SkillManager } from '../skill/skills.js';
 import type { HookRunner } from '../hook/hooks.js';
 import type { TimerStore } from '../wake/timer-store.js';
-import { modelVisibilityFor, trustOfBatch, isOwnerLabel } from './trust.ts';
+import { modelVisibilityFor, trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
 import { createAuthzGate, type Scenario } from './authz.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 import { WarnExemptBook, type WarnExemptSubject } from '../channel/warn-exempt.ts';
 // `msgSeqOf`：平台给不出消息序号时"补事件 seq"的**唯一判据**（信箱那条路也走它）
 import { msgSeqOf } from '../channel/inbox.ts';
 import { MEMORY_MAINTAIN_PAYLOAD_KIND, maintainMemory, memoriesDir } from '../persona/memory-maintain.ts';
-import { renderAssetsLine, probeOnPath, selectAssets, type AssetFactSource } from '../persona/assets.ts';
+import {
+  MCP_INDEX_DESC_CLAUSE_VERSION, mcpIndexView, probeOnPath, type AssetFactSource,
+} from '../persona/assets.ts';
 import {
   buildMemoryIndex, emptyMemoryIndex, ensureMemoryIndex, renderMemoryIndex,
   type MemoryIndex,
@@ -217,12 +225,67 @@ function contextEventFilter(event: AppEvent): boolean {
 }
 
 /**
+ * 压缩之后那条唤醒的**正文**（逐字进 `wake/manual.note`，2026-10-09）。
+ *
+ * 纯函数（入参 → 字符串，不读盘、不读时钟）：同一份判定在任何时刻渲染出同一串字节，
+ * 重放与测试因此都能引用同一串字面量，不必各写一遍。
+ *
+ * 三件事按用户给的口径写，一件不许少：
+ *   ① **告知刚压过**：说清"哪些内容不在眼前了"（遮蔽点）与"替代品在哪"（交接笔记）。
+ *      替代品的位置是**具体的那一行**，不是一句概念：笔记在 `compaction/summary` 里，
+ *      而渲染层把它摆在 input 的**最前面**那段长期记忆层（`renderMemoryLayer`：
+ *      `[早期历史摘要 · 覆盖至 seq N]` + 笔记正文）——所以要她"抬头看第一段"。
+ *   ② **接着做没做完的事**（用户的原话：「如有中断的工作则继续」）。这句必须是正文里的
+ *      祈使句，不能只靠她自己想起来：压缩正好发生在"一轮刚收尾"的时刻，而那一刻她刚
+ *      写完的东西已经不在现场了，最容易读成"这一轮结束了、可以歇了"。
+ *   ③ **给一条能用的入口**：`safe_read` 读 `data/events/*.jsonl` 按 seq 回查（原始事件）。
+ *      不能只给"去看交接笔记"这个概念——`/dream` 与 `job-wake` 两次都是"指了一条够不着的
+ *      路"（前者按了没反应、后者让她去找一个不存在的 job 工具），这里按同一把尺子写：
+ *      给的是她自己已有的能力（文件工具）+ 一个她真能读到的路径。
+ *
+ * 为什么两段都带上 `turn`：唤醒是"跳过一段时间"之后到达的，日志读起来（以及重放时）
+ * 必须一眼看得出这条通报说的是哪一拍——只写"刚压过"会让事后复盘猜时刻。
+ */
+function compactionWakeNote(args: {
+  turn: number;
+  covered: number;
+  previous: number;
+  dataDir: string;
+}): string {
+  const { turn, covered, previous, dataDir } = args;
+  const from = previous <= 0 ? '（这是第一次交接）' : `（此前遮蔽到 seq ${previous}）`;
+  // 反斜杠归一成正斜杠（`cli.ts` / `doctor.ts` / 记忆层那一族都是这么写的）：她读到的路径
+  // 与工具回执、与她自己敲的相对路径同形；`C:\x\data/events` 这种混写只会让她多试一次。
+  const eventsPath = `${dataDir.replace(/\\/gu, '/')}/events/*.jsonl`;
+  return `【框架通报 · 上下文压缩】turn ${turn} 刚做过一次上下文压缩。
+- 你眼前那段往来（遮蔽点前的历史）已经不在现场了，替代品是**交接笔记**：它就在你这次输入的最前面那段「早期历史摘要 · 覆盖至 seq ${covered}」里，标题是「# 交接笔记」。遮蔽点 seq ${covered}${from}。
+- 要看更细的原始记录：用 safe_read 读 ${eventsPath}，按 seq 回查。
+- 如果手上还有没做完的事（做到一半的任务、刚起的头、答应过还没交代的），**接着做**：压缩不会替你结束任何事，这一拍就是给你接着往下做的。`;
+}
+
+/**
  * 附件预热一次最多回看多少条事件。
  *
  * 它是"重启后补扫"的上限，不是常规路径：平时带游标只看新来的那几条。取 200 是因为
  * 一张图从到达、渲染到真正被认领通常只隔几十条事件；再往前翻既没必要，也白读盘。
  */
 const ATTACHMENT_SCAN_WINDOW = 200;
+
+/**
+ * `read_channel` 一次读（一屏 / 一页）最多把几张"点名她"的图片带进上下文（2026-10-11 用户拍板）。
+ *
+ * 定在 **2**，三条理由：
+ *   · 与 `vision.maxContextImages` 的出厂值同一个数（2）——那个数是"同时待在上下文里的图片张数"，
+ *     读会话这条路不该比唤醒那条路更大方；
+ *   · **图片每轮都要重发一遍**（base64 之后一张动辄几十上百 KB，见 attachment-store 的
+ *     `CONTEXT_IMAGE_COMPRESS_ABOVE_BYTES` 那段），多带一张的代价是**每一拍**都付；
+ *   · 2 张盖得住"一条消息配一两张图"这个常见形态；要更多时她有自己的路：`vision_read`
+ *     （点名要看哪张），何况每张图的地址都留在那一行上。
+ *
+ * 它只是**这一条路**的上限：真正决定请求体里有几张的是 `vision.maxContextImages`
+ * （渲染层那个"从后往前数 N 张"的窗口），所以实际名额取两者的**小**者——见 `contextImageBudget`。
+ */
+const READ_CHANNEL_CONTEXT_IMAGE_MAX = 2;
 
 /** 每积累这么多事件写一次折叠快照（M5-9 与 design §4.12 的体量盘算：日均 5000 事件即一天一快照） */
 export const SNAPSHOT_EVERY_EVENTS = 5000;
@@ -371,6 +434,29 @@ export function mentionedInMessage(data: { chatType?: string; mentionsMe?: boole
   return data.chatType === 'group-at' || data.mentionsMe === true;
 }
 
+/**
+ * 这一条消息的图**是不是冲她来的**——`read_channel` 的"点名例外"（2026-10-11 用户拍板）唯一
+ * 使用的那条判据（**只此一处**）。是 ⇒ 图按现有准入装配进上下文；不是 ⇒ 一个字都不装配，
+ * 那一行只给地址，由她自己决定值不值得看。
+ *
+ * 两个分支都不是新写的：
+ *   · 群聊 ⇒ `mentionedInMessage`（平台 @ 了她，或平台/宿主如实填的"提到了你"）——与
+ *     `read_channel` 摆出来的那个 `▶` 是**同一个结论**；关键词那一路也不必在这里重判：
+ *     main 落库时就把命中的群消息写成了 `mentionsMe: true`（`main.ts` 的 `onChannelMessage`），
+ *     所以它读得到；
+ *   · 私聊 ⇒ **无条件**——与唤醒判据 `shouldWakeForChannelMessage` 的第一条**逐字同源**
+ *     （"私聊：对方就是在跟她说话"，见 `channel/inbox.ts`）。这一条必须单独写出来：
+ *     `mentionedInMessage` 对私聊恒假（私聊里没有"提及"这回事），而用户点名的三种情形里
+ *     就有它。
+ *
+ * ⚠️ 它**不是**新的 @/回复判定，也不改 `mentionedInMessage` 本身：那个函数还管着
+ * `read_channel` 那一屏摆哪几条（把私聊也算成"提及"会让每个私聊行都多一个 `▶`），
+ * 两件事判据不同，各自接自己那一半（与 `mentionedInMessage` 的注释同一个口径）。
+ */
+export function imageAimedAtHer(data: { chatType?: string; mentionsMe?: boolean }): boolean {
+  return data.chatType === 'c2c' || mentionedInMessage(data);
+}
+
 function groupMemberCandidateOf(event: AppEvent): GroupCallingEvent | null {
   if (event.type !== 'wake/channel') return null;
   const data = event.data;
@@ -379,36 +465,16 @@ function groupMemberCandidateOf(event: AppEvent): GroupCallingEvent | null {
   return event;
 }
 
-/**
- * 配置里**声明**了哪些 MCP server（数字资产事实层的那一格，v34）。
+/*
+ * **这里曾经有一个函数**：`declaredMcpServers(config)`（v34 起）——把 `AppConfig.mcp.servers`
+ * 读成"配置里声明了哪些 server"，供数字资产事实层核对她的 `[mcp]` 条目。
  *
- * 为什么读盘而不是读 `config`：`AppConfig`（`config/config.ts`）**没有 `mcp` 段**——
- * 那张声明面只活在 `config.json` 里，由 `parseMcpServers` 解析（界面那侧就是这么读的，
- * 见 `web/server.ts` 的 mcpView）。所以这里走同一条路：读 `<dataDir>/../config.json` 的
- * `mcp.servers`。`dataDir` 就是配置所在目录下的 `data/`（`config.ts` 的 `buildDefaults`），
- * 相对路径以配置文件所在目录为基准，与 `loadConfig` 同一套口径。
- *
- * **读不到就返回 `undefined`**（不是 `[]`）：两者对她是两句不同的话——
- * `undefined` ⇒ "没有 MCP 配置可核对"（这一轮读不到，别当成没有）；
- * `[]` ⇒ "配置里确实一个 server 都没声明"。
- * **就绪情况不在这里判**：`McpClientPool` 归宿主，real-loop 看不到"起没起来"，
- * 所以只给名字，就绪那一格由 `assets.ts` 如实写成"已配置（是否已启动未知）"。
- *
- * 配置非法（`mcp.servers` 形状不对）时也返回 `undefined`：那是**读不出结论**，
- * 与"没有声明"不是一件事——宁可少一格，也不写一句可能是假的话。
+ * v45 删（2026-10-09 用户拍板取消「light 选取资产」这条机制）：它唯一的生产消费者
+ * （`assetFacts()`，跟着那次挑选一起走）没了。**读配置面这件事本身没丢**：同一个 `AppConfig.mcp`
+ * 段仍然是 MCP 池与界面 `mcpView` 读的那一份（`config/config.ts` 的 `McpConfig`），
+ * 那两处不经过这里。事实层要不要重新接回"声明面"由以后真需要它的那条路决定——
+ * 别为了留着这个函数而去找一个调用点。
  */
-function declaredMcpServers(dataDir: string): readonly { name: string }[] | undefined {
-  try {
-    const raw: unknown = JSON.parse(readFileSync(join(dataDir, '..', CONFIG_FILE_NAME), 'utf8'));
-    const mcpRaw = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)['mcp'] : undefined;
-    const servers = mcpRaw === undefined || mcpRaw === null
-      ? undefined
-      : (mcpRaw as Record<string, unknown>)['servers'];
-    return parseMcpServers(servers ?? undefined).map(entry => ({ name: entry.name }));
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * 同一条判据，但吃的是**裸的事件形状**（`type` + `data`）而不是 `WakeEmission`。
@@ -498,20 +564,39 @@ export interface RealLoopDeps {
   /**
    * 数字资产事实层里 `[path]` 条目的就绪探测（v34，见 `persona/assets.ts` 的 `probeOnPath`）。
    *
-   * 为什么留一个覆盖点：真探测要读 `process.env.PATH` 与磁盘，测试里那是**环境依赖**
-   * （这台机器上有没有 `gh`、`node` 装在哪）——同一个用例在两台机器上会得到不同的那一行。
-   * 覆盖之后"探测得出什么"就成了用例的输入，断言才是确定的。
-   * 缺省 = `probeOnPath`（真查 PATH，Windows 上按 `PATHEXT` 逐个后缀找）。
+   * ⚠ **v45 起没有生产消费者**（2026-10-09 用户拍板取消「light 选取资产」这条机制：
+   * 原来读它的是 `assetFacts()`，跟着那次挑选一起删了）。**留着**是因为它是事实层的注入点
+   * ——`persona/assets.ts` 的 `probeOnPath` 与那套判据照旧在，谁要重开一条"核对就绪"的路，
+   * 从这里接手（测试的确定性覆盖点也还在，`test/fixtures/real-wake-rig.ts` 的 `probeAssetPath`）。
+   * **缺省 = `probeOnPath`**（真查 PATH，Windows 上按 `PATHEXT` 逐个后缀找；纯 fs、不跑子进程）。
    */
   probeAssetPath?: (command: string) => { found: boolean; path?: string };
   /**
    * 数字资产事实层里 MCP 那一格的覆盖点（v34）：**配置声明了哪些 server**。
    *
-   * 缺省走 `declaredMcpServers(dataDir)`（读 `<dataDir>/../config.json` 的 `mcp.servers`）。
-   * 给了它就以它为准——测试与窄路径（子代理、诊断）因此不必有那份配置文件，
-   * 也能精确控制"声明面长什么样"。返回**只有名字**的列表：就绪情况 real-loop 看不到。
+   * ⚠ **v45 起没有生产消费者**（与上面 `probeAssetPath` 同一批删的调用点）。留着是把
+   * "声明面"这个注入点留住：生产上"配置里声明了哪些 server"的正源是 `AppConfig.mcp.servers`
+   * （MCP 池与界面 `mcpView` 读的就是它），哪个窄路径不想带那份配置，从这里给一份只有名字的
+   * 列表即可（就绪情况 real-loop 看不到——`McpClientPool` 归宿主）。
    */
   mcpServers?: () => readonly string[];
+  /**
+   * **配置热更**：`config.json` 里可热更的那些字段变了之后，由宿主调一次（2026-10-10 加）。
+   *
+   * 为什么这个口在循环上：`AppConfig` 被**就地**改（见 `config/watcher.ts` 的
+   * `applyHotFieldsInPlace`），所以循环不用重建就能看见新值；但"看见新值"与"把
+   * **派生出来的那份事实**也跟上"是两件事——今天只有一件派生事实：
+   *   · **MCP 常驻索引**（`mcpIndexText`）：它按用户定的口径**只在重大变化点归集**
+   *     （见 `mcpIndexSync`：首次 / 模板换代 / `compaction/summary` 之后）。
+   *     所以这里**刻意不重建它**（重建一次 = 每轮改请求前缀 = 缓存整段失效）；
+   *     这一步留着的价值是**如实说一句**："声明面变了，索引会在下一次重大变化时归集"
+   *     ——不说的话，读日志的人会以为热更没生效（而 `config/changed` 只在主进程那条日志里）。
+   *   · 池那侧的重建**不在这里**：池归宿主（`main.ts` 的 `McpClientPool.applyDeclarations`），
+   *     循环手里没有它，也不该有（披露式的全部价值就是池不与循环耦合）。
+   *
+   * 缺省不接 = 什么都不做（测试台与"配置不会变"的嵌入方照旧；行为与没有这一格时逐字相同）。
+   */
+  onConfigReloaded?: (change: ConfigReloadOutcome) => void;
   /**
    * 定时器表：每日记忆整理任务的布防与 payload 识别都读它（design §4.17）。
    * 不注入则不布防该任务，带整理 payload 的唤醒会退化为普通 turn。
@@ -616,6 +701,16 @@ export class RealLoop {
   private interruptEpoch = 0;
   /** 触发打断的那句话（写进 speak 的回执，让她知道该针对什么重新组织语言）**与是哪条唤醒** */
   private userSpokeNote: { text: string; wakeSeq: number } | null = null;
+  /**
+   * 已经为哪些 turn 发过"压缩后唤醒"（`via: 'compact'`）。
+   *
+   * 为什么进程内记一份就够、不必落事件：`compaction/decision` **一 turn 恰好一条**
+   * （写入点只有 `TurnRunner.run` 一处），而 turn 号单调递增——所以"这个 turn 发过没有"
+   * 是一个进程内即可判定的问题，重启后重新开始也只会漏掉那些**早就发过**的 turn
+   * （真重启之后那一拍本就不该补发，补发就是对着一段已经翻篇的历史再叫一次）。
+   * 见 {@link handleCompactionWake} 的"防抖"那一段。
+   */
+  private readonly compactWakeTurns = new Set<number>();
   /** 启动预热（重建限流窗口与加注累计）；幂等，只做一次 */
   private ready: Promise<void> | null = null;
   /** 失败刹车的暂停起点（null 表示未暂停） */
@@ -674,18 +769,76 @@ export class RealLoop {
   private wakeChannelData: WakeChannel['data'] | null = null;
 
   /**
-   * 本轮任务卡上那一行「本任务相关资产」（v34；`persona/assets.ts` 的 `renderAssetsLine`）。
+   * 这一拍该进上下文的**MCP 常驻索引文本**（v46；空串 = 那一刻一个 server 都没有）。
    *
-   * **在本轮开跑之前算一次**（`tickOnce` 的 `prefetchAssetsLine`），整轮由 `agentDeps` 原样
-   * 转手给循环层。三件事都靠"轮首算一次"：
-   *   • **只调一次 light**：判据一处（那一拍的唤醒批次），不是每步都选——用户对用度的口径；
-   *   • **轮内逐字节不变**：它进此刻层的任务卡，同一轮相邻两步的前缀因此仍然接得上；
-   *   • **任务完就不渲染**：它连着任务卡一起消失（下一轮没有任务卡，或者清单里挑不出相关的，
-   *     这个字段就是空串）——不进历史、不受压缩影响。
+   * 为什么记在实例上、而不是让 `agentDeps` 现读日志或现读配置：
+   *   • **现读配置**正是用户点名不许的那件事（每轮改前缀 ⇒ 缓存整段失效）；
+   *   • 现读日志要 async（`readAll` 是异步迭代器），而 `agentDeps()` 是同步的；
+   *   • 记在实例上之后，"本拍用的是哪一版索引"与 `mcp/index` 那条事件**逐字节同源**
+   *     ——`mcpIndexSync` 是唯一写入点，它写完就顺手把这份缓存更新成同一串字节。
    *
-   * 空串 = 整行不出现（清单不存在 / 没挑出相关的 / 这一拍不必干活）。
+   * 进程刚起来时它是空串：`warmUp`/第一拍 tickOnce 里的 `mcpIndexSync` 会在**认领任何输入
+   * 之前**把它定下来（判据见那个方法），所以第一次请求里就已经是正确的那一版。
    */
-  private assetsLine = '';
+  private mcpIndexText = '';
+
+  /**
+   * **本拍读过的事件快照**（`mcpIndexSync` 每拍全量读一次日志，顺手留在这里）。
+   *
+   * 谁用它：`settleGrants`（判"这张申请单拾取过没有"）。它**不能 await**——拾取必须在
+   * 同一拍的同步段里跑完（那两条事件里有一条是给人的卡）；而 `EventLog` 没有同步的
+   * "读全量"（只有逐条 `get(seq)`，组不出"哪些 id 出现过"这份账）。
+   * ⇒ 复用同一拍已经付过的那一次读，而不是为它再读一遍盘。
+   *
+   * 纪律：**只读**。它是快照，写入点仍然是日志（`appendSync`）——就地改它等于让
+   * "本拍的事件"与"盘上的事件"漂开，而后面按它判重的那几处会一起被骗。
+   */
+  private eventView: AppEvent[] = [];
+
+  /**
+   * 预热跑完之前到达的**配置热更通报**（一次重载最多一条，见 `notifyConfigReloaded`）。
+   *
+   * 为什么需要这一格：热更是**事件驱动**的（文件一变就来），而循环的预热是**第一拍**才跑的
+   * ——两者谁先到是不确定的。预热的那趟全量读会把 `mcpIndexText` 定下来，而通报里那句
+   * "当前几个 server"该在它之后说。存一格比"加一个 async 排队机制"简单得多，也不会漏：
+   * `ConfigWatcher` 的重载是串行的（互斥锁 + 去抖），不会有第二条覆盖第一条。
+   */
+  private pendingConfigReload: ConfigReloadOutcome | null = null;
+
+  /**
+   * 这一刻的**遮蔽点**（`compaction/summary` 的 `coveredUpToSeq`，取最大者；没有就是 0）。
+   *
+   * v50 用它判"这条输入还在不在她眼前"：**`seq <= 遮蔽点` 的唤醒已经被折进摘要了**——
+   * 它的内容不在她眼前，重投它只会造出"一条已经被折掉的通报又插回请求中间"
+   * （2026-10-10 现场：`miss=37884`，判据写在 `settleHumanSuspension` 的注释里）。
+   *
+   * 素材是 `mcpIndexSync` 每拍已经读过的那一份 `eventView`（本拍看到的事件快照），
+   * 所以这里**不再读一遍盘**——而且这个判据**只在这一处被问**。
+   */
+  private coveredPointOf(): number {
+    let covered = 0;
+    for (const event of this.eventView) {
+      if (event.type === 'compaction/summary' && event.data.coveredUpToSeq > covered) {
+        covered = event.data.coveredUpToSeq;
+      }
+    }
+    return covered;
+  }
+
+  /**
+   * 某一轮 `turn/start` 的 seq（查不到给 0）。
+   *
+   * v50 用它把"重投"分成两类，见 `settleHumanSuspension` 的判据：
+   *   · `wake.seq < 该轮 turn/start` ⇒ 这条输入**是上一拍就已经递到她眼前的**（当轮输入）；
+   *   · 其余 ⇒ 它是**本轮进行中才插进来的**（`claimInterruption`），从头到尾还没被递过。
+   * 素材同样是本拍那份 `eventView`（不额外读盘）。
+   */
+  private turnStartSeqOf(turn: number): number {
+    for (const event of this.eventView) {
+      if (event.type === 'turn/start' && event.data.turn === turn) return event.seq;
+    }
+    return 0;
+  }
 
   /**
    * 会话簿：她认人/认场景的依据（启动时折叠一次，之后每拍并入新来的通道事件）。
@@ -954,6 +1107,10 @@ export class RealLoop {
     // 启动那一次已经覆盖"改配置 + 重启"，这里覆盖运行期上限变化的其余路径（加注看门文件
     // 刚被拾取、判定器被重建……），并保证唤醒门读到的记录与活的上限永远对得上。
     this.releaseLiftedPauses();
+    // MCP 常驻索引（v46）：**在任何输入被认领之前**定下本拍的索引版本。
+    // 放在这里（而不是 wake 处理那一段）是为了它不依赖"这一拍有没有 pending"：
+    // 索引进的是请求头部，任何一条请求（含心跳拍）都得用同一版。
+    await this.mcpIndexSync();
     await this.healthCheck();
     // 图片附件：每拍补下最近到达的（**包括 turn 进行中到达的那张**——它会立刻出现在她
     // 后续 step 的历史里）。放在 busy 检查之前：她正忙的时候恰恰是图片最容易到场的时候。
@@ -965,6 +1122,14 @@ export class RealLoop {
     // 放在 busy 之前是刻意的——她正在跑的那个长 turn 里，这条事实也要及时出现在她的上下文里
     // （agent-loop 每一步都重新对齐日志），而不是等她忙完才补上。
     await this.settleHumanAsks();
+    // 她递的申请单（2026-10-11：MCP 的增删她只能"申请"，用户只在界面点批准或驳回）：
+    // 每拍扫一次 `<dataDir>/grants/`，把还没进过日志的单子变成一条待批（`human/asked`
+    // 用 **system 来源** = 挂起语义，与计划审批同一个坑位）。
+    //
+    // **为什么也在 busy 之前**：她在 turn 中途递的单子，这一拍就该挂出来给人看见
+    // （人可能正开着界面）。挂起那一刻 turn 早已在跑，所以它不打断她——她那一轮结束后
+    // 若还挂在台面上，后面那些输入会被"她在等人"那道门按既有语义拦下（design §4.21）。
+    this.settleGrants();
     // 话痨会话的话题（v32）：门槛在里面（未读 ≥ 5 且距上次 ≥ 10 分钟），不满足时**不发请求**。
     // 同样放在 busy 之前：她正忙的时候恰恰是群里聊得最热的时候，而那时她最需要"在聊什么"。
     //
@@ -1022,11 +1187,10 @@ export class RealLoop {
       // 示警落库（v25）：把"框架对她说了这句话"记成事件——GUI 卡片原样贴它，此刻层那段
       // 历史数它，而"她到底看没看见"从此是可查的事实（而不是靠推断渲染时拼了什么）。
       this.noteInjectionWarnings(wakeEvents);
-      // 数字资产（v34）：**在开跑之前**挑一次——这一拍要干活，就从她自己的清单
-      // （`MEMORIES/assets.md`）里挑 ≤3 条相关的，渲染成任务卡上那一行只读提示。
-      // 判据与"记不记记忆索引"同源（`isHeartbeatTurn`）：只有心跳的那一拍没人在叫她干活，
-      // 连清单都不读、一次 light 都不发。整轮共用这一次结果（见 `assetsLine` 字段）。
-      await this.prefetchAssetsLine(wakeEvents);
+      // **数字资产那一行没有了**（v45，2026-10-09 用户拍板取消「light 选取资产」这条机制）：
+      // 这里原来是 `prefetchAssetsLine(wakeEvents)`——轮首读 `MEMORIES/assets.md`、把索引喂给
+      // light 挑 ≤3 条、渲染成任务卡上那行「本任务相关资产：…」。理由与替代（她自己照清单读）
+      // 写在 `persona/assets.ts` 的文件头；`MEMORIES/assets.md` 一个字节都没动，事实层照旧。
       let reason: TurnEndReason;
       try {
         reason = await runTurn(this.agentDeps(wakeEvents), wakeEvents);
@@ -1035,11 +1199,13 @@ export class RealLoop {
         // 插话计数**不清零**（它只增不减，speak 每次开口时重新取基准值）。
         this.wakeChannelData = null;
         this.userSpokeNote = null;
-        // 数字资产那一行同理：它是**这一轮**的提示，turn 一结束就丢掉——下一轮重新判、
-        // 重新挑（留到下一轮就成了"上一件事的工具清单"，那是误导）。
-        this.assetsLine = '';
       }
       this.write(`[循环] turn 结束：${reason.kind}`);
+      // 压缩之后**叫醒她一次**（`wake/manual` · `via: 'compact'`，2026-10-09）：压完不叫，
+      // 那份交接笔记要等到下一次有人说话才被看见，而"手上没做完的事"就是在这段时间里断掉的。
+      // 放在 turn 结束之后、**且不 return**：它是把一条输入放进队列（下一拍起 turn），
+      // 本拍剩下的收尾（挂起线索、安静计时、预算告警）一条都不许跳过。
+      await this.handleCompactionWake(beforeSeq);
       // 人审挂起（design §4.21）：turn 因提问/计划审批而挂起（不是完成、也不是失败）——
       // 记下这条线索。输入已被 input/claimed 摘走，等 human/answered 到达后送回队列。
       if (reason.kind === 'blocked' && reason.by === ASK_HUMAN_BLOCKED_BY) {
@@ -1056,6 +1222,215 @@ export class RealLoop {
   private async tick(): Promise<void> {
     if (!this.running) return;
     await this.tickOnce();
+  }
+
+  // ──────────────────────────────── MCP 常驻索引（v46） ────────────────────────────────
+
+  /**
+   * **MCP 常驻索引的快照同步**：把"这一版索引是什么"定下来，并落一条 `mcp/index`。
+   *
+   * ──────────────────────────── 它解决的是什么 ────────────────────────────
+   *
+   * 用户 2026-10-10 的设计原话（逐字）：「虽然有了入口，但是**还是需要有对应的索引存在**。
+   * **mcp 的存在类同 skill**。不过**入口不是自己读而是我们的统一 mcp 工具**。」
+   * 「**增删进入上下文的方式依然还是。追加在末，固定位置，直到上下文重大变化时归集到
+   * 正确的索引位置。**」
+   *
+   * 索引本身由 `render` 摆进**长期记忆层**（与技能 catalog 同段素材、紧挨着它）。
+   * 这里管的是**它什么时候变**——这一格错了，整套设计就反过来了：
+   * 若渲染时每轮从实时配置现渲染，那么"加一个 server"会**立刻改掉请求前缀**
+   * （KV 缓存整段失效，本仓库实测口径 ≈9.6 万 token 一轮），而用户的意图恰恰是
+   * "增删只追加在末尾，到重大变化点才归集"。
+   *
+   * ⇒ **索引必须冻结**：渲染读的是日志里那条快照，而快照只在下面三个点上重建。
+   *
+   * ──────────────────────────── 三个重建触发点（判据） ────────────────────────────
+   *
+   * ① **本进程至今没有快照**（老日志、或全新的数据目录）——进程启动就是一次"重大变化"：
+   *    它改了渲染模板之外的运行时事实，而**绝大多数配置字段仍然要重启才生效**
+   *    （`config/watcher.ts` 的热更白名单今天只有一项 `mcp.servers`，见下），所以
+   *    "配置不动的那段时间"大体上等于进程的生命周期；进程一开始定下的索引，在这一整段里
+   *    都代表现状。
+   * ② **模板换代**：最后一条快照的 `version` ≠ 当前 `RENDER_VERSION` ⇒ 旧字节与当前模板
+   *    不是同一把尺子（那一天本来就是一次缓存全 miss，见 `render.ts` 的 v46 那一篇）。
+   * ③ **上下文重大变化**：最后一条快照的 seq **早于**最后一条 `compaction/summary`
+   *    ——自动压缩与界面 reset（`/api/...` 的 reset，`web/server.ts` 也写这个事件）都算。
+   *    这一刻才是用户说的"归集到正确的索引位置"：用**当前配置**重建索引，
+   *    此前那些"尾部追加"（server 增删的通报）就自然被新索引覆盖了语义
+   *    ——它们在历史里逐字节不动（append-only），只是不再是"唯一知道有它"的那一处。
+   *
+   * **配置改动刻意不是触发点**（`mcp.servers` 热更之后这条判据**照旧成立，而且是刻意的**）：
+   * 它不落 `compaction/summary`。热更把活配置就地改了 ⇒ 本方法读到的 `servers` 立刻是新值，
+   * 但**索引的字节仍然冻结在快照上**——这正是用户要的那条："增删进入上下文的方式依然还是。
+   * 追加在末，固定位置，直到上下文重大变化时归集"。所以热更那一刻**不会**重建索引
+   * （重建 = 每轮改请求前缀 = 缓存整段失效，判据见 `config/watcher.ts` 的 `HOT_RELOAD_FIELDS` ①）。
+   * 真正会让索引变的是**下一次重大变化**（③）与**重启**（①）。
+   *
+   * ⚠️ 一处已知的**行为边界**（热更带来的，写在明处）：如果**这个进程从来没写过快照**
+   * （`point.seq === 0`，例如 `servers` 原本为空 ⇒ 按下面那条"空索引不落库"的口径，
+   * 之后又在运行期热更加了一个 server），那么下一次 `mcpIndexSync` 会把它当成"首次"落一条
+   * `mcp/index`——那一次就是一次请求前缀变化（与重启后首次落快照**同一个代价**）。
+   * 不是热更独有的病（重启也走这条路），但热更让它更容易被碰上：**加第一个 server 时**
+   * 若不想付这一笔，就在加之前先重启一次（那时会在启动期落好快照）——**未实测**，
+   * 依据是这三条判据本身。
+   *
+   * ─────────────────── 空配置：**不写事件**（这一条有测试钉着） ───────────────────
+   *
+   * `servers` 为空 ⇒ 索引段整段不出现 ⇒ 快照与"没有快照"在渲染上**逐字节等价**
+   * （都渲染成空）。此时写一条 `mcp/index` 只会在事件流里多一行没人读的东西，
+   * 却会让"事件序列逐字相同"那类基线（`test/heartbeat-real-wake.test.ts`）无故变红。
+   * ⇒ 空索引**不落库**，实例上那份缓存照旧置空串（渲染结果与没有这一版逐字节相同）。
+   *
+   * 返回"这一拍定下的文本"，便于测试直接断言（生产调用点不需要它）。
+   */
+  async mcpIndexSync(): Promise<string> {
+    const events: AppEvent[] = [];
+    for await (const event of this.deps.log.readAll()) events.push(event);
+    // 这一份**留给同一拍后面的人用**（`settleGrants`）：它必须在同步段里跑完，不能自己再读一遍
+    // 全量日志（那是一次真实的磁盘往返，而这里每拍已经付过一次了）。
+    // 它只是"本拍看到的事件快照"——写入点仍然是日志，这里**只读**，谁也不许就地改它。
+    this.eventView = events;
+    const point = mcpIndexOf(events);
+    const version = RENDER_VERSION;
+    // 两条"该重建"的判据**分开**（判据与理由写在 `MCP_INDEX_DESC_CLAUSE_VERSION` 的注释里）：
+    //   • version 换代 ⇒ 渲染模板变了（请求体可比性变了）；
+    //   • 行模板版本换代 ⇒ 这一行怎么拼变了。它**只重建一次**：重建出来的快照带着当前值，
+    //     下一拍这条判据就不成立了。若把这两条合成一条（只认 version），这一版的生命周期里
+    //     "快照 version ≠ 当前 RENDER_VERSION"会**一直**成立 ⇒ 每拍重建一次索引。
+    const stale = point.seq === 0
+      || point.version !== version
+      || point.descClauseVersion !== MCP_INDEX_DESC_CLAUSE_VERSION
+      || point.seq < point.coveredSeq;
+    if (!stale) {
+      this.mcpIndexText = point.text ?? '';
+      return this.mcpIndexText;
+    }
+
+    const view = mcpIndexView(this.deps.config.mcp.servers, this.deps.dataDir);
+    // 空索引：不写事件（判据见方法头），但**缓存要跟着置空**——她这一刻确实一个 server 都没有。
+    if (view.text === '') {
+      this.mcpIndexText = '';
+      return this.mcpIndexText;
+    }
+    this.appendSync('mcp/index', {
+      version, text: view.text, servers: view.servers,
+      // 行模板版本一起落（缺这一格的老快照按 0 算 ⇒ 该重建一次，见那个常量的注释）
+      descClauseVersion: view.descClauseVersion,
+    }, 'internal');
+    this.mcpIndexText = view.text;
+    const reason = point.seq === 0
+      ? '首次（日志里还没有快照）'
+      : point.version !== version
+        ? `模板换代（快照是 v${point.version ?? '?'}）`
+        : point.descClauseVersion !== MCP_INDEX_DESC_CLAUSE_VERSION
+          ? `索引行模板换代（快照是第 ${point.descClauseVersion} 版，当前第 ${MCP_INDEX_DESC_CLAUSE_VERSION} 版——这一版给行里补了"它是干什么的"那一截）`
+          : '上下文重大变化后归集';
+    this.write(`[MCP] 常驻索引已重建（${reason}）：${view.servers.length} 个 server，`
+      + `${view.servers.filter(row => !row.disabled).length} 个启用`);
+    return this.mcpIndexText;
+  }
+
+  /**
+   * **配置热更之后的循环侧收尾**（2026-10-10 加；宿主接在 `RealLoopDeps.onConfigReloaded` 上）。
+   *
+   * 它**只做一件事**：如实说清"声明面变了，但索引那一段的字节不动"。
+   *
+   * 三处刻意不做的（每一处都有判据，别顺手加回去）：
+   *   • **不重建索引**（不调 `mcpIndexSync`）：索引按用户定的口径**只在重大变化点归集**，
+   *     而"改一次配置"不是重大变化。在这里重建就等于每轮改请求前缀——正是 v46 那一版
+   *     花了一整版躲开的那件事（≈9.6 万 token 一轮，见 `config/watcher.ts` 的
+   *     `HOT_RELOAD_FIELDS` ①）。她要知道"声明变了"，走的是**尾部追加的通报**
+   *     （`wake/manual{via:'mcp'}`，由宿主发；这里只写诊断输出）。
+   *   • **不落事件**：热更的事实已经由 `ConfigWatcher` 写成 `config/changed`（internal），
+   *     再写一条只是把同一件事记两遍；而 `mcp/index` 是**快照**（语义是"这一刻索引是什么"），
+   *     拿它当"声明变了"的通知用会把两件事揉在一起。
+   *   • **不叫醒她**（不 `appendSync`）：唤醒的写入点是宿主（`main.ts` 的订阅者）——
+   *     那里才知道"这次到底变了哪几个 server 的名字"，而通报的正文要的就是那几个名字。
+   *
+   * 为什么这一句值得写进日志：热更之后**索引与配置会短暂不一致**（索引还是旧的，配置已是新的），
+   * 这是设计内的。不说，读日志的人就会以为"热更没生效"。
+   *
+   * **预热之前的调用会被存起来**（`pendingConfigReload`）：`warmUp` 的第一件事是按日志重建
+   * `mcpIndexText`，而"当前有几个 server"这句话该在它之后说（否则那两行与紧接着的预热日志
+   * 会对不上）。存起来 → `ensureReady` 在预热跑完时补写。**不做成 async 排队**：这一格只装
+   * 一条通报，而配置重载是串行的（`ConfigWatcher` 的互斥锁），不会有第二条挤掉第一条。
+   */
+  notifyConfigReloaded(change: ConfigReloadOutcome): void {
+    if (this.ready === null) {
+      this.pendingConfigReload = change;
+      return;
+    }
+    this.noteConfigReload(change);
+  }
+
+  private noteConfigReload(change: ConfigReloadOutcome): void {
+    const fields = change.fields.join('、');
+    this.write(`[配置] 热更已并入：${fields}（循环这一侧读的是同一份就地改过的 AppConfig，无需重建）`);
+    if (change.fields.includes('mcp.servers')) {
+      const enabled = this.deps.config.mcp.servers.filter(entry => entry.disabled !== true).length;
+      this.write(`[MCP] 声明面已热更（当前 ${this.deps.config.mcp.servers.length} 个 server，`
+        + `${enabled} 个启用）：**常驻索引那一段的字节保持不变**——`
+        + '它按既有快照机制在下一次上下文重大变化（压缩 / reset）或重启时归集；'
+        + '此刻要她看见的变化走的是尾部追加的那条通报（wake/manual · via=mcp）');
+    }
+    if (change.requiresRestart.length > 0) {
+      this.write(`[配置] 以下字段仍需重启：${change.requiresRestart.join('、')}`);
+    }
+  }
+
+  // ──────────────────────────────── 压缩后唤醒（2026-10-09） ────────────────────────────────
+
+  /**
+   * **压缩完成之后叫醒她一次**（用户 2026-10-09 的原话：「压缩后，应该也进行一次唤醒。
+   * 告知 LLM 刚刚进行了压缩。**如有中断的工作则继续**」）。
+   *
+   * 为什么必须有这一下：压缩把刚跑完那一轮折进交接笔记、也就是说**她眼前的那段上下文刚被
+   * 换掉**。不叫醒，`compaction/summary` 落库之后就是一片安静——那份笔记要等到下一次有人
+   * 说话（可能是几小时后的心跳、也可能是一整夜之后）才第一次进她的上下文，而"手上没做完的
+   * 事"正是在这段安静里断掉的。这一拍的成本是一次请求；不叫的代价是**一件做到一半的活
+   * 停在没人知道的地方**。
+   *
+   * 走的是**既有那条真唤醒路径**（与 MCP 声明变更同一形状）：`appendSync('wake/manual')`
+   * → `applyOne` 折进共享投影 → 主循环下一拍认领 ⇒ 真起 turn、`turn/start` 出现、
+   * 正文逐字进当轮请求体。**没有新增唤醒类型**，`main.ts` 一行都不用改。
+   *
+   * 三处刻意不做的：
+   *   • **不接 `noteUserSpoke`**：这不是人开口。接了会把框架通报写成"他刚说「…」"，
+   *     还会顺手打断她正在说的话（`/dream` 那条踩过同一个坑，见 `noteUserSpokeEvent`）；
+   *   • **本拍不自己起 turn**：认领与开跑都归主循环（`tickOnce` 的输入处理那一段）。
+   *     这里再跑一次 `runTurn` 就等于绕过唤醒门（预算暂停、日额度、攒批）自己开一条后门；
+   *   • **不 `return`**：调用点在 `tickOnce` 的收尾链中间，提前返回会跳过挂起线索与安静计时。
+   *
+   * **防抖（不许自己叫自己）**：`compaction/decision` 一 turn 恰好一条（写入点只有
+   * `TurnRunner.run` 一处），而这里按 `decision.data.turn` 去重——同一个 turn 只发一次。
+   * 于是"唤醒那一拍自己又触发了压缩"这件事最多产生**下下拍**的一次新唤醒，且新唤醒必须
+   * 来自**新的** `reason: 'wrote'`：它要求遮蔽点严格前移、折叠真的变小、且新闭合的历史
+   * ≥ 一个 recent tail（`RECENT_TAIL_TOKENS`，见 `compactionDecision`）。**刚压完再压**
+   * 那一段量出来是 0 ⇒ 必被闸门拦下 ⇒ 不可能自激成环。
+   *
+   * @param beforeSeq 本 turn 开跑前的位置：只在这个区间里找判定（少了它，上一个 turn 的
+   *   `wrote` 会被本拍再读一遍，同一件事叫两次）。
+   */
+  private async handleCompactionWake(beforeSeq: number): Promise<void> {
+    let decision: AppEvent & { type: 'compaction/decision' } | null = null;
+    for await (const event of this.deps.log.readRange(beforeSeq + 1)) {
+      if (event.type === 'compaction/decision' && event.data.reason === 'wrote') {
+        decision = event as AppEvent & { type: 'compaction/decision' };
+      }
+    }
+    if (decision === null) return;
+
+    const key = decision.data.turn;
+    if (this.compactWakeTurns.has(key)) return; // 同一 turn 不重复发（防抖；见方法头）
+    this.compactWakeTurns.add(key);
+
+    const covered = decision.data.coveredUpToSeq ?? 0;
+    const previous = decision.data.previousCoveredUpToSeq ?? 0;
+    const note = compactionWakeNote({ turn: key, covered, previous, dataDir: this.deps.dataDir });
+    // 正文逐字进 `wake/manual.note`（不是"另写一句摘要"）：日志是唯一真相源，
+    // 而"框架当时对她说了什么"要能从日志里原样读回来（与 `injection/noted` 同一条理由）。
+    this.appendSync('wake/manual', { note, via: 'compact' }, 'model');
+    this.write(`[压缩] 已发一次真唤醒（via=compact，turn ${key}，遮蔽至 seq ${covered}）`);
   }
 
   // ──────────────────────────────── 唤醒门 ────────────────────────────────
@@ -1648,6 +2023,45 @@ export class RealLoop {
     }
   }
 
+  // ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
+
+  /**
+   * 把 `<dataDir>/grants/` 里**还没进过日志**的单子变成一条待批（②那一拍）。
+   *
+   * 整套判据在 `grant/mcp-grant.ts` 的 `settleGrants`（那里是唯一实现：幂等、同一件事只问
+   * 一次、判不过的当场退回、`human/asked` 用 system 来源）。这一层只做两件**循环侧**的事：
+   *   • 把投影里台面上还没答复的提问喂给它（判"同一件事只问一次"要用）；
+   *   • 把"写事件"接到 `appendSync` 上——**可见性一律走 schema 表**（同 agent-loop 那条纪律）。
+   *
+   * 它**不异步、不 await**：整件事是"读几个小文件 + 写两条事件"，与 `settleHumanAsks`
+   * 同一个量级；而它必须在**任何输入被认领之前**跑完（那两条事件的一部分就是给人的卡）。
+   */
+  private settleGrants(): void {
+    const result = settleGrants({
+      dataDir: this.deps.dataDir,
+      // 这一拍的全量事件视图（`mcpIndexSync` 就在 tickOnce 的前几行读下的那一份，
+      // 见 `eventView` 那一格：**本方法不能 await**，而它必须在同步段里跑完）
+      events: this.eventView,
+      openAsks: this.deps.projection.humanAsks.map((ask) => ({
+        seq: ask.seq, question: ask.question, at: ask.at, expiredAt: ask.expiredAt,
+      })),
+      write: (type, data) => this.appendSync(type, data, defaultVisibility(type)).seq,
+      // turn 号在这一拍还没分配（认领在后面）⇒ 挂 0。与通道注入判定那条"挂 0"同一口径：
+      // 这条账的用途是"这张单子是什么时候递的"，不是 turn 归属
+      turn: 0,
+    });
+    for (const raised of result.raised) {
+      this.write(
+        `[申请单] 拾取到一张待批：${raised.data.kind}「${raised.data.name}」`
+        + `（id=${raised.data.id}）⇒ 已挂出提问 seq ${raised.data.askSeq}，等人点头`,
+      );
+    }
+    for (const bounced of result.bounced) {
+      // 退回**不挂卡**（理由在 `settleGrants` 的判据 ③）：留一行诊断让人查得到
+      this.write(`[申请单] ${bounced.id} 当场退回（${bounced.reason}）：${bounced.detail}`);
+    }
+  }
+
   // ──────────────────────────────── 人审挂起（design §4.21） ────────────────────────────────
 
   /**
@@ -1673,13 +2087,64 @@ export class RealLoop {
       this.appendSync('budget/topped-up', { layer: 'task', addedTokens: 0, by: 'human-answer' }, 'internal');
       void this.notifier.ok(CATEGORY.human, '人审挂起已得到答复：任务层暂停已解除。');
     }
-    this.appendSync('input/requeued', {
-      wakeSeqs: s.wakeSeqs,
-      claimCounts: s.claimCounts,
-      sources: s.sources,
-      reason: 'human-answered',
-    }, 'internal');
-    this.write(`[人审] turn ${s.turn} 的答复已到位：${s.wakeSeqs.length} 条输入已重新入队`);
+
+    // ── 重投之前先问一句：这条输入**还在她的上下文里**吗（v50，2026-10-10 修的真 bug）──
+    //
+    // 判据**只有一条**，落在**一个**点上（就是这里）：把"重投"按它进那一轮的位置分成两类——
+    //   · `seq < 该轮 turn/start` ⇒ **上一拍就已经递到她眼前的那条输入**（当轮输入）；
+    //   · 其余 ⇒ 本轮进行中才插进来的插话（`claimInterruption`），从头到尾还没被递过。
+    // 只有**前一类**才需要再问一句"它还在吗"：**`seq <= 遮蔽点` ⇒ 它已经被
+    // `compaction/summary` 折进摘要了**，她的上下文里没有它 ⇒ **不许再插一条**。
+    //
+    // 现场（逐项对照 1245/14 与 1246/1，本机 03:17）：那条 `input/requeued{human-answered}`
+    // 把 `wake/manual`（**上下文压缩通报**，seq 72233）重新入队，而它早在 turn 1245 就被递过、
+    // 且已经被后面那次压缩折掉 ⇒ 那一拍的请求里**同一个包裹出现两遍**：一条在历史最前面
+    // （`[1]`：标题 + 三行正文 + 遮蔽点），新递的那条**插在历史中间**（`[42]` 附近）
+    // ⇒ **它之后的一切错位**，`input=54396 / hit=16512 / miss=37884`（几乎全 miss）。
+    // 日志自己的判词是 `cacheBreak.class='history' / cause='unattributable'`——
+    // "指纹变了，但两次调用之间没有任何能解释它的事件"，因为那条错位**不是**某条事件的字节
+    // 变化，而是**多了一条一模一样的通报**。
+    //
+    // 为什么这两条合起来就是对的（而且不必再看别的）：
+    //   · **被折掉 = 摘要已经替她说过了** ⇒ 重投既改不了她的判断，又白赔一整段前缀；
+    //   · **插话那一类照旧重投**：它还没被递过，重投是"第一次给她"（不多不少一条）；
+    //   · **没压缩过**（遮蔽点 0）或**遮蔽点在它之前**的，一律照旧——重启打断 / 整轮失败
+    //     那两条路要的正是"再给她一次机会"，`crash-injection.test.ts` 与
+    //     `plan-askhuman.test.ts` 都盯着这件事。
+    // **判据一处**：渲染层不重复判（`render` 照旧只认 `requeuedSeqsOf` 那个集合），
+    // `agent-loop` 也不判——"哪条不该再递"是**投递**的决定，只落在这一行上。
+    const covered = this.coveredPointOf();
+    const turnStartSeq = this.turnStartSeqOf(s.turn);
+    const keepSeqs: number[] = [];
+    const keepCounts: number[] = [];
+    const keepSources: typeof s.sources = [];
+    const folded: number[] = [];
+    s.wakeSeqs.forEach((seq, i) => {
+      const wasCurrentInput = turnStartSeq > 0 && seq < turnStartSeq;
+      if (wasCurrentInput && seq <= covered) {
+        folded.push(seq);
+        return;
+      }
+      keepSeqs.push(seq);
+      keepCounts.push(s.claimCounts[i] ?? 1);
+      keepSources.push(s.sources[i] ?? 'manual');
+    });
+
+    if (keepSeqs.length > 0) {
+      this.appendSync('input/requeued', {
+        wakeSeqs: keepSeqs,
+        claimCounts: keepCounts,
+        sources: keepSources,
+        reason: 'human-answered',
+      }, 'internal');
+    }
+    // 被折掉的那几条**如实记账**（不静默丢）：投影里它们不再回队列，日志里这一次要说清
+    if (folded.length > 0) {
+      this.write(`[人审] turn ${s.turn} 的答复已到位：${folded.length} 条输入**不再重投**`
+        + `（早已递过、且已被上下文压缩折进摘要——遮蔽点 seq ${covered}：${folded.join('、')}）`
+        + `：重投它只会把一条已经折掉的通报插回请求中间（那正是一次整段前缀失守的成因）`);
+    }
+    this.write(`[人审] turn ${s.turn} 的答复已到位：${keepSeqs.length} 条输入已重新入队`);
     this.suspension = null;
   }
 
@@ -1800,6 +2265,14 @@ export class RealLoop {
   private async ensureReady(): Promise<void> {
     if (this.ready === null) this.ready = this.warmUp();
     await this.ready;
+    // 热更通报在预热跑完之前到达时**存着**（见 `notifyConfigReloaded` 的注释），这里补写：
+    // 判据是"预热已经把 `mcpIndexText` 定下来了吗"——没定下来时那两行日志里的"当前几个 server"
+    // 会与预热即将定下的索引对不上，读的人会以为热更丢了。
+    const queued = this.pendingConfigReload;
+    if (queued !== null) {
+      this.pendingConfigReload = null;
+      this.noteConfigReload(queued);
+    }
   }
 
   /** 从日志重建四样跨重启的东西：告警限流窗口（M3-10）、人工加注累计（M3-5）、技能信任表（§4.19）与 turn 号 */
@@ -1889,6 +2362,11 @@ export class RealLoop {
     }
     // 布防放在最后：它要读定时器表（表由宿主在构造前 load 过），而且只该布一次
     await this.ensureMemoryMaintainTimer();
+    // MCP 常驻索引（v46）：**启动也是"重大变化点"**（所有配置字段都要重启才生效，所以
+    // "配置不动的那段时间"正好是这个进程的生命周期）⇒ 这里把索引定下来并落一条 `mcp/index`。
+    // 放在最后：它要读配置面与落盘缓存，且**必须在第一拍认领输入之前**完成
+    // （`ensureReady()` 在 `tickOnce` 的第一行，认领在后面）。
+    await this.mcpIndexSync();
   }
 
   // ──────────────────────────────── 每日记忆整理（design §4.17） ────────────────────────────────
@@ -2055,6 +2533,10 @@ export class RealLoop {
     // 场合：最高档 = GUI/本机唤醒、官 bot 上用户 id 的会话（单聊与群聊都算）、她自己。
     // 其余（群里别人、陌生单聊、webhook）都是"软件里遇到的人"→ guest。
     const scenario: Scenario = this.scenarioOf(wakeEvents);
+    // 本轮可信级别：**与上面 scenario 同源**（`trustOfTurn` 一处判定，两个消费点各取自己那半边）。
+    // 场合只有两档（owner/guest），而工具清单要区分四档——`trusted`（单聊里记过名字的熟人）
+    // 与 `external`（群里的人）拿到的清单不同，见下面的 modelVisibility。
+    const trust: TurnTrust = this.trustOfTurn(wakeEvents);
     // 本轮固定块的素材（B2）：**在这里读一次**，整轮共用同一份（见 turnBlockFacts）。
     // 读一次是这段代码的全部要点：`deriveRequest` 每步都会重新读 deps，而 deps 里的这份
     // 是**轮首快照**——一轮之内它逐字节不变，"不必每步重新编码"才成立。
@@ -2119,15 +2601,19 @@ export class RealLoop {
       // 进模型清单的工具口径（§4.10 第三级门）：destructive 工具有没有「全开」或进名单，
       // 由配置说了算——以前这里恒为空对象，界面上把 destructive 打开也不会有任何效果。
       //
-      // 现在再叠一层：**按本轮的可信级别收紧**（runtime/trust.ts）。群里任何人 @ 她都会叫醒
-      // 她，而那条消息本身就是输入；配置里"图方便全开"不能等于"群里谁都能使唤她"。
-      // 取更严的那份——外部来源只看到 speak/report/read_channel/vision_read 四件。
-      // **工具清单恒定**（2026-10-04 用户定稿）：不再按信任级增减件数。
+      // 再叠一层：**按本轮的可信级别收紧**（runtime/trust.ts）——外部来源只看到白名单那四件
+      // （speak / report / read_channel / vision_read），`trusted` 那一档一律不含 destructive。
+      // 合成只有一处实现：`modelVisibilityFor`（本文件这个分支上**曾经**写的是恒为
+      // `{ includeDestructive }` 的裸取值，于是"外部轮次天然拿不到 mcp"这句话在代码里不成立——
+      // 外部轮次看得见也调得动 `mcp`，而 config 里 destructiveEnabled 一开，MCP 侧的破坏性
+      // 工具全部放行。那份注释在 2026-10-09 的复核里被判为"文档写着有门、代码里没有"）。
       //
-      // 依据是实测：清单随会话变，会让"它之后的那整段历史"前缀缓存全部失效
-      // （同签名命中 85.2%、换签名 41.2%，最差 2%）。所以能力的收窄挪到**执行期**，
-      // 见下面的 authzGate——清单不再承担权限表达。
-      modelVisibility: { includeDestructive: d.config.tools.destructiveEnabled },
+      // **工具清单恒定**（2026-10-04 用户定稿：不再按信任级增减件数）这条铁律在这里被**有意**
+      // 推翻一次：实测口径是"清单随会话变会让它之后那整段历史的前缀缓存失效"（同签名命中 85.2%、
+      // 换签名 41.2%）。安全那半边压过这一个百分数——只按信任级（不是按会话）分档，工具清单
+      // 仍然只有**四档**，同一档内的所有轮次逐字节相同。代价是换档那一次 miss，按 `render.ts` 的
+      // 红线同批递增了 `RENDER_VERSION`（43 → 44）。能力的收窄**另有一道**执行期门，见 authzGate。
+      modelVisibility: modelVisibilityFor(trust, d.config.tools.destructiveEnabled),
       // 活动边界（`config.trust.mode`）：**装配层唯一的消费点**——判据是 config.ts 的
       // `trustBoundaryRoot`（'full' → null 完全信任 / 'workspace' → 只限 trust.workspaceRoot）。
       // 与 workspaceRoot 一样是启动期定下的（它进的是 `AgentLoopDeps`，每 turn 重新装配一次，
@@ -2161,6 +2647,12 @@ export class RealLoop {
       },
       // 技能索引（§4.19）：每 turn 重扫一次技能根，信任门未放行的不进 catalog
       skillCatalog: this.skills?.catalogText() ?? null,
+      // MCP 常驻索引（v46）：与技能索引**同段素材**（长期记忆层里紧挨着它）。
+      // ⚠ 它**不是**每 turn 现渲染的：字节只来自日志里那条 `mcp/index` 快照
+      // （轮首由 `mcpIndexSync` 按"重大变化点"重建），这样"加一个 server"不会改掉请求前缀。
+      // 这一格是**实例上那份缓存**（`mcpIndexText`）：`mcpIndexSync` 在同一个 tick 的轮首
+      // 刚把它更新过，而本轮认领输入发生在它之后 ⇒ 这里读到的永远是本拍定下的那一份。
+      mcpIndex: this.mcpIndexText,
       // 记忆索引（B2）：`MEMORIES/INDEX.md` 的渲染形态——只有指针（路径 + 一行摘要 + !pinned），
       // 正文要她按需 safe_read。每 turn 重建一次索引文件（幂等：内容没变就不写盘），
       // 因为上一轮里她可能刚写过新记忆。见 persona/memory-injection.ts。
@@ -2172,11 +2664,16 @@ export class RealLoop {
       // 只有上面那份索引（指针表）。她需要哪一条就照索引 safe_read——读回来的内容作为工具结果
       // 留在历史里，长期命中前缀缓存；代价是她得自己想起来去读（见 docs/memory-injection.md §5）。
       turnBlock,
-      // 本任务相关资产那一行（v34）：**轮首算好**的那一份（`prefetchAssetsLine`），
-      // 每步原样转手——所以一轮之内它逐字节不变（同一轮相邻两步的前缀仍接得上），
-      // 而"要不要挑、挑哪几条"只在轮首判一次（不每步重算）。
-      // 空串 = 整行不出现；任务完（下一轮没有任务卡）它自然消失。
-      assetsLine: this.assetsLine,
+      // **「本任务相关资产」那一行不再给了**（v45，2026-10-09 用户拍板取消「light 选取资产」
+      // 这条机制）：原来这里传的是轮首挑好的 `this.assetsLine`。删掉的是**值**，不是格子——
+      // `assetLine?` 这个字段本身留着，因为它是**逐字节重建旧日志**那条路要用的：
+      // `memory/selected.assets`（v34 起搭着记忆索引的账落库）里记着当时那一行，
+      // 重放（`runtime/replay.ts` 的 `assetsFromEvents`）与界面预览（`web/server.ts` 的
+      // `assetsLineAt`）都从事件取回它——把字段一起删掉就等于**改写历史**（旧日志重放出来会比
+      // 当时少一整行，`test/replay.test.ts` 的 v34 用例钉着这件事）。
+      // 于是：新的一轮**一个字都不给**（那一行不再出现在请求体里），旧的请求仍重建得回来。
+      // 空串 = 整行不出现（渲染层那一条判据在 `render.ts` 的此刻层）。
+      assetsLine: '',
       // STATE 预算（v32）：宿主装配 deps 时读一次配置（启动期参数），循环层每步原样转手。
       // 「她的 STATE 有多少字节」不在这里量——deriveRequest 从 `persona.state` 量，
       // 重放与界面预览因此拿到同一个数（三处判据一致，见 agent-loop 的注释）。
@@ -2274,6 +2771,11 @@ export class RealLoop {
       aliases: this.readAliases(),
       // 联系人表：人声明的事实（谁是用户、这个群是什么），优先于她自己的别名
       contacts: new Map(Object.entries(config.persona.contacts)),
+      // 发言人 → 名字：**这一个**判据也交给渲染层（v47），此刻层的「预警：」那一行与点名那句
+      // 用它写人名。为什么由宿主注入而不是让渲染层自己查表：名字真源的最后一档要读
+      // `data/group-members.json`（渲染层不读盘），而少一档就等于第二份判据——两份判据漂移
+      // 的后果正是 2026-10-11 修的那一处（同一份上下文里"用户（OWNER）"与"1269541505"并存）。
+      personNameOf: (person: string) => this.personNameOf(person),
       // 本轮唤醒的那条通道消息：只用来判"这轮是不是群里有人 @ 了我"。
       // 取的是**原始唤醒数据**而不是 `replyableWakeChannel` 的结论：那个判据问的是"能不能
       // 回投"（只认 c2c/group-at），而这里问的是"谁点了我的名"——将来的 `group` 全量模式
@@ -2421,21 +2923,16 @@ export class RealLoop {
     injection: 'human' | 'heartbeat';
     indexHash: string;
     entries: number;
-    assets?: string;
   } {
     const heartbeatTurn = isHeartbeatTurn(wakeEvents);
     // 心跳轮：什么都没注入，所以**没有"注进去的那一版"**——指纹留空串、条数留 0。
     // 此处刻意不算那份没被注入的索引的哈希：算了就等于账上写着一个"当时并不在请求里"的指纹，
     // 事后读日志的人会以为它注进去了（这个洞正是记账要防的那一类）。
-    // 数字资产那一行同理：心跳拍不挑（`prefetchAssetsLine` 已经把它留成空串），账上也不写。
     if (heartbeatTurn) return { injection: 'heartbeat', indexHash: '', entries: 0 };
     return {
       injection: 'human',
       indexHash: sha256Hex(renderMemoryIndex(index)),
       entries: index.entries.length,
-      // 本任务相关资产那一行（v34）：**轮首算好的那一份**，原样落账（重放据此逐字节重建）。
-      // 空串 = 这一轮没有那一行 → 字段不出现（事件形状与 v34 之前一致）。
-      ...(this.assetsLine === '' ? {} : { assets: this.assetsLine }),
     };
   }
 
@@ -2466,11 +2963,28 @@ export class RealLoop {
 
   /** 读 `MEMORIES/aliases.md`（她给外部会话起的名字）；读不到就当没有，不报错 */
   private readAliases(): Map<string, KnownSessionAlias> {
+    return this.readAliasTables().sessions;
+  }
+
+  /**
+   * 同一份 `aliases.md` 折成**两张表**：会话别名（sid 键）与群成员别名（裸 id 键）。
+   *
+   * 为什么一次读、两次解析：这两张表来自同一个文件、同一套行解析（`parseAliases` /
+   * `parseMemberAliases` 逐字对称），而认人那条路（`personNameFromHumanTables`）两张都要。
+   * 各自读一遍文件的话，`read_channel` 那种"一屏几十行、每行查一次名字"的地方会把同一份文件
+   * 读两遍——名字是渲染热路径，省下的那次 syscall 是白捡的。
+   */
+  private readAliasTables(): {
+    sessions: Map<string, KnownSessionAlias>;
+    members: Map<string, KnownSessionAlias>;
+  } {
     try {
       const path = join(memoriesDir(this.deps.dataDir), 'aliases.md');
-      return parseAliases(readFileSync(path, 'utf8'));
+      const text = readFileSync(path, 'utf8');
+      return { sessions: parseAliases(text), members: parseMemberAliases(text) };
     } catch {
-      return new Map();
+      // 读不动 / 没写过：两张空表。她是"还没给谁起过名字"，不是出错——不报、不拦。
+      return { sessions: new Map(), members: new Map() };
     }
   }
 
@@ -2551,116 +3065,24 @@ export class RealLoop {
     }
   }
 
-  /**
-   * 本轮的「本任务相关资产」那一行（v34）：从**索引清单**（她自己那一层 + 框架聚合的事实层）
-   * 里挑 ≤3 条相关的。
+  /*
+   * **这里曾经有三个方法**（v34 起，v45 删）：`prefetchAssetsLine()`（轮首读 `MEMORIES/assets.md`、
+   * 把索引喂给 light 挑 ≤3 条、渲染成任务卡上那一行）、`assetFacts()`（聚合技能目录 / MCP 声明 /
+   * PATH 探测这份**事实层**）、`assetTaskTitle()`（把"这一轮要做什么"交给 light）。
    *
-   * **它是"择机提醒"的落点**（用户 2026-10-06 收窄后的口径）：她平时看不见这份清单，只有
-   * **这一拍要干活**的时候，框架才把索引交给 light 挑一次，把可能用得上的 ≤3 条递到她面前
-   * ——一行、只读、就在任务卡上，**并带指路**（漏选时她仍有路去读全份清单）。
-   * 用法她自己去写、自己去读，框架一个字都不碰（见 `persona/assets.ts` 的纪律）。
-   *
-   * 五条分寸，都是这一处判的：
-   *   • **判据一处**：`isHeartbeatTurn`——只有心跳的那一拍"没人在叫她干活"，不读清单、不发请求。
-   *     这与"心跳轮不注入记忆索引"是同一个判据（`agentDeps` 里那个 `heartbeatTurn`），
-   *     两处各写一个判据迟早会漂成"账上说没挑、请求里却有"。
-   *   • **一次**：在 `tickOnce` 里调用一次，结果存进 `assetsLine`，整轮所有 step 共用
-   *     ——绝不每步重算（成本会从"一轮一次"挪到"一步一次"）。
-   *   • **事实层在这里聚合**（`assetFacts()`）：技能目录、MCP 声明、PATH 探测——
-   *     **别要求她手抄事实**（用户明确的一条）。她那一层只写"什么时候用、怎么用"。
-   *   • **失败即空**：`selectAssets` 自己承诺不抛（超时/回包不可用都返回空），这里再包一层
-   *     try/catch——最坏情况是这一轮没有那一行，绝不是"她开不了工"。
-   *   • **索引为空就不花这钱**：她没写过任何条目、事实层也没东西时，`selectAssets` 在发请求
-   *     **之前**就返回（`by:'none'`、`called:false`），一次 light 都不花。
+   * **为什么整块删干净**（2026-10-09 用户拍板取消「light 选取资产」这条机制）：留着一个再也不会
+   * 被调用的方法，等于把"框架还会替她挑"这件事留在代码里——下一个读代码的人会先信它。
+   * **没删的东西**（有意保留，别跟着一起删）：
+   *   • `persona/assets.ts` 的**事实层**（`factOf` / `withFacts` / `indexOf` / `probeOnPath`，
+   *     连同历史选型用的 `clipAssetNote` 那一套截断口径）——它服务"有哪些、在哪、就绪没有"，
+   *     与挑不挑无关；
+   *   • `MEMORIES/assets.md`（她自己的清单，她维护）与那条常驻规矩（"先读说明再用，不许凭名字猜"，
+   *     在装置自述第⑰段）——**一个字都没动**；
+   *   • `memory/selected.assets` 这条账与 `taskCard.assets` 这一格：**旧日志要逐字节重建**，
+   *     见 `agentDeps` 装配处那一篇注释（删的是"值"，不是"格子"）。
+   * 连带的 `RealLoopDeps.probeAssetPath` / `mcpServers` 两个覆盖点**留着**（它们是事实层的注入点；
+   * 现在**没有生产消费者**——这一点如实记在报告里，不假装它们还在服务什么）。
    */
-  private async prefetchAssetsLine(wakeEvents: readonly AppEvent[]): Promise<void> {
-    this.assetsLine = '';
-    // 只有心跳的那一拍：没人在叫她干活 → 清单都不读（与记忆索引同一条判据）
-    if (isHeartbeatTurn(wakeEvents)) return;
-    // 没有可用的模型通道就不挑（测试与窄路径上 `ds` 可能只是个空壳，与 judgeChannelWakes 同）
-    if (typeof this.deps.ds?.generate !== 'function') return;
-    const task = this.assetTaskTitle(wakeEvents);
-    try {
-      const selection = await selectAssets(this.deps.dataDir, {
-        ds: this.deps.ds,
-        task,
-        facts: this.assetFacts(),
-        log: this.deps.log,
-        projection: this.deps.projection,
-        now: this.deps.now,
-        // turn 号此刻还没分配（循环层在自己的 runInner 里才定），与注入判定的记账同一口径：
-        // 这条账的用途是观测 light 用量，不是 turn 归属。
-        turn: 0,
-        out: this.write,
-      });
-      this.assetsLine = renderAssetsLine(selection.entries, selection.skipped);
-      if (this.assetsLine !== '') {
-        // 留一行：这是**框架的**动作（挑了什么），排障时要看得见。
-        // **标题只印一份**：`renderAssetsLine` 的结果自己就以 `本任务相关资产：` 开头，
-        // 前缀里再带一次就成了 `[数字资产] 本任务相关资产（model）：本任务相关资产：…`
-        // （控制台实测就这样印过两遍）。这里只印**是谁挑的**，标题交给那一行自己。
-        // 只动这一处显示，进请求的字节一个字没动（`assetsLine` 原样转手）。
-        this.write(`[数字资产] 相关资产（${selection.by}）：${this.assetsLine}`);
-      }
-    } catch (err) {
-      // selectAssets 承诺不抛；真抛了也只当没挑出来（不拦她开工）
-      this.write(`[数字资产] 选取异常，这一轮不渲染那一行：${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  /**
-   * 事实层（框架聚合，用户的第 2 条）：**有哪些、在哪、是否就绪**。
-   *
-   * 三个来源，全部是这台机器上现成的事实——所以**不该由她手抄**（抄了就会过期）：
-   *   • **技能目录**：`SkillManager.scan()` 的候选名（技能被删掉之后，她清单里那条会如实显示
-   *     "已探测：未找到"，而不是一直看着像有）；
-   *   • **MCP**：`config.json` 的 `mcp.servers[]` 里**声明了哪些 server**（v34 补上，2026-10-06）。
-   *     声明面**就是配置**——主循环拿得到配置，所以"有哪些"是真事实；但**就绪情况不可知**
-   *     （`McpClientPool` 归宿主，real-loop 没有它）⇒ 那一格如实写"已配置（是否已启动未知）"。
-   *     **读不到配置面时整格留空**（`undefined`）：她的 `[mcp]` 条目会写"没有 MCP 配置可核对"，
-   *     绝不写"配置里没有这个 server"——读不到与确实没有是两件事，后者是假话。
-   *     **不新增网关工具**（用户 2026-10-06 的定调）。
-   *   • **PATH**：`probeOnPath`（纯 fs 查 PATH，不跑子进程）——只有她写了"已在 PATH"/路径的
-   *     条目才会被探一次，探测次数 = 她清单里的条目数，一轮一次。
-   */
-  private assetFacts(): AssetFactSource {
-    const skills = this.skills === null
-      ? undefined
-      : this.skills.scan().candidates.map(candidate => candidate.name);
-    // `probeAssetPath` 是覆盖点（测试注入确定性的探测结论）；缺省真查 PATH
-    return {
-      skills,
-      mcp: this.deps.mcpServers !== undefined
-        ? this.deps.mcpServers().map(name => ({ name }))
-        : declaredMcpServers(this.deps.dataDir),
-      probePath: this.deps.probeAssetPath ?? probeOnPath,
-    };
-  }
-
-  /**
-   * 挑资产时用的"这一轮要做什么"。
-   *
-   * 口径与任务卡标题**同源**：`wakeTitle`（`agent-loop` 的 `taskCard()` 用的就是它），
-   * 提及那一轮换成那句框架通知（走 `contactWithWakeStamp` + `mentionNoticeOf`，与循环层
-   * **同一处实现**）——两处各算一份标题，就会出现"挑资产时看的是 A、任务卡上写的是 B"。
-   * 多批输入时用换行连起来（她要办的事可能不止一件），长度交给 assets 模块里的截断。
-   *
-   * 定时器 payload 表这里给空的：`wake/timer` 事件自带 payload（`renderWake` / `wakeTitle`
-   * 都先读事件自带的那份，查表只是老日志的兜底），而"到点要做什么"的 note 就在事件里。
-   */
-  private assetTaskTitle(wakeEvents: readonly AppEvent[]): string {
-    const contact = this.contactFacts();
-    const payloads = new Map<string, unknown>();
-    return wakeEvents
-      .map((event) => {
-        if (event.type !== 'wake/channel') return wakeTitle(event, payloads);
-        const withStamp = contactWithWakeStamp(contact, event, this.deps.timezone);
-        const notice = mentionNoticeOf(withStamp, event);
-        return notice === null ? wakeTitle(event, payloads) : notice.text;
-      })
-      .filter(text => text !== '')
-      .join('\n');
-  }
 
   /**
    * 把"框架示了警"这件事落成事件（`injection/noted`，v25）——**逐条**，一条消息一次。
@@ -2920,7 +3342,112 @@ export class RealLoop {
         ...(flagged === null ? {} : { flaggedNote: flagged }),
       });
     }
-    return hits.slice(-limit);
+    // 取数窗口才是"这一屏的候选"（`slice(-limit)` 就是工具层拿到的那些），所以图片事实
+    // 也算在**窗口**上、名额也发在窗口上——不是算在整份日志上（那会为几十条历史白读文件）。
+    const window = hits.slice(-limit);
+    this.prepareAimedContextImages(window);
+    return window;
+  }
+
+  /**
+   * `read_channel` 的**点名例外**（2026-10-11 用户拍板）：给这一屏里"冲她来的"那些消息算一份
+   * "图片能不能进上下文"的事实，挂在 `ChannelMessageView.contextImages` 上交给工具层。
+   *
+   * 三条判据**一处都不重写**：
+   *   · 是不是冲她来的 ⇒ `imageAimedAtHer`；
+   *   · 准入 ⇒ `contextImageAdmission`（地址形态 + 声明型别——与唤醒那条路、与预热那条路
+   *     是同一个结论）；
+   *   · 最后一米 ⇒ `readFileImage`，**渲染层注入 loader 自己那个函数**（见 real-loop 的
+   *     `loadImage`/`readAttachmentImage` 与 render.ts 的 imagesOf）：同一个文件、同一个
+   *     字节头上限，所以"这里说进得去"就等于"请求体里真有它"，不是两次各判一遍。
+   *
+   * 这里**只算事实、不装配**：装配（写 `image/attached`）由工具层在"这一屏到底给她哪几条"
+   * 定下来之后做——候选窗口与那一屏不是同一集合（工具层那五个分支可能只摆窗口里的一部分）。
+   *
+   * **不下载**（与预热的明确分工）：字节由 `prewarmRecentAttachments` 每拍取（它扫的正是
+   * `wake/channel`，而"冲她来的"消息必然走那条路），这里只读本地已有的那一份。理由是预算：
+   * 预热是后台拍的预算（5s 下载 + 15s 压缩），而这是**交互式**的一次读（工具超时 10s，
+   * 见 admin 的 read_channel）——在这里现下现压能把一次"翻开看看"拖成超时，那时她连
+   * "这一屏有什么"都拿不到。"本地没有字节"照实说（那一行的地址照旧在，她自己 http_download 也行）。
+   *
+   * ⚠️ **已知的一处重复**（取舍写在这里，不藏着）：点名她的消息本身就是 `wake/channel`，
+   * 而唤醒那条路也会把它的图注进上下文（渲染层的图片窗口按"最近 N 张事件"选，**不按内容去重**）。
+   * 于是"她读一条刚叫醒她的带图消息"时，同一张图可能进请求体两遍。这里**没有**去重，因为要去重
+   * 就得在宿主里再实现一遍那个窗口的挑选规则（"最近 N 张、seq 越过遮蔽点、model 可见"）——
+   * 那是第二份判据，迟早与渲染层漂移，而漂移的后果是"行上说带了、请求体里其实没有"。
+   * 代价有上限：一次读最多 N 张（上面那个常量），而地址与行数的成本一分没变。
+   */
+  private prepareAimedContextImages(window: ChannelMessageView[]): void {
+    const budget = this.contextImageBudget();
+    if (budget <= 0) return;
+    let spent = 0;
+    for (const item of window) {
+      if (!imageAimedAtHer(item)) continue;
+      const images = (item.attachments ?? []).filter(isImageAttachment);
+      if (images.length === 0) continue;
+      const facts: ContextImageFact[] = [];
+      for (const image of images) {
+        // 名额按**时间正序**发：她是从上往下读这一屏的，先遇到的那几张先带。
+        if (spent >= budget) {
+          facts.push({ state: 'over' });
+          continue;
+        }
+        const fact = this.contextImageFactOf(image);
+        if (fact.state === 'ready') spent += 1;
+        facts.push(fact);
+      }
+      item.contextImages = facts;
+    }
+  }
+
+  /**
+   * 这一次读的图片名额：`vision.imagesToContext` 关着、或 `maxContextImages` 是 0 ⇒ **0**
+   * （一条事实都不产出，那一行与默认那条路逐字相同：只给地址）。
+   *
+   * 为什么两个都要看：`imagesToContext` 是总闸（渲染层连 loader 都不装配），`maxContextImages`
+   * 是"同时待在上下文里的图片张数"（渲染层那个从后往前数的窗口）。少看任何一个，这条路都会
+   * 说出"已带进上下文"，而请求体里其实没有它。
+   */
+  private contextImageBudget(): number {
+    const vision = this.deps.config.vision;
+    if (vision.imagesToContext !== true) return 0;
+    return Math.max(0, Math.min(READ_CHANNEL_CONTEXT_IMAGE_MAX, vision.maxContextImages));
+  }
+
+  /**
+   * 一张图能不能进上下文（判据全是既有实现，见 `prepareAimedContextImages` 的注释）。
+   *
+   * 两步都必要、不是重复：
+   *   ① `readAttachmentImage` 答复"这份字节算不算一张能进上下文的图"，并定下**读哪一份**
+   *      （有压缩产物就用它——那是专门为上下文准备的小图；没有才退回原件）；
+   *   ② `readFileImage` 拿①选中的那个**文件**再走一遍 loader 那条路（`image/attached` 的 key
+   *      只能是本地文件、渲染层就是拿它调这个函数）。①认得出而②读不出，只可能出现在
+   *      "字节是内联的 `data:`、而本地并没有落成文件"这种形态上——那时如实报 `no-local-bytes`，
+   *      不许说"已带进上下文"。
+   */
+  private contextImageFactOf(image: { type: string; url?: string; name?: string }): ContextImageFact {
+    const url = image.url ?? '';
+    const admission = contextImageAdmission({ url, mime: image.type });
+    if (!admission.admitted) return { state: 'denied', reason: admission.reason ?? 'unknown-media-type' };
+    const viaAttachment = readAttachmentImage(
+      this.deps.dataDir,
+      { source: 'remote', key: url, mime: image.type },
+      CONTEXT_IMAGE_HARD_BYTES,
+    );
+    if (!viaAttachment.ok) return { state: 'denied', reason: viaAttachment.reason };
+    const file = viaAttachment.compressed
+      ? compressedPath(this.deps.dataDir, url)
+      : attachmentPath(this.deps.dataDir, url);
+    const viaFile = readFileImage(file, viaAttachment.image.mediaType, CONTEXT_IMAGE_HARD_BYTES);
+    if (!viaFile.ok) return { state: 'denied', reason: viaFile.reason };
+    return {
+      state: 'ready',
+      key: file,
+      // 型别取**字节头认出来的那个**（`readFileImage` 的结论）：它就是渲染层拼 data URL 用的那一个，
+      // 拿声明那一栏（OneBot 的裸标签 `image`）写进事件只是让 loader 再嗅一遍、结论相同
+      mime: viaFile.image.mediaType,
+      ...(image.name === undefined || image.name === '' ? {} : { name: image.name }),
+    };
   }
 
   /**
@@ -3141,19 +3668,33 @@ export class RealLoop {
   }
 
   /**
-   * 只从**人写的**两处取名字（用户手写的联系人表、她自己的别名表），不含群成员档案。
+   * **人写的三处**取名字（用户手写的联系人表、她的会话别名、她的**群成员别名**），
+   * 不含群成员档案那条机器攒的。判据只在 `sessions.ts` 的 `resolvePersonNameFromTables` 一处。
+   *
+   * 群成员别名（`aliases.md` 的 `# 群成员` 段，裸 id）是 2026-10-11 接上的：在那之前，她按
+   * 段头那句"只在认人时用"写下的裸 id 行（她真写了六条）**框架一条都没消费**——群里的人
+   * **可能从没私聊过她**，而这里原来只会合成 `*:c2c:<id>` 两个键（那要求他先从那扇单聊门
+   * 说过话）。缺口的来龙去脉与"它修不到哪些写法"见 `resolvePersonNameFromTables` 的注释。
+   */
+  private personNameFromHumanTables(person: string): string | null {
+    if (person === '') return null;
+    const { sessions, members } = this.readAliasTables();
+    return resolvePersonNameFromTables(
+      person,
+      new Map(Object.entries(this.deps.config.persona.contacts)),
+      sessions,
+      members,
+    );
+  }
+
+  /**
+   * 只从**人写的**那几处取名字，不含群成员档案。
    *
    * 与 `personNameOf` 的区别就是"不含档案"：注册前要用它判断"这人已经有名字了吗"，
    * 若把自己也算进去，就会得出"他已有名字（我刚发的占位号）"而永远不再更新。
    */
   private humanSourceNameOf(person: string): string | null {
-    if (person === '') return null;
-    for (const namespace of ['qq', 'onebot']) {
-      const sid = `${namespace}:c2c:${person}`;
-      const named = this.resolveChannelName(sid);
-      if (named !== null && named !== '') return named;
-    }
-    return null;
+    return this.personNameFromHumanTables(person);
   }
   /**
    * **已知是用户的 id**：联系人表里标成用户名字的那条会话的**第三段**（那个 id 本身）。
@@ -3186,28 +3727,49 @@ export class RealLoop {
     return ids;
   }
 
-  /** 这一轮的场合（owner = 自己家；guest = 软件里遇到的人）。认不出按 guest 算（从严） */
-  private scenarioOf(wakeEvents: readonly AppEvent[]): Scenario {
+  /**
+   * 这一轮的可信级别（`owner` / `self` / `trusted` / `external`）——**唯一一处**判定入口。
+   *
+   * 两个消费点必须读同一份结论，否则会漂成"鉴权按外部算、工具清单按用户给"：
+   *   · `scenarioOf()`（authz 的场景档：用户/她自己 → owner，其余 → guest）
+   *   · `agentDeps()` 的 `modelVisibility`（工具清单白名单）
+   *
+   * 认不出来的来源一律 `external`——判据在 `trustOfWake` 的 default 分支，不在这里补默认。
+   */
+  private trustOfTurn(wakeEvents: readonly AppEvent[]): TurnTrust {
     const d = this.deps;
-    const trust = trustOfBatch(
+    return trustOfBatch(
       wakeEvents,
       new Map(Object.entries(d.config.persona.contacts)),
       d.config.persona.owner,
       wakeEvents.length === 0 ? new Set<string>() : this.ownerIds(),
     );
+  }
+
+  /** 这一轮的场合（owner = 自己家；guest = 软件里遇到的人）。认不出按 guest 算（从严） */
+  private scenarioOf(wakeEvents: readonly AppEvent[]): Scenario {
+    const trust = this.trustOfTurn(wakeEvents);
     return trust === 'owner' || trust === 'self' ? 'owner' : 'guest';
   }
+  /**
+   * 发言人（`person`）→ 名字：**这一条路是"她眼里这个人叫什么"的唯一判据**。
+   *
+   * 顺序（人写的永远压过机器攒的）：用户手写的联系人表 > 她的会话别名 > 她的**群成员别名**
+   * >（最后一档）群成员档案里那个自动占位名。
+   * 前三档在 `sessions.ts` 的 `resolvePersonNameFromTables` 一处判；这里只接最后一档，
+   * 因为那一档要读盘（`GroupMemberBook`），而前三档是纯查表。
+   *
+   * 消费点：唤醒正文的 `personLabel`（`channelRenderContext`）、`read_channel` 每行那个"谁"、
+   * 话题概括的 `nameOf`、以及通知行（预警 / 点名）——**都读这一个函数**，所以在同一份上下文里
+   * 同一个人只会有一个名字。
+   */
   private personNameOf(person: string): string | null {
-    if (person === '') return null;
-    // ① 用户手写的联系人表 / 她自己的别名表（都按 c2c 会话键查）：认得出就直接用。
-    //    这两处**优先于**自动档案——人写的永远压过机器攒的。
-    for (const namespace of ['qq', 'onebot']) {
-      const sid = `${namespace}:c2c:${person}`;
-      const named = this.resolveChannelName(sid);
-      if (named !== null && named !== '') return named;
-    }
-    // ② 群成员档案（2026-10-04）：群里的人可能**从没私聊过她**，没有 c2c 会话键，
-    //    上面那一步永远查不到——那正是"自动注册"要解决的问题。
+    // ①②③ 人写的三处（含群成员别名那一档）：认得出就直接用
+    const named = this.personNameFromHumanTables(person);
+    if (named !== null) return named;
+    // ④ 群成员档案（2026-10-04）：群里的人可能**从没私聊过她**，也没有人给她写过名字，
+    //    那正是"自动注册"要解决的问题。它是**最后一档**：占位名"群友A（群昵称：用户）"
+    //    是机器发的，发了就不改（见 group-members.ts），绝不能压过她自己写的名字。
     if (this.groupMembers === null) return null;
     this.groupMembers.refresh();
     return this.groupMembers.nameOf(person);

@@ -1,5 +1,5 @@
 /**
- * 唤醒标题（`wakeTitle`）与「本任务相关资产」那一行的回归 —— 2026-10-06 修的真 bug。
+ * 唤醒标题（`wakeTitle`）的回归 —— 2026-10-06 修的真 bug。
  *
  * 缺陷（agent 本体伊尔弥亚实测报出）：**凡是从 QQ 官方通道来的任务，"本任务相关资产"那一行
  * 永远是空的**。根因在 `wakeTitle` 的口径：它对 `wake/channel` 退回 `renderWake`，于是"标题"
@@ -9,18 +9,23 @@
  * 实测（`data/events` 全量 632 条 `wake/channel`）：修前 **0/607** 条的正文进得了那个窗口，
  * 修后 **607/607**；同一条事件只喂正文，light 立刻挑出 gh/git/rg。
  *
+ * ⚠ **那一侧（挑资产）2026-10-09 取消了**（v45，用户拍板：准确率太低）：
+ * "喂给 light 的任务是不是人话"这一半**没有消费者了**，所以这里不再钉它。
+ * **标题口径本身照旧要钉**——它今天仍是任务卡那一行、CLI replay 的重建、界面预览与
+ * 交接笔记条目共用的那一处（少一处另写口径，就会出现"她看到的是 A、日志里记的是 B"）。
+ *
  * 这份文件钉四件事（判据只紧不松）：
  *   ① 判据本身：标题**就是人写的那句话**，机器标识（`source=` / `person=` / `msg=`）不进标题；
  *   ② 判据**只在一处**：`wakeTitle`。所以它的每个消费者（此刻层任务卡、CLI replay 的重建、
- *      界面预览、交接笔记条目、宿主挑资产的标题）拿到的是同一句话——端到端那两条从
- *      **真实请求**上验，不是验函数返回值；
+ *      界面预览、交接笔记条目）拿到的是同一句话——端到端那两条从**真实请求**上验，
+ *      不是验函数返回值；
  *   ③ **包裹没有被动过**：`renderWake` 仍然是那个带 `[external_event]` 边界的包裹——框里是
  *      别人说的话，这是安全语义，改标题不许碰它；
  *   ④ **GUI 手动唤醒（`wake/manual`）那条路一起钉住**：它本来就通（标题一直是那句人话），
  *      这条用例保证"修渠道那一条"没有把它改坏。
  *
  * 台子见 `test/fixtures/real-wake-rig.ts`：真 RealLoop + 真 agent-loop + 真 render，
- * **只有模型是假的**——"喂给 light 的到底是什么"只有走整条链路才证得了。
+ * **只有模型是假的**——"她那一轮到底看到了什么"只有走整条链路才证得了。
  */
 
 import assert from 'node:assert/strict';
@@ -32,7 +37,6 @@ import test from 'node:test';
 import { HookRunner } from '../src/hook/hooks.ts';
 import type { AppEvent } from '../src/log/types.ts';
 import { NOW_LAYER_BANNER, clipTaskTitle, renderWake, wakeTitle } from '../src/model/render.ts';
-import { ASSETS_INDEX_POINTER } from '../src/persona/assets.ts';
 import { RIG_NOW, makeRealWakeRig } from './fixtures/real-wake-rig.ts';
 
 // ──────────────────────────────── 夹具 ────────────────────────────────
@@ -73,25 +77,23 @@ function channelWake(text: string, messageId = LONG_MESSAGE_ID): AppEvent {
   });
 }
 
-/** 落一份清单（路径与生产一致：`<dataDir>/workspace/MEMORIES/assets.md`） */
+/**
+ * 落一份清单（路径与生产一致：`<dataDir>/workspace/MEMORIES/assets.md`）。
+ *
+ * v45（2026-10-09 取消「light 选取资产」）之后，这一份**没有任何东西会去读它**：这条用例留着
+ * 它是为了钉住"清单在盘上、而请求体里一个字都没有"（清单从不常驻）。所以这里连
+ * `probeAssetPath` 覆盖点也不必给了——事实层已经不在这一拍上跑。
+ */
 function writeAssets(rig: { dir: string }, content: string): void {
   const dir = join(rig.dir, 'data', 'workspace', 'MEMORIES');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'assets.md'), content, 'utf8');
 }
 
-/** 确定性的 PATH 探测：`gh` 找得到（真 PATH 依环境，同一用例在两台机器上会渲染出不同的行） */
-const PROBE = (command: string): { found: boolean; path?: string } =>
-  (command.trim().toLowerCase() === 'gh' ? { found: true, path: 'C:\\bin\\gh.exe' } : { found: false });
-
-const GH_LINE = 'gh（已在 PATH → C:\\bin\\gh.exe）';
-const ASSETS_LINE = `本任务相关资产：${GH_LINE}——${ASSETS_INDEX_POINTER}`;
-
 const ONE_ASSET = ['# 数字资产', '', '- [path] gh ｜ 命令行管 GitHub ｜ 已在 PATH'].join('\n');
 
 /** 注入判定的回包（`wake/channel` 的每一轮都会先判一次，见 real-loop 的 judgeChannelWakes） */
 const NO_RISK = '{"risky":false,"reason":"普通请求，没有指挥她的迹象","quotes":[]}';
-const PICK_ONE = '{"picks":[1]}';
 
 /** 一次请求的此刻层那一段文本（按段头认层，与 render 自己的做法一致） */
 function nowLayerOf(request: { input?: unknown }): string {
@@ -101,11 +103,6 @@ function nowLayerOf(request: { input?: unknown }): string {
     if (typeof content === 'string' && content.includes(NOW_LAYER_BANNER)) return content;
   }
   return '';
-}
-
-/** 「本任务相关资产」那一行本身 */
-function assetLineOf(request: { input?: unknown }): string {
-  return nowLayerOf(request).split('\n').find(text => text.startsWith('本任务相关资产：')) ?? '';
 }
 
 /** 任务卡上「当前任务：」那一段（到 `（turn ` 为止） */
@@ -182,8 +179,10 @@ test('① 附带：别的唤醒类型口径不变（定时器/心跳/后台任�
     '[system] 已安静 10 分钟。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）',
   );
   assert.equal(
-    wakeTitle(evt('wake/job', { jobId: 'job-1' })),
-    '[后台任务完成] job-1（用 job 查询工具看结果）',
+    // v41 起后台任务的标题是**一行摘要**（命令 + 退出码）：正文（多行输出）在 `renderWake` 里，
+    // 不能进标题——任务卡那一行与 assets 的 200 字窗口都只装得下一行。
+    wakeTitle(evt('wake/job', { jobId: 'job-1', command: 'npm run build', exitCode: 0 })),
+    '[后台任务完成] job-1：npm run build（退出码 0）',
   );
   assert.equal(
     wakeTitle(evt('wake/timer', { timerId: 't1', scheduledAt: '2026-10-06T10:00:00.000Z', payload: { note: '提醒我喝水' } })),
@@ -207,15 +206,15 @@ test('② 改的是标题，不是包裹：renderWake 照旧带 [external_event]
 
 // ──────────── ③ 端到端：渠道来的任务 ⇒ 资产那一行真的渲染出来 ────────────
 
-test('③ 渠道唤醒端到端：喂给 light 的任务是人话，资产那一行真的进她的请求', async (t) => {
+test('③ 渠道唤醒端到端：她的任务卡标题是那句人话（v45 起不再有资产那一行）', async (t) => {
+  // 这一条原来还顺带钉"资产那一行真的进请求 + 喂给 light 的任务是人话"。
+  // **v45（2026-10-09 用户拍板取消「light 选取资产」这条机制）之后那两半没有了**：
+  // 这一拍只剩「判注入（light）→ 她自己的主力车道」，所以断言跟着换成"标题仍然是那句话、
+  // 而且机器标识一个都不许进上下文"。资产那一侧的新判据在 `test/digital-assets.test.ts` ①。
   const rig = await makeRealWakeRig({
-    // 顺序是运行期的顺序：先注入判定（judgeChannelWakes），再挑资产（prefetchAssetsLine）
-    generate: [
-      { outputItems: [{ type: 'message', text: NO_RISK }] },
-      { outputItems: [{ type: 'message', text: PICK_ONE }] },
-    ],
+    // 渠道那一拍只有注入判定那一次 light（挑资产那一次已经取消）
+    generate: [{ outputItems: [{ type: 'message', text: NO_RISK }] }],
     stream: [{ text: '', toolCalls: [] }],
-    probeAssetPath: PROBE,
   });
   t.after(rig.dispose);
   writeAssets(rig, ONE_ASSET);
@@ -234,42 +233,30 @@ test('③ 渠道唤醒端到端：喂给 light 的任务是人话，资产那一
 
   assert.deepEqual(
     rig.requests.map(item => item.lane),
-    ['light', 'light', 'heavy'],
-    '渠道那一拍：先判注入（light）、再挑资产（light）、再走她自己的主力车道',
+    ['light', 'heavy'],
+    '渠道那一拍：先判注入（light），再走她自己的主力车道（挑资产那一次已经取消）',
   );
 
-  // ③a 喂给它挑资产的那句任务：是那句话，不是 `ROBOT1.0_…`
-  const pick = rig.requests[1]!.request;
-  assert.ok(
-    pick.input.includes(`马上要做的事：${HUMAN_SENTENCE}`),
-    `喂给 light 的任务该是那句人话：\n${String(pick.input).slice(-260)}`,
-  );
-  assert.equal(pick.input.includes('ROBOT1.0_'), false, '喂给 light 的内容里不许出现消息 id');
-
-  // ③b 她那一拍真的收到了「本任务相关资产」那一行
-  const heavy = rig.requests[2]!.request;
-  assert.equal(assetLineOf(heavy), ASSETS_LINE, '资产那一行必须真的渲染进这一轮的请求');
-  assert.equal(cardTitleOf(heavy), HUMAN_SENTENCE, '任务卡标题也是那句话——同一个标题口径');
+  // ③a 她那一拍的任务卡标题就是那句话（不是 `ROBOT1.0_…` 那串包裹）
+  const heavy = rig.requests[1]!.request;
+  assert.equal(cardTitleOf(heavy), HUMAN_SENTENCE, '任务卡标题是那句人话——wakeTitle 那一处口径');
   assert.equal(nowLayerOf(heavy).includes('ROBOT1.0_'), false, '此刻层里不许出现消息 id');
+  assert.equal(nowLayerOf(heavy).includes('本任务相关资产'), false, 'v45 起任务卡上不再有那一行');
 
-  // ③c 账上那一条：`memory/selected.assets` 真的非空（这是"修好了"的可审计证据）
+  // ③b 记忆索引那条账照旧（它跟资产无关），而且**不再带 assets 那一格**
   const selected = (await rig.events()).filter(event => event.type === 'memory/selected');
-  assert.equal(selected.length, 1, '轮首该写一条记忆/资产注入账');
-  assert.equal(
-    (selected[0]!.data as { assets?: string }).assets,
-    ASSETS_LINE,
-    '账上那条 assets 与请求里那一行逐字节相同（预览/重放靠的就是它）',
-  );
+  assert.equal(selected.length, 1, '轮首该写一条记忆注入账');
+  assert.equal((selected[0]!.data as { assets?: string }).assets, undefined,
+    'v45 起运行期不再产生那一格（旧日志里那些仍然读得回来，见 replay 的 v34 用例）');
 });
 
-// ──────────── ④ GUI 手动唤醒那条路：本来就通，也不许被改坏 ────────────
+// ──────────── ④ GUI 手动唤醒那条路：标题口径一样（v45 起不挑资产） ────────────
 
-test('④ GUI 手动唤醒（wake/manual）端到端：同一套挑选链，一样挑得出东西', async (t) => {
+test('④ GUI 手动唤醒（wake/manual）端到端：任务卡标题就是他打的那句话', async (t) => {
   const rig = await makeRealWakeRig({
-    // 手动唤醒**不判注入**（judgeChannelWakes 只认 wake/channel）——所以这里只有一次 light
-    generate: [{ outputItems: [{ type: 'message', text: PICK_ONE }] }],
+    // 手动唤醒**不判注入**（judgeChannelWakes 只认 wake/channel），v45 起也不挑资产 ——
+    // 所以这一拍**一次 light 都不发**：`generate` 一条脚本都不给，多调一次就抛。
     stream: [{ text: '', toolCalls: [] }],
-    probeAssetPath: PROBE,
   });
   t.after(rig.dispose);
   writeAssets(rig, ONE_ASSET);
@@ -278,13 +265,10 @@ test('④ GUI 手动唤醒（wake/manual）端到端：同一套挑选链，一�
   rig.append('wake/manual', { note: '把 GitHub 上那个仓库的数据查一下', person: '用户', dedupeKey: 'k1' });
   await rig.tick();
 
-  assert.deepEqual(rig.requests.map(item => item.lane), ['light', 'heavy'], '手动那一拍只有一次 light（挑资产）');
-  assert.ok(
-    rig.requests[0]!.request.input.includes('马上要做的事：把 GitHub 上那个仓库的数据查一下'),
-    '喂给 light 的就是他打的那句话',
-  );
-  assert.equal(assetLineOf(rig.requests[1]!.request), ASSETS_LINE, '手动唤醒这条路一直是通的，别改坏它');
-  assert.equal(cardTitleOf(rig.requests[1]!.request), '把 GitHub 上那个仓库的数据查一下');
+  assert.deepEqual(rig.requests.map(item => item.lane), ['heavy'], '手动那一拍只剩她自己的主力车道（不再挑资产）');
+  const heavy = rig.requests[0]!.request;
+  assert.equal(cardTitleOf(heavy), '把 GitHub 上那个仓库的数据查一下');
+  assert.equal(nowLayerOf(heavy).includes('本任务相关资产'), false, '任务卡上不再有那一行');
 });
 
 test('④ 附带：手动唤醒的标题口径没变（空输入仍然是"（空消息）"）', () => {
@@ -297,12 +281,9 @@ test('④ 附带：手动唤醒的标题口径没变（空输入仍然是"（空
 
 test('⑤ 界面预览的标题与运行期同一个口径：都出自 wakeTitle，不会一边人话一边包裹', async (t) => {
   const rig = await makeRealWakeRig({
-    generate: [
-      { outputItems: [{ type: 'message', text: NO_RISK }] },
-      { outputItems: [{ type: 'message', text: PICK_ONE }] },
-    ],
+    // 渠道那一拍只有注入判定那一次 light（v45 起挑资产那一次没有了）
+    generate: [{ outputItems: [{ type: 'message', text: NO_RISK }] }],
     stream: [{ text: '', toolCalls: [] }],
-    probeAssetPath: PROBE,
   });
   t.after(rig.dispose);
   writeAssets(rig, ONE_ASSET);
@@ -316,7 +297,7 @@ test('⑤ 界面预览的标题与运行期同一个口径：都出自 wakeTitle
 
   // 界面的预览（`buildReplay`）与 CLI 的重建都走 `deriveRequest` → `wakeTitle` 那一处口径；
   // 这里比的是**两串真实字节**——两处只要有一处另写口径，这一条就会红。
-  const live = cardTitleOf(rig.requests[2]!.request);
+  const live = cardTitleOf(rig.requests[1]!.request);
   assert.equal(clipTaskTitle(wakeTitle(wake)), live, '预览侧与运行期侧必须是同一串字节');
   assert.equal(live, HUMAN_SENTENCE);
   assert.equal(

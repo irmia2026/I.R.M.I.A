@@ -147,6 +147,8 @@ export function real2140Events(): AppEvent[] {
   // **工具名要错开**：入参一过 512 字节就被压成「键名 + 字节数」，而同名同结构的调用压出来
   // 是同一串字节 ⇒ 笔记的逐字重复合并会把它们并成一条 `(同样的一条重复了 N 次)`。
   // 生产里这一轮调的是好几件不同的工具（read/rg/pwsh…），错开名字才是它的样子。
+  // **名字不许因为"工具删了"而改**：这份夹具是历史重建（生产 turn 749），`list_dir` 于 v42
+  // 被删，但那一轮真的调过它——改名字既是伪造历史，也会改掉下面按 `name.length` 配平的字节数。
   const toolNames = ['safe_read', 'rg_search', 'list_dir', 'pwsh'] as const;
   const pairs = 12;
   const resultEach = Math.floor(TURN_VISIBLE.toolResult / pairs);

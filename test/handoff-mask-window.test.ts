@@ -139,6 +139,10 @@ test('21:40 真实交接：遮蔽点落在本 turn 的 turn/end，本 turn 整�
   assert.equal(note.text.startsWith('# 交接笔记'), true, '新摘要的正文就是这份笔记');
   // 本 turn 的工具往来：**回执**在（`[结果] <工具名> ok`），**入参**在（`[调用] <工具名>`，
   // 且因为过 512 字节已压成「键名 + 字节数」——见下面那条专项断言）
+  //
+  // ⚠ `list_dir` 于 v42 被删，但**这个名字留在断言里是对的**：这份夹具是按生产 turn 749
+  // 重建的，那一轮真的调过它（`tool/call` 里存的是**当时**的名字）。交接笔记要能照旧显示
+  // **历史里存在过**的工具名，否则翻旧账时读到的会是一段被抹掉的历史。
   assert.match(note.text, /\[结果\] (safe_read|rg_search|list_dir|pwsh) ok/u, '本 turn 的工具回执在笔记里');
   assert.match(note.text, /\[调用\] (safe_read|rg_search|list_dir|pwsh)\(/u, '本 turn 的工具入参在笔记里');
   // 笔记的硬上限：遮蔽 43,832 token 换来的替代品必须远小于它（否则这次交接不划算）

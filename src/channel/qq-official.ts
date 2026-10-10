@@ -117,6 +117,40 @@ export const QQ_PASSIVE_EXPIRED_CODES: readonly number[] = [304103, 40034005, 40
 export const QQ_DEDUPE_CODES: readonly number[] = [40054005];
 export const QQ_MARKDOWN_REJECT_CODES: readonly number[] = [22006, 40034011, 40034124, 40034127];
 
+/**
+ * **"正在输入"**（`msg_type: 6` + `input_notify`）的协议常量。
+ *
+ * 官方口径（2026-10-11 亲验《发送单聊消息》
+ * <https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html>）：
+ *   • 请求体里 `msg_type` 的取值表写着 `6=输入中状态（input_notify)`；
+ *   • `input_notify` 是一个对象：`input_type`「填 1」；`input_second`「状态持续时间，最长 60s」；
+ *   • 官方示例体就是 `{msg_type: 6, input_notify: {input_type: 1, input_second: 60}, msg_id, msg_seq}`；
+ *   • **只有单聊那一页列了它**——群聊那一页的 `msg_type` 表里没有 6、请求体里也没有 `input_notify`
+ *     ⇒ 群里发它是"官方没写的用法"，本适配器**不试**（如实跳过，见 `sendInputNotify`）。
+ *
+ * `input_type: 1` = 「对方正在输入…」（官方页只写"填 1"，其余取值只在 bot-docs 的**注释掉**的
+ * 旧表格里出现过——不采信，所以这里只用 1）。
+ */
+export const QQ_INPUT_NOTIFY_TYPE = 1;
+
+/**
+ * 一次通知里声明的**状态持续时间**（秒，官方上限 60）。
+ *
+ * 取上限 60 而不是"预计要打多久"：这个状态会被**紧接着发出去的第一条消息自动取消**，
+ * 所以它的作用是"她还没开口之前，那一段静默里对方看到的是正在输入"——真正需要覆盖的是
+ * 「第一个字出去之前」那段（打字节奏：一段十几个字要等十几秒，一趟总预算 90 秒）。
+ * 取小了会在她还没说完时先消失，取大了（上限）没有任何额外代价。
+ */
+export const QQ_INPUT_NOTIFY_SECONDS = 60;
+
+/** `sendInputNotify` 的结果：三类分得清清楚楚，**"不会发"不是"发失败"** */
+export type QqInputNotifyOutcome =
+  | { ok: true; messageId: string; passive: boolean }
+  /** 这条通道能力上就不做这件事（群聊；或该 chatType 没有这条路）——不是错误，也不进日志 */
+  | { ok: false; skipped: true; reason: string }
+  /** 真的试了、平台/网络没答应——**调用方据此走"照旧说话"**，绝不让它影响发言 */
+  | { ok: false; skipped: false; reason: string };
+
 /** 该响应是不是"不接受原生 markdown"（错误码或文案任一命中） */
 function isMarkdownRejected(response: HttpJsonResponse): boolean {
   const payload = asRecord(response.body);
@@ -1207,6 +1241,38 @@ export class QqMessageSender {
     this.nextSeqFn = options.nextSeq ?? ((messageId) => this.bumpSeq(messageId));
   }
 
+  /**
+   * 「正在输入」的三个观测计数（**观测面只有这一处**，不写进事件日志）。
+   *
+   * 为什么落在发送器（真正发请求的那一层）而不是 `admin`（决定"要不要发"的那一层）：
+   * 失败的真凭据在这里——平台错误码就在这个函数手里。而事件日志的类型表是只读契约
+   * （`log/types.ts`），一个零成本的可选动作不配在它上面开一个新事件类型。
+   *   • `attempts`：真发出去的请求数（群里那条路**不算**——它是合法的"不发"）；
+   *   • `sent`：平台答应了的次数；
+   *   • `failed` = attempts − sent，每一次都配一行 `log.warn`（配额出问题时人看得见）。
+   */
+  private inputNotifyAttempts = 0;
+  private inputNotifySent = 0;
+  private inputNotifyFailed = 0;
+
+  /**
+   * 发送器的观测快照（CLI/测试用）：今天只有「正在输入」那三个数。
+   *
+   * 与 `QqOfficialChannel.snapshot()` 同一个成例（那个把网关与凭证的快照拼在一起）——
+   * 通道那一层把它原样透出去，于是"她怎么不显示正在输入"这个问题有一条**只读**的答案：
+   * `attempts === 0` ⇒ 根本没走到通道（群里 / 开关关了 / 没有回投地址）；
+   * `attempts > 0 && sent === 0` ⇒ 走了但平台不要（去 `log.warn` 那行看错误码）。
+   */
+  snapshot(): { inputNotify: { attempts: number; sent: number; failed: number } } {
+    return {
+      inputNotify: {
+        attempts: this.inputNotifyAttempts,
+        sent: this.inputNotifySent,
+        failed: this.inputNotifyFailed,
+      },
+    };
+  }
+
   /** 同一条消息的回复序号递增（从 2 起：第一条被动回复天然是 1） */
   private bumpSeq(messageId: string): number {
     const next = (this.seqCounters.get(messageId) ?? 1) + 1;
@@ -1648,6 +1714,90 @@ export class QqMessageSender {
       : { ok: false, reason: second.reason, passive: false };
   }
 
+  /**
+   * **发一个"正在输入"状态**（`msg_type: 6` + `input_notify`）。
+   *
+   * 协议依据见 `QQ_INPUT_NOTIFY_TYPE` 那段注释（官方示例体逐字段照抄，只少一个 `msg_seq`）。
+   *
+   * 四条纪律，逐条都有代价在后面：
+   *   ① **仅单聊**（`c2c`）：官方只在《发送单聊消息》页列了 `msg_type: 6`，群聊页没有它。
+   *      群里发 = 拿一个官方没写的用法去赌，赌输的形态未知 ⇒ 这里**连试都不试**，
+   *      返回 `skipped: true`（"不会发"不是"发失败"，日志里也不该出现它）。
+   *   ② **不碰 `msg_seq` 计数器**（最要紧的一条）：`sendText` 的序号是 `msg_id + msg_seq`
+   *      这一对上的去重号，也是**被动回复 4 次窗口**往下数的凭据。这里刻意**不带 `msg_seq`**
+   *      （官方"不填默认是 1"），于是：
+   *        · 如果平台把 `msg_type:6` 算作一次回复 ⇒ 这一次**照样会**从窗口里扣掉一次
+   *          （那是平台说了算，我们藏不掉），但它**不会**把后面几条正文的号往后推；
+   *        · 如果平台不算 ⇒ 一个字都没多花。
+   *      两边的结果都只是"这一次通知本身"，**绝不牵连后面那几条正文的编号**。
+   *      ⚠️ **它到底算不算一次被动回复，官方文档没写**（《消息收发概述》只说被动回复
+   *      "每个消息最多回复 4 次"）。这条**未亲验**，所以它是可关的
+   *      （`config.speak.inputNotify`，出厂开）——撞了 `40034128` 就把它关掉。
+   *   ③ **只发一次、不重试、不降级**：去重撞车那套重发是给"内容必须送到"的正文用的；
+   *      一个状态通知没送到**什么都不影响**，多试一次只是多花一次配额。
+   *      `msg_id` 过期（`40034005`/`40034128`…）时**也不降级为主动消息**：状态通知不值得
+   *      动主动配额（那是每月限额，见《发送消息》页），如实失败即可。
+   *   ④ **失败就是失败**：返回 `ok: false`，由调用方决定"照旧说话"（`admin.speak` 就是这么用的）。
+   *      这里不抛异常——取 token 失败、网络失败都折成返回值，调用方不必再写 try/catch。
+   */
+  async sendInputNotify(
+    chatType: QqChatType,
+    chatId: string,
+    options: SendTextOptions = {},
+  ): Promise<QqInputNotifyOutcome> {
+    // ① 能力判据**只有这一处**：官方只有单聊有 `input_notify`。频道（guild/dm）走的是 v1
+    //（`/channels/…`、`/dms/…`，连 `msg_type` 都不认，见 `post()` 里那段），群聊官方页没列。
+    if (chatType !== 'c2c') {
+      return { ok: false, skipped: true, reason: `官方只有单聊支持"正在输入"（${chatType} 不发）` };
+    }
+    let token: string;
+    try {
+      token = await this.options.token();
+    } catch (err) {
+      return { ok: false, skipped: false, reason: `取 token 失败：${messageOf(err)}` };
+    }
+    const msgId = options.msgId ?? '';
+    const payload: Record<string, unknown> = {
+      msg_type: 6,
+      input_notify: { input_type: QQ_INPUT_NOTIFY_TYPE, input_second: QQ_INPUT_NOTIFY_SECONDS },
+    };
+    // ② 只在**真有被动窗口**时带上 msg_id（官方示例就是这么发的）：不带它这条会被平台当成
+    // **主动消息**——那是另一套配额，一个状态通知不值得动它。
+    if (msgId !== '') payload['msg_id'] = msgId;
+    const url = `${this.apiBase}${messagesPathOf(chatType, chatId)}`;
+    /** 失败留痕**只此一处**：`log.warn` 一行 + 计数一格（见 `snapshot().inputNotify`）。 */
+    const failed = (reason: string): QqInputNotifyOutcome => {
+      this.inputNotifyFailed += 1;
+      this.log.warn?.(`[QQ] "正在输入"没发出去（不影响这次发言，chatType=${chatType}）：${reason}`);
+      return { ok: false, skipped: false, reason };
+    };
+    this.inputNotifyAttempts += 1;
+    let response: HttpJsonResponse;
+    try {
+      response = await this.http({
+        method: 'POST',
+        url,
+        headers: { authorization: `QQBot ${token}` },
+        jsonBody: payload,
+        timeoutMs: 15_000,
+      });
+    } catch (err) {
+      return failed(`发送请求失败（${url}）：${messageOf(err)}`);
+    }
+    const body = asRecord(response.body);
+    const code = readNumber(body, 'code');
+    if (code !== null && code !== 0) {
+      const detail = readString(body, 'message');
+      return failed(`HTTP ${response.status} code=${code} ${detail}`);
+    }
+    const messageId = readString(body, 'id');
+    if (response.status >= 300 || messageId === '') {
+      return failed(`HTTP ${response.status}，响应体：${response.text.slice(0, 200)}`);
+    }
+    this.inputNotifySent += 1;
+    return { ok: true, messageId, passive: msgId !== '' };
+  }
+
   private async post(
     chatType: QqChatType,
     chatId: string,
@@ -1743,6 +1893,18 @@ export interface ChannelAdapter {
   onMessage?: (event: WakeChannel['data']) => void;
   /** 回投：chatType + chatId + 文本；msgId/msgSeq 给定时走被动回复 */
   sendText(chatType: QqChatType, chatId: string, text: string, options?: SendTextOptions): Promise<SendOutcome>;
+  /**
+   * **能力声明**：这条通道会不会发"正在输入"（`msg_type: 6` + `input_notify`）。
+   *
+   * 有这个方法 = 会发；没有 = 不会（OneBot 就**没有**它：官方那套补充协议里没有等价能力）。
+   * 判定一律走 `typeof channel.sendInputNotify === 'function'`——**不按通道名分支**：
+   * 名字会变（别名实例）、能力在不在是事实。
+   *
+   * 注意它**不是**"一定发得出去"：能不能发还要看 `chatType`（官方只有单聊支持）与网络，
+   * 由实现自己如实回（`QqInputNotifyOutcome` 把"不会发"与"发失败"分开）。
+   * 调用方（`channel/input-notify.ts` → `speak`）对一切结果的态度只有一条：**照旧说话**。
+   */
+  sendInputNotify?(chatType: QqChatType, chatId: string, options?: SendTextOptions): Promise<QqInputNotifyOutcome>;
 }
 
 export interface QqOfficialChannelOptions {
@@ -1850,6 +2012,15 @@ export class QqOfficialChannel implements ChannelAdapter {
     return this.sender.sendText(chatType, chatId, text, options);
   }
 
+  /** "正在输入"（`msg_type: 6`）：能力与限制全在 `QqMessageSender.sendInputNotify` 的注释里 */
+  sendInputNotify(
+    chatType: QqChatType,
+    chatId: string,
+    options: SendTextOptions = {},
+  ): Promise<QqInputNotifyOutcome> {
+    return this.sender.sendInputNotify(chatType, chatId, options);
+  }
+
   /**
    * 发一个**富媒体**：先上传换 `file_info`，再按 `msg_type=7` 发出。
    *
@@ -1891,6 +2062,15 @@ export class QqOfficialChannel implements ChannelAdapter {
     tokenFetches: number;
     hasToken: boolean;
     gateway: ReturnType<QqGateway['snapshot']>;
+    /**
+     * 「正在输入」的读数（2026-10-11 加）：`attempts` = 真发出去的请求数，
+     * `sent` = 平台答应的次数，`failed` = 前两者之差。
+     *
+     * 怎么用它判断"她怎么不显示正在输入"：`attempts === 0` ⇒ 根本没走到通道
+     *（群里？开关关了？没有回投地址？——那三件事各有各的判据，都不在这里）；
+     * `attempts > 0 && sent === 0` ⇒ 走了但平台不要（看 `log.warn` 那一行的错误码）。
+     */
+    inputNotify: { attempts: number; sent: number; failed: number };
   } {
     return {
       appId: this.appId,
@@ -1898,6 +2078,7 @@ export class QqOfficialChannel implements ChannelAdapter {
       tokenFetches: this.tokens.fetches,
       hasToken: this.tokens.snapshot().hasToken,
       gateway: this.gateway.snapshot(),
+      inputNotify: this.sender.snapshot().inputNotify,
     };
   }
 }

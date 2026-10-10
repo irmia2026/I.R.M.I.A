@@ -193,6 +193,11 @@ async function makeHarness(t: TestContext): Promise<Harness> {
       // 本任务相关资产那一行（v34）：运行期由 real-loop 在轮首挑好（`assetsLine`），
       // 重放侧从 `memory/selected.assets` 取回——这一格只在 v34 那条用例里给（其余用例
       // 不传 = 与引入它之前逐字节相同）。
+      //
+      // **2026-10-09（v45）起运行期不再产生那一行了**（用户拍板取消「light 选取资产」这条机制），
+      // 但这里**一个字都没改**：这条用例造的是**旧日志**（v34–v44 那些轮真的记过 `assets`），
+      // 要钉的正是"旧日志仍然逐字节重建得回来"——删掉这一格或那个渲染分支就等于改写历史。
+      // "新的一轮里没有那一行"另有判据：`test/digital-assets.test.ts` ①（真链路跑一轮）。
       ...(extra.assetsLine === undefined ? {} : { assetsLine: extra.assetsLine }),
       // 记忆索引注入账（v34 起顺带带那一行）：**运行期由 real-loop 提供**（`planMemorySelection`），
       // 重放要逐字节重建就得有这条账——所以 v34 那条用例按生产的形状给一份。
@@ -224,9 +229,14 @@ async function appendSessionStart(h: Harness): Promise<void> {
 
 // ──────────────────────────────── ① 单步一致 ────────────────────────────────
 
-test('v34 数字资产：那一行进过请求，重放也重建得回来（逐字节一致）', async (t) => {
+test('v34 数字资产：那一行进过请求，重放也重建得回来（逐字节一致；v45 之后这是**旧日志**那条路）', async (t) => {
   // 为什么必须有这条：那一行**只能**来自事件（盘上的 `assets.md` 是她随时会改的文件，
   // 从盘上重算就不是"当时那个请求"了）。所以它搭 `memory/selected` 一起落库，重放从那里取回。
+  //
+  // **v45（2026-10-09）之后这条用例的意义变了、但一条都不许松**：运行期不再产生那一行
+  // （「light 选取资产」那条机制被用户取消），于是这里造的是**旧日志**——
+  // 它钉的是"**日志里的旧轮次照旧逐字节重建**"，也就是"删的是新的行，不是过去的字节"。
+  // 把它删掉或改成"不再重建那一行"，等于让历史失真（GUI 预览、CLI replay 都会少一整行）。
   const h = await makeHarness(t);
   await appendSessionStart(h);
   const wake = h.append('wake/manual', { note: '抓一篇正文' });
