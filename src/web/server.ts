@@ -1195,7 +1195,10 @@ import { configFileLock } from '../config/file-lock.ts';
 interface EventSnapshot {
   /** 已同步到的 seq；`0` = 还没读过 */
   upToSeq: number;
-  /** 全量事件（seq 升序）；每次增量补齐后**换新数组**，旧引用不会被就地改写 */
+  /**
+   * 全量事件（seq 升序）。**就地追加**（见 `allEventsOf` 里那段：展开合并每拍白分配一次），
+   * 所以这个引用**从建立起一直有效**、只会变长。
+   */
   events: readonly AppEvent[];
   /** 正在进行的补齐（并发合流用）；null = 没有在飞的 */
   inflight: Promise<readonly AppEvent[]> | null;
@@ -1210,8 +1213,20 @@ const eventSnapshots = new WeakMap<EventLog, EventSnapshot>();
  * `fold` / `answerHuman` …），没有一处就地改它。类型标 `readonly` 是为了把这条纪律
  * 写进签名里——想改的人会在编译期被拦下，而不是在运行期把缓存污染掉。
  *
- * 同一实例上返回的**数组引用稳定**（没有新增事件时就是同一个对象），所以调用方
- * 顺手拿它当 React/Flutter 那种"依赖引用变化"的判据也是安全的。
+ * 同一实例上返回的**数组引用稳定**（没有新增事件时就是同一个对象；有新增时也是同一个，
+ * 只是尾部多了几条）——但**别依赖它当"变没变"的判据**：日志只增，引用不变不等于内容不变。
+ *
+ * ──────────────────────────── 那 ~88 MB 是**有意**的 ────────────────────────────
+ *
+ * 实测：7.3 万条事件解析后常驻约 **88~93 MB**（`_research/probe-mem-blocks.mts`）。
+ * **这是有意留的，不是没想到**：它换掉的是"每个请求都把 58 MB / 20 万行重读重 parse 一遍"
+ * ——改前八条端点各 450~550 ms，改后 4~54 ms，界面每页 1.1~1.4 s → 10~70 ms。
+ *
+ * 2026-10-10 评估过"给它设上限（只留最近 N 条 / LRU）"，**结论是不做**：那会让
+ * "翻很老的会话、7 天预算、按 seq 定位重放"退化成重新读盘（~300 ms 起），
+ * 而**"端点响应时间不许退步"是硬要求** —— 拿这些换 88 MB 不划算。
+ * 真要把整体内存压下来，杠杆在**进程级的老生代上限**（`--max-old-space-size`，
+ * 见 `docs/operations.md` §4.4），不在这一块。
  */
 export async function allEventsOf(log: EventLog): Promise<readonly AppEvent[]> {
   const existing = eventSnapshots.get(log);
@@ -1228,12 +1243,25 @@ export async function allEventsOf(log: EventLog): Promise<readonly AppEvent[]> {
   const from = latest < snapshot.upToSeq ? 1 : snapshot.upToSeq + 1;
 
   const inflight = (async (): Promise<readonly AppEvent[]> => {
-    const fresh: AppEvent[] = [];
-    for await (const event of log.readRange(from)) fresh.push(event);
-    const merged = from === 1 ? fresh : [...snapshot.events, ...fresh];
-    snapshot.events = merged;
-    snapshot.upToSeq = merged.length > 0 ? merged[merged.length - 1]!.seq : snapshot.upToSeq;
-    return merged;
+    // **就地追加，不用 `[...events, ...fresh]`**。
+    //
+    // ⚠ 别把这条当成"省了 88 MB"：展开合并复制的是**引用数组**，不是事件对象本身
+    // ——7.3 万条时实测只多占 **1.4 MB**（`_research/probe-spread-cost.mjs`）。所以这是
+    // 一处**每拍省一次分配**的小改动，不是"把内存压下来"那件事的主力。
+    //
+    // 为什么仍然改：这条路径**每一拍有事件就要走一次**（界面一页打四条、SSE 每 250 ms 一拍、
+    // 轮询 15/20 s 一次），而 RSS 只涨不还（`_research/probe-v8-retention.mjs`：堆还了、
+    // RSS 不还）⇒ 每拍一次无谓的整段分配，长期就是白交给 V8 的峰值。
+    //
+    // 为什么现在可以就地改（之前刻意换新数组）：**没有任何调用方依赖"引用会变"**——
+    // 它们要么整份扫一遍、要么按 seq 过滤，拿到的 `readonly` 数组只读。唯一的差别是
+    // "拿到数组后、又 await 过"的持有者会看见尾部多出几条：那是**更新的事实**（日志本来就
+    // 只增），不是被改写的历史。
+    const target: AppEvent[] = from === 1 ? [] : snapshot.events as AppEvent[];
+    if (from === 1) snapshot.events = target;
+    for await (const event of log.readRange(from)) target.push(event);
+    snapshot.upToSeq = target.length > 0 ? target[target.length - 1]!.seq : snapshot.upToSeq;
+    return target;
   })();
 
   snapshot.inflight = inflight;
@@ -1293,11 +1321,20 @@ function clipFrameworkQuotes(quotes: unknown): string[] {
  * 尾部事件视图：dashboard 的 24h 序列与建议规则只需最近一段，不必每次全量读盘。
  * 首次 sync 从"尾部 DASHBOARD_EVENT_WINDOW 条"起读（seq 有空洞时是估算，注释在案），
  * 之后按 `latestSeq` 增量补齐；保留条数超过窗口就从头部裁掉。
+ *
+ * 裁剪**用头部下标，不用 `slice(-window)`**。⚠ 老实说这一处的收益也很小：`slice` 复制的
+ * 是**引用数组**，1 万条 ≈ 几十 KB（与 `allEventsOf` 那处同一性质，见那里的注释）；
+ * 它是"每拍少一次分配"，不是"省下几十 MB"。之所以还是改：dashboard 每次刷新都走这里，
+ * 而 RSS 只涨不还，长期就是白交给 V8 的峰值。
+ * 用下标时只在"死区比活区还大"时才真压一次，均摊几乎为零；`sync()` 的返回值仍然只含
+ * 窗口内那些条（消费方看不见下标）。
  */
 class RecentEventView {
   private readonly log: EventLog;
   private readonly window: number;
   private events: AppEvent[] = [];
+  /** 逻辑头部：`events[head..]` 才是有效窗口；`head === events.length` = 空 */
+  private head = 0;
   private upToSeq = 0;
 
   constructor(log: EventLog, window: number) {
@@ -1307,13 +1344,20 @@ class RecentEventView {
 
   async sync(): Promise<AppEvent[]> {
     const latest = this.log.latestSeq();
-    if (latest <= this.upToSeq) return this.events;
+    if (latest <= this.upToSeq) return this.head === 0 ? this.events : this.events.slice(this.head);
 
     const from = this.upToSeq === 0 ? Math.max(1, latest - this.window) : this.upToSeq + 1;
     for await (const event of this.log.readRange(from)) this.events.push(event);
-    if (this.events.length > this.window) this.events = this.events.slice(-this.window);
+    // 超出窗口的部分只**记账**（推 head），不复制
+    const live = this.events.length - this.head;
+    if (live > this.window) this.head += live - this.window;
+    // 死区比活区还大时才真压一次，免得数组无限长（摊销到每一拍几乎为零）
+    if (this.head > 0 && this.head >= this.events.length - this.head) {
+      this.events = this.events.slice(this.head);
+      this.head = 0;
+    }
     this.upToSeq = latest;
-    return this.events;
+    return this.head === 0 ? this.events : this.events.slice(this.head);
   }
 }
 

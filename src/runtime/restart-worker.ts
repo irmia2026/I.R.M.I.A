@@ -404,16 +404,45 @@ function startGuiProcess(guiExe: string): number {
 }
 
 /**
+ * 新后端的老生代上限（MB）—— 与三份启动脚本**同一个数、同一处口径**
+ * （`packaging/start.ps1` / `packaging/restart.ps1` / `tools/restart-agent.ps1`
+ * 的 `-NodeMaxOldSpaceMb` 默认都是 512）。
+ *
+ * **为什么这条路上也必须有**：`self-restart` 是**第三条**拉后端的路（没有 pwsh / 没有那两个
+ * 脚本时就走它），它在这里 `spawn` 新后端。少了这个参数，界面那三份脚本带上了上限、
+ * 而这一条路悄悄退化成"由 V8 自己看着办"——**同一个进程在不同重启路径下内存行为不一样**，
+ * 是那种最难查的不一致。
+ *
+ * 为什么是 512 与风险，见 `docs/operations.md` §4.4（与本文件同源的那段注释）。
+ * 改这一格即可回退（设 0 = 不带这个参数）。
+ */
+export const MAX_OLD_SPACE_MB = 512;
+
+/**
+ * 拉新后端时给 node 的参数数组（**纯函数**，便于钉住）。
+ *
+ * 顺序是判据：`--max-old-space-size` 是 **Node 自己的选项，必须排在入口之前**；
+ * 排到入口之后会被当成 `main.js` 的参数（它不认，直接退）。上限 ≤ 0 时**一个参数都不加**，
+ * 命令行与加这条之前逐字相同（那是"回退"这条路的定义）。
+ */
+export function backendSpawnArgv(entry: string, maxOldSpaceMb: number = MAX_OLD_SPACE_MB): string[] {
+  return maxOldSpaceMb > 0 ? [`--max-old-space-size=${maxOldSpaceMb}`, entry] : [entry];
+}
+
+/**
  * 拉起新的后端：**分离**进程（`detached` + `unref`），所以拉起器退出之后它还活着。
  *
  * stdout/stderr 直接给它自己的日志文件（`stdio` 里那两个 fd）：这样"新实例为什么没起来"
  * 事后有原文可看，而不会随拉起器一起消失。
+ *
+ * ⚠ Node 的选项**必须排在入口之前**（`node --max-old-space-size=512 <entry>`）；
+ * 排在入口之后会被当成 `main.js` 自己的参数（它不认，直接退）。
  */
 function spawnBackendDetached(input: { nodeExe: string; entry: string; root: string; logPath: string }): number {
   if (!existsSync(input.nodeExe)) throw new Error(`没有这个 node 运行时：${input.nodeExe}`);
   if (!existsSync(input.entry)) throw new Error(`没有这个入口：${input.entry}`);
   const fd = openSync(input.logPath, 'a');
-  const child = spawn(input.nodeExe, [input.entry], {
+  const child = spawn(input.nodeExe, backendSpawnArgv(input.entry), {
     cwd: input.root,
     detached: true,
     windowsHide: true,

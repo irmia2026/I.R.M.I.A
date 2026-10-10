@@ -22,7 +22,8 @@ import {
 } from '../src/runtime/restart-chain.ts';
 import { parseRestartTrace, restartCommandLine, restartNote } from '../src/web/server.ts';
 import {
-  parseRestartWorkerArgs, probeTcp, runRestartWorker, type RestartWorkerIo, type RestartWorkerOptions,
+  MAX_OLD_SPACE_MB, backendSpawnArgv, parseRestartWorkerArgs, probeTcp, runRestartWorker,
+  type RestartWorkerIo, type RestartWorkerOptions,
 } from '../src/runtime/restart-worker.ts';
 
 /** 造一个"只有这些路径存在"的世界 */
@@ -358,4 +359,29 @@ test('命令行：重定向写在内层引号里面、入口与 cwd 都是绝对
 test('端口探测：探不通就是 false（这条判据要能被单测钉住）', async () => {
   // 用一个几乎不可能有人听的端口：探不通要老实返回 false，而不是抛
   assert.equal(await probeTcp('127.0.0.1', 1, 300), false);
+});
+
+// ──────────────────── ④ 自重启那条路也带老生代上限（2026-10-10） ────────────────────
+
+test('④ 自重启拉新后端时带 `--max-old-space-size`，且**排在入口之前**', () => {
+  // 这条钉的是一个真实的不一致：三份启动脚本（`packaging/start.ps1` /
+  // `packaging/restart.ps1` / `tools/restart-agent.ps1`）都带上了 `-NodeMaxOldSpaceMb 512`，
+  // 而 `self-restart` 是**第三条**拉后端的路 —— 少了这里，同一个进程在不同重启路径下
+  // 内存行为不一样，那种不一致最难查。
+  const argv = backendSpawnArgv('C:\\Irmia\\app\\dist\\main.js');
+  assert.deepEqual(argv, ['--max-old-space-size=512', 'C:\\Irmia\\app\\dist\\main.js']);
+  // 顺序是判据：Node 的选项排到入口之后会被当成 `main.js` 的参数（它不认，直接退）
+  assert.match(argv[0]!, /^--max-old-space-size=\d+$/u);
+  assert.equal(argv[argv.length - 1], 'C:\\Irmia\\app\\dist\\main.js', '入口必须是最后一个参数');
+});
+
+test('④b 上限设成 0 ⇒ 一个参数都不加（"回退"这条路的定义）', () => {
+  assert.deepEqual(backendSpawnArgv('C:\\Irmia\\app\\dist\\main.js', 0), ['C:\\Irmia\\app\\dist\\main.js']);
+  assert.deepEqual(backendSpawnArgv('C:\\Irmia\\app\\dist\\main.js', -1), ['C:\\Irmia\\app\\dist\\main.js']);
+});
+
+test('④c 三处默认值同源：worker 的常量与脚本里的 512 是同一个数', () => {
+  // 脚本那一侧没法在这里 import（PowerShell），所以把"同一个数"写成一条断言：
+  // 改任何一处而忘了另一处，这条会红。
+  assert.equal(MAX_OLD_SPACE_MB, 512);
 });
