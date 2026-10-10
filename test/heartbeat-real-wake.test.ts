@@ -26,7 +26,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { heartbeatData, makeRealWakeRig, requestFingerprint } from './fixtures/real-wake-rig.ts';
+import type { AppEvent } from '../src/log/types.ts';
+import { defaultVisibility } from '../src/log/types.ts';
+import type { DsRequest } from '../src/model/ds-client.ts';
+import { heartbeatData, makeRealWakeRig, requestFingerprint, type RealWakeRig } from './fixtures/real-wake-rig.ts';
 
 // ──────────────────────────────── 改动前的基线 ────────────────────────────────
 
@@ -132,6 +135,70 @@ const BEFORE_HEARTBEAT_TYPES = [
   'compaction/decision',
 ];
 
+/**
+ * **启动必然落的那一条留痕**（2026-10-11 别人那条线加的：`runtime/restart`）。
+ *
+ * ──────────────────────────── 它为什么该被"容纳"而不是被"重取" ────────────────────────────
+ *
+ * 上面那三张表是**改动前的历史常量**，它们记的是"当年那一刻的事件序列"。而 `runtime/restart`
+ * 是一条**每次启动都会写**的 internal 留痕（进程起来时写一条：这一任是谁拉起的、上一任怎么没的
+ * ——见 `src/runtime/real-loop.ts` 那段头注释）。台子（`test/fixtures/real-wake-rig.ts`）走的是
+ * 真 `RealLoop.tickOnce()`，所以它**必然**在里面出现一次、位置在"唤醒事件之后、预热收尾那一段"：
+ *
+ * ```
+ * 非心跳拍：wake/manual  →  [runtime/restart]  →  budget/rollover  →  snapshot/checkpoint  →  turn/start …
+ * 混批：    wake/heartbeat, wake/manual  →  [runtime/restart]  →  budget/rollover …
+ * ```
+ *
+ * **这一条改动没有重取那三张基线常量**，理由与做法都在下面那两条断言里：
+ *   · 三张历史常量**一个字不动**（它们仍是"改动前"的凭据）；
+ *   · 实际序列**滤掉这一条**之后，必须与历史基线**逐字相同** ⇒ 两边的差集**恰好只有这一条**
+ *     （多滤一条、少滤一条、多出任何别的类型，用例都会红）；
+ *   · 另外单独钉住"这一条不许进她的请求体"（`internal` ⇒ 渲染层看不见它）——
+ *     它正好是这条留痕最容易犯的错：一条簿记混进上下文，之后每一轮都在为它付费。
+ *
+ * 判据没有放宽：`compaction/decision` 当年也是"别人那条线加的收尾事件"，走的是同一条路
+ * （见文件头 2026-10-09 那一段），只是那次它是**补进表里**（那三条表当时本来就在重取）。
+ */
+const STARTUP_RESTART_EVENT = 'runtime/restart';
+
+/** 实际序列 - 启动留痕（`deepEqual` 要求两边都是可变数组，所以这里不标 readonly） */
+function withoutStartupRestart(types: string[]): string[] {
+  return types.filter(type => type !== STARTUP_RESTART_EVENT);
+}
+
+/**
+ * 一条事件（判据要它的 `visibility`；缺了就直接红——比"顺手取一个可能为 undefined 的东西"硬）
+ */
+async function eventOfType(rig: RealWakeRig, type: string): Promise<AppEvent> {
+  const hit = (await rig.events()).find(event => event.type === type);
+  assert.ok(hit !== undefined, `事件流里必须有 ${type}（它不在，下面那条"不进请求体"就没有对象）`);
+  return hit;
+}
+
+/**
+ * 一次请求里**输入那一段的全部文本**（外层不套 JSON）：Windows 路径里的反斜杠会被
+ * `JSON.stringify` 转义成 `\\`，于是"这串字节在不在请求里"这种断言会因为转义而假绿/假红。
+ * 与 `compaction-decision-wake.test.ts` 的同名函数同一口径。
+ */
+function textOfRequest(request: DsRequest): string {
+  const input = request.input;
+  if (typeof input === 'string') return input;
+  if (!Array.isArray(input)) return '';
+  const parts: string[] = [];
+  for (const item of input) {
+    const content = (item as { content?: unknown }).content;
+    if (typeof content === 'string') parts.push(content);
+    else if (Array.isArray(content)) {
+      for (const part of content) {
+        const text = (part as { text?: unknown }).text;
+        if (typeof text === 'string') parts.push(text);
+      }
+    }
+  }
+  return parts.join('\n');
+}
+
 /** 一次整拍：落一条唤醒 → 跑一拍（生产定时器回调与 `tick()` 是同一份逻辑） */
 async function runOneWake(
   wake: { type: string; data: unknown },
@@ -190,7 +257,13 @@ test('①b 一整库"牵挂"全无（到期意图/待确认/待办/等回答/死
 test('② 非心跳拍与改动前逐字节一致：事件序列 + 请求指纹（基线在改动前捕获）', async (t) => {
   const manual = await runOneWake({ type: 'wake/manual', data: { note: '帮我看看日志' } });
   t.after(manual.dispose);
-  assert.deepEqual(await manual.types(), BEFORE_MANUAL_TYPES, '非心跳拍的事件序列必须与改动前一字不差');
+  // 基线**没有重取**：实际序列滤掉"启动必然落的那一条"（`runtime/restart`）之后，
+  // 必须与改动前的历史常量**逐字相同** ⇒ 差集恰好只有那一条（见那一段注释）。
+  assert.deepEqual(
+    withoutStartupRestart(await manual.types()),
+    BEFORE_MANUAL_TYPES,
+    '非心跳拍的事件序列必须与改动前一字不差（除启动那条 runtime/restart 留痕）',
+  );
   assert.deepEqual(
     manual.requests.map(item => `${item.lane}:${requestFingerprint(item.request)}`),
     [`heavy:${BEFORE_MANUAL_FINGERPRINT}`],
@@ -205,10 +278,47 @@ test('②b 混批（心跳 + 人）仍按"有真实事件"处理：与改动前�
   rig.append('wake/manual', { note: '混批' });
   await rig.tick();
 
-  assert.deepEqual(await rig.types(), BEFORE_MIXED_TYPES);
+  assert.deepEqual(withoutStartupRestart(await rig.types()), BEFORE_MIXED_TYPES);
   assert.deepEqual(
     rig.requests.map(item => `${item.lane}:${requestFingerprint(item.request)}`),
     [`heavy:${BEFORE_MIXED_FINGERPRINT}`],
+  );
+});
+
+// ──────────── ②c 启动留痕是 internal ⇒ 不许污染她的上下文（2026-10-11） ────────────
+
+test('②c 启动留痕 runtime/restart 是 internal：一条都不进她的请求体', async (t) => {
+  // 这条正好把"留痕不该污染上下文"钉死：它是**每次启动都写**的一条（见 `src/runtime/real-loop.ts`
+  // 那段头注释），一旦写成 model，之后**每一轮**请求都要为它付一次常驻 token。
+  const rig = await runOneWake({ type: 'wake/manual', data: { note: '帮我看看日志' } }, [{ text: '嗯。', toolCalls: [] }]);
+  t.after(rig.dispose);
+
+  // ① 它真的在事件流里、位置与形状都对（**留痕在前、预热收尾那一段**），且可见性是 internal
+  const logged = await eventOfType(rig, STARTUP_RESTART_EVENT);
+  assert.equal(defaultVisibility(STARTUP_RESTART_EVENT), 'internal',
+    '写入点走 defaultVisibility，所以 schema 表里那一格就是契约');
+  assert.equal(logged.visibility, 'internal', '落库那一栏也必须是 internal（表与写入点两处都要对）');
+  assert.equal(logged.data.wake, false,
+    '台子里没有上一任的 session/start ⇒ 判成首任/unknown 且不喊（这一条留痕不该顺带叫醒她）');
+  assert.equal(
+    (await rig.types()).filter(type => type === STARTUP_RESTART_EVENT).length, 1,
+    '一次启动恰好一条（不是每拍一条）',
+  );
+
+  // ② 请求体里一个字节都没有它（**用整份请求的原文**，不是指纹——指纹剥了此刻层，口径更窄）
+  const sent = rig.requests.map(item => JSON.stringify(item.request)).join('\n') + '\n'
+    + rig.requests.map(item => textOfRequest(item.request)).join('\n');
+  for (const marker of [STARTUP_RESTART_EVENT, 'runtime-restart', 'launchedBy', 'launchedEvidence',
+    'heapCap', 'death', '【框架通报 · 进程重启】']) {
+    assert.equal(sent.includes(marker), false, `不该出现在请求里的字节：${marker}`);
+  }
+  // 正对照：同一次请求里**唤醒那一行必须在**——否则上面那六条可能只是因为整条路都坏了
+  assert.ok(sent.includes('帮我看看日志'), '同一次请求里那条唤醒要在（否则上面六条不算证据）');
+  // ③ 指纹那一侧同样没被它动过（两侧互为正反：指纹看不见它，是因为它本来就不该进请求）
+  assert.deepEqual(
+    rig.requests.map(item => `${item.lane}:${requestFingerprint(item.request)}`),
+    [`heavy:${BEFORE_MANUAL_FINGERPRINT}`],
+    '加了这条留痕之后，非心跳拍的请求指纹仍是改动前那一个',
   );
 });
 

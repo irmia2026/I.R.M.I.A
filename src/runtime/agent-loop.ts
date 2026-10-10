@@ -1512,6 +1512,20 @@ class TurnRunner {
    *     压缩、渲染换代、空闲）降级成普通记录，只有"无法归因"仍然告警——用户那次的原话是
    *     「预期内的代价和真正的异常混在同一条告警里 ⇒ 告警常态化 ⇒ 人就不看了」。
    * 两次比对之间没有额外的请求，所以"一步一条"既是归因的粒度，也是哨兵的粒度。
+   *
+   * ⚠️ **本方法写下的 `tokensTodayAccum` 是观测字段，别拿它当预算依据**（2026-10-11 写准）：
+   * 它的形状是"**本条之前的内存投影当日累计（新口径 `budgetTokensOf` 折出来的）+ 本条
+   * `inputTokens + outputTokens`（旧口径增量）**"——2026-10-05 换预算口径时基线换了、delta
+   * 没换，于是这个字段**天生是混合口径**。全仓**五处写入一律如此、彼此自洽**（本方法
+   * 成功路径、`failStep` 失败路径写全 0、`channel/injection-judge.ts:203`、`channel/topic.ts:188`、
+   * `persona/memory-maintain.ts:719`），所以**谁也别说谁写错了**。
+   * **一切预算读数走投影**（`state/fold.ts` 的 `budgetTokensOf`），任何闸门/判据都不许拿这个
+   * 字段当依据——doctor 的 I7 原来核它，2026-10-05 起天天假报，2026-10-11 已把那条判据删掉。
+   * 真正要对齐的话，最小改法是上面那 5 处一起改成
+   * `this.projection.budget.tokensToday + budgetTokensOf({ inputTokens, cacheHitTokens: cacheHit, outputTokens: usage.outputTokens })`，
+   * 代价是同时要改三支钉住"in+out 累进"的断言（`test/task-tool-wiring.test.ts:423`、
+   * `test/subagent.test.ts:352-353`、`test/memory-maintain.test.ts:228`）+ `docs/schema.md` §6 的注释；
+   * **本轮刻意不做**（收益只有字段语义好看，代价是动运行期写入式子）。
    */
   private accountStep(
     step: number,

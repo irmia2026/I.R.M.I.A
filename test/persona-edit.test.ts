@@ -80,6 +80,10 @@ describe('persona-edit', () => {
     assert.equal(body['changed'], true);
     assert.equal(body['file'], 'STATE.md');
     assert.equal(typeof body['diffHash'], 'string');
+    // **满 64 位**内容地址（2026-10-11 修）：这之前是 `.slice(0, 16)`，于是同一个 diffHash 字段
+    // 在日志里有两种形状，凡是"拿盘上重算的 sha256 去比日志里那条"的判据（doctor I10、
+    // persona diff/log）都得额外容忍截断。版本库快照文件名只能是满 64 位，这里写满才与它一致。
+    assert.match(String(body['diffHash']), /^[0-9a-f]{64}$/u, 'diffHash 必须是满 64 位 sha256');
 
     // 文件真的变了
     const onDisk = readFileSync(join(dir, 'data', 'persona', 'STATE.md'), 'utf8');
@@ -92,6 +96,9 @@ describe('persona-edit', () => {
     const updated = events.events.filter((e) => e.type === 'persona/updated');
     assert.ok(updated.length >= 1, '应当写下 persona/updated 事件');
     assert.equal(updated.at(-1)?.data['by'], 'human');
+    // 事件里那格与响应同形状（满 64 位）——它要与版本库文件名、与 doctor 的重算值对得上
+    assert.equal(updated.at(-1)?.data['diffHash'], body['diffHash']);
+    assert.match(String(updated.at(-1)?.data['diffHash']), /^[0-9a-f]{64}$/u);
 
     // 旧内容可在版本历史里找到（快照）
     const history = await api('/api/persona/history').then((r) => r.json());

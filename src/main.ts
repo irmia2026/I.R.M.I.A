@@ -48,7 +48,17 @@ import { WEBHOOK_SECRET_FILE_NAME } from './web/webhook-secret.ts';
 import { keysPath } from './config/keys.ts';
 import { applyOne, finalizePressure } from './state/fold.ts';
 import { JobManager } from './runtime/job-manager.ts';
-import { toInstanceTakeoverData, type TakeoverRecord } from './runtime/instance-lock.ts';
+import { LockHeldError, toInstanceTakeoverData, type TakeoverRecord } from './runtime/instance-lock.ts';
+import {
+  acquireInstanceGate, BackendAlreadyRunningError,
+  type GateReclaimRecord,
+} from './runtime/instance-guard.ts';
+import {
+  createGuiGuard, discoverGuiExe, launchGuiByStartProcess, listPidsByExePath, resolveGuardMode,
+  DEFAULT_INTERVAL_MS, DEFAULT_MAX_RELAUNCH_PER_WINDOW, DEFAULT_WINDOW_MS,
+  GUI_GUARD_OFF_FILE_NAME, GUI_PATH_FILE_NAME,
+  type GuiGuard, type GuiGuardRecord,
+} from './runtime/gui-guard.ts';
 import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
 import { EVENT_LOG_DIR_NAME, TIMER_FILE_NAME, recover, type RecoverResult } from './runtime/recover.ts';
 import { TimerStore } from './wake/timer-store.ts';
@@ -76,7 +86,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.6';
+export const AGENT_VERSION = '0.1.0-beta.7';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -296,32 +306,69 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const lockState: { takeover: TakeoverRecord | null } = { takeover: null };
   let stopRef: ((reason: SessionEndReason, detail?: string) => Promise<void>) | null = null;
 
-  const recovery = await recover(
-    {
-      dataDir,
-      timers,
-      log: (level, message, extra) => {
-        write(`[恢复/${level}] ${message}${extra === undefined ? '' : ` ${JSON.stringify(extra)}`}`);
-      },
+  /**
+   * ── 单实例：**接管闸门**罩住恢复流程的第一步（那次可能并发的接管）──
+   *
+   * 为什么必须在 `recover()` 外面再包一层：`instance-lock.ts` 的排他创建对**首次创建**
+   * 是原子的，但**接管陈旧锁**走的是"判定 → tmp+rename 覆盖 → 回读"，而 rename 覆盖
+   * 不是比较并交换——两个进程都可能在对方写之前读到"前任已死"，然后**都**认为自己持了锁
+   * （完整的交错写在 `instance-guard.ts` 的文件头）。那正是"两套 turn 同时跑"的形状。
+   *
+   * 闸门（`<dataDir>/lock.json.takeover`，同样 `wx` 排他创建）把"判定 + 写入"串起来：
+   * 谁拿不到闸门就**如实拒绝启动**，一个字节都不写。它只在 recover 期间持有。
+   *
+   * 判据一处都没多：接管结论（pid-gone / pid-reused / stale-heartbeat + 宽限期）仍然
+   * 整个由 `instance-lock.ts` 给；这里只负责**串行**。
+   */
+  const gate = await acquireInstanceGate(dataDir, {
+    log: (level, message, extra) => {
+      write(`[锁/${level}] ${message}${extra === undefined ? '' : ` ${JSON.stringify(extra)}`}`);
     },
-    {
-      now: () => now().getTime(),
-      onTakeover: (record) => {
-        lockState.takeover = record;
-      },
-      onStolen: (info) => {
-        // 锁被夺走意味着双写风险已经成立：唯一正确的动作是立刻退出，不再写任何事件
-        write(`[致命] 锁已不属于本进程（当前持有者 pid ${info.observed?.pid ?? '未知'}），立即退出`);
-        const stop = stopRef;
-        if (stop !== null) {
-          void stop('error', '锁被接管').then(() => {
-            process.exitCode = 1;
-            process.exit(1);
-          });
-        }
-      },
+    onReclaim: (record: GateReclaimRecord) => {
+      write(`[锁] 接管了陈旧闸门：前任 pid ${record.previousPid ?? '未知'}（${record.staleBecause}`
+        + `${record.heldMs === null ? '' : `，持有了 ${Math.round(record.heldMs / 1000)} 秒`}）——`
+        + '上一个实例是在接管单实例锁的中途死的；本次继续，接管本身的留痕见紧随的 instance/takeover');
     },
-  );
+  });
+
+  let recovery: RecoverResult;
+  try {
+    recovery = await recover(
+      {
+        dataDir,
+        timers,
+        log: (level, message, extra) => {
+          write(`[恢复/${level}] ${message}${extra === undefined ? '' : ` ${JSON.stringify(extra)}`}`);
+        },
+      },
+      {
+        now: () => now().getTime(),
+        onTakeover: (record) => {
+          lockState.takeover = record;
+        },
+        onStolen: (info) => {
+          // 锁被夺走意味着双写风险已经成立：唯一正确的动作是立刻退出，不再写任何事件
+          write(`[致命] 锁已不属于本进程（当前持有者 pid ${info.observed?.pid ?? '未知'}），立即退出`);
+          const stop = stopRef;
+          if (stop !== null) {
+            void stop('error', '锁被接管').then(() => {
+              process.exitCode = 1;
+              process.exit(1);
+            });
+          }
+        },
+      },
+    );
+  } catch (err) {
+    // 「已经有一个后端在跑」要有一句人能直接读懂的话，而不是一个 LockHeldError 的类名
+    // （用户 2026-10-11 要的判据：第二个实例**立刻退出** + 人话说明）
+    if (err instanceof LockHeldError) {
+      throw new BackendAlreadyRunningError(err.file, err.holder.pid, err.holder.startedAt);
+    }
+    throw err;
+  } finally {
+    gate.release();
+  }
 
   const { log, lock } = recovery;
 
@@ -1214,6 +1261,68 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     write(`[唤醒源/timer] 补记 ${backfilled} 条恢复期已触发的定时器（wake/timer 已入队）`);
   }
 
+  /**
+   * ── 后端保活前端（A 项）：主进程看着界面，界面意外没了就把它拉回来 ──
+   *
+   * 判据、协议与上限**全部写在** `runtime/gui-guard.ts` 的文件头（那里是唯一一处），
+   * 这里只做三件接线的事：把路径喂给它、把它的每一条判定落成 `runtime/gui-relaunch`
+   * （internal：原因 + 结果都在里面）、把"超限/永久停手"接到既有的告警出口。
+   *
+   * **界面 exe 的路径不许猜**：三个来源按优先级（环境变量 `IRMIA_GUI_EXE` →
+   * `data/gui-path.txt` 里的一行 → 拉起器留痕里最近一次真的用过、且**盘上还在**的那一个），
+   * 全都没有就**如实说"这次不保活"**并给出怎么补——绝不退到"按名字找一个像界面的进程"
+   * （今晚踩过的那条坑：按名字判断会认错人）。
+   *
+   * **主动退出 vs 崩溃**：区分"用户主动关的"与"崩了"靠界面**退出前**写的那枚短时效标记（协议 `docs/gui-guard.md` §3）。
+   * 界面那一半**已经接上**（v50 起：`gui/lib/gui_quit.dart` ⇒ `%APPDATA%\Irmia\gui-quit.marker`，关窗
+   * `main.dart:85`／托盘 `tray.dart:150` 各写一次、**收进托盘不写**，b5d68ce）；**只有旧构建的界面**不写标记 ⇒ 那时主动关仍会被当崩溃拉回。
+   */
+  const guardMode = resolveGuardMode(process.env, dataDir);
+  const guiFound = discoverGuiExe({ dataDir, env: process.env, fileExists: existsSync });
+  /**
+   * 句柄要先于 `stop()` 声明：退出路径里第一件事就是把它停掉
+   * （不再有"界面没了 ⇒ 又被拉回来"这种在退出过程中冒出来的动作）。
+   */
+  const guiGuardRef: { guard: GuiGuard | null } = { guard: null };
+  if (guardMode.mode === 'off') {
+    write(`[界面保活] 已关（${guardMode.why}）：不看着界面，也不拉起它`);
+  } else if (guiFound === null) {
+    write('[界面保活] 找不到界面 exe 的绝对路径 ⇒ 本次不保活（绝不按名字猜）。三种给法任选一条：'
+      + '环境变量 IRMIA_GUI_EXE=<exe 绝对路径>、'
+      + `或写一行进 ${join(dataDir, GUI_PATH_FILE_NAME)}、或让拉起器（tools/restart-agent.ps1 -GuiExe …）先跑过一次`);
+  } else {
+    write(`[界面保活] 已布防：每 ${DEFAULT_INTERVAL_MS / 1000} 秒按**可执行文件全路径**看一次 ${guiFound.exe}`
+      + `（路径来自 ${guiFound.source}）· 档位=${guardMode.mode}（${guardMode.why}）`
+      + ` · 拉起上限 ${DEFAULT_MAX_RELAUNCH_PER_WINDOW} 次/${DEFAULT_WINDOW_MS / 60_000} 分钟，超限报警`);
+    write(`[界面保活] 主动退出的判据：界面在退出前写 ${join(dataDir, 'gui-quit.marker')}（或 %APPDATA%\\Irmia 那一份，两处都认）`
+      + ` ⇒ 新鲜就判"用户主动关的"，只记账不拉起。界面那一半**已接线**（v50 起：gui/lib/gui_quit.dart，`
+      + `关窗与托盘退出各写一次，b5d68ce）——只有**旧构建的界面**不写标记 ⇒ 那时主动关会被当成崩溃拉回来；`
+      + `要停就 IRMIA_GUI_GUARD=watch（只看不拉）或 =off，也可以建一个空文件 ${join(dataDir, GUI_GUARD_OFF_FILE_NAME)}`);
+    guiGuardRef.guard = createGuiGuard({
+      dataDir,
+      exe: guiFound.exe,
+      exeSource: guiFound.source,
+      mode: guardMode.mode,
+      io: { listPids: listPidsByExePath, launch: launchGuiByStartProcess },
+      record: (r: GuiGuardRecord) => {
+        append('runtime/gui-relaunch', { outcome: r.outcome, reason: r.reason, ...r.detail }, 'internal');
+        write(`[界面保活] ${r.outcome}：${r.reason}`);
+      },
+      alert: (a) => {
+        // 与其它告警共用同一个出口（限流窗口只有一份）：这里不 await，也不让它拦住别的收尾
+        void notifier.alert({
+          category: 'gui-guard',
+          level: a.level,
+          title: a.title,
+          body: a.body,
+          params: a.params,
+        }).catch((err: unknown) => {
+          write(`[界面保活] 告警没发出去（不影响保活本身）：${describeError(err)}`);
+        });
+      },
+    });
+  }
+
   // ── 退出 ──
   let stopping = false;
   const signalHandlers: Array<{ signal: NodeJS.Signals; handler: (signal: NodeJS.Signals) => void }> = [];
@@ -1224,6 +1333,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
     for (const entry of signalHandlers) process.off(entry.signal, entry.handler);
     signalHandlers.length = 0;
+
+    // 保活守在第一件事上停掉：退出过程中界面消失是**预期的**（拉起器先停界面再收后端），
+    // 这时候再去"保活"只会与拉起器抢着拉出第二个界面。
+    guiGuardRef.guard?.stop();
 
     // 协议端是框架拉起来的，就得由框架收尸：先停它（killProcessTree 连子进程一起，
     // 否则 NTQQ 那层会变成孤儿进程，下次启动还会抢同一个端口）
@@ -1289,6 +1402,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
   // ── 起拍 ──
   loop.start();
+  // 保活跟着主循环起拍（`start()` 会**先跑一拍**：布防当场就有一次"界面在不在"的读数）
+  guiGuardRef.guard?.start();
   write(`[运行] 唤醒源 ${sources.length} 个已布防（日志目录 ${EVENT_LOG_DIR_NAME}/），假循环整装待发`);
 
   return { dataDir, loop, sources, recovery, config, persona, webServer, stop };

@@ -32,7 +32,7 @@
  * 所以不补 `registerTools`（那会改掉指纹基线，与本版无关）。
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -41,9 +41,10 @@ import { DEFAULT_DATA_DIR_NAME, defaultConfig } from '../src/config/config.ts';
 import type { AppConfig } from '../src/config/config.ts';
 import type { AppEvent } from '../src/log/types.ts';
 import { MCP_TOOLS_CACHE_DIR, MCP_TOOLS_CACHE_VERSION } from '../src/mcp/client.ts';
-import { RENDER_VERSION } from '../src/model/render.ts';
+import { RENDER_VERSION, mcpIndexOf } from '../src/model/render.ts';
 import { MCP_INDEX_HEADER, MCP_INDEX_DESC_CLAUSE_VERSION, mcpIndexView } from '../src/persona/assets.ts';
 import { locateStep, rebuildRenderedRequest } from '../src/runtime/replay.ts';
+import { allEventsOf } from '../src/state/event-snapshot.ts';
 import { makeRealWakeRig } from './fixtures/real-wake-rig.ts';
 import type { RealWakeRig } from './fixtures/real-wake-rig.ts';
 
@@ -563,44 +564,47 @@ test('⑤d 快照的版本号跟着 RENDER_VERSION（模板换代 ⇒ 旧快照�
   assert.equal(snapshot.visibility, 'internal', '快照本身是 internal：进上下文的是渲染出来的那一段');
 });
 
-test('⑤e 没有 descClauseVersion 的**老快照**：当作第 0 版 ⇒ 该重建（行模板换了代）', async (t) => {
+test('⑤e 盘上躺着**缺 descClauseVersion 的老快照**（升级上来的日志）⇒ 新代码第一拍就重建一次', async (t) => {
   const rig = await makeRealWakeRig({ patchConfig: withServers(['alpha']) });
   t.after(rig.dispose);
-  rig.append('wake/manual', { note: '一拍' });
-  await tick(rig);
-  const first = (await eventsOf(rig)).find((event) => event.type === 'mcp/index');
-  assert.ok(first !== undefined, '这一拍该落一条快照');
 
   /**
-   * 把**盘上**那条快照改回老形状（没有 `descClauseVersion`）——这是"升级上来的日志"的样子。
+   * 先把"老版本写下的那条快照"落进日志，**再**打第一拍——这才是真升级的形状：老 dist 写下的
+   * 日志躺在盘上，新 dist 起一个进程、第一次读它。
    *
-   * 为什么必须落到文件上、而不是改内存里那条事件对象：`EventLog.get(seq)` 在内存视图里
-   * 查得到就先用它（实测确认过：改内存那份之后，下一拍的同步仍然读到带这一格的版本）。
-   * 真升级路径上那个字段**本来就不在盘上**，所以只有改写分片才是等价的模拟。
+   * ⚠ **为什么不能在跑着的台子上回头改分片**（这条用例 2026-10-11 之前正是那么写的，于是它烂了）：
+   * `mcpIndexSync` 读的是 `allEventsOf(log)`，而它按 `EventLog` 实例缓存**已 parse 的事件**、只补
+   * `latestSeq()` 之后的增量（`state/event-snapshot.ts`；2026-10-10 为止血"每拍全量重读 98 MB"
+   * 才改成这样，`real-loop.ts:1929` 那一段记着旧形状）⇒ 回头改一条历史分片，同步那一侧**永远
+   * 看不见它**：探针实测同一拍下 `allEventsOf` 那侧仍是 `descClauseVersion=2`，而 `log.readAll()`
+   * （真读盘）那侧已经是 `undefined`（`mcpIndexOf` 按 0 算）。也就是说旧写法测的已经不是"升级"，
+   * 而是"台账外改历史分片"——那件事本来就不受支持（日志 append-only）。**红的不是判据**：
+   * 探针把同一条老快照放在**第一次读日志之前**，一拍就重建、第二拍照旧冻结。
    */
-  const shardDir = join(dataDirOf(rig.dir), 'events');
-  const shard = readdirSync(shardDir).filter((name) => name.endsWith('.jsonl')).sort().at(-1);
-  assert.ok(shard !== undefined, '日志分片该在（否则这条断言什么都没测到）');
-  const shardPath = join(shardDir, shard!);
-  const lines = readFileSync(shardPath, 'utf8').split('\n');
-  let patched = 0;
-  const next = lines.map((line) => {
-    if (!line.includes('"mcp/index"')) return line;
-    const parsed = JSON.parse(line) as { data: Record<string, unknown> };
-    delete parsed.data['descClauseVersion'];
-    patched += 1;
-    return JSON.stringify(parsed);
+  rig.append('mcp/index', {
+    version: RENDER_VERSION,
+    // 逐字取一份真老快照的行形状（真日志 seq 71662，version 47：行里没有"它是干什么的"那一截）
+    text: '[MCP server] 配置里声明的 MCP server（每条 = 名字 + 启用状态 + 已见工具数）。'
+      + '要调 MCP：用 mcp 工具……\n- alpha —— 启用，工具清单还没拉过（要看就调 mcp 工具）\n'
+      + '（要看某个 server 的工具就调 mcp 工具带上它的名字；工具名不在这段索引里。）',
+    servers: [],
   });
-  assert.equal(patched, 1, '该改到恰好一条索引快照');
-  writeFileSync(shardPath, next.join('\n'), 'utf8');
 
-  rig.append('wake/manual', { note: '再来一拍' });
+  const seeded = mcpIndexOf(await allEventsOf(rig.log));
+  assert.equal(seeded.version, RENDER_VERSION, '前提：模板版本就是当前这一代 ⇒ 唯一能让它过期的是"行模板版本"那一格');
+  assert.equal(seeded.descClauseVersion, 0, '前提：缺那一格按第 0 版算（不是 undefined，也不能被当成当前版）');
+
+  rig.append('wake/manual', { note: '一拍' });
+  await tick(rig);
+  const snapshots = (await eventsOf(rig)).filter(
+    (event): event is Extract<AppEvent, { type: 'mcp/index' }> => event.type === 'mcp/index',
+  );
+  assert.equal(snapshots.length, 2, '缺那一格的老快照 ⇒ 当头重建一次');
+  assert.equal(snapshots.at(-1)?.data.descClauseVersion, MCP_INDEX_DESC_CLAUSE_VERSION, '重建出来那份带着当前值');
+  assert.notEqual(snapshots.at(-1)?.data.text, seeded.text, '行也是按当前模板重拼的（老那份没被当成现役）');
+
+  rig.append('wake/manual', { note: '第二拍' });
   await tick(rig);
   const count = (await eventsOf(rig)).filter((event) => event.type === 'mcp/index').length;
-  assert.equal(count, 2, '缺那一格的老快照 ⇒ 重建一次');
-
-  rig.append('wake/manual', { note: '第三拍' });
-  await tick(rig);
-  const count3 = (await eventsOf(rig)).filter((event) => event.type === 'mcp/index').length;
-  assert.equal(count3, 2, '重建过一次之后就照旧冻结（这一条挡住"每拍都重建"那个毛病）');
+  assert.equal(count, 2, '重建过一次之后就照旧冻结（这一条挡住"每拍都重建"那个毛病）');
 });

@@ -19,22 +19,23 @@
  *    （一次带那条事件、一次把它摘掉）**除当轮输入那一格的两个字以外逐字节相同**。
  * ② **当前输入仍带"重投"**：被重投的那一拍，**当轮输入**那条 wake 上必须有 ` · 重投`。
  * ③ **因果对照**：把那条 `input/requeued` 拿掉 ⇒ 两次渲染的条数与字节只差那个标记。
- * ④ **真数据回归**（`data/events`）：拿真实发生过的那一拍，删掉盖住它的那条 requeue
- *    之后**前缀逐字节相同**。`data/` 是运行数据、不在版本库里 ⇒ 找不到时**如实跳过**并说明。
+ * ④ **因果对照（自己造的事件流，真 RealLoop 台子）**：台子跑出一拍真事件（模型那一拍整轮失败 ⇒
+ *    agent-loop 真的写一条 `input/requeued{turn-error}`，它落在这一拍的 `step/start` **之后**），
+ *    再走**生产那条重建路**（`rebuildRenderedRequest`）：把那条 requeue 从事件流里删掉 ⇒
+ *    这一拍的请求**逐字节相同**。
+ *    ⚠ 这一条原来读**真 `data/events`** 并做**全行子串匹配**"重投"⇒ 现场一变就假红
+ *    （她自己的文本里就有那两个字，2026-10-11 已发生）。取数方式换成台子，**判据一个字没放宽**。
  *
  * **没实测的**：这一改对 cacheHit 的实际改善没有实测——本次现场那次 miss 的主因是上面
  * 那条"插入"，修完它**不会**消失。
  */
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import test from 'node:test';
 
 import { defaultVisibility, type AppEvent } from '../src/log/types.ts';
 import { NOW_LAYER_BANNER, inputContentText, render, type InputItem, type RenderInput } from '../src/model/render.ts';
 import { locateStep, rebuildRenderedRequest } from '../src/runtime/replay.ts';
-import { loadPersona } from '../src/persona/loader.ts';
-import { catalogToolSpecs } from '../src/tools/catalog.ts';
+import { makeRealWakeRig } from './fixtures/real-wake-rig.ts';
 
 // ──────────────────────────────── 事件与渲染的小工厂 ────────────────────────────────
 
@@ -193,153 +194,81 @@ test('③ 因果对照：把那条 input/requeued 拿掉 ⇒ **除了当轮输�
   assert.equal(marked.length, 1, '有 requeue 时当轮输入带标记');
   assert.deepEqual(historyWithout.filter((line) => line.includes('重投')), [], '没有 requeue 时一个字都不该有');
 });
-
-// ──────────────────────────────── ④ 真数据回归（现场那一对拍） ────────────────────────────────
-
-const EVENT_DIR = join('data', 'events');
-
-interface Located { turn: number; step: number }
+// ──────────────────────────────── ④ 因果对照（自己造的事件流） ────────────────────────────────
 
 /**
- * 在真日志里找一对"现场拍"：某个 turn 的第一次请求之后，有一条 `input/requeued`
- * 盖住了**那一轮认领过的 wake**（= 追溯改写的现场）。找不到就给 null。
+ * 台子跑一拍、把日志读回来。
  *
- * 判据与 `_research` 那次归因同一把尺子：requeue 的 seq 落在"那一轮的 step/start"之后。
- * **从最近的往回想**：老的那些现场可能已经被后来的压缩遮蔽（遮蔽点前的 item 不再渲染），
- * 拿它当回归对象会得到"本来就没有前缀"的假失败。
+ * 为什么用**真 RealLoop 台子**而不是手搓事件：这一条钉的是"一条**后来的** requeue 不许改写
+ * 更早那一拍的请求字节"，而"requeue 落在哪一拍"这件事该由**真循环**决定——agent-loop 在整轮
+ * 失败时把认领过的输入退回队列（`input/requeued{turn-error}`）。手搓那份事件流等于把这个前提
+ * 当成假设写进用例；台子跑出来的才是既成事实（实测：wake seq 1 → step/start seq 8 →
+ * input/requeued seq 11）。
  */
-function findRetroRequeueScene(events: readonly AppEvent[]): { victim: Located; next: Located } | null {
-  const stepStarts = events.filter((e) => e.type === 'step/start');
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i]!;
-    if (event.type !== 'input/requeued') continue;
-    for (const wakeSeq of event.data.wakeSeqs) {
-      const owner = stepStarts.find((s) => s.seq > wakeSeq && s.seq < event.seq);
-      if (owner === undefined) continue;
-      const turn = owner.data.turn;
-      const next = stepStarts.find((s) => s.seq > event.seq && s.data.turn !== turn);
-      if (next === undefined) continue;
-      return { victim: { turn, step: 1 }, next: { turn: next.data.turn, step: next.data.step } };
-    }
-  }
-  return null;
-}
+test('④ 一条**后来的** requeue 不改写更早那一拍的请求字节（真台子 + 生产重建路）', async (t) => {
+  const rig = await makeRealWakeRig({
+    // 这一拍整轮失败（模型抛）⇒ agent-loop 走"输入退回队列"那条真路
+    stream: [{ throws: new Error('测试替身：这一拍整轮失败（服务端 400 的等价物）') }],
+  });
+  t.after(rig.dispose);
 
-function readAllEvents(): AppEvent[] {
-  const out: AppEvent[] = [];
-  for (const file of readdirSync(EVENT_DIR).filter((f) => f.endsWith('.jsonl')).sort()) {
-    for (const line of readFileSync(join(EVENT_DIR, file), 'utf8').split('\n')) {
-      if (line.trim() === '') continue;
-      try {
-        out.push(JSON.parse(line) as AppEvent);
-      } catch { /* 坏行跳过：与 CLI 的读法一致 */ }
-    }
-  }
-  return out.sort((a, b) => a.seq - b.seq);
-}
+  const wake = rig.append('wake/manual', {
+    note: '【框架通报 · 上下文压缩】turn 1244 刚做过一次上下文压缩。手上没做完的事接着做。',
+  });
+  await rig.tick();
 
-/**
- * 全部"追溯改写"的候选现场（**新的在前**）。
- *
- * 为什么要一串而不是一个：老的那些现场可能已经被**后来的压缩**遮蔽（遮蔽点前的 item
- * 不再渲染）——拿它当回归对象只会得到"本来就没有前缀"的假失败。所以调用方从新往旧试，
- * 取第一个**真的还有前缀**的（判据在用例里：前缀条数 > 10）。
- */
-function retroRequeueScenes(events: readonly AppEvent[]): Array<{ victim: Located; next: Located }> {
-  const stepStarts = events.filter((e) => e.type === 'step/start');
-  const found: Array<{ victim: Located; next: Located }> = [];
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i]!;
-    if (event.type !== 'input/requeued') continue;
-    for (const wakeSeq of event.data.wakeSeqs) {
-      const owner = stepStarts.find((s) => s.seq > wakeSeq && s.seq < event.seq);
-      if (owner === undefined) continue;
-      const turn = owner.data.turn;
-      const next = stepStarts.find((s) => s.seq > event.seq && s.data.turn !== turn);
-      if (next === undefined) continue;
-      found.push({ victim: { turn, step: 1 }, next: { turn: next.data.turn, step: next.data.step } });
-    }
-  }
-  return found;
-}
+  const events: AppEvent[] = [];
+  for await (const event of rig.log.readAll()) events.push(event);
 
-test('④ 真数据回归：现场那一拍，删掉那条 input/requeued 之后**前缀逐字节相同**', async (t) => {
-  if (!existsSync(EVENT_DIR)) {
-    t.skip(`没有 ${EVENT_DIR}（运行数据不在版本库里）——这条用例在真实工作区上才有意义`);
-    return;
-  }
-  const events = readAllEvents();
-  const scenes = retroRequeueScenes(events);
-  if (scenes.length === 0) {
-    t.skip('这份日志里已经找不到"追溯改写"的现场——用例跳过而不是假绿');
-    return;
-  }
+  const requeue = events.find((event) => event.type === 'input/requeued');
+  assert.ok(requeue !== undefined, '前提：整轮失败必须写 input/requeued（否则这条用例什么都没测到）');
+  assert.deepEqual(requeue!.data.wakeSeqs, [wake.seq], '前提：退回的正是这一拍认领的那条输入');
+  const stepStart = events.find((event) => event.type === 'step/start' && event.data.turn === 1);
+  assert.ok(stepStart !== undefined, '前提：这一拍真的起了 step（请求重建得起来）');
+  assert.ok(
+    stepStart!.seq < requeue!.seq,
+    '前提：那条 requeue 落在**这一拍的 step/start 之后**（"后来的"是这条用例的全部张力）',
+  );
 
-  const persona = loadPersona('data');
-  const tools = (await catalogToolSpecs('data')).specs;
   /** 走**生产那条重建路**（CLI `replay` 与界面预览共用它），而不是在用例里另拼一份 */
-  const renderAt = (stream: readonly AppEvent[], turn: number, step: number): string[] | null => {
-    const located = locateStep(stream, turn, step);
+  const renderTurn1 = (stream: readonly AppEvent[]): string[] | null => {
+    const located = locateStep(stream, 1, 1);
     if (!located.ok) return null;
     const request = rebuildRenderedRequest(located, {
       persona: {
-        identity: persona.identity, constitution: persona.constitution, style: persona.style,
-        state: persona.state, personaHash: persona.personaHash, relationship: null,
+        identity: 'ID', constitution: 'CO', style: 'ST', state: 'STATE',
+        personaHash: 'p', relationship: null,
       },
-      tools,
+      tools: [],
       timezone: 'Asia/Shanghai',
     });
     return frozenOf(request);
   };
 
-  /**
-   * 判据（**在受害那一拍自己身上**做因果对照，不跨轮比）：
-   * 把那条追溯改写它的 `input/requeued` 从事件流里删掉，同一拍的**前缀必须逐字节相同**。
-   *
-   * 为什么不跨轮比（第一版就是这么写的，假红）：
-   *   • 轮与轮之间隔着"本该出现的新输入"，多唤醒的轮次里 `locateStep.wakeEvent` 只挑一条
-   *     —— 另一条会以历史形态渲染，于是 item 列表天然错位一格；
-   *   • 而且现场可能已被后来的压缩遮蔽（老的那些就是这样）。
-   *   两条都会让"前缀被改写"与"本来就该多一条"混在一起——那正是这条用例要分开的两种情形。
-   */
-  let hits = 0;
-  let usedTurn: number | null = null;
-  for (const scene of scenes.slice(0, 40)) {
-    // 找出"盖住这一拍那条 wake"的 requeue 事件：它的 seq 落在该拍第一个 step/start 之后
-    const stepStart = events.find(
-      (e) => e.type === 'step/start' && e.data.turn === scene.victim.turn && e.data.step === scene.victim.step,
-    );
-    if (stepStart === undefined) continue;
-    const culprit = events.find((e) => e.type === 'input/requeued' && e.seq > stepStart.seq);
-    if (culprit === undefined) continue;
+  const withIt = renderTurn1(events);
+  const withoutIt = renderTurn1(events.filter((event) => event.seq !== requeue!.seq));
+  assert.ok(withIt !== null && withoutIt !== null, '两边的请求都该重建得起来');
+  assert.ok(withIt!.length > 0, '这一拍的请求里得有冻结那一段（否则下面的断言什么都没测到）');
+  assert.ok(
+    withIt!.some((line) => line.includes('【框架通报 · 上下文压缩】')),
+    '前提：这条 wake 真的进了这一拍的请求',
+  );
 
-    const withIt = renderAt(events, scene.victim.turn, scene.victim.step);
-    const withoutIt = renderAt(
-      events.filter((e) => e.seq !== culprit.seq),
-      scene.victim.turn,
-      scene.victim.step,
-    );
-    if (withIt === null || withoutIt === null) continue;
-    if (withIt.length <= 10) continue; // 前缀已被压缩遮蔽：换下一个现场
+  // ★ 判据本体（一个字没放宽）：删掉那条**后来的** requeue ⇒ 这一拍的请求**逐字节相同**
+  assert.deepEqual(
+    withIt,
+    withoutIt,
+    '一条后来的 input/requeued 改写了更早那一拍的请求字节（那一刻它还不存在）',
+  );
 
-    hits += 1;
-    usedTurn = scene.victim.turn;
-    assert.deepEqual(
-      withIt,
-      withoutIt,
-      `真数据回归：turn ${scene.victim.turn} 的前缀被 seq ${culprit.seq} 那条 input/requeued 改写了`,
-    );
-    assert.deepEqual(
-      withIt.filter((line) => line.includes('重投')),
-      [],
-      `turn ${scene.victim.turn} 的历史里不该再有"重投"字样（它只属于当轮输入）`,
-    );
-    break;
-  }
-
-  if (hits === 0) {
-    t.skip(`找到 ${scenes.length} 个现场，但它们的前缀都已被后来的压缩遮蔽——跳过而不是假绿`);
-    return;
-  }
-  console.log(`[mcp-index] 真数据回归：turn ${usedTurn} 的前缀在删掉那条 requeue 前后逐字节相同`);
+  // 标记那一格：认**标记的形态**（` · 重投] `），不认"重投"那两个字——她自己的文本里也会有
+  // 那两个字（旧版用例就是栽在全行子串匹配上：真 data/ 一变就假红）。
+  // 这一格为什么钉得住 v49 那个毛病：这条 wake 在这一拍**已经落在历史那一侧**
+  // （实测：这一拍重建出来是 `[界面消息] 【框架通报 …】…`），而 v49 之前历史那一侧拿的是
+  // **全量重算**出来的重投集合 ⇒ 一条后来的 requeue 会给它补上 ` · 重投`，字节当场变。
+  assert.deepEqual(
+    withIt!.filter((line) => line.includes(' · 重投] ')),
+    [],
+    '那一拍渲染时这条 requeue 还没发生 ⇒ 历史那一侧一个字都不许被补上',
+  );
 });

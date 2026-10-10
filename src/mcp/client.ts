@@ -76,7 +76,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-06-18', '20
 /** clientInfo（握手时上报；server 侧日志靠它辨认调用方）。version 与 main.ts 的 AGENT_VERSION 同步 */
 export const DEFAULT_CLIENT_INFO: { readonly name: string; readonly version: string } = {
   name: 'irmia-agent',
-  version: '0.1.0-beta.6',
+  version: '0.1.0-beta.7',
 };
 
 /** 每请求软超时：progress 通知可重置这个时钟 */

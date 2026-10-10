@@ -240,7 +240,7 @@ test('M7-1 全链路：握手 → initialized → tools/list → tools/call，�
   assert.ok(initialize !== undefined, '夹具收到了 initialize');
   // 不声明 roots/sampling/elicitation：capabilities 就是空对象
   assert.deepEqual(initialize.capabilities, {});
-  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: '0.1.0-beta.6' });
+  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: '0.1.0-beta.7' });
   assert.ok(marks.some((m) => m.t === 'initialized'), '握手第二步发了 notifications/initialized');
   assert.equal(marks.filter((m) => m.t === 'list').length, 1, 'tools/list 在进程启动时拉一次');
   assert.equal(marks.find((m) => m.t === 'call')?.name, 'echo');

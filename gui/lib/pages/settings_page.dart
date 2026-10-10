@@ -51,7 +51,7 @@ class SettingsPage extends StatefulWidget {
 /// 标记——beta 只体现在这里与包名/说明里；后端那边对同一版号的口径是 `AGENT_VERSION`
 /// （不带 v，见 src/main.ts）。
 /// ⚠️ 别把具体版号抄进注释：出包脚本只改这一行的字面量、不改注释，抄一处就留一处对不上。
-const guiVersion = 'v0.1.0-beta.6';
+const guiVersion = 'v0.1.0-beta.7';
 
 /// 锚点侧栏宽度（AstrBot 的左侧 section 导航）
 const _railWidth = 180.0;

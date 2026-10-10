@@ -270,6 +270,10 @@ function hash16(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
 }
 
+function hash64(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
 /**
  * 原始路径请求：fetch 会在构造 URL 时就把 `..` 归一化掉，那样测不到服务器自己的防护。
  * 这里直接把原始 target 写进请求行，让 percent-encoded 的点段真的到得了 `decodeURIComponent`。
@@ -951,7 +955,7 @@ test('POST /api/commands/persona-approve：应用提案、删提案、落 person
   const proposal = '# 表达风格\n\n- 更短\n- 不用感叹号\n';
   mkdirSync(join(fx.personaRoot, 'proposals'), { recursive: true });
   writeFileSync(join(fx.personaRoot, 'proposals', 'STYLE.md'), proposal, 'utf8');
-  const diffHash = hash16(proposal);
+  const diffHash = hash64(proposal);
 
   const stale = await call(fx, '/api/commands/persona-approve', {
     method: 'POST',
@@ -959,6 +963,16 @@ test('POST /api/commands/persona-approve：应用提案、删提案、落 person
   });
   assert.equal(stale.status, 409);
   assert.equal(errorOf(stale).code, 'stale-proposal');
+
+  // ⚠ 回执两形状都认（2026-10-11）：旧客户端回的是它当年拿到的 16 位截断前缀，不该当场 409。
+  // 这里先拿 16 位走通一次完整批准，事件里必须记**满 64 位**（内容地址只有一种形状）。
+  const legacy = await call(fx, '/api/commands/persona-approve', {
+    method: 'POST',
+    body: { file: 'STYLE.md', diffHash: hash16(proposal) },
+  });
+  assert.equal(legacy.status, 200, '16 位回执是旧客户端的合法形状，不许判成 stale');
+  assert.deepEqual((await fx.readAll()).at(-1)!.data, { file: 'STYLE.md', diffHash, by: 'human' });
+  writeFileSync(join(fx.personaRoot, 'proposals', 'STYLE.md'), proposal, 'utf8');
 
   const res = await call(fx, '/api/commands/persona-approve', {
     method: 'POST',
@@ -1755,6 +1769,77 @@ test('POST /api/commands/restart：带了盘上不存在的界面路径 ⇒ 当�
     false,
     '一个进程都没动：拒绝路径不该走到 WMI',
   );
+});
+
+test('POST /api/commands/restart：已经有一个拉起器在飞 ⇒ 409 + 人话，且第二个一个字节都不动', async (t) => {
+  const fx = await setup(t);
+  // 用户 2026-10-11（判据与成因见 `docs/gui-guard.md` §5.2 成因 ②）：`chooseRestartPath` 只保证
+  // "**一次**请求内部"三条路互斥；**两次**请求（连点两下 / 两个界面窗口各点一下）会各拉一个
+  // 拉起器 ⇒ 各拉一个后端。锁挡得住第二个，但那是兜底、不是"不许发生"。
+  //
+  // ⚠ 这里**只能白盒置位**：这条路上任何"真的发一次重启"都会 `spawnSync` 建一个**真的** WMI
+  // 进程（隔离测试不许做这件事，见 test\restart-*.ps1 那几条纪律）。所以判据那一处
+  // （`restartInFlightUntil`）直接摆成"有一个在飞"，然后走**真的 HTTP 路由**问它 ——
+  // 判据、状态码、文案、事件、以及"有没有往后走"全都是真的在跑。
+  const armed = fx.server as unknown as { restartInFlightUntil: number; restartInFlightTraceSize: number };
+  armed.restartInFlightUntil = fx.now().getTime() + 60_000;
+  armed.restartInFlightTraceSize = 0;
+
+  const res = await call(fx, '/api/commands/restart', {
+    method: 'POST', body: {}, headers: { 'x-confirm': 'restart' },
+  });
+  assert.equal(res.status, 409, '这不是"请求不合法"，是"此刻不许再来一个"（冲突，不是参数错）');
+  const error = (res.body as { error: { code: string; message: string } }).error;
+  assert.equal(error.code, 'restart-in-flight');
+  assert.match(error.message, /已经在重启了/u, '人话：界面 toast 原样贴服务端这句（`重启失败：$err`）');
+  assert.match(error.message, /只允许一个后端/u, '把代价说出口：两个拉起器会各拉一个后端');
+
+  const events = await fx.readAll();
+  assert.equal(
+    events.filter((event) => event.type === 'config/changed'
+      && (event.data as { configHash?: string }).configHash === 'restart-rejected-in-flight').length,
+    1,
+    '拒绝也要留痕：不然"连点两下到底发生了什么"事后仍然无法回答',
+  );
+  assert.equal(existsSync(join(fx.dataDir, 'restart-script.log')), false, '脚本那层一个进程都没起');
+  assert.equal(existsSync(join(fx.dataDir, 'restart-worker.log')), false, '自重启那层同样一个都没起');
+});
+
+test('POST /api/commands/restart：拉起器干完了（留痕有 [结束]）或窗口过期 ⇒ 当场放行', async (t) => {
+  // 排他**不是**一道"点过就锁死"的闸：解除的两条路都是实话——证据（它写了 `[结束]`）与时限。
+  const fx = await setup(t);
+  const armed = fx.server as unknown as { restartInFlightUntil: number; restartInFlightTraceSize: number };
+
+  // ① **证据**：上一次拉起器已经写了 `[结束]`（它干完了）⇒ 当场解除，不必让人白等到窗口上限
+  armed.restartInFlightTraceSize = 0;
+  armed.restartInFlightUntil = fx.now().getTime() + 60_000;
+  writeFileSync(
+    join(fx.dataDir, 'restart-trace.log'),
+    '2026-10-11 01:00:00 [重启] [回执] 脚本已启动\n'
+    + '2026-10-11 01:00:10 [重启] [结束] ok=True backendPid=1 port=ready guiPid=0\n',
+    'utf8',
+  );
+  const passed = await call(fx, '/api/commands/restart', {
+    method: 'POST', body: {}, headers: { 'x-confirm': 'restart' },
+  });
+  // 放行之后走到的是**后面**那一处拒：这份夹具里两条脚本与自重启拉起器都不在
+  // （`<repo>\dist\runtime\restart-worker.js` 不存在）——所以这个 code 正是"排那关放行了"的凭据。
+  assert.equal(passed.status, 400);
+  assert.equal(
+    (passed.body as { error: { code: string } }).error.code, 'restart-self-worker-missing',
+    '走到了后面那一处 ⇒ 排他那一关确实放行了',
+  );
+  assert.equal(armed.restartInFlightUntil, 0, '放行之后窗口当场解除（不用等它自己过期）');
+
+  // ② **时限**：窗口过去了（拉起器多半早就不在了）⇒ 允许人再点一次
+  armed.restartInFlightUntil = fx.now().getTime() + 60_000;
+  armed.restartInFlightTraceSize = 0;
+  fx.advance(60_001);
+  const expired = await call(fx, '/api/commands/restart', {
+    method: 'POST', body: {}, headers: { 'x-confirm': 'restart' },
+  });
+  assert.equal(expired.status, 400, '窗口过期之后不许再拦');
+  assert.equal((expired.body as { error: { code: string } }).error.code, 'restart-self-worker-missing');
 });
 
 test('重启回执：三态三句话（"没跑起来" / "跑了但失败" / "成功带真 pid 与端口"）', () => {

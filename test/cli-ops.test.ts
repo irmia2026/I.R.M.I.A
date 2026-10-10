@@ -135,6 +135,22 @@ test('persona log：按 persona/updated 倒序给出演化时间线，并标出�
   assert.match(bad.errors.join('\n'), /无法识别的参数/);
 });
 
+test('persona log：事件里那 16 位前缀也要认出**在库**的快照（版本库文件名是满 64 位）', async (t) => {
+  // 现场：2026-10-11 之前 GUI 直编那条通道往事件里写 `.slice(0, 16)`，版本库的快照文件名却是
+  // `sha256Hex(content)` 的满 64 位 ⇒ 直接拿事件里那串拼路径，会把在库的快照说成"版本库无此快照"
+  const fx = await setup(t);
+  fx.append('persona/updated', { file: 'STATE.md', diffHash: OLD_HASH.slice(0, 16), by: 'human' });
+
+  const entries = buildPersonaLog(fx.dir);
+  assert.equal(entries[0]!.diffHash, OLD_HASH.slice(0, 16), '事件里那串是历史事实，原样报');
+  assert.notEqual(entries[0]!.snapshotPath, null, '但快照必须认出在库（解一次唯一前缀）');
+
+  const cli = collector();
+  assert.equal(await runCli(['persona', 'log'], cli.io, { dataDir: fx.dir }), 0);
+  assert.match(cli.lines.join('\n'), /快照在库/);
+  assert.ok(!cli.lines.join('\n').includes('版本库无此快照'));
+});
+
 // ──────────────────────────────── persona diff ────────────────────────────────
 
 test('persona diff：当前与上一版本快照逐行对照，行号可读', async (t) => {
@@ -202,6 +218,60 @@ test('persona diff：版本库缺快照时不编造内容，只报事件记录',
   const cli = collector();
   assert.equal(await runCli(['persona', 'diff', 'STATE.md'], cli.io, { dataDir: fx.dir }), 0);
   assert.match(cli.lines.join('\n'), /版本库缺这份内容/);
+});
+
+test('persona diff：日志那条只有 16 位（GUI 直编通道）⇒ 不报"不一致"，对照取更早那条', async (t) => {
+  // 现场（真 data/ 上三个文件都是这个形状）：事件里记的是 `.slice(0, 16)`，盘上重算是满 64 位
+  // ⇒ 拿 64 比 16，内容一字不差也判"不一致"，而且会把**最近那条**当成"上一版本"（当前 vs 当前）
+  const fx = await setup(t);
+  fx.append('persona/updated', { file: 'STATE.md', diffHash: OLD_HASH, by: 'agent' });
+  fx.append('persona/updated', { file: 'STATE.md', diffHash: NEW_HASH.slice(0, 16), by: 'human' });
+
+  const result = buildPersonaDiff(fx.dir, 'STATE.md');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.report.currentEvented, true, '16 位前缀与满 64 位说的是同一份内容');
+  assert.equal(result.report.previous?.diffHash, OLD_HASH, '对照是**更早**那条，不是当前这条自己');
+  assert.notEqual(result.report.previous?.snapshotPath, null, '在库的快照不许被报成缺');
+  assert.ok(!result.report.notes.some((note) => note.includes('不一致')), '不许留下假的"不一致"注');
+  assert.ok(!result.report.notes.some((note) => note.includes('版本库里缺')), '快照在库就不许说缺');
+  assert.ok(result.report.stats.removed >= 1 && result.report.stats.added >= 1, '真比出了差异');
+
+  const cli = collector();
+  assert.equal(await runCli(['persona', 'diff', 'STATE.md'], cli.io, { dataDir: fx.dir }), 0);
+  assert.match(cli.lines.join('\n'), /与日志最近一条 persona\/updated 一致/);
+});
+
+test('persona diff：只有一条记录（16 位那条）⇒ 说"没有更早的版本可比"，不印假 diff', async (t) => {
+  const fx = await setup(t, { seedVersionStore: false });
+  fx.append('persona/updated', { file: 'STATE.md', diffHash: NEW_HASH.slice(0, 16), by: 'human' });
+
+  const result = buildPersonaDiff(fx.dir, 'STATE.md');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.report.currentEvented, true);
+  assert.equal(result.report.previous, null, '没有更早的版本 ⇒ 不许把最近那条拿来当对照');
+  assert.equal(result.report.lines.length, 0, '没有对照就没有 diff 行');
+
+  const cli = collector();
+  assert.equal(await runCli(['persona', 'diff', 'STATE.md'], cli.io, { dataDir: fx.dir }), 0);
+  const text = cli.lines.join('\n');
+  assert.match(text, /对照：无（日志里只有当前这一版：没有更早的版本可比）/);
+  assert.ok(!text.includes('来自 seq'), '没有任何"对照"记录时不许印出对照行');
+});
+
+test('persona diff：16 位那条 + 内容真改过 ⇒ 仍如实报"不一致"（判据没被放宽）', async (t) => {
+  const fx = await setup(t);
+  fx.append('persona/updated', { file: 'STATE.md', diffHash: NEW_HASH.slice(0, 16), by: 'human' });
+  writeFileSync(join(fx.dir, 'persona', 'STATE.md'), '# 当前状态\n\n被人手改了。\n', 'utf8');
+
+  const result = buildPersonaDiff(fx.dir, 'STATE.md');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.report.currentEvented, false, '改过一个字就不是同一份内容');
+  assert.equal(result.report.previous?.diffHash, NEW_HASH.slice(0, 16), '对照仍是那条记录（记的是改前的内容）');
+  assert.equal(result.report.previous?.snapshotPath, null, '那份内容从没进过版本库（写入时不存新内容）');
+  assert.ok(result.report.notes.some((note) => note.includes('不一致')));
 });
 
 // ──────────────────────────────── persona rollback ────────────────────────────────

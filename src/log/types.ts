@@ -793,6 +793,17 @@ export interface BudgetConsumed extends EventEnvelope<'budget/consumed', {
   reasoningTokens?: number;
   durationMs: number; retryCount: number;
   finishReason: 'completed' | 'max_output_tokens' | 'failed' | 'aborted';
+  /**
+   * 这次调用的**当日累计（写入方口径，观测字段）**：本条写入之前的**内存投影当日累计**
+   * + 本条的 `inputTokens + outputTokens`。
+   *
+   * ⚠️ 它是**"新口径基线 + 旧口径增量"的混合口径**（2026-10-05 换预算口径时留下的形状）
+   * ⇒ **只是观测，任何闸门/判据都不许拿它当预算依据**：预算一律读投影（`state/fold.ts` 的
+   * `budgetTokensOf`）。**五处写入一律如此、彼此自洽**，谁都没写错：`runtime/agent-loop.ts`
+   * 的 `accountStep`（成功）/ `failStep`（失败，delta 为 0）、`channel/injection-judge.ts`、
+   * `channel/topic.ts`、`persona/memory-maintain.ts`。口径与"将来要对齐的话最小改哪一行"
+   * 见 `docs/schema.md` §6 这个字段的注释。
+   */
   tokensTodayAccum: number;
   /**
    * 这次请求的**上下文归因**（`model/context-audit.ts` 的 `ContextBreakdown`）：

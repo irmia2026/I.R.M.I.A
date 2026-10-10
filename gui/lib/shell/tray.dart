@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../gui_quit.dart';
 import '../her_name.dart';
 
 /// Irmia GUI 的**托盘**（2026-10-04 用户要的托盘化）。
@@ -143,6 +144,10 @@ class IrmiaTray with TrayListener {
             .then((Object? result) => _onRestartResult?.call(result)));
         break;
       case 'quit':
+        // **先写标记、再退**（协议见 docs/gui-guard.md §3）：后端保活按"有没有这个标记"
+        // 分"他主动退的"与"崩了/被杀了"，不写就会被当成崩溃拉回来（最多 6 次）。
+        // ⚠ 上面 'hide'（收进托盘）那一支**不许**写：界面还在跑，写了会压住真的那次崩溃。
+        unawaited(markGuiQuit('tray-quit'));
         _onQuitRequested?.call();
         unawaited(trayManager.destroy());
         unawaited(windowManager.destroy());

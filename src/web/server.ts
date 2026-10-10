@@ -1823,6 +1823,16 @@ const RESTART_RECEIPT_WAIT_MS = ((): number => {
 })();
 const RESTART_RECEIPT_STEP_MS = 50;
 
+/**
+ * 「重启进行中」这个排他窗口的**上限**（毫秒）。判据只有一处：`WebServer.restartInFlightUntil`。
+ *
+ * 为什么是 180 秒：拉起器自己那几个等待窗口的上界之和 —— 延迟（`IRMIA_RESTART_DELAY_MS`，
+ * 默认 12 秒）+ 等旧实例退出（脚本 10 秒）+ 等端口空出来（5 秒）+ 两个 60 秒的端口窗口
+ * + 界面那一支的观察窗（约 40 秒）。它只是**上限**：留痕里一出现 `[结束]`（拉起器干完了）
+ * 就当场解除，不必等它走完。
+ */
+const RESTART_IN_FLIGHT_MS = 180_000;
+
 function waitForScriptReceipt(
   traceLog: string,
   sizeBefore: number,
@@ -1854,6 +1864,33 @@ function waitForScriptReceipt(
     // 忙等 50ms：这条路上不能 await（回执要在这一个请求里给出去）
     const until = Date.now() + RESTART_RECEIPT_STEP_MS;
     while (Date.now() < until) { /* spin */ }
+  }
+}
+
+/**
+ * 留痕里**从 `sizeBefore` 起**有没有出现过 `[结束]` —— 也就是"上一个拉起器干完了没有"。
+ *
+ * 为什么要有它（重启端点的排他判据要用）：`[结束]` 是链条自己写的收尾那行
+ * （脚本与拉起器都写、**恰好一次**），它是**证据**：读得到就说明上一次重启已经走完，
+ * 排他窗口可以当场解除，不必让人白等到上限。读不到（文件没了 / 相对基线没长 / 读失败）
+ * 一律报 `false` —— 这一档的坏消息优先方向是"当作它还在飞，宁可不拉"：
+ * 两个拉起器会各拉一个后端，而"同一时刻只允许一个后端"是这条链路的地基。
+ */
+function traceFinishedSince(traceLog: string, sizeBefore: number): boolean {
+  try {
+    const size = existsSync(traceLog) ? statSync(traceLog).size : -1;
+    if (size <= sizeBefore) return false;
+    const fd = openSync(traceLog, 'r');
+    try {
+      const length = size - sizeBefore;
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, sizeBefore);
+      return buffer.toString('utf8').includes('[结束]');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
   }
 }
 
@@ -2876,6 +2913,24 @@ class WebServerImpl implements WebServer {
    * 60 秒一条足够让排障的人看见"有个老脚本还在用会话凭据"，又不至于把日志淹掉。
    */
   private lastWebhookRejectLogAt = 0;
+  /**
+   * 「重启进行中」的判据（**只此一处**）：上一次拉起器**发出**之后的有效期。0 = 没有重启在进行中。
+   *
+   * 为什么不是一个"进来自动置位、出去自动清掉"的布尔：`runCommand` 的 `restart` 那一支是
+   * **同步**跑完的（`confirmRestart` 里那 8 秒是忙等，不走 await），两个"同时"到达的请求
+   * 在事件循环上本来就是串行的 —— 第二个进来时第一个早返回了。真正会撞上的是**手动重试**：
+   * 人点了按钮、界面说"已发出、结局未确认"，他过几秒再点一下，而第一个拉起器还在等旧实例
+   * 退出（脚本那条几十秒，自重启那条 `--wait-ms` 更长）。所以这个判据的窗口必须**盖住拉起器
+   * 干活的那段时间**，而不是盖住这一个请求。
+   *
+   * 解除只有两条路，都是**证据**：① 留痕里出现了 `[结束]`（它干完了，见 `traceFinishedSince`）；
+   * ② 连 `[回执]` 都没读到（它根本没跑起来 ⇒ 没有东西在飞）。都没有就按 [RESTART_IN_FLIGHT_MS]
+   * 拒绝 —— **宁可不拉**：两个拉起器会各拉一个后端，而单实例锁只是兜底（它挡得住第二个，
+   * 但那一段里同一份事件日志已经被两个进程碰过了）。
+   */
+  private restartInFlightUntil = 0;
+  /** 上一次拉起器发出时留痕的大小（判"它后来写没写 `[结束]`"的基线；-1 = 没有在飞的） */
+  private restartInFlightTraceSize = -1;
 
   constructor(deps: WebServerDeps) {
     this.deps = deps;
@@ -4899,8 +4954,19 @@ class WebServerImpl implements WebServer {
             'proposal-not-found',
           );
         }
-        const proposalHash = sha256Hex(proposal.content).slice(0, 16);
-        if (diffHash !== '' && diffHash !== proposalHash) {
+        // 提案指纹 = **满 64 位**内容地址（2026-10-11 修；这之前是 `.slice(0, 16)`）。
+        // 为什么必须写满：`data/.versions/<文件>/<diffHash>.md` 的快照文件名本来就是满 64 位
+        // （`versions.ts` 的 `writePersonaVersion`），而同一个 `diffHash` 字段在 `write_persona`
+        // （`tools/admin.ts`）与回滚那条路上也是满 64 位 ⇒ 只有 GUI 这两处写 16 位，于是日志里
+        // 同一格有两种形状，凡是"拿盘上重算的哈希去比日志里那条"的判据都得额外容忍截断
+        // （doctor 的 I10、cli 的 persona diff/log 都踩过假红）。
+        // ⚠ 历史里已经写下的 16 位**不动**（日志 append-only）⇒ 读侧照旧两种都认。
+        const proposalHash = sha256Hex(proposal.content);
+        // 批准请求里那格是"我审阅的是哪一版提案"的**回执**：旧客户端回的是它当年拿到的 16 位
+        // ⇒ 两形状都认（短于 16 位不认——那不是"旧形状"，是手误）。
+        const echoed = diffHash === ''
+          || (diffHash.length >= 16 && proposalHash.startsWith(diffHash));
+        if (!echoed) {
           throw new HttpError(
             409,
             'stale-proposal',
@@ -4993,6 +5059,43 @@ class WebServerImpl implements WebServer {
       }
       case 'restart': {
         // 运行情况页那颗按钮（原来这里是"立即唤醒"，用户 2026-10-04 说那个没用了，改成重启）。
+        //
+        // ── **排他：同一时刻只允许一个拉起器在飞**（2026-10-11 加，判据只此一处）────────
+        //
+        // 为什么要有它（`docs/gui-guard.md` §5.2 成因 ②）：`restart-chain.ts` 的
+        // `chooseRestartPath` 只保证"**一次**请求内部"三条路互斥；**两次**请求（连点两下 /
+        // 两个界面窗口各点一下）会各自拉一个拉起器 ⇒ 两个拉起器各等旧实例退出、各拉一个新后端。
+        // 单实例锁挡得住第二个（它会 `LockHeldError` 退出），但那是**兜底**、不是"不许发生"。
+        //
+        // 判据是 `this.restartInFlightUntil` 那一处；解除的两条路都是证据：
+        //   ① 上一次拉起器已经写了 `[结束]`（`traceFinishedSince`）⇒ 它干完了，当场放行；
+        //   ② 连 `[回执]` 都没读到 ⇒ 它根本没跑起来（下面那段会把窗口一并解除）。
+        // 两条都不成立就按窗口上限拒绝，**宁可不拉**（与两条脚本的 `old-not-gone` 同一条纪律）。
+        const restartNowMs = now.getTime();
+        if (this.restartInFlightUntil > restartNowMs) {
+          const finished = this.restartInFlightTraceSize >= 0
+            && traceFinishedSince(join(this.deps.dataDir, 'restart-trace.log'), this.restartInFlightTraceSize);
+          if (!finished) {
+            const leftSeconds = Math.max(1, Math.ceil((this.restartInFlightUntil - restartNowMs) / 1000));
+            this.write(`[重启] 拒绝：已经有一个重启在进行中（守卫窗口还剩约 ${leftSeconds} 秒）——`
+              + '同一时刻只允许一个拉起器：两次请求会各拉一个后端，两个一起跑会把同一份事件日志写脏');
+            this.appendSync(
+              'config/changed',
+              {
+                fields: ['restart'], configHash: 'restart-rejected-in-flight',
+                leftSeconds, restartInFlightUntil: this.restartInFlightUntil,
+              },
+              'internal',
+            );
+            throw new HttpError(409, 'restart-in-flight',
+              `已经在重启了（上一次重启还在进行中，守卫窗口还剩约 ${leftSeconds} 秒）：`
+              + '这一次不再拉起第二个——两个拉起器会各拉一个后端，而同一时刻只允许一个后端。'
+              + '等它结束再点一次（它干完没有，看 data\\restart-trace.log 里那条 [结束]）。');
+          }
+          // 证据说它干完了：解除排他，这一次照常往下走
+          this.restartInFlightUntil = 0;
+          this.restartInFlightTraceSize = -1;
+        }
         //
         // 四条纪律：
         //   • **延迟到"这次回执已经能说清楚"之后才动手**：让 HTTP 回执先发出去，界面不至于
@@ -5213,6 +5316,10 @@ class WebServerImpl implements WebServer {
             'restart-failed',
           );
         }
+        // 拉起器**已经发出**了：从这里开始算"重启进行中"（解除的唯一凭据是它写的 `[结束]`）。
+        // 基线用**动手之前**那个大小（`traceLogAt`）——上一轮留下的 `[结束]` 不算这一轮的。
+        this.restartInFlightUntil = now.getTime() + RESTART_IN_FLIGHT_MS;
+        this.restartInFlightTraceSize = traceLogAt;
         // **回执判定**：WMI 返回码 0 **不等于脚本跑起来了**。
         //
         // 本仓实测（_research/probe-restart-chain.ps1 + 2026-10-07 的复现）：
@@ -5247,6 +5354,13 @@ class WebServerImpl implements WebServer {
           probePort: !selfRestart,
         });
         const scriptStarted = confirm.scriptStarted;
+        // 证据到了就**当场解除排他**（别让人白等窗口）：读到了 `[结束]`（链条干完了），
+        // 或者连 `[回执]` 都没读到（拉起器根本没跑起来 ⇒ 没有东西在飞）。
+        // 两样都没有 ⇒ 它还在干活，窗口留着（下一次请求会被拒，人话是"已经在重启了"）。
+        if (parsed.ok !== null || !scriptStarted) {
+          this.restartInFlightUntil = 0;
+          this.restartInFlightTraceSize = -1;
+        }
         // 真实新 pid：脚本那行 `[实例]`/`[结束]` 是首选；还没有时退到 `data/lock.json`
         // ——它是她启动后自己写的 {pid, startedAt, heartbeatAt}，比任何"壳的 pid"都真。
         const backendPid = confirm.backendPid;
@@ -5672,7 +5786,12 @@ class WebServerImpl implements WebServer {
         writeFileAtomicSync(target, req.content);
 
         // ③ 事件
-        const diffHash = sha256Hex(req.content).slice(0, 16);
+        // 这一格记**满 64 位**内容地址（2026-10-11 修；这之前是 `.slice(0, 16)`）：同一个字段在
+        // `write_persona`（`tools/admin.ts`）与回滚那条路上一直是满 64 位，而版本库快照的文件名
+        // （`data/.versions/<文件>/<diffHash>.md`）也只能是满 64 位 ⇒ 只有这里写 16 位会让日志里
+        // 同一格有两种形状，凡是"拿盘上重算的 sha256 去比日志里那条"的判据都得额外容忍截断。
+        // ⚠ 历史里已写下的 16 位**不动**（append-only）⇒ 读侧两头都认（doctor 的 I10、persona diff）。
+        const diffHash = sha256Hex(req.content);
         const event = this.appendSync(
           'persona/updated',
           { file: req.file, diffHash, by: 'human' },
@@ -7921,7 +8040,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.6' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.7' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

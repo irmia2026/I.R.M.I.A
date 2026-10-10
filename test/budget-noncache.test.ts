@@ -68,8 +68,8 @@ function consumed(d: {
     durationMs: 1,
     retryCount: 0,
     finishReason: 'completed',
-    // 观测字段（写入方口径仍是 in + out，见 doctor 的 I7 注释）——这里刻意给个旧口径的数，
-    // 证明**判据不读它**：投影只按 budgetTokensOf 累
+    // 观测字段（写入方口径是"投影基线 + in + out"的混合口径，见 docs/schema.md §6 该字段注释）
+    // ——这里刻意给个旧口径的数，证明**判据不读它**：投影只按 budgetTokensOf 累
     tokensTodayAccum: d.inputTokens + d.outputTokens,
   }, d.parentCallId);
 }

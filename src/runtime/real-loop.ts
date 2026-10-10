@@ -1218,6 +1218,28 @@ export class RealLoop {
   private running = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private busy = false;
+  /**
+   * 「上一拍还在飞吗」——**tick 级的重叠保护**（2026-10-11，P1）。
+   *
+   * 为什么 `busy` 之外还需要它：`busy` 是**turn 级**的判据，而它的检查与置位之间隔着
+   * prepare 段的 await（写快照 / 增量扫日志 / slash 命令 / 预算告警）。`setInterval` 到点就
+   * `void this.tick()`，某拍被那些 await 拖过 `pollMs` 时下一拍照常重入 ⇒ 两拍都通过 `busy` 判据。
+   * 实测后果（本机 16:40–16:45，事件 seq 74122–74414）：**turn 1277 被两个实例同时跑**
+   * ——两条 `turn/start turn=1277`、13 个 step 每个都有两份 `step/start`/`step/end`、
+   * `read_channel` 同一步两次且全部 10s 超时，turn 号复用、输入被重复认领、越滚越多。
+   *
+   * 它在**任何 await 之前**同步置位（见 {@link tick}），所以是真正的原子互斥；
+   * 而 `busy` 的置位也已提到 prepare 段之前（同一处修的另一半），两者一起才堵住这个缺口。
+   */
+  private tickInFlight = false;
+  /**
+   * 本拍进行期间**被守卫吞掉的拍数**。
+   *
+   * 守卫生效后在飞数必然恒为 1，所以"当时在飞几个"这个读数没有信息量；有信息量的是
+   * "这一慢拍里到底压掉了几拍"——它就是重叠曾经发生过的证据，慢拍观测（`runtime/slow-tick`）
+   * 每拍清零上报，不做累计（累计数会把"上一次卡顿"混进"这一次"）。
+   */
+  private tickSkipped = 0;
   /** 附件预热扫到哪条事件了（重启后归零，从窗口起点补一次） */
   private attachmentScanSeq = 0;
   /**
@@ -1671,28 +1693,55 @@ export class RealLoop {
     // 提及是"有人在叫她"，这时哪怕只攒了一两条也要给一句"那边在聊什么"，
     // 否则她只能看见被叫的那一句、看不见上下文。
     await this.summarizeChattySessions(this.mentionSidOf(this.deps.projection.pending));
-
+    // ── 手上有活就整拍让路（2026-10-11 修的重叠缺口：置位提到**判据紧邻处**）──
+    //
+    // 这里原来是"先 await 完 prepare 四件事，再判 busy、再置位"，于是检查与置位之间隔了
+    // 四个 await。`setInterval` 到点即 `void this.tick()`，只要某拍被其中一个 await 拖过
+    // `pollMs`，下一拍就会在 **busy 还是 false** 的时候重入并一路走到 `runTurn`
+    // ⇒ 两个 turn 同时跑（现场：turn 1277 的双实例，见 {@link tickInFlight}）。
+    // 现在判据与置位**紧挨着、且在任何 await 之前**，中间再没有让出点。
+    // 这与 `tick()` 的 tick 级守卫是**两层**：那一层防"同一拍重入"，这一层防"turn 并存"。
+    //
+    // **代价（照实写）**：她正忙时下面这四件事这一拍不办，等下一次不忙的拍补办——
+    //   · `maybeSnapshot`：快照纯由投影推导，晚一拍写字节完全相同（`:2791` 自己还有
+    //     "同一天/满 N 条才写"的门，跳过不改变"会不会写"）；
+    //   · `settleHumanSuspension`：答复探测与超时判定都是幂等的（`detectAnswer` 从
+    //     `humanCursor` 增量扫、`maybeTimeoutHuman` 判 `lastExhausted`），晚判一拍只让
+    //     "重投"和"超时"晚一拍落地；
+    //   · `handleSlashCommands`：指令不唤醒 turn，晚一拍执行等于"她说完这轮再压上下文"
+    //     （`/compact`、`/handoff` 的语义本来就是"现在压"，不抢这一秒）；
+    //   · `admitWake`：**它只判不认领**（`:1990`，全程没有一处消费 pending），跳过它
+    //     唯一的后果是这一拍不开新 turn——而 busy 时本来也不允许开。
+    //
+    // ★ **"四件事会不会丢输入"的结论：不会，没有一件需要就地补最小保护。** 判据一处：
+    //   从 pending 里**摘除**的唯一写入点是 `input/claimed`（`state/fold.ts:282`
+    //   `p.pending = p.pending.filter(...)`），而它只由"turn 已经开起来了"的两条路写
+    //   ——`agent-loop.ts:1663 claimInput`（turn 开头）与 `:1686 claimInterruption`（轮中插话）。
+    //   这四件事里没有任何一件写 `input/claimed` 或 `input/dead-letter`（`fold.ts:309` 是
+    //   pending 的另一个出口，同样不在这四件里），所以它们**没有"跳过即丢失"的能力**：
+    //   跳过只是把"这一拍本来会做的推导/派发"推迟到下一次不忙的拍，pending 原样留着。
+    //   （`claimInput` 只在 turn 内被调，而 busy=true ⇒ 本拍根本不会开 turn ⇒ 不存在
+    //    "这一拍跳过了认领、输入还在队列里"这种漏接。）
     if (this.busy) return;
-    // 快照判定放在 busy 之后、输入处理之前：既不在 turn 中途插事件，空转拍也能落每日快照
-    await this.maybeSnapshot();
-    // 人审挂起（design §4.21）：答复到位就把挂起时认领的输入送回队列（本拍就能接着跑），
-    // 超过时限则按预算耗尽同等语义进入可恢复暂停。必须在 pending 检查**之前**——
-    // 重入队正是那个「让 pending 非空」的动作，晚一步就要白等一拍。
-    await this.settleHumanSuspension();
-    const p = this.deps.projection;
-    if (p.pending.length === 0) return;
-    // ── 人打的指令（B1 第二步：`/compact` 与 `/handoff`）──
-    // 放在攒批门与唤醒门**之前**：指令是框架自己就能办的事（收紧她的上下文 / 写一份交接笔记），
-    // 既不该被群消息的攒批窗口压住，也不该被预算暂停拦住——**撞上限时人恰恰更需要它**。
-    await this.handleSlashCommands();
-    // 指令已把队列里那几条摘走（input/claimed），可能这一拍就没别的可做了
-    if (p.pending.length === 0) return;
-    // 群消息攒批（design §4.24）：单聊每句都看，群聊攒够窗口再一起看
-    if (this.holdsGroupBatch(p)) return;
-    if (!(await this.admitWake())) return;
-
     this.busy = true;
     try {
+      // 快照判定放在输入处理之前：空转拍也能落每日快照
+      await this.maybeSnapshot();
+      // 人审挂起（design §4.21）：答复到位就把挂起时认领的输入送回队列（本拍就能接着跑），
+      // 超过时限则按预算耗尽同等语义进入可恢复暂停。
+      await this.settleHumanSuspension();
+      const p = this.deps.projection;
+      if (p.pending.length === 0) return;
+      // ── 人打的指令（B1 第二步：`/compact` 与 `/handoff`）──
+      // 放在攒批门与唤醒门**之前**：指令是框架自己就能办的事（收紧她的上下文 / 写一份交接笔记），
+      // 既不该被群消息的攒批窗口压住，也不该被预算暂停拦住——**撞上限时人恰恰更需要它**。
+      await this.handleSlashCommands();
+      // 指令已把队列里那几条摘走（input/claimed），可能这一拍就没别的可做了
+      if (p.pending.length === 0) return;
+      // 群消息攒批（design §4.24）：单聊每句都看，群聊攒够窗口再一起看
+      if (this.holdsGroupBatch(p)) return;
+      if (!(await this.admitWake())) return;
+
       const batch = p.pending.slice(0, BATCH_LIMIT);
       // 本批开跑前的位置：挂起因时用它把「刚刚落库的 turn/start」读回来（编号不靠猜）
       const beforeSeq = p.lastSeq;
@@ -1752,9 +1801,69 @@ export class RealLoop {
     }
   }
 
+  /**
+   * 跑一拍，**并且保证同时只有一拍在飞**（2026-10-11，P1：tick 重叠保护）。
+   *
+   * ──────────────────────────── 为什么需要这一层 ────────────────────────────
+   * `start()` 用的是 `setInterval(() => { void this.tick().catch(...) }, pollMs)`——发射后不管。
+   * 原来这里只判 `running`（`:1218`，只有 `stop()` 会置 false），**不判"上一拍还在飞"**。
+   * 于是一拍只要跑过 `pollMs`（默认 1000ms），下一拍就叠上来。
+   * 而这一拍真的会跑很久：写一次快照是几百 MB 量级（见 `:1933` 那条实测口径
+   * "**单次 98.4 MB 堆增量 / 500 ms**"）、`detectAnswer` 要增量扫日志、
+   * `handleSlashCommands` 有真 I/O、预算告警要投递。
+   *
+   * 现场（本机 16:40–16:45，事件 seq 74122–74414，`data/events/000000074108.jsonl`）：
+   * 两条 `turn/start turn=1277`、turn 1277 的 13 个 step **每个都有两份** `step/start`/`step/end`、
+   * `read_channel` 在同一步里被调两次且**全部 10s 超时**、turn 号被复用、输入被重复认领。
+   * 两个实例各自 `executeToolCalls` ⇒ `exclusive` 只在自己那一份里成立（它是**每轮内**的语义），
+   * 所以"两个 read_channel"正是这么来的。
+   *
+   * ──────────────────────────── 为什么守卫必须在**最前面** ────────────────────────────
+   * 不能只在 `busy` 那一处加锁：`busy` 的检查与置位之间原本隔着 prepare 段的 await
+   * （那段缺口已由 `tickOnce` 里的"判据紧邻置位"补上，是另一半）。这一层要挡的是
+   * **连 `tickOnce` 都不许重入**——包括它开头那些"放在 busy 之前、刻意每拍都做"的事
+   * （`settleHumanAsks`/`settleGrants`/话痨话题/附件预热），那些也会重入并重复落事件。
+   * `tickInFlight` 在**任何 await 之前**同步置位，所以它是真正的原子互斥，没有 TOCTOU 窗口。
+   *
+   * `tickOnce` 保持 public 且不受守卫影响：测试与宿主手工驱动它时行为与从前**逐字相同**
+   * （全仓只有这一处调它，见 `:1757` 的旧口径与 `start()` 的定时器）。
+   *
+   * ──────────────────────────── 慢拍观测 ────────────────────────────
+   * 一拍用满 `pollMs` 就落一条 `runtime/slow-tick`（internal，不进她的上下文，零缓存代价）。
+   * 字段：`elapsedMs` 本拍耗时 · `pollMs` 判定用的预算 · `skipped` 本拍期间被吞掉的拍数 ·
+   * `busy` 收尾时手上还有没有活。**`skipped` 就是"当时在飞数"的实测替身**：守卫生效后在飞
+   * 必然恒为 1，所以有信息量的是"这一慢拍压掉了几拍"——它正是重叠发生过的证据。
+   * 写成 internal 而不是 model 是刻意的：它是**框架的账**，不是对她说的话。
+   */
   private async tick(): Promise<void> {
     if (!this.running) return;
-    await this.tickOnce();
+    // 上一拍还在飞：这一拍整拍丢掉，只记一笔。丢拍是安全的——下一拍会把所有推导重做一遍
+    // （判据与理由见 `tickOnce` 里那段"四件事跳过的代价"）。
+    if (this.tickInFlight) {
+      this.tickSkipped += 1;
+      return;
+    }
+    this.tickInFlight = true;
+    const startedAt = Date.now();
+    try {
+      await this.tickOnce();
+    } finally {
+      // try/finally：`tickOnce` 抛错也一定复位，否则一次异常就把循环永久锁死
+      // （外层 `start()` 的 `.catch` 只管报错，不会复位任何标志）。
+      this.tickInFlight = false;
+      const elapsedMs = Date.now() - startedAt;
+      const skipped = this.tickSkipped;
+      this.tickSkipped = 0;
+      if (elapsedMs >= this.pollMs) {
+        try {
+          this.appendSync('runtime/slow-tick', {
+            elapsedMs, pollMs: this.pollMs, skipped, busy: this.busy,
+          }, 'internal');
+        } catch {
+          // 观测不许反过来打断循环：这条账丢了不影响任何判据（它不是承诺类事实）
+        }
+      }
+    }
   }
 
   // ──────────────────────────────── MCP 常驻索引（v46） ────────────────────────────────

@@ -44,7 +44,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { connect } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import {
   RESTART_FAILURE_REASONS, endTraceLine, instanceTraceLine, restartTraceLine,
@@ -386,18 +386,67 @@ function stopGuiByPath(guiExe: string): number[] {
   return text.split(',').map((part) => Number(part.trim())).filter((value) => Number.isInteger(value) && value > 0);
 }
 
-function startGuiProcess(guiExe: string): number {
+/**
+ * 拉起界面进程。
+ *
+ * ## 判据：**三条路同一形状**
+ *
+ * 拉界面的路一共三条，形状必须**逐字同一种**（对着 `docs/restart-gui-launch-shape.md` 的结论抄）：
+ *
+ *   | # | 谁 | 落在哪 |
+ *   |---|---|---|
+ *   | ① | 开发机脚本 | `tools\restart-agent.ps1` 的 `Invoke-DetachedStartProcess` |
+ *   | ② | 随包脚本 | `packaging\restart.ps1` 的同名函数 |
+ *   | ③ | 自重启拉起器 | **这里** |
+ *
+ * 三条都是 `Start-Process -FilePath <exe 绝对路径> -WorkingDirectory <exe 所在目录> -PassThru`。
+ *
+ * **为什么这件事必须一致**（那份文档的实测结论，别再往 `cmd /s /c` 上打补丁）：
+ * 界面拉不起来的原因**不是**那个形状本身、也**不是**中文路径，而是"**重定向目标恰好被外层
+ * 持有**"——`cmd` 的 `>>` 只 `FILE_SHARE_READ`，内层在"打开文件"这一步就失败、`cmd` 随即退出，
+ * 而建进程那一层照样报成功。症状是 `界面拉起=not-appeared`：命令发出去了、壳 pid 也有、
+ * 目标 exe 根本没被执行。`Start-Process` 这条形状**不经过 `cmd`**、也不重定向界面的
+ * stdout/stderr ⇒ 没有那个变量。
+ *
+ * 换成这条形状还顺带修掉一个判据问题：`-PassThru` 给的 pid **就是界面自己**，
+ * 于是不必去"采样里认一个同路径的新进程"——那套分不清"我拉起的"与"用户手工拉起的"
+ * （2026-10-10 01:31 那条 `alive` 的疑点就是这么来的）。三条路**只认自己手里的 pid**。
+ *
+ * ## 与两条脚本唯一的差别：谁来读"四态"
+ *
+ * 脚本会把 `alive / alive-no-window / appeared-then-exited / not-appeared` 写进留痕，
+ * 而拉起器这一层的契约只有"给一个 pid，0 = 没起来"（`RestartWorkerIo.startGui`）——
+ * 所以这里做**同一件事的最小版**：`-PassThru` 拿到 pid 之后**复看一次**（3 秒，与脚本同一条
+ * "拉起成功 = 活过 3 秒"纪律：缺 DLL / 缺 `data\` 的程序会起来就自己退，而那一刻
+ * `Start-Process` 照样是成功的）；活着就报 pid，已经退了就报 0。
+ * 判据没有第二份：`[结束] guiPid=0 + reason=gui-failed` 就是这条路说的"没起来"。
+ *
+ * 目标路径**只从环境变量进**（与上面 `stopGuiByPath` 同一条纪律）：这段脚本里没有一个外来
+ * 字符串，引号问题在构造上就不存在。**工作目录必须是 exe 所在目录**：Flutter 的 Windows
+ * 产物要就地找 `flutter_windows.dll` 与 `data\`，工作目录给错 = 起来就自己退。
+ *
+ * 导出只为让测试能直接调它（`test\restart-worker-gui.test.ts` 拿**替身 exe** 走三态：
+ * 活着 ⇒ 给 pid、起来就退 ⇒ 0、根本起不来 ⇒ 0，并从那替身自己写下的 cwd 读数验
+ * `-WorkingDirectory` 真的生效）——**一个真界面都不弹**。
+ */
+export function startGuiProcess(guiExe: string): number {
+  const script = [
+    '$exe = [System.IO.Path]::GetFullPath($env:IRMIA_RESTART_GUI_EXE)',
+    '$dir = [System.IO.Path]::GetDirectoryName($exe)',
+    // 形状与两条脚本逐字一致（`-FilePath` 绝对路径 + `-WorkingDirectory` exe 所在目录 + `-PassThru`）
+    'try { $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru } catch { Write-Output "0"; exit 0 }',
+    // 复看一次：起来就自己退（缺 DLL / 缺 data）不算拉起来（脚本那边叫 appeared-then-exited）
+    'Start-Sleep -Milliseconds 3000',
+    'if ($p.HasExited) { Write-Output "0" } else { Write-Output ([string]$p.Id) }',
+  ].join("\n");
   try {
-    const child = spawn(guiExe, [], {
-      // 界面自己按 exe 所在目录找 config.json（与 start.ps1 拉它时的 cwd 口径一致）
-      cwd: dirname(guiExe),
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false,
+    const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: { ...process.env, IRMIA_RESTART_GUI_EXE: guiExe },
     });
-    const pid = child.pid ?? 0;
-    child.unref();
-    return pid;
+    const pid = Number((probe.stdout ?? '').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : 0;
   } catch {
     return 0;
   }

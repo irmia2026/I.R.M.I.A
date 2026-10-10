@@ -2855,7 +2855,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       required: ['sid'],
       additionalProperties: false,
     },
-    executionMode: 'parallel',
+    executionMode: 'exclusive',
     sideEffect: 'idempotent',
     timeoutMs: 10_000,
     handler: async (rawArgs, ctx): Promise<ToolHandlerResult> => {

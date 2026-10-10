@@ -35,8 +35,8 @@ import {
 import { writePersonaAsset } from './persona/loader.ts';
 import { ownerPersonOf } from './persona/relationship.ts';
 import {
-  diffLines, diffStats, formatDiffLines, isDiffHashPrefix, normalizePersonaFile, personaVersionsRoot,
-  readPersonaVersion, resolveDiffHashPrefix, sha256Hex, writePersonaVersion,
+  diffLines, diffStats, formatDiffLines, isDiffHashPrefix, listPersonaVersions, normalizePersonaFile,
+  readPersonaVersion, resolveDiffHashPrefix, sha256Hex, versionPathOf, writePersonaVersion,
   type DiffLine, type DiffStats,
 } from './persona/versions.ts';
 import {
@@ -1073,21 +1073,49 @@ export interface PersonaLogEntry {
   snapshotPath: string | null;
 }
 
+/**
+ * 把日志里那串 `diffHash` 解成**版本库文件名**（永远是满 64 位）。
+ *
+ * 为什么必须解一次：2026-10-11 之前 GUI 直编那条通道往事件里写的是 **16 位截断前缀**
+ * （见 `samePersonaContent` 那段），而版本库的快照文件名永远是满 64 位
+ * （`versions.ts` 的 `writePersonaVersion` 用 `sha256Hex(content)`；`doctor.ts` 的
+ * `versionStoreProblems` 也要求文件名是 64 位）⇒ 直接拿事件里那串去拼路径，会把**明明在库**
+ * 的快照报成"版本库无此快照／内容不可考"。解一次前缀（与 `persona rollback <前缀>` 同一套
+ * 语义：**唯一匹配**才算数），命中多个就不猜——宁可说"不可考"，也别指错一个版本。
+ *
+ * `known` 由调用方按文件缓存（一个文件只列一次目录，别在事件循环里反复 readdir）。
+ */
+function resolveStoredHash(known: readonly string[], diffHash: string): string | null {
+  if (known.includes(diffHash)) return diffHash;
+  const matched = known.filter((item) => item.startsWith(diffHash));
+  return matched.length === 1 ? matched[0]! : null;
+}
+
 /** 人格演化时间线：`persona/updated` 倒序（最近改的排最前） */
 export function buildPersonaLog(dataDir: string): PersonaLogEntry[] {
   const events = readEventsReadOnly(join(dataDir, EVENT_LOG_DIR_NAME)).events;
+  const knownByFile = new Map<string, readonly string[]>();
+  const storedHashesOf = (file: string): readonly string[] => {
+    const cached = knownByFile.get(file);
+    if (cached !== undefined) return cached;
+    const list = listPersonaVersions(dataDir, file).map((item) => item.diffHash);
+    knownByFile.set(file, list);
+    return list;
+  };
   const out: PersonaLogEntry[] = [];
   for (const event of events) {
     if (event.type !== 'persona/updated') continue;
     const file = event.data.file.replace(/\\/gu, '/');
-    const path = join(personaVersionsRoot(dataDir), file, `${event.data.diffHash}.md`);
+    // 目录里的文件名才是内容地址（满 64 位）；事件里那串可能只是它的前缀
+    const stored = resolveStoredHash(storedHashesOf(file), event.data.diffHash);
+    const path = stored === null ? null : versionPathOf(dataDir, file, stored);
     out.push({
       seq: event.seq,
       ts: event.ts,
       file,
       diffHash: event.data.diffHash,
       by: event.data.by,
-      snapshotPath: existsSync(path) ? path : null,
+      snapshotPath: path !== null && existsSync(path) ? path : null,
     });
   }
   return out.reverse();
@@ -1134,6 +1162,20 @@ export type PersonaDiffResult =
  * 这样两种现实都对：当前内容已被记录（取更早那条），或当前被人直接改过（取最后那条记录）——
  * 后者恰好等于"人手动改了文件"，diff 出来就是人改了什么。
  */
+/**
+ * 日志里那条 `diffHash` 与"盘上重算的 sha256"说的是不是**同一份内容**。
+ *
+ * ⚠ **两个长度**（2026-10-11 定死）：GUI 直编那条通道写的曾是 `.slice(0, 16)` 的**截断前缀**
+ * （`web/server.ts` 的 `persona-edit`；同日起改成写满 64 位，历史那 16 位按 append-only 不动），
+ * 而 `write_persona`（`tools/admin.ts`）与人味回滚写满 64 位；盘上重算的永远是 64 位。
+ * 拿 64 位去比 16 位 ⇒ **内容一字不差也判"不一致"**，而且下游会把**最近那条**当成"上一版本"，
+ * diff 出来的"上一版"就是当前版（一条假 diff + 两句假注）。比较一律**先对齐到日志那条的长度**：
+ * 16 位十六进制 = 64 bit，"是不是同一份内容"的力道不变（与 `runtime/doctor.ts` 的 I10 同一口径）。
+ */
+function samePersonaContent(diffHash: string, actualSha256: string): boolean {
+  return actualSha256.slice(0, diffHash.length) === diffHash;
+}
+
 export function buildPersonaDiff(dataDir: string, rawFile: string): PersonaDiffResult {
   let file: string;
   try {
@@ -1159,8 +1201,8 @@ export function buildPersonaDiff(dataDir: string, rawFile: string): PersonaDiffR
       event.type === 'persona/updated' && event.data.file.replace(/\\/gu, '/') === file,
   );
   const latest = history[history.length - 1] ?? null;
-  const currentEvented = latest !== null && latest.data.diffHash === currentHash;
-  const previousEntry = [...history].reverse().find((event) => event.data.diffHash !== currentHash) ?? null;
+  const currentEvented = latest !== null && samePersonaContent(latest.data.diffHash, currentHash);
+  const previousEntry = [...history].reverse().find((event) => !samePersonaContent(event.data.diffHash, currentHash)) ?? null;
 
   const notes: string[] = [];
   if (previousEntry === null) {
@@ -1174,12 +1216,19 @@ export function buildPersonaDiff(dataDir: string, rawFile: string): PersonaDiffR
   let previousBytes: number | null = null;
   let previous: PersonaDiffReport['previous'] = null;
   if (previousEntry !== null) {
-    const snapshotPath = join(personaVersionsRoot(dataDir), file, `${previousEntry.data.diffHash}.md`);
-    const exists = existsSync(snapshotPath);
-    previousText = readPersonaVersion(dataDir, file, previousEntry.data.diffHash);
+    // 版本库里的文件名是满 64 位内容地址；事件里那串对 GUI 直编写下的历史记录只有 16 位
+    // ⇒ 解一次前缀再拼路径（不这么做会把**在库**的快照说成"内容不可考"）
+    const stored = resolveStoredHash(
+      listPersonaVersions(dataDir, file).map((item) => item.diffHash),
+      previousEntry.data.diffHash,
+    );
+    const snapshotPath = stored === null ? null : versionPathOf(dataDir, file, stored);
+    const exists = snapshotPath !== null && existsSync(snapshotPath);
+    previousText = stored === null ? null : readPersonaVersion(dataDir, file, stored);
     previousBytes = previousText === null ? null : Buffer.byteLength(previousText, 'utf8');
     previous = {
-      diffHash: previousEntry.data.diffHash,
+      // 报**解出来的**那个（能直接喂给 `persona rollback`）；解不出才退回事件里那串
+      diffHash: stored ?? previousEntry.data.diffHash,
       seq: previousEntry.seq,
       ts: previousEntry.ts,
       by: previousEntry.data.by,
@@ -1212,7 +1261,11 @@ export function formatPersonaDiff(report: PersonaDiffReport, options: { full: bo
   lines.push(`  当前：sha256 ${report.currentHash.slice(0, 16)} · ${report.currentBytes} 字节`
     + `${report.currentEvented ? '（与日志最近一条 persona/updated 一致）' : '（日志里没有对应记录）'}`);
   if (report.previous === null) {
-    lines.push('  对照：无（没有更早的版本记录）');
+    // 两种"没有对照"要分开说：内容**已被记录**（只是没有更早的一版）与"日志里压根没有记录"
+    // ——用同一句话盖住两种现实，读的人会以为自己的改动没被记下来
+    lines.push(report.currentEvented
+      ? '  对照：无（日志里只有当前这一版：没有更早的版本可比）'
+      : '  对照：无（没有更早的版本记录）');
   } else {
     lines.push(`  对照：sha256 ${report.previous.diffHash.slice(0, 16)} · ${report.previousBytes ?? '?'} 字节`
       + ` · 来自 seq ${report.previous.seq} @ ${report.previous.ts}（by ${report.previous.by}）`);

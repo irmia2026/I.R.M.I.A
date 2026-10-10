@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
+// 「我要走了」的标记：后端保活靠它把"他主动关的"与"崩了"分开，见 docs/gui-guard.md §3
+import 'gui_quit.dart';
 import 'shell/tray.dart';
 // 「关窗时收进托盘」这个界面偏好（`%APPDATA%/Irmia/ui-state.json`，键 close-to-tray）
 import 'ui_state.dart';
@@ -76,6 +78,11 @@ class _CloseToTray extends WindowListener {
     }
     // **托盘没装成就不许隐藏**（与开关无关）：装不上时"隐藏"等于把界面丢进黑洞
     // ——托盘图标不存在，没有任何入口能把它叫回来，只能去任务管理器。
+    //
+    // 走到这儿才是"真的要退出界面"（上面那一支已经 return）；**先写标记、再退**：
+    // 后端保活（gui-guard）拿它把"用户主动关的"与"崩了/被杀了"分开——不写就会被
+    // 当成崩溃拉回来，最多 6 次。⚠ 上面"收进托盘"那一支**不许**写（进程还在跑）。
+    unawaited(markGuiQuit('window-close'));
     unawaited(windowManager.destroy());
   }
 }

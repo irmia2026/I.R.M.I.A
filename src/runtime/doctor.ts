@@ -151,17 +151,61 @@ function checkResultPairing(events: readonly AppEvent[]): DoctorCheck {
 function checkTurnEndUniqueness(events: readonly AppEvent[], projection: Projection): DoctorCheck {
   const endCounts = new Map<number, number[]>();
   const started = new Set<number>();
+  /** 每个 turn 的**最后一条** turn 生命周期事件是 start 还是 end（见下面 unclosed 的判据） */
+  const lastWasEnd = new Map<number, boolean>();
   for (const event of events) {
-    if (event.type === 'turn/start') started.add(event.data.turn);
+    if (event.type === 'turn/start') {
+      started.add(event.data.turn);
+      lastWasEnd.set(event.data.turn, false);
+    }
     if (event.type === 'turn/end') {
       const list = endCounts.get(event.data.turn) ?? [];
       list.push(event.seq);
       endCounts.set(event.data.turn, list);
+      lastWasEnd.set(event.data.turn, true);
     }
   }
 
   const duplicated = [...endCounts.entries()].filter(([, seqs]) => seqs.length > 1);
+
+  // 有 turn/start 却没有 turn/end：只有"当前打开的那一个"合法。
+  //
+  // ⚠️ **"没闭合"的判据是"最后一条 turn 生命周期事件是 start"**，不是"一条 turn/end 都没有"
+  // （2026-10-11 修正）。原来的写法（`!endCounts.has(turn)`）有一个盲区：**`turn/end` 写在
+  // 最后一条 `turn/start` 之前时，turn 其实还开着**——而"有一条 end 就算闭合"会把它当成已闭合。
+  // 两种写法在**现场日志**上结论相同（1236/1241/1285 的 end 都排在各自最后一条 start 之后），
+  // 但只有这一种与投影的 `openTurn` 同语义（`fold.ts:208-220`：start 置位、同 turn 的 end 清空），
+  // 也才让"同一 turn 既重复闭合又未闭合"这种形状真的能被报出来（否则两支互斥，
+  // "未闭合优先"就永远没有生效的场合）。
+  const allowed = projection.openTurn?.turn;
+  const unclosed = [...started].filter((turn) => lastWasEnd.get(turn) === false && turn !== allowed);
+
+  // **未闭合优先报**（2026-10-11 判据顺序修正）：这一支原来排在 duplicated 之后，而 duplicated
+  // 一旦成立就 `return`，于是"有 turn/start 却没 turn/end"在当前这份日志上**一次都没被报出来过**
+  // （实测：1236/1241/1285 有双 turn/end 抢先返回，1237/1277/1279 就此被遮住）。
+  // 两支都要人动手，但**未闭合更该先看见**：它要靠恢复流程按 interrupted 逐条结算，
+  // 而重复 turn/end 只说明"关闭写了两次"、不动账。所以先报未闭合，再报重复闭合。
+  if (unclosed.length > 0) {
+    return {
+      id: 'I3',
+      title: '每个已关闭的 turn 有且只有一条 turn/end',
+      status: 'fail',
+      detail: `未闭合且不是当前 turn：${unclosed.join('、')}`,
+    };
+  }
+
   if (duplicated.length > 0) {
+    // **已知历史痕迹，不是回归**（2026-10-11 记）：
+    //   现场日志里重复 turn/end 的是 **1236 / 1241 / 1285**（各 2 条）。成因是 2026-10-10 的并发缺陷
+    //   ——**同一拍里两个 turn 同时在跑**，然后双方各写了一条 end。**成因已修**（tick 重叠守卫 +
+    //   busy 紧邻置位），**不会再新增**；留下的这三条无法在不违反"append-only（事件日志只追加、
+    //   不改历史）"的前提下修掉（要修只能删掉第二条 end = 改历史）。
+    //   ⇒ **这条红是如实的**：它报的是"日志里确实有重复闭合"，而不是"现在坏了"。
+    //   什么时候该重新当回事：**出现 1236/1241/1285 之外的新 turn**，那才是并发缺陷回来了。
+    //   注释里写一遍不够（doctor 的输出才是人真正看的东西）⇒ detail 尾部也带一句，只加说明、不改判据。
+    const note = '（注：1236/1241/1285 的重复 turn/end 是 2026-10-10 并发缺陷留下的历史痕迹，'
+      + '成因已修、不会再新增；修它要改历史 ⇒ 这条红是如实的，不是回归。'
+      + '出现这三个之外的新 turn 才说明缺陷回来了）';
     return {
       id: 'I3',
       title: '每个已关闭的 turn 有且只有一条 turn/end',
@@ -169,34 +213,42 @@ function checkTurnEndUniqueness(events: readonly AppEvent[], projection: Project
       detail: duplicated
         .slice(0, 5)
         .map(([turn, seqs]) => `turn ${turn} 有 ${seqs.length} 条 turn/end（seq ${seqs.join(',')}）`)
-        .join('；'),
+        .join('；') + note,
     };
   }
 
-  // 有 turn/start 却没有 turn/end：只有"当前打开的那一个"合法
-  const allowed = projection.openTurn?.turn;
-  const illegal = [...started].filter((turn) => !endCounts.has(turn) && turn !== allowed);
   return {
     id: 'I3',
     title: '每个已关闭的 turn 有且只有一条 turn/end',
-    status: illegal.length === 0 ? 'ok' : 'fail',
-    detail: illegal.length === 0
-      ? `${endCounts.size} 个已关闭 turn 各一条 turn/end`
-      : `未闭合且不是当前 turn：${illegal.join('、')}`,
+    status: 'ok',
+    detail: `${endCounts.size} 个已关闭 turn 各一条 turn/end`,
   };
 }
 
 // ──────────────────────────────── I4 ────────────────────────────────
 
-/** I4：打开的 turn 在正常运行期间最多一个 */
-function checkSingleOpenTurn(events: readonly AppEvent[], projection: Projection): DoctorCheck {
-  const started: number[] = [];
+/**
+ * I4：打开的 turn 在正常运行期间最多一个。
+ *
+ * **为什么导出**（`_` 前缀 = 仅供测试引用）：判据要**两侧**都看——日志侧（有几个 turn
+ * 没闭合）与投影侧（`openTurn` 是谁）。而 `runDoctor` 的投影就是 `fold(events)`（`doctor.ts:60`），
+ * 于是"投影说开着、日志里已闭合"这**另一侧**的不一致**不可能由一份日志造出来**（`fold` 里
+ * `openTurn` 只被 `turn/start` 置位、只被同 turn 的 `turn/end` 清空，见 `fold.ts:208-220`）——
+ * 走 `runDoctor` 的测试**永远覆盖不到**它。所以把判据本体开一个口子，让测试能把一份
+ * **显式投影**喂进来；`runDoctor` 仍走同一条生产路径（`doctor.ts` 的 checks 数组里就是它）。
+ */
+export function checkSingleOpenTurn(events: readonly AppEvent[], projection: Projection): DoctorCheck {
+  // ⚠️ **按 turn 号去重**（2026-10-11 修正）：原来是 `started.push(...)`——按 `turn/start`
+  // **事件条数**列。并发缺陷下同一个 turn 会写出两条 `turn/start`，于是 1277 在"未闭合 turn"
+  // 里出现两次，把**4 个**未闭合 turn 显示成"5 个"（诊断报告 ①.3 坐实）。
+  // 判据问的是"有几个**打开的 turn**"，不是"写了几条 start"——所以这里按 turn 号去重。
+  const started = new Set<number>();
   const closed = new Set<number>();
   for (const event of events) {
-    if (event.type === 'turn/start') started.push(event.data.turn);
+    if (event.type === 'turn/start') started.add(event.data.turn);
     if (event.type === 'turn/end') closed.add(event.data.turn);
   }
-  const unclosed = started.filter((turn) => !closed.has(turn));
+  const unclosed = [...started].filter((turn) => !closed.has(turn));
 
   if (unclosed.length > 1) {
     return {
@@ -212,6 +264,17 @@ function checkSingleOpenTurn(events: readonly AppEvent[], projection: Projection
       title: '打开的 turn 最多一个',
       status: 'fail',
       detail: `未闭合 turn ${unclosed[0]} 与投影 openTurn=${String(projection.openTurn?.turn ?? 'null')} 不一致`,
+    };
+  }
+  // **反向不一致**（2026-10-11 补）：上面两条只查"日志里没闭合的"，`unclosed.length === 0`
+  // 时无条件放行——于是"投影说有个 turn 开着、日志里却早已闭合"这种**另一侧**的不一致
+  // （恢复流程会把 openTurn 清成 null，这一支抓的就是它没清干净）看不到。判据要两侧都看。
+  if (unclosed.length === 0 && projection.openTurn !== null) {
+    return {
+      id: 'I4',
+      title: '打开的 turn 最多一个',
+      status: 'fail',
+      detail: `投影 openTurn=${projection.openTurn.turn} 但日志里没有未闭合的 turn（该 turn 已闭合或根本不存在）`,
     };
   }
   return {
@@ -290,23 +353,39 @@ function checkUnknownInNeedsReview(events: readonly AppEvent[], projection: Proj
 // ──────────────────────────────── I7 ────────────────────────────────
 
 /**
- * I7：预算累计 = 所有 budget/consumed 的折叠结果（tokensToday 只算最近 rollover 之后）
+ * I7：预算累计 = 所有 `budget/consumed` 的折叠结果（当日口径，照 `fold.ts`）。
  *
- * ⚠️ **两个累计量、两条式子，别混**（2026-10-05 换预算口径时改的这一处）：
+ * **为什么导出**（`_` 前缀 = 仅供测试引用，同 I4）：这一条是"**投影 vs 事件重折**"的比对，
+ * 而 `runDoctor` 里的投影就是 `fold(events)`（`doctor.ts:60`）——两侧由同一次折叠产生，
+ * 走 `runDoctor` 只能验到"折叠是纯函数"，**验不到"投影坏了会不会被抓"**。所以把判据本体
+ * 开一个口子，让测试能把一份**显式投影**喂进来；`runDoctor` 仍走同一条生产路径。
  *
- *   · **投影那三格**（`tokensToday` / `Heavy` / `Light`）按**预算口径**折：**引**
- *     `state/fold.ts` 的 `budgetTokensOf`，**不在这里重写公式**。这一处原来自己写了一遍
- *     `inputTokens + outputTokens`——换口径之后它就是"第二份判据"，实跑会把一份**正确**的投影
- *     报成 `投影 tokensToday=X，事件累计 Y`（假故障）。判据只做一处，这里只做搬运。
- *   · **事件自带的 `tokensTodayAccum`** 按**写入方**的式子核：新增之前的累计 + 本条
- *     `input + output`（写入方是 `agent-loop.accountStep`，另外几处内部调用同式）。
- *     它是 `docs/schema.md` §6 里的**观测字段**（"便于直接查询"），**不等于**预算口径——
- *     换口径没有动它，拿预算口径去核它会把一条写对了的事实报成坏的。
+ * **只有一把尺子**：投影那三格（`tokensToday` / `Heavy` / `Light`）按**预算口径**折——**引**
+ * `state/fold.ts` 的 `budgetTokensOf`（唯一一处定义），**不在这里重写公式**。这一处原来自己
+ * 写了一遍 `inputTokens + outputTokens`，换口径之后它就成了"第二份判据"，会把一份**正确**的
+ * 投影报成 `投影 tokensToday=X，事件累计 Y`（2026-10-05 起的假故障，`612b866` / `ceac537` 的旧账）。
+ *
+ * **判据的日期边界必须与投影的折叠语义逐字一致**。`state/fold.ts:348-358` 折
+ * `budget/rollover` 时把当日三格**归零**（收到一条就归零，不自己判"日期是不是真的变了"）——
+ * 所以这里也照做。这一处原来只清 `accum`、**从不清 `billable`/`heavy`/`light`**，于是拿
+ * **全历史** 29 991 932 去比当日的 1 628 746（诊断报告 ②.3 的错误 B）。
+ *
+ * ⚠️ 口径上要知道的一件事：**归零的时机由事件本身决定，不由判据猜**。"同日重启不该把当日
+ * 清零"这件事的真正落点在**写入侧**——`runtime/real-loop.ts` 的 `rolloverIfNeeded` 早先每次启动
+ * 都写一条 rollover（现场 09-30/10-01 因此有 33 条**同日期** rollover，把当天已记的账抹掉：
+ * fold 重放出来 09-30=69 028 / 10-01=309 493，而当日真实发生量是 1 574 006 / 965 806）；
+ * 现在它改成"投影说今天记过了就不再写"，**当前运行期不再产生同日期 rollover**。
+ * 判据若自作主张"只在日期变化时归零"，就会比投影**多算**同日期 rollover 之后的那一段——
+ * 在一份投影其实自洽的日志上报假故障。**判据跟着投影走，投影跟着事件走。**
+ *
+ * ⚠️ **`tokensTodayAccum` 这条判据 2026-10-11 已删**（诊断报告 ②.3 的错误 A）。它是写入方的
+ * 观测字段，形状是"**新口径基线 + 本条旧口径增量**"（五处写入一律如此、彼此自洽）：拿旧口径
+ * （`input + output`）去核它，等于用两把尺子量同一根柱子。它**只是观测**——schema 明写、预算
+ * 闸门读投影而不读它（`budget-guard.ts:454/707`）、`test/fold.test.ts:577` 也钉着"预算不信它"。
+ * 把它留在自检里就是让观测值承担不变量职责：换口径/重建这类**合法**操作一改基线就天天假报。
  */
-function checkBudgetFold(events: readonly AppEvent[], projection: Projection): DoctorCheck {
-  /** 事件自带 `tokensTodayAccum` 的累计（写入方口径：in + out） */
-  let accum = 0;
-  /** 预算口径的累计（`budgetTokensOf`：未命中 + 输出） */
+export function checkBudgetFold(events: readonly AppEvent[], projection: Projection): DoctorCheck {
+  /** 预算口径的当日累计（`budgetTokensOf`：未命中 + 输出） */
   let billable = 0;
   let heavy = 0;
   let light = 0;
@@ -314,7 +393,8 @@ function checkBudgetFold(events: readonly AppEvent[], projection: Projection): D
   const broken: string[] = [];
   for (const event of events) {
     if (event.type === 'budget/rollover') {
-      accum = 0;
+      // 归零时机**照抄 fold.ts:348-358**：折到一条 rollover 就把当日三格归零（不自己判日期）。
+      // 这是本判据的**唯一一处**日期边界，也是原来漏掉的那一处（billable/heavy/light 从不归零）。
       billable = 0;
       heavy = 0;
       light = 0;
@@ -322,13 +402,6 @@ function checkBudgetFold(events: readonly AppEvent[], projection: Projection): D
     }
     if (event.type !== 'budget/consumed') continue;
     consumed += 1;
-    const delta = event.data.inputTokens + event.data.outputTokens;
-    const expected = accum + delta;
-    // tokensTodayAccum 的写入口径（agent-loop.accountStep）：本条新增之前的累计 + 本条 delta
-    if (event.data.tokensTodayAccum !== expected && broken.length < 5) {
-      broken.push(`seq ${event.seq} 的 tokensTodayAccum=${event.data.tokensTodayAccum}，折叠应为 ${expected}`);
-    }
-    accum = expected;
     // 投影那一侧走预算口径（唯一一处定义在 fold.ts；这里不重算 token 算式）
     const cost = budgetTokensOf(event.data);
     billable += cost;
@@ -463,13 +536,32 @@ function checkPersonaEvented(dataDir: string, events: readonly AppEvent[]): Doct
       continue;
     }
     const actual = sha256Hex(content);
-    if (recorded !== actual) drifted.push(`${file} 盘上 ${actual.slice(0, 8)} ≠ 日志 ${recorded.slice(0, 8)}`);
+    /**
+     * ⚠ **两个长度**（2026-10-11 定死，原来的假红就出在这里）：日志里那条 `diffHash` 由两个
+     * 写通道各写一种形状——GUI 直编（`web/server.ts:5778`）写 `.slice(0, 16)` 的**截断前缀**，
+     * 而 `write_persona`（`tools/admin.ts:1711`）与人味回滚（`cli.ts:1341`）写满 64 位。
+     * 盘上这一侧永远是 64 位。拿 64 去比 16 ⇒ **内容一字不差也判"漂移"**，而两侧都按
+     * 前 8 位打印 ⇒ 消息长成「盘上 92f28ba3 ≠ 日志 92f28ba3」（同一句话，看不出差在哪）。
+     * 所以比较**先对齐到日志那条的长度**（16 位十六进制 = 64 bit，判漂移的力道不变），
+     * 报错时把两侧的**长度与全量**都打出来。
+     */
+    const comparable = actual.slice(0, recorded.length);
+    if (comparable !== recorded) {
+      drifted.push(`${file} 盘上 ${actual}（${actual.length} 位）≠ 日志 ${recorded}（${recorded.length} 位）`);
+    }
   }
 
   const versionBroken = versionStoreProblems(dataDir);
-  const notes = unversioned.length === 0
+  const notes: string[] = unversioned.length === 0
     ? []
     : [`${unversioned.length} 个文件没有 persona/updated 记录（首启种子或人工直改）：${unversioned.slice(0, 5).join('、')}`];
+  // 说清楚"这次比的是多长的哈希"：日志里两种长度混着来（见上面那段），不写出来就会有人
+  // 拿"怎么只有 16 位"再查一遍
+  const truncated = [...latest.values()].filter((hash) => hash.length < 64).length;
+  if (truncated > 0) {
+    notes.push(`其中 ${truncated} 条 persona/updated 的 diffHash 是截断前缀（GUI 直编通道写 16 位）`
+      + '，比对已按该长度对齐');
+  }
   const broken = [...drifted, ...versionBroken];
   return {
     id: 'I10',
