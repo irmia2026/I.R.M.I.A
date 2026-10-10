@@ -947,6 +947,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       log, dataDir, projection: recovery.projection, now,
       timezone: config.timezone ?? 'Asia/Shanghai',
       ds, registry, persona, config, out: write,
+      // 版本号（`runtime/restart` 的通报里要说"你现在跑的是哪一版"）：给的是**同一个常量**
+      // ——`session/start.version` 写的也是它。循环自己不去盘上读 `package.json`：
+      // 版本号的唯一真相源就是这一行（见它的注释），多读一处就是多一个会漂的口径。
+      version: AGENT_VERSION,
       // 同一个告警实例：启动告警刚写下的 alarm/sent 就是它的限流窗口起点
       notifier,
       skills,

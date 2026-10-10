@@ -900,6 +900,21 @@ function completedResult(
   return result;
 }
 
+/**
+ * 超时回执（**全工具共用这一处**：谁的 `timeoutMs` 到了都是这一句）。
+ *
+ * 口径（2026-10-10 改）：**同一个目标别再重试**。原话是"超时不会中断本轮循环；要推进这件事，
+ * 请缩小参数范围、拆成更小的调用，或先确认目标是否可达"——那句话把超时**归因到参数上**，
+ * 于是读它的人（或她）照着去"缩小范围"，而现场那次 `read_channel`（消息量很大的群、
+ * `timeoutMs: 10_000`）根本不是参数问题：她把 `limit` 换了 20 次（6/8/10/12），一次次超时。
+ * 归因错了，出路就错了；所以改口径时把"再试一次"这条路**收掉**，只留两条真出路：
+ * 换做法，或如实报告用户。
+ *
+ * ⚠ 这一句进的是**事件**（日志/重放/界面读它）。**模型那侧读的不是它**：同一条 `tool/result`
+ * 到了渲染层由 `model/render.ts` 的 `renderToolOutput` 按 status 分发，`case 'timeout'` 打的是
+ * 一句固定文本、**把这里的 `content` 整个丢掉**。要真改她读到的口径，两处得一起改；
+ * 只改这里等于只改了留痕。回归用例：`test/tool-failure-streak.test.ts` 的 ④ 逐字钉这一句。
+ */
 function timeoutResult(
   call: ToolCallRequest,
   def: ToolDefinition,
@@ -909,7 +924,8 @@ function timeoutResult(
     status: 'timeout',
     content:
       `工具 ${call.name} 超过 ${def.timeoutMs}ms 没有返回，已记为超时结果。`
-      + '超时不会中断本轮循环；要推进这件事，请缩小参数范围、拆成更小的调用，或先确认目标是否可达。',
+      + '超时不会中断本轮循环；同一个目标别再重试（超时通常不是参数问题）——'
+      + '要么换做法，要么如实报告用户。',
     isError: true,
     error: { message: `工具 ${call.name} 执行超时（${def.timeoutMs}ms）`, code: 'TOOL_TIMEOUT' },
     durationMs: Date.now() - startedAt,

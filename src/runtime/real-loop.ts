@@ -1,3 +1,4 @@
+import { allEventsOf } from '../state/event-snapshot.ts';
 /**
  * Irmia Agent — 真循环驱动（M2 骨架 + M3 刹车与告警接入）
  *
@@ -35,11 +36,13 @@
  * 并写 `snapshot/checkpoint` 事件；恢复时 runtime/recover.ts 从最近快照起算（M5-9）。
  */
 
-import { readFileSync, readdirSync, statfsSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, statfsSync, unlinkSync, openSync, readSync, closeSync, statSync } from 'node:fs';
 import { arch, platform as osPlatform, release as osRelease } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { getHeapStatistics } from 'node:v8';
 
 import type { AppEvent, BudgetLayer, PendingInput, Projection, TurnEndReason, WakeChannel } from '../log/types.js';
+import type { RuntimeRestart, RuntimeRestartPrevious } from '../log/types.js';
 import { isImageAttachment, isTopLevelEvent, defaultVisibility } from '../log/types.ts';
 // 申请单那一套（她发起 → 待批 → 用户点 → 框架执行）：唯一实现在 `grant/mcp-grant.ts`
 import { settleGrants } from '../grant/mcp-grant.ts';
@@ -263,6 +266,516 @@ function compactionWakeNote(args: {
 - 如果手上还有没做完的事（做到一半的任务、刚起的头、答应过还没交代的），**接着做**：压缩不会替你结束任何事，这一拍就是给你接着往下做的。`;
 }
 
+// ══════════════════════ 进程重启的判据与通报（2026-10-11 加） ══════════════════════
+
+/**
+ * 重启的**判据、留痕与通报**——「她说她没认出来进程在反复重启」这一条的落点。
+ *
+ * ───────────────────────────────── 用户原话 ─────────────────────────────────
+ *
+ * 「**她说她没认出来进程在反复重启**。**进程重启应当跟 compact 事件一样，有个通知让
+ *   agent 知晓**」（2026-10-11）。
+ *
+ * 现场（同一天）：后端因为内存不足反复崩/重启（512 上限崩一次、2048 上限 167 秒崩一次、
+ * 无上限涨到 3.8 GB），而她**完全没意识到**——她的上下文里没有任何"我刚被重启过"的痕迹，
+ * 于是把断档读成"没人叫我"。对照面是压缩：`compaction/summary` 之后框架会**真唤醒**她一次
+ * （`wake/manual{via:'compact'}`）。所以这条路做成**同一形状**：
+ *
+ * ```
+ * ① 留痕（每次启动都写）  runtime/restart（internal，不进她的上下文、零缓存代价）
+ * ② 通报（异常退出才写）  wake/manual{via:'restart'}（model，正文是真唤醒、真起 turn）
+ * ```
+ *
+ * ───────────────────────────── 判据：什么算"异常退出" ─────────────────────────────
+ *
+ * **判据的优先级就是下面这个顺序**（前一条成立就不看后一条；写在这里、也只写在这里）：
+ *
+ *   ① `oom`     —— **输出日志里有内存不足的引擎原话**（`JavaScript heap out of memory` /
+ *                  `Reached heap limit` / `Ineffective mark-compacts`）。这是**硬件级事实**，
+ *                  优先级最高：一个正在 OOM 的进程就算同时留下了别的痕迹，它也是被内存搞死的。
+ *   ② `error`   —— 上一任自己写了 `session/end{reason:'error'}`：**它自己报的**异常退出。
+ *   ③ `killed`  —— 有 `session/start`、但**没有** `session/end`，而拉起器的留痕里出现了
+ *                  "停主进程 / 已接管"：它是被**故意**换掉的（拉起器或人关的），只是没走完
+ *                  优雅退出。这一档**不算异常**——人按下按钮时她本来就知道。
+ *   ④ `unknown` —— 有 `session/start`、**没有** `session/end`、也没有任何可判的痕迹。
+ *                  这一档**算异常**：进程没能写下自己的停机记录（被硬杀、被 OOM killer 带走、
+ *                  断电……），而"她不知道"正是这次要治的那件事。**宁可多叫一次，也不许
+ *                  再一次让她把断档读成"没人叫我"。**
+ *
+ * `abnormal = death === 'oom' || death === 'error' || death === 'unknown'`。
+ * 第一任（日志里根本没有上一任的 `session/start`）**不算异常**：那是首次安装，没有"断档"可言。
+ *
+ * ───────────────────────────── 去重：同一次启动只喊一次 ─────────────────────────────
+ *
+ * 判据是**日志里有没有 `runtime/restart`**（`startupRestartEvent()`）：有 ⇒ 这一任的留痕
+ * 已经写过、该叫的也叫过了 ⇒ **整段跳过**。于是它同时挡住两种重复：
+ *   · 同一个进程里 `warmUp` 被跑第二次（`ready` 缓存失效、或将来有人再调一次）；
+ *   · 进程在同一次启动里重放同一条路径。
+ * 重启之后的**新进程**当然会再写一条（那是**另一任**，另一件事），这正是要的。
+ *
+ * ───────────────────────────── "谁拉起的"怎么判（不猜） ─────────────────────────────
+ *
+ * 四条可以核对的事实，按优先级：① 拉起器留痕（`data/restart-trace.log`）里的脚本名与
+ * 它自己写下的命令行；② `process.argv` 里的拉起器路径（自重启那条路会把自己的参数原样带来）；
+ * ③ 环境变量 `IRMIA_LAUNCHED_BY`（给外部看护进程用：显式声明比让框架猜可靠）；
+ * ④ 都没有 ⇒ `unknown`——**如实说不知道**，不编一个来源。
+ *
+ * ───────────────────────────── 老日志（回溯友好） ─────────────────────────────
+ *
+ * 全部读取都是"读不到就给 null / unknown"：没有 `session/start`（老日志、第一任）、
+ * 没有输出日志、留痕不存在——**任何一条缺失都不许抛**。这一条是硬要求：她是活的进程，
+ * 启动路径上抛异常等于整个 agent 起不来（与 `machineFacts` 那条纪律同源）。
+ */
+
+/** 这次是谁拉起的（能判就给，判不出 `unknown`——**不许猜**） */
+export type RestartLauncher = RuntimeRestart['data']['launchedBy'];
+
+/** 外部看护进程显式声明"是我拉起的"的口子（声明比猜可靠；值就是本类型的取值之一） */
+export const RESTART_LAUNCHED_BY_ENV = 'IRMIA_LAUNCHED_BY';
+
+/** 输出日志只看**结尾**这么多字节：引擎的致命原话一定在最末尾（不必读整个文件） */
+const RESTART_OUTPUT_TAIL_BYTES = 64 * 1024;
+/** 一次最多扫几个候选输出日志（拉起器留痕里可能出现好几个路径） */
+const RESTART_OUTPUT_SCAN_MAX = 6;
+/** 拉起器留痕只看结尾这么多字节：一次重启的那几行就在结尾 */
+const RESTART_TRACE_TAIL_BYTES = 64 * 1024;
+/**
+ * 「留痕里的那次重启就是把我拉起来的那次吗」的窗口（毫秒）。
+ *
+ * 判据是**留痕文件的 mtime 距离本进程启动多久**（拉起器写留痕与拉起新实例是同一秒的事，
+ * 所以窗口只要盖得住启动耗时）。窗口外 ⇒ 那份留痕是**别的时刻**的，不能拿它说这次是谁拉起的。
+ * 判不出时间（mtime 读不到）时按"可用"处理：读得到内容却读不到时间时，内容仍是最好的线索。
+ */
+const RESTART_TRACE_FRESH_MS = 10 * 60 * 1000;
+
+/**
+ * 内存不足的**引擎原话**（V8 打给 stderr 的那几行，逐字）。
+ *
+ * 为什么不用一个宽泛的 `/oom/i`：那会在"日志里正好聊到 OOM 这个词"时误判，
+ * 而这条判据的后果是**给她发一条通报**（误报就是一次没来由的打扰）。
+ * 这三个字面量都是引擎自己打的，人写不出这种句子。
+ */
+const OOM_MARKERS: readonly RegExp[] = [
+  /JavaScript heap out of memory/u,
+  /Reached heap limit/u,
+  /Ineffective mark-compacts near heap limit/u,
+];
+
+/**
+ * 拉起器留痕里"它是被**故意**换掉的"那几句话（逐字取自 `tools/restart-agent.ps1` 的
+ * `Write-Trace` 与 `restart-worker.ts` 的 `--old-pid` 那条路）。
+ *
+ * 为什么认这些字而不是认"有没有 `[结束]`"：`[结束]` 在**失败**时也写（`ok=False`），
+ * 而这里要回答的是"旧实例是不是被有意停掉的"——只有"停主进程"与"旧实例 pid="这两句说得清。
+ * 它们是留痕的**既定写法**（服务端自己也按行解析同一份文件），不是我们为这条判据新造的格式。
+ */
+const KILL_TRACE_MARKERS: readonly RegExp[] = [
+  /停主进程/u,
+  /旧实例 pid=/u,
+  /旧实例退出确认/u,
+  /已接管/u,
+];
+
+/** 当前进程的 pid（唯一一处读它的地方：测试可以覆盖它来摆"上一任"的场景） */
+function currentPid(): number {
+  return process.pid;
+}
+
+/**
+ * 从尾部读一段文本（**只读尾部**：输出日志可以是几 MB，整份读进来是白花的内存）。
+ * 读不到（文件不在 / 权限不够 / 目录）一律给空串——调用方据此当"没有痕迹"，绝不抛。
+ */
+function readTailText(path: string, maxBytes: number): string {
+  let fd: number | null = null;
+  try {
+    const size = statSync(path).size;
+    if (size <= 0) return '';
+    const start = Math.max(0, size - maxBytes);
+    fd = openSync(path, 'r');
+    const buffer = Buffer.allocUnsafe(size - start);
+    const read = readSync(fd, buffer, 0, buffer.length, start);
+    return buffer.subarray(0, read).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* 关不掉就算了：这一次的读已经结束，别让它把启动拦下 */
+      }
+    }
+  }
+}
+
+/**
+ * 一个输出日志里有没有 OOM 的引擎原话。**返回那一行**（人读的证据），没有就是 null。
+ */
+function findOomEvidence(path: string): string | null {
+  const tail = readTailText(path, RESTART_OUTPUT_TAIL_BYTES);
+  if (tail === '') return null;
+  for (const line of tail.split(/\r?\n/u)) {
+    for (const marker of OOM_MARKERS) {
+      if (marker.test(line)) {
+        return `${path}：${line.trim().slice(0, 200)}`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 拉起器留痕里提到的**输出落点**（新实例的 stdout/stderr 去哪了）。
+ *
+ * 为什么从留痕里抠而不是写死一个路径：后端 stdout 的落点是**拉起方决定的**
+ * （仓库脚本默认 `D:\IrmiaAgent\agent-console.out.log`、随包脚本默认
+ * `<dataDir>/restart-backend.log`、自重启那条路用 `--out` 显式给）。写死一个就等于
+ * 只在"某一种装法"上有效——而这条路要回答的恰恰是"**这一台**机器上它是怎么起的"。
+ * 留痕里那句"完整命令行"把它逐字记着，`>> "<路径>" 2>&1` 就是它。
+ */
+function logPathsFromTrace(trace: string): string[] {
+  const out: string[] = [];
+  const quoted = /"([^"\r\n]*\.log)"/giu;
+  for (const match of trace.matchAll(quoted)) {
+    const path = (match[1] ?? '').trim();
+    if (path !== '' && !out.includes(path)) out.push(path);
+  }
+  return out;
+}
+
+/** 上一任的输出日志候选（含"读不到就是没有"的兜底路径；顺序即优先级） */
+export function previousOutputCandidates(input: {
+  dataDir: string;
+  traceText: string;
+  env: Record<string, string | undefined>;
+}): string[] {
+  const out: string[] = [];
+  const push = (path: string): void => {
+    const trimmed = path.trim();
+    if (trimmed === '' || out.includes(trimmed)) return;
+    out.push(isAbsolute(trimmed) ? trimmed : join(input.dataDir, trimmed));
+  };
+  // ① 环境变量：外部看护进程知道后端输出去了哪儿时，显式给（比抠留痕可靠）
+  push(input.env['IRMIA_OUT_LOG'] ?? '');
+  // ② 拉起器留痕里逐字记着的那个落点（三种拉起方式的实际情况都在这儿）
+  for (const path of logPathsFromTrace(input.traceText)) push(path);
+  // ③ 随包脚本与自重启那条路的默认值（`packaging/restart.ps1` 的 `-OutLog` 缺省）
+  push(join(input.dataDir, 'restart-backend.log'));
+  return out;
+}
+
+/** 拉起器留痕里那句"完整命令行"（判"是谁拉起的"最硬的一条依据） */
+function traceCommandLineOf(trace: string): string {
+  const match = /完整命令行（([^\r\n]*)）/u.exec(trace);
+  return (match?.[1] ?? '').trim();
+}
+
+/**
+ * 这次是谁拉起的——**判据只此一处**（纯函数：入参给全，测试不必摆真进程）。
+ *
+ * 优先级写在 {@link RestartLauncher} 与上面那一段头注释里；这里逐条落实。
+ * `traceUsable=false` 表示留痕里的那次重启**不是**把我拉起来的那次（mtime 太旧）⇒ 整条不看。
+ */
+export function classifyRestartLauncher(input: {
+  argv: readonly string[];
+  traceText: string;
+  traceUsable: boolean;
+  env: Record<string, string | undefined>;
+}): { launchedBy: RestartLauncher; evidence: string } {
+  const argvText = input.argv.join(' ');
+  if (input.traceUsable) {
+    const command = traceCommandLineOf(input.traceText);
+    const haystack = `${command} ${input.traceText}`;
+    if (command !== '' && /restart-agent\.ps1/u.test(haystack)) {
+      return { launchedBy: 'root-script', evidence: `拉起器留痕：${command}` };
+    }
+    if (command !== '' && /restart\.ps1/u.test(haystack)) {
+      return { launchedBy: 'packaged-script', evidence: `拉起器留痕：${command}` };
+    }
+    if (/restart-worker\.(js|mjs)/u.test(haystack)) {
+      return { launchedBy: 'self-restart', evidence: `拉起器留痕：${command === '' ? '自重启' : command}` };
+    }
+    // 服务端发起的那条路先写一行 `[发起]`（`web/server.ts` 的 restartTraceLine('发起', …)）
+    if (/\[发起\]/u.test(input.traceText)) {
+      const line = /\[发起\][^\r\n]*/u.exec(input.traceText)?.[0] ?? '';
+      return { launchedBy: 'ui', evidence: `拉起器留痕：${line.trim().slice(0, 200)}` };
+    }
+  }
+  // `process.argv` 里带着拉起器自己的参数 = 自重启那条路（`restart-worker.ts` 转手的就是它）
+  if (/restart-worker\.(js|mjs)/u.test(argvText) || argvText.includes('--old-pid')) {
+    return { launchedBy: 'self-restart', evidence: `本进程命令行带着拉起器参数：${argvText.slice(0, 200)}` };
+  }
+  const declared = (input.env[RESTART_LAUNCHED_BY_ENV] ?? '').trim();
+  if (declared !== '' && isRestartLauncher(declared)) {
+    return { launchedBy: declared, evidence: `环境变量 ${RESTART_LAUNCHED_BY_ENV}=${declared}` };
+  }
+  return { launchedBy: 'unknown', evidence: input.traceUsable ? '' : '留痕里那次重启不是把我拉起来的那次（时间对不上）' };
+}
+
+/** 环境变量里那个值认不认（认不出就退回 unknown，不把它当自由文本塞进事件） */
+function isRestartLauncher(value: string): value is RestartLauncher {
+  return value === 'root-script' || value === 'packaged-script' || value === 'self-restart'
+    || value === 'ui' || value === 'external';
+}
+
+/**
+ * 判据的结论（{@link RuntimeRestartPrevious}）——**纯函数**：事件、OOM 证据、拉起器线索三样给全。
+ *
+ * 判据顺序与理由写在上面那段头注释里；这里只落实，不再解释一遍。
+ * 参数全部可缺（老日志没有 `session/start`、输出日志读不到）：缺什么就当"没这条证据"。
+ */
+export function previousRunVerdict(input: {
+  events: readonly AppEvent[];
+  /** OOM 的引擎原话（`findOomEvidence` 的结论）；没有就是 null */
+  oomEvidence: string | null;
+  /** 拉起器留痕里"故意换人"的痕迹；没有就是 null */
+  killEvidence: string | null;
+  /** 上一任的 pid（调用方从 lock.json 读的）；读不到就是 null */
+  previousPid: number | null;
+}): RuntimeRestartPrevious {
+  const sessions: Array<AppEvent & { type: 'session/start' }> = [];
+  const ends: Array<AppEvent & { type: 'session/end' }> = [];
+  for (const event of input.events) {
+    if (event.type === 'session/start') sessions.push(event);
+    else if (event.type === 'session/end') ends.push(event);
+  }
+  const previous = sessions.length >= 2 ? sessions[sessions.length - 2]! : undefined;
+  // 上一任的停机记录只在它**之后**才算（当前这一任也写过 session/end 时不能拿它顶替）
+  const end = previous === undefined
+    ? undefined
+    : ends.filter(candidate => candidate.seq > previous.seq).pop();
+  const base = {
+    pid: previous?.data.pid ?? input.previousPid,
+    // `ts` 在**信封**上（`data` 里只有 pid/cwd/version/…）：起始时刻要读信封那一格
+    startedAt: previous?.ts ?? null,
+    version: previous?.data.version ?? null,
+    endedAt: end?.ts ?? null,
+    endedReason: end?.data.reason ?? null,
+  };
+  if (previous === undefined) {
+    return { ...base, death: 'unknown', abnormal: false, evidence: '事件日志里没有上一任的 session/start（第一任，或老日志）' };
+  }
+  if (input.oomEvidence !== null) {
+    return { ...base, death: 'oom', abnormal: true, evidence: input.oomEvidence };
+  }
+  if (end?.data.reason === 'error') {
+    return { ...base, death: 'error', abnormal: true, evidence: `上一任自己的停机记录：session/end{reason:'error'}${end.data.detail === undefined ? '' : `（${end.data.detail}）`}` };
+  }
+  if (end !== undefined) {
+    return { ...base, death: 'unknown', abnormal: false, evidence: `上一任写了停机记录：session/end{reason:'${end.data.reason}'}` };
+  }
+  if (input.killEvidence !== null) {
+    return { ...base, death: 'killed', abnormal: false, evidence: input.killEvidence };
+  }
+  return {
+    ...base, death: 'unknown', abnormal: true,
+    evidence: '上一任没有留下 session/end（没能走完优雅退出），也没有 OOM 或拉起器的痕迹',
+  };
+}
+
+/** 本进程的内存上限（V8 报的那个数）——"有没有带上限、上限多少"要能读到 */
+export function heapCapOf(argv: readonly string[], heapLimitBytes: number): RuntimeRestart['data']['heapCap'] {
+  const enabled = argv.some(arg => arg.startsWith('--max-old-space-size'));
+  if (!enabled) return { enabled: false, limitMb: null };
+  // V8 的 `heap_size_limit` 是**算出来的**（含命令行那一位），所以它能答"上限是多少"；
+  // 而"带没带这个参数"只有 argv 答得出——两个来源各答一半，都不猜。
+  const mb = Math.round((heapLimitBytes / (1024 * 1024)) * 100) / 100;
+  return { enabled: true, limitMb: Number.isFinite(mb) && mb > 0 ? mb : null };
+}
+
+/** 上一任是怎么没的——**一句人话**（通报正文与留痕共用这一份，不各写一遍） */
+export function deathReasonText(previous: RuntimeRestartPrevious): string {
+  switch (previous.death) {
+    case 'oom':
+      return '进程崩了，是**内存不足**（Node 报 "JavaScript heap out of memory"）';
+    case 'error':
+      return '进程自己报了**异常退出**（session/end 里写的是 error）';
+    case 'killed':
+      return '进程被**故意换掉**的（拉起器/人关的），只是没来得及走完优雅退出';
+    case 'unknown':
+      return previous.pid === null
+        ? '**日志里没有上一任的痕迹**（这是第一次启动，或者老日志里没有这一条）'
+        : '进程**没能留下停机记录**（被硬杀 / 断电 / 没走完优雅退出），所以说不清具体原因';
+  }
+}
+
+/**
+ * 这一份日志里**本任**的 `runtime/restart` 留痕（没有就是 null）——同一次启动只喊一次的判据。
+ *
+ * 为什么"有它"就等于"喊过了"：留痕与那条真唤醒是**同一个同步块**里写的（`announceRestart`），
+ * 而留痕在前。所以"留痕在、通报不在"只可能是"这一任本来就不该喊"（正常重启），
+ * 不可能是"喊漏了"——判据因此既简单又不会把该喊的那次吞掉。
+ */
+export function startupRestartEvent(events: readonly AppEvent[]): (AppEvent & { type: 'runtime/restart' }) | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event !== undefined && event.type === 'runtime/restart') {
+      return event as AppEvent & { type: 'runtime/restart' };
+    }
+  }
+  return null;
+}
+
+/** 文件的修改时刻（毫秒）；读不到就是 null（**调用方据此当"判不出时间"**，绝不抛） */
+function mtimeMsOf(path: string): number | null {
+  try {
+    const ms = statSync(path).mtimeMs;
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 重启通报的**正文**（逐字进 `wake/manual.note`，2026-10-11）。
+ *
+ * 纯函数（入参 → 字符串，不读盘、不读时钟）：同一份判定在任何时刻渲染出同一串字节，
+ * 重放与测试因此都能引用同一串字面量（与 `compactionWakeNote` 同一条纪律）。
+ *
+ * 四件事按用户给的口径写，一件不许少：
+ *   ① **告知刚被重启过**（段头就点明，她一眼看得出这不是用户说的话）；
+ *   ② **说清上一任怎么没的**（`deathReasonText`）——不知道就如实说不知道，
+ *      绝不写"一切正常"这种替实现圆场的话；
+ *   ③ **说清现在跑的是哪一版**（她问"我在哪一版上"时这是唯一凭据）；
+ *   ④ **两件要她接着做的事**：断档的活接着做；**记忆不受影响**（这一句是用户点名要的：
+ *      重启会让上下文里的"刚发生的事"断掉，但数据/记忆/她自己的结论都在盘上、一个字没少）。
+ */
+export function restartWakeNote(args: {
+  pid: number;
+  version: string;
+  previous: RuntimeRestartPrevious;
+  /** 重启那一刻的 ISO 时刻（正文里给一个人读得懂的时刻，省得她再去翻事件） */
+  at: string;
+}): string {
+  const { pid, version, previous, at } = args;
+  const lines = [
+    '【框架通报 · 进程重启】**我刚被重启过**（这是一条框架通报，不是用户说的话）。',
+    `- 上一任：${deathReasonText(previous)}`
+      + `${previous.pid === null ? '' : `（上一任 pid ${previous.pid}`}`
+      + `${previous.pid === null || previous.startedAt === null ? '' : `，起于 ${previous.startedAt}`}`
+      + `${previous.pid === null ? '' : '）'}。`,
+    `- 现在这一任：pid ${pid}，跑的是 **${version}**，重启时刻 ${at}。`,
+    '- 如果刚才有没做完的活（做到一半的任务、刚起的头、答应过还没交代的），**接着做**：'
+      + '重启只打断了进程，不会替你结束任何事。',
+    '- **重启不影响你的记忆与记忆里的结论**：盘上的记忆、STATE、日志都还在，一个字都没少。'
+      + '你只是"中间断了一小段"，而不是"忘了什么"。',
+  ];
+  return lines.join('\n');
+}
+
+/**
+ * **只有真环境才知道、也只该在真启动时读一次**的那几格（{@link restartFacts} 的入参之一）。
+ *
+ * 为什么拆成两步：`restartFacts` 要是**纯函数**（测试才能不碰盘、不读真进程地摆每一种判据），
+ * 而"上一任的输出日志在哪、里面有没有 OOM、拉起器留痕说了什么"必须真去读盘。
+ * 读盘那一半全在这里，且**任何失败都退化成"没有这条证据"**——启动路径上不许抛。
+ */
+export function restartProbeOf(
+  dataDir: string,
+  now: Date,
+): { oomEvidence: string | null; killEvidence: string | null; traceText: string; traceUsable: boolean } {
+  const tracePath = join(dataDir, 'restart-trace.log');
+  const traceMtimeMs = mtimeMsOf(tracePath);
+  const traceText = readTailText(tracePath, RESTART_TRACE_TAIL_BYTES);
+  // 留痕在、但它的 mtime 明显早于本次启动 ⇒ 那是**别的时刻**的重启记录，不能用它说这次
+  const traceUsable = traceText !== ''
+    && (traceMtimeMs === null || now.getTime() - traceMtimeMs <= RESTART_TRACE_FRESH_MS);
+  let oomEvidence: string | null = null;
+  for (const path of previousOutputCandidates({ dataDir, traceText, env: process.env })
+    .slice(0, RESTART_OUTPUT_SCAN_MAX)) {
+    oomEvidence = findOomEvidence(path);
+    if (oomEvidence !== null) break;
+  }
+  const killMarker = traceUsable
+    ? (KILL_TRACE_MARKERS.map(marker => marker.exec(traceText)?.[0]).find(hit => hit !== undefined) ?? null)
+    : null;
+  return {
+    traceText,
+    traceUsable,
+    oomEvidence,
+    killEvidence: killMarker === null
+      ? null
+      : `拉起器留痕里出现了「${killMarker}」：旧实例是被**故意**停掉的`,
+  };
+}
+
+/**
+ * **这一次启动的全部事实**（判据的输入与结论，纯函数）——`announceRestart` 只负责落库。
+ *
+ * 拆出来是为了让四条纪律各自可测：① 异常退出 ⇒ 有通报、正文含"重启"与原因；
+ * ② 正常重启 ⇒ 不喊；③ 同一次启动只喊一次（那是 `startupRestartEvent` 的去重）；
+ * ④ 老日志里没有这条事件 ⇒ 不许炸（缺什么都当"没有这条证据"）。
+ *
+ * 判据本身写在文件上半段那段头注释里（**唯一一处**），这里只落实。
+ */
+export function restartFacts(input: {
+  events: readonly AppEvent[];
+  argv: readonly string[];
+  env: Record<string, string | undefined>;
+  now: Date;
+  /** 本进程 pid（测试可给一个假数） */
+  pid: number;
+  /** 本进程版本号（`main.ts` 的 AGENT_VERSION；测试给什么都行） */
+  version: string;
+  /** `restartProbeOf` 读出来的那几格；测试直接给字面量 */
+  oomEvidence: string | null;
+  killEvidence: string | null;
+  traceText: string;
+  traceUsable: boolean;
+  /**
+   * 上一任的 pid **提示**（`lock.json` 里那个数）：事件日志里查不到上一任时用它。
+   * 判据不依赖它（它只是"补一格 pid"），所以缺省 null 不影响任何结论。
+   */
+  previousPidHint?: number | null;
+  /** V8 报的老生代上限（字节）；缺省按本进程现读（测试可给一个数） */
+  heapLimitBytes?: number;
+}): {
+  pid: number;
+  version: string;
+  previous: RuntimeRestartPrevious;
+  launchedBy: RestartLauncher;
+  launchedEvidence: string;
+  argv: string;
+  heapCap: RuntimeRestart['data']['heapCap'];
+  /** 要发给她的通报正文；null = **这一任不喊**（正常重启，只留痕） */
+  note: string | null;
+} {
+  const previous = previousRunVerdict({
+    events: input.events,
+    oomEvidence: input.oomEvidence,
+    killEvidence: input.killEvidence,
+    previousPid: input.previousPidHint ?? null,
+  });
+  const launcher = classifyRestartLauncher({
+    argv: input.argv,
+    traceText: input.traceText,
+    traceUsable: input.traceUsable,
+    env: input.env,
+  });
+  return {
+    pid: input.pid,
+    version: input.version,
+    previous,
+    launchedBy: launcher.launchedBy,
+    launchedEvidence: launcher.evidence,
+    argv: input.argv.join(' '),
+    heapCap: heapCapOf(input.argv, input.heapLimitBytes ?? getHeapStatistics().heap_size_limit),
+    note: previous.abnormal
+      ? restartWakeNote({ pid: input.pid, version: input.version, previous, at: input.now.toISOString() })
+      : null,
+  };
+}
+
+/** 文件根本不存在（而不是读到了空文件）——"没有痕迹"与"痕迹是空的"是两件事 */
+function fileMissing(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * 附件预热一次最多回看多少条事件。
  *
@@ -270,7 +783,6 @@ function compactionWakeNote(args: {
  * 一张图从到达、渲染到真正被认领通常只隔几十条事件；再往前翻既没必要，也白读盘。
  */
 const ATTACHMENT_SCAN_WINDOW = 200;
-
 /**
  * `read_channel` 一次读（一屏 / 一页）最多把几张"点名她"的图片带进上下文（2026-10-11 用户拍板）。
  *
@@ -537,6 +1049,27 @@ export interface RealLoopDeps {
   persona: PersonaAssets;
   config: AppConfig;
   out?: (line: string) => void;
+  /**
+   * 本进程的**版本号**（`main.ts` 的 `AGENT_VERSION`，与 `session/start.version` 同一处口径）。
+   *
+   * 为什么要宿主给而不是循环自己读 `package.json`：版本号的唯一真相源是那一个常量
+   * （它的注释写着"改这一个要同步四处"），循环再去盘上读一次就是第五处。
+   * 缺省 `'unknown'`——**测试台与嵌入方不传时，通报里如实写"说不出版本"**，不编一个数。
+   */
+  version?: string;
+  /**
+   * 重启探测的**读盘那一半**（上一任的输出日志里有没有 OOM、拉起器留痕说了什么）覆盖点。
+   *
+   * 为什么留这一格：这条路的判据全是"从盘上读痕迹"，而痕迹的种类（OOM 的输出日志、
+   * 拉起器留痕、老日志根本没有这些文件）在一个夹具里摆不齐——真去造一份几 MB 的
+   * node 输出日志不现实。缺省就是真读盘（`restartProbeOf`），生产行为一个字节不变。
+   */
+  restartProbe?: (dataDir: string, now: Date) => {
+    oomEvidence: string | null;
+    killEvidence: string | null;
+    traceText: string;
+    traceUsable: boolean;
+  };
   /** 轮询间隔（毫秒），默认 1000 */
   pollMs?: number;
   /** 刹车判定器覆盖点（测试注入假阈值用）；缺省按 config.budget 构造 */
@@ -793,7 +1326,7 @@ export class RealLoop {
    * 纪律：**只读**。它是快照，写入点仍然是日志（`appendSync`）——就地改它等于让
    * "本拍的事件"与"盘上的事件"漂开，而后面按它判重的那几处会一起被骗。
    */
-  private eventView: AppEvent[] = [];
+  private eventView: readonly AppEvent[] = [];
 
   /**
    * 预热跑完之前到达的**配置热更通报**（一次重载最多一条，见 `notifyConfigReloaded`）。
@@ -1284,8 +1817,23 @@ export class RealLoop {
    * 返回"这一拍定下的文本"，便于测试直接断言（生产调用点不需要它）。
    */
   async mcpIndexSync(): Promise<string> {
-    const events: AppEvent[] = [];
-    for await (const event of this.deps.log.readAll()) events.push(event);
+    // ── **共用那份增量快照，不自己再 `readAll()` 一遍**（2026-10-10 修） ──
+    //
+    // 这条路径原来每一拍都 `for await (…) log.readAll()` 把**全量**日志折进一个**新数组**。
+    // 实测代价（`_research/probe-tick-churn.mts`，7.4 万条 / 59 MB）：
+    // **单次 98.4 MB 堆增量 / 500 ms**；而 `pollMs = 1000`（`:910`）⇒ tick **每秒一次**
+    // ⇒ 每秒白造 ~98 MB 垃圾。连打 10 拍堆就到 459 MB（探针里还没有并发）。
+    //
+    // 为什么这会要命：V8 **把堆还给 `heapUsed`、不还给系统**
+    // （`_research/probe-v8-retention.mjs`：持有 ~600 MB 再全释放 + GC ⇒ heapUsed 4 MB、
+    // **RSS 仍是 1174 MB**）。于是每秒一次的 98 MB churn 把 **RSS 高水位**一路顶上去
+    // —— 真实事故：带上限 512 MB 的那一轮 **167 秒就 OOM**（当时日志里只有 225 条事件、
+    // 0.1 MB，事件本身完全解释不了那 1.8 GB）。
+    //
+    // 修法是**只有一份**：`state/event-snapshot.ts` 按 `EventLog` 实例缓存已 parse 的全量事件、
+    // 之后只读 `latestSeq()` 之后的增量。单拍成本从 98.4 MB/500 ms 降到"几条新事件"。
+    // `web/server.ts` 那八条只读端点读的是**同一个函数**（那份缓存是 2026-10-10 早先为它们加的）。
+    const events = await allEventsOf(this.deps.log);
     // 这一份**留给同一拍后面的人用**（`settleGrants`）：它必须在同步段里跑完，不能自己再读一遍
     // 全量日志（那是一次真实的磁盘往返，而这里每拍已经付过一次了）。
     // 它只是"本拍看到的事件快照"——写入点仍然是日志，这里**只读**，谁也不许就地改它。
@@ -2367,6 +2915,102 @@ export class RealLoop {
     // 放在最后：它要读配置面与落盘缓存，且**必须在第一拍认领输入之前**完成
     // （`ensureReady()` 在 `tickOnce` 的第一行，认领在后面）。
     await this.mcpIndexSync();
+    // 进程重启的**留痕 +（异常退出时的）一次真唤醒**（2026-10-11）。也放在最后：
+    // 它要与"上一任是怎么没的"的全部素材对齐（`session/end` 已经折完、`mcp/index` 已落），
+    // 而那条 `wake/manual` 与其它唤醒同一条路（`applyOne` 折进共享投影 ⇒ 本拍认领 ⇒ 起 turn），
+    // 所以它必须落在 `tickOnce` **认领输入之前**的那一段里——预热正好是那一段。
+    this.announceRestart(events);
+  }
+
+  /**
+   * 本进程起来时：落一条 `runtime/restart` 留痕，**异常退出后**再叫醒她一次。
+   *
+   * `events` 是 `warmUp` 已经读进内存的那一份全量事件（不再读第二遍盘）。
+   *
+   * ──────────────────────────── 判据（唯一一处） ────────────────────────────
+   *
+   * **什么算"异常退出"、要不要叫她**：逐条写在上面那一段头注释里（`oom` / `error` /
+   * `killed` / `unknown` 四档，以及 `abnormal` 的算式）。这里只做三件事：
+   * ① 把判据的**输入**凑齐（事件流、上一任的输出日志尾部、拉起器留痕、lock 里的旧 pid）；
+   * ② 落留痕（**每次都写**——正常重启也写，只是不叫她）；
+   * ③ 只有 `abnormal` 才追加那条真唤醒。
+   *
+   * ──────────────────────────── 去重（同一次启动只喊一次） ────────────────────────────
+   *
+   * 判据是**日志里有没有 `runtime/restart`**：有 ⇒ 这一任的留痕写过、该叫的也叫过了 ⇒ 整段
+   * 返回（`startupRestartEvent` 那一行）。它挡的是"同一个进程里 `warmUp` 被跑第二次"，
+   * 以及"有人把这条路接了两遍"——而**下一个进程**当然会再写一条（那是另一任，另一件事）。
+   *
+   * ──────────────────────────── 绝不拦启动 ────────────────────────────
+   *
+   * 全部探测都是"读不到就给 null"（见那一族函数的注释），任何一处失败都不许让 agent 起不来。
+   */
+  private announceRestart(events: readonly AppEvent[]): void {
+    // 去重：这一任已经留过痕 ⇒ 什么都不做（见方法头）
+    if (startupRestartEvent(events) !== null) return;
+
+    const facts = restartFacts({
+      events,
+      argv: [...process.argv],
+      env: process.env,
+      now: this.deps.now(),
+      pid: currentPid(),
+      version: this.deps.version ?? 'unknown',
+      ...(this.deps.restartProbe ?? restartProbeOf)(this.deps.dataDir, this.deps.now()),
+      previousPidHint: this.previousPidHint(events),
+    });
+
+    const logged = this.appendSync('runtime/restart', {
+      pid: facts.pid,
+      version: facts.version,
+      previous: facts.previous,
+      launchedBy: facts.launchedBy,
+      launchedEvidence: facts.launchedEvidence,
+      argv: facts.argv,
+      heapCap: facts.heapCap,
+      wake: facts.note !== null,
+    }, defaultVisibility('runtime/restart')) as AppEvent & { type: 'runtime/restart' };
+
+    if (facts.note !== null) {
+      // 走**既有那条真唤醒路径**（与压缩那条逐字同形，见 `handleCompactionWake`）：
+      // `appendSync` 已经把留痕折进共享投影 ⇒ 本拍认领 ⇒ 真起 turn ⇒ 正文逐字进请求。
+      // `dedupeKey` 挂在**留痕的 seq** 上（不是时刻）：同一任只可能算出同一个键，
+      // 于是即便将来有人把这段接了两遍，队列那层的幂等键也拦得住第二遍。
+      this.appendSync('wake/manual', {
+        note: facts.note,
+        via: 'restart',
+        dedupeKey: `runtime-restart#${logged.seq}`,
+      }, 'model');
+    }
+    this.write(
+      `[重启] 本进程 pid=${facts.pid}（版本 ${facts.version}）·`
+      + ` 上一任 ${facts.previous.pid ?? '未知'} ${facts.previous.death}${facts.previous.abnormal ? '（异常）' : ''}`
+      + ` · 由 ${facts.launchedBy} 拉起 · 老生代上限 `
+      + `${facts.heapCap.enabled ? `${facts.heapCap.limitMb ?? '未知'} MB` : '未启用'}`
+      + `${facts.note === null ? ' · 正常重启：只留痕，不叫她' : ' · 已发一次真唤醒（via=restart）'}`,
+    );
+  }
+
+  /**
+   * 上一任的 pid：事件里查不到时退回 `lock.json` 里那个数。
+   *
+   * 为什么两处都要看：`session/start` 是**主**来源（它与版本号、起始时刻同一行），
+   * 而"这一任之前那个 pid 是谁"在 lock.json 里更权威（写它的与拿锁的是同一个动作）。
+   * 两处都读不到就是 null——**第一任与老日志都在这一档**，`previousRunVerdict` 会据此
+   * 判"没有上一任的痕迹"（不叫醒她）。
+   */
+  private previousPidHint(events: readonly AppEvent[]): number | null {
+    let seen = 0;
+    for (const event of events) {
+      if (event.type === 'session/start') seen += 1;
+    }
+    if (seen >= 2) return null; // 事件里就有上一任，`previousRunVerdict` 会自己取
+    try {
+      const raw = JSON.parse(readFileSync(join(this.deps.dataDir, 'lock.json'), 'utf8')) as { pid?: unknown };
+      return typeof raw.pid === 'number' && raw.pid > 0 && raw.pid !== currentPid() ? raw.pid : null;
+    } catch {
+      return null;
+    }
   }
 
   // ──────────────────────────────── 每日记忆整理（design §4.17） ────────────────────────────────

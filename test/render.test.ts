@@ -1283,16 +1283,56 @@ describe('铁律 3 · 配对完整', () => {
 
   test('timeout 模板稳定：同状态逐字节一致，durationMs 缺省回退 ?', () => {
     resetFactory();
+    // v50 起模板**也吃 `content`**（见下一条用例）：所以"逐字节一致"的判据是
+    // 「同一 status + 同一 durationMs + 同一 content」——t1/t2 的 content 因此显式给成同一份
+    // （夹具的默认 content 是 `结果正文 ${callId}`，t1 与 t2 天然不同）。
     const events = [
-      ...toolPair('t1', 'http_get', 'timeout', { durationMs: 1500 }),
-      ...toolPair('t2', 'http_get', 'timeout', { durationMs: 1500 }),
-      ...toolPair('t3', 'http_get', 'timeout'),
+      ...toolPair('t1', 'http_get', 'timeout', { durationMs: 1500, content: '超时正文' }),
+      ...toolPair('t2', 'http_get', 'timeout', { durationMs: 1500, content: '超时正文' }),
+      ...toolPair('t3', 'http_get', 'timeout', { content: '超时正文' }),
     ];
     const r = renderOnce({ events });
     const outs = outputsByCallId(r);
-    assert.equal(outs.get('t1'), '工具执行超时（1500ms）。结果未知，不要假设成功。');
-    assert.equal(outs.get('t1'), outs.get('t2'), '模板只依赖 status 与 durationMs');
-    assert.equal(outs.get('t3'), '工具执行超时（?ms）。结果未知，不要假设成功。');
+    assert.equal(outs.get('t1'), '工具执行超时（1500ms）。结果未知，不要假设成功。\n超时正文');
+    assert.equal(outs.get('t1'), outs.get('t2'), '模板只依赖 status 与 durationMs 与 content');
+    assert.equal(outs.get('t3'), '工具执行超时（?ms）。结果未知，不要假设成功。\n超时正文');
+  });
+
+  /**
+   * v50 的核心用例：**超时的 `content` 必须可见**。
+   *
+   * 钉的不是措辞，是一条因果链（见 `render.ts` 文件头 v50 那一篇）：
+   * 超时回执的正文由 `tools/executor.ts` 的 `timeoutResult()` 写（全工具共用一处），
+   * 而"连续第 N 次调用同一个工具"的**框架软提醒**由 `runtime/agent-loop.ts` 的
+   * `recordToolResult` **追加进这条回执的 `content`** ——这是软提醒唯一的落点。
+   * `case 'timeout'` 曾经把这整段丢掉 ⇒ 写入侧记着"已提示"，她一次都读不到，
+   * 守卫在她那一侧完全失效（2026-10-10 `read_channel` 死循环的因果链）。
+   *
+   * 所以断言分两层：① 逐字等于"固定句 + 正文"；② 正文与软提醒**整段逐字出现在**她读到的
+   * output 里（`includes` 那一层是防"以后有人把正文截短/换措辞"的——`equal` 那层会同时失败，
+   * 但 `includes` 指明的是"丢的是哪一段"）。
+   */
+  test('timeout：content 可见（框架软提醒真的进上下文）', () => {
+    resetFactory();
+    const timeoutBody = '工具 read_channel 超过 10000ms 没有返回，已记为超时结果。'
+      + '超时不会中断本轮循环；同一个目标别再重试（超时通常不是参数问题）——要么换做法，要么如实报告用户。';
+    const reminder = '[框架提示] 这是连续第 7 次调用 `read_channel`（其中同参数 1 次）。'
+      + '重复调用工具过多，考虑检查参数或重新决定策略：需要等就用 `timer wait`，需要重新想就直接停下重新规划。'
+      + '（如果你是在逐个处理不同的目标，忽略这条。）';
+    const r = renderOnce({
+      events: toolPair('c1', 'read_channel', 'timeout', {
+        durationMs: 10000,
+        content: `${timeoutBody}\n\n${reminder}`,
+      }),
+    });
+    const out = outputsByCallId(r).get('c1') ?? '';
+    assert.equal(
+      out,
+      `工具执行超时（10000ms）。结果未知，不要假设成功。\n${timeoutBody}\n\n${reminder}`,
+    );
+    assert.ok(out.includes(timeoutBody), '超时回执正文必须逐字可见');
+    assert.ok(out.includes(reminder), '框架软提醒必须逐字可见（它是守卫唯一的落点）');
+    assertPaired(r);
   });
 
   test('denied 模板：error.message 优先，缺省回退 content', () => {
@@ -1326,6 +1366,23 @@ describe('铁律 3 · 配对完整', () => {
     const outs = outputsByCallId(renderOnce({ events }));
     assert.equal(outs.get('e1'), '工具执行错误：ENOENT: 文件不存在');
     assert.equal(outs.get('e2'), '工具执行错误：退出码 1');
+  });
+
+  test('失败连击守卫的拒绝回执：正文原样进上下文（content 与 error.message 同源）', () => {
+    // 为什么这条必须钉在这里（2026-10-10）：拒绝若照 `timeout` 的形状落库，渲染层那条分支
+    // **只打一句固定文本、把 content 整个丢掉** ⇒ 她根本看不到"别再试了"，守卫就只剩日志里的一句话。
+    // 所以拒绝走 `error` 形状、且 `content` 与 `error.message` 写同一句：两条分支打出同一行。
+    resetFactory();
+    const refusal = '工具 read_channel 在 qq:group:953245617 这个目标上这一轮已经连续失败 3 次，'
+      + '别再试了——换做法，或如实报告用户。';
+    const both = toolPair('f1', 'read_channel', 'error', {
+      content: refusal, error: { message: refusal, code: 'TOOL_FAILURE_STREAK_REFUSED' },
+    });
+    const contentOnly = toolPair('f2', 'read_channel', 'error', { content: refusal });
+    const outs = outputsByCallId(renderOnce({ events: [...both, ...contentOnly] }));
+    assert.equal(outs.get('f1'), `工具执行错误：${refusal}`);
+    assert.equal(outs.get('f2'), outs.get('f1'), '两条分支同源：缺 error.message 时回退 content');
+    assert.ok(outs.get('f1')?.includes('别再试了'), '这句必须进她的上下文');
   });
 
   test('aborted 状态固定文本', () => {

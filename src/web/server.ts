@@ -117,6 +117,9 @@ import {
 } from '../model/context-audit.ts';
 import { SKILL_DESCRIPTION_MAX_CHARS, SKILL_FILE_NAME, SkillManager, skillNameProblem } from '../skill/skills.ts';
 import { applyOne, budgetTokensOf, finalizePressure, wakeSourceOf } from '../state/fold.ts';
+// 全量事件快照：与 `real-loop.ts` 的 `mcpIndexSync()` **共用同一份**（那边每一拍要它）。
+// 两份实现会让"每拍 98 MB 的重读"重新长出来，见 event-snapshot.ts 的文件头。
+import { readAllEvents } from '../state/event-snapshot.ts';
 import { compactTimestamp } from '../tools/fs/text-codec.ts';
 import { estimateTokens } from '../tools/registry.ts';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -1167,118 +1170,13 @@ import { configFileLock } from '../config/file-lock.ts';
 
 // ──────────────────────────────── 事件读写辅助 ────────────────────────────────
 
-/**
- * 全量事件快照（按日志实例缓存 + 增量补齐）。
- *
- * **为什么需要它**：这条路径原来每请求都 `readAll()` 一遍——把 201 个分片、56 MB、
- * 七万多行重读重 `JSON.parse` 一次，实测量到 **450–550 ms/请求**，而用它的端点有八条
- * （`/api/budget`、`/api/sessions`、`/api/framework-notes`、`/api/mcp`、`/api/skills`、
- * `/api/persona/history`、`/api/replay`、`/api/commands/*` 里那几条校验）。
- * 界面一页 `Future.wait` 打四条，服务端只有一条 JS 线程 + `JSON.parse` 是同步的，
- * 于是那四条**排着队各付一遍**——"一个页面等半天"就是这么来的。
- *
- * **为什么不破坏正确性**：日志是只增的（seq 单调、分片只追加），所以"全量"这个快照
- * 可以一次读进来、之后只补 `upToSeq` 之后的增量。`latestSeq()` 与磁盘之间没有中间态：
- * 它读的是已落盘的最大 seq。
- *
- * **内存**：整份 71.5k 事件实测约 84 MB 堆——与"每请求临时物化一份然后丢掉"的峰值同量级，
- * 省掉的是每请求重复 parse 与随之而来的 GC 压力。进程本来就常驻数 GB（MCP + 模型），
- * 这点增量换掉每请求半个 CPU 秒是划算的。
- *
- * **为什么 key 是 EventLog 实例**：生产上一个进程只有一份日志，但测试里同时开着好几份
- * （各自 mkdtemp）。用 `WeakMap` 按实例分桶，实例被回收时缓存跟着走——不会串味，
- * 也不会把临时目录的数据留在内存里。
- *
- * **为什么要有 `inflight`**：界面一页并发打四条时，四条会同时走到这里，四条都看到
- * "还没同步"就各读一遍（雷群）。只留一个在飞的 promise，后到的等它。
- */
-interface EventSnapshot {
-  /** 已同步到的 seq；`0` = 还没读过 */
-  upToSeq: number;
-  /**
-   * 全量事件（seq 升序）。**就地追加**（见 `allEventsOf` 里那段：展开合并每拍白分配一次），
-   * 所以这个引用**从建立起一直有效**、只会变长。
-   */
-  events: readonly AppEvent[];
-  /** 正在进行的补齐（并发合流用）；null = 没有在飞的 */
-  inflight: Promise<readonly AppEvent[]> | null;
-}
-
-const eventSnapshots = new WeakMap<EventLog, EventSnapshot>();
-
-/**
- * 取"截至此刻的全量事件"。首次调用全量读盘，此后只读 `upToSeq` 之后的增量。
- *
- * 返回值**只读**：调用方一律照着只读用（`buildReviewEntries` / `pairedRecoveries` /
- * `fold` / `answerHuman` …），没有一处就地改它。类型标 `readonly` 是为了把这条纪律
- * 写进签名里——想改的人会在编译期被拦下，而不是在运行期把缓存污染掉。
- *
- * 同一实例上返回的**数组引用稳定**（没有新增事件时就是同一个对象；有新增时也是同一个，
- * 只是尾部多了几条）——但**别依赖它当"变没变"的判据**：日志只增，引用不变不等于内容不变。
- *
- * ──────────────────────────── 那 ~88 MB 是**有意**的 ────────────────────────────
- *
- * 实测：7.3 万条事件解析后常驻约 **88~93 MB**（`_research/probe-mem-blocks.mts`）。
- * **这是有意留的，不是没想到**：它换掉的是"每个请求都把 58 MB / 20 万行重读重 parse 一遍"
- * ——改前八条端点各 450~550 ms，改后 4~54 ms，界面每页 1.1~1.4 s → 10~70 ms。
- *
- * 2026-10-10 评估过"给它设上限（只留最近 N 条 / LRU）"，**结论是不做**：那会让
- * "翻很老的会话、7 天预算、按 seq 定位重放"退化成重新读盘（~300 ms 起），
- * 而**"端点响应时间不许退步"是硬要求** —— 拿这些换 88 MB 不划算。
- * 真要把整体内存压下来，杠杆在**进程级的老生代上限**（`--max-old-space-size`，
- * 见 `docs/operations.md` §4.4），不在这一块。
- */
-export async function allEventsOf(log: EventLog): Promise<readonly AppEvent[]> {
-  const existing = eventSnapshots.get(log);
-  const snapshot: EventSnapshot = existing ?? { upToSeq: 0, events: [], inflight: null };
-  if (existing === undefined) eventSnapshots.set(log, snapshot);
-
-  const latest = log.latestSeq();
-  // 正常路径（没有新事件）：零 IO、零 parse，直接给同一份引用
-  if (latest <= snapshot.upToSeq) return snapshot.events;
-  if (snapshot.inflight !== null) return snapshot.inflight;
-
-  // 日志被换掉/截断（测试里重建日志、或运维换了一份 events/）：从 1 重新读，
-  // 不然会把新日志的增量接到旧日志的尾部，拼出一份谁也没写过的历史
-  const from = latest < snapshot.upToSeq ? 1 : snapshot.upToSeq + 1;
-
-  const inflight = (async (): Promise<readonly AppEvent[]> => {
-    // **就地追加，不用 `[...events, ...fresh]`**。
-    //
-    // ⚠ 别把这条当成"省了 88 MB"：展开合并复制的是**引用数组**，不是事件对象本身
-    // ——7.3 万条时实测只多占 **1.4 MB**（`_research/probe-spread-cost.mjs`）。所以这是
-    // 一处**每拍省一次分配**的小改动，不是"把内存压下来"那件事的主力。
-    //
-    // 为什么仍然改：这条路径**每一拍有事件就要走一次**（界面一页打四条、SSE 每 250 ms 一拍、
-    // 轮询 15/20 s 一次），而 RSS 只涨不还（`_research/probe-v8-retention.mjs`：堆还了、
-    // RSS 不还）⇒ 每拍一次无谓的整段分配，长期就是白交给 V8 的峰值。
-    //
-    // 为什么现在可以就地改（之前刻意换新数组）：**没有任何调用方依赖"引用会变"**——
-    // 它们要么整份扫一遍、要么按 seq 过滤，拿到的 `readonly` 数组只读。唯一的差别是
-    // "拿到数组后、又 await 过"的持有者会看见尾部多出几条：那是**更新的事实**（日志本来就
-    // 只增），不是被改写的历史。
-    const target: AppEvent[] = from === 1 ? [] : snapshot.events as AppEvent[];
-    if (from === 1) snapshot.events = target;
-    for await (const event of log.readRange(from)) target.push(event);
-    snapshot.upToSeq = target.length > 0 ? target[target.length - 1]!.seq : snapshot.upToSeq;
-    return target;
-  })();
-
-  snapshot.inflight = inflight;
-  try {
-    return await inflight;
-  } finally {
-    snapshot.inflight = null;
-  }
-}
-
-/**
- * 全量事件（旧调用点的门面）：语义与过去逐字节一致，只是**同一实例上不再每请求重读**。
- * 保留这个名字是因为八处调用点读起来仍然是"我要全量"；增量与缓存藏在 {@link allEventsOf} 里。
- */
-async function readAllEvents(log: EventLog): Promise<readonly AppEvent[]> {
-  return allEventsOf(log);
-}
+// 全量事件快照的实现搬去了 `src/state/event-snapshot.ts`（2026-10-10）。
+//
+// 为什么搬：**同一件事有两个热路径在做**——本文件的八条只读端点，与 `real-loop.ts`
+// 的 `mcpIndexSync()`（**每一拍**，`pollMs = 1000`）。后者每拍把全量日志折进一个**新数组**，
+// 实测单次 **98.4 MB / 500 ms**（`_research/probe-tick-churn.mts`），而 V8 把堆还给
+// `heapUsed`、不还给系统 ⇒ RSS 高水位被一路顶上去（真实事故：带上限 512 MB 那轮 167 秒 OOM）。
+// 两份实现必然漂移，所以只留一份、两边共用。
 
 /**
  * 框架提示的条数：缺省 {@link FRAMEWORK_NOTES_LIMIT}，显式传入时夹在 [1, {@link FRAMEWORK_NOTES_MAX_LIMIT}]。

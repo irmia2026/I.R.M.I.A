@@ -219,7 +219,24 @@ export interface WakeManual extends EventEnvelope<'wake/manual', {
    *     就等于让那份交接笔记躺到下一次有人说话为止（用户 2026-10-09 的原话：
    *     「压缩后，应该也进行一次唤醒……**如有中断的工作则继续**」）。
    */
-  via?: 'dream' | 'mcp' | 'compact';
+  /**
+   * **`'restart'`（2026-10-11 补）是第四种，形状与 `'compact'` 最近**：
+   * 上一任**异常退出**（内存不足崩掉 / 没来得及写 `session/end`）之后，本进程起来时
+   * 框架**主动**叫她一次，告诉她"我刚被重启过、原因是什么、接着做"（写入点见
+   * `real-loop.ts` 的 `announceRestart`；判据只写在那一个方法头里）。
+   *
+   * 与其余三个值的关系：
+   *   • 与 `'compact'` 同：**没有人按下任何按钮**，正文里带祈使句（"接着做"）——重启正好
+   *     落在"上一任做到一半就没了"的时刻，不叫醒她，那段断档永远没人解释（用户 2026-10-11
+   *     的原话：「她说她没认出来进程在反复重启」「进程重启应当跟 compact 事件一样，
+   *     有个通知让 agent 知晓」）；
+   *   • 与 `'dream'` / `'mcp'` 同：这条 note **不是用户打的话**——界面上该走框架卡片，
+   *     `noteUserSpoke` 那条路要绕开它（否则会把框架通报写成"他刚说「…」"）。
+   *
+   * **它只在异常退出时出现**：正常重启（她自己请求的、或者拉起器干净换人的）**一个字都不发**，
+   * 只留 `runtime/restart` 那条 internal 留痕——判据与理由见 `announceRestart` 的方法头。
+   */
+  via?: 'dream' | 'mcp' | 'compact' | 'restart';
 }> {}
 
 /**
@@ -1755,10 +1772,127 @@ export interface AuthWebhookTokenRotated extends EventEnvelope<'auth/webhook-tok
   previousSecretId: string | null;
 }> {}
 
+// ──────────────────────────── 进程重启（2026-10-11 加）────────────────────────────
+
+/**
+ * 上一任进程**是怎么没的**（{@link RuntimeRestart} 的判据输出）。
+ *
+ * 为什么要把"怎么没的"枚举出来、而不是只写一句话：这一格是**判据的落点**——
+ * 要不要叫醒她（见 `RuntimeRestart.wake`）完全由它决定，而"哪个判据命中了"必须能从
+ * 日志上读回来（与 `wake/heartbeat` 把 `probability`/`roll` 落进事件同一条理由：
+ * 判据的输入要能复算，不能只有一个结论）。
+ */
+export type RuntimeDeathKind =
+  /** 内存不足崩的（Node 的老生代上限被打满）：输出里留着 `JavaScript heap out of memory` 那一行 */
+  | 'oom'
+  /** 上一任写了 `session/end{reason:'error'}`：**它自己**报的异常退出 */
+  | 'error'
+  /** 上一任被 kill 掉、没来得及走优雅退出（拉起器/人关的，或者被硬杀） */
+  | 'killed'
+  /** 上一任既没写 `session/end`、也没有任何可判的痕迹（**包括第一任**——那时没有上一任） */
+  | 'unknown';
+
+/**
+ * **上一任进程的停机结论**（`runtime/restart` 事件里 `previous` 那一格）。
+ *
+ * 拆成"事实"与"判据"两半（`endedAt`/`endedReason`/`evidence` 是事实，`death`/`abnormal` 是判据）：
+ * 判据会随口径改进而变，而当时那一份**证据**不会——只落结论的话，将来推翻口径就再也复核不了
+ * 当时为什么这么判（同一批纪律见 `log/repaired`、`compaction/decision`）。
+ */
+export interface RuntimeRestartPrevious {
+  /** 上一任的 pid；查不到就是 null（老日志**没有** `session/start`，或者这是第一任） */
+  pid: number | null;
+  /** 上一任是什么时候起的（`session/start.ts`）；查不到就是 null */
+  startedAt: string | null;
+  /** 它上一次启动跑的是哪个版本号（`session/start.version`）；查不到就是 null */
+  version: string | null;
+  /** 判据结论（见 [RuntimeDeathKind]） */
+  death: RuntimeDeathKind;
+  /** true = **异常退出**（该叫她一次）；false = 正常重启（她本来就知道，只留痕） */
+  abnormal: boolean;
+  /** 上一任停机的那条 `session/end` 的时刻；没写过就是 null（这份"缺失"本身就是判据的输入） */
+  endedAt: string | null;
+  /** 那条 `session/end` 自己报的原因；没写过就是 null */
+  endedReason: 'shutdown' | 'error' | 'signal' | null;
+  /**
+   * **判据当时看到的原话**（人读的一句话）：OOM 痕迹是哪一行、或者"没找到停机记录"。
+   * 空串 = 没有任何可说的证据（第一任、或老日志根本没有痕迹）。
+   */
+  evidence: string;
+}
+
+/**
+ * **本进程这次是怎么起来的**（internal；2026-10-11 加）。
+ *
+ * ──────────────────────────── 它治的是什么 ────────────────────────────
+ *
+ * 用户 2026-10-11 的原话：「**她说她没认出来进程在反复重启**。**进程重启应当跟 compact
+ * 事件一样，有个通知让 agent 知晓**」。
+ *
+ * 现场（同一天）：后端因为内存不足**反复崩/重启**（512 上限崩一次、2048 上限 167 秒崩一次、
+ * 无上限涨到 3.8 GB），而她**完全没意识到**——她的上下文里没有任何"我刚被重启过"的痕迹，
+ * 于是把断档读成"没人叫我"。对照面是压缩：`compaction/summary` 之后框架会**真唤醒**她一次
+ * （`wake/manual{via:'compact'}`），所以"刚压过、中断的活接着做"是**她知道**的事实。
+ *
+ * ⇒ 重启要**同一形状**：一条留痕（本事件）+ 一次真唤醒（异常退出时；`wake/manual{via:'restart'}`）。
+ *
+ * ──────────────────────────── 三处刻意分开的账 ────────────────────────────
+ *
+ *   ① **留痕与唤醒是两条事件**（与压缩那条路逐字同形）：本事件是**簿记**——"这次是谁拉起的、
+ *      上一任怎么没的"要能事后查；给她看的是那条 `wake/manual` 的正文。合成一条的话，
+ *      "该不该叫醒她"这个决定就藏进了渲染层，而它是个**判据**，必须留在产生侧。
+ *   ② **可见性 internal**（走 `defaultVisibility` 的缺省，也在 `EVENT_VISIBILITY` 里写明）：
+ *      它**不进她的上下文**，零缓存代价。若写成 `model`，同一件事会在她眼前出现两遍
+ *      （一遍是这条事件自己的渲染、一遍是那条通报），第二遍纯属常驻开销。
+ *   ③ **每次启动恰好一条、且每次启动都会写**（正常重启也写，只是不叫醒她）：
+ *      "这一任是什么时候起的"是**所有**复盘的第一格；漏掉正常重启那次，日志上就会出现
+ *      "pid 换了但没有任何解释"的断口——那正是这次要消灭的东西。
+ *
+ * 判据（什么算异常退出、要不要叫醒她）只写在**一处**：`real-loop.ts` 那段
+ * `runtime/restart` 写入点的方法头。本类型只负责把判据的**输入与结论**如实装下来。
+ */
+export interface RuntimeRestart extends EventEnvelope<'runtime/restart', {
+  /** 本进程的 pid（她"现在跑在哪一任上"的凭据） */
+  pid: number;
+  /** 本次启动跑的是哪个版本号（与 `session/start.version` 同一处口径：`main.ts` 的 AGENT_VERSION） */
+  version: string;
+  /** 上一任的停机结论与判据（**第一任**时它也在，只是 pid/death 如实为空/unknown） */
+  previous: RuntimeRestartPrevious;
+  /**
+   * **这次是谁拉起的**（能判就给，判不出就 `unknown`——**不许猜**）：
+   *   · `root-script`     —— 仓库脚本 `tools/restart-agent.ps1`（开发机的形状）
+   *   · `packaged-script` —— 随包脚本 `restart.ps1`（装出来的那份）
+   *   · `self-restart`    —— 框架自己的拉起器（`dist/runtime/restart-worker.js`）
+   *   · `ui`              —— 界面上按的重启（服务端发起）
+   *   · `external`        —— 显式声明是外部看护拉起的（`IRMIA_LAUNCHED_BY`，见下）
+   *   · `unknown`         —— 没有任何痕迹（人手工敲的命令行、别人的看护进程……）
+   */
+  launchedBy: 'root-script' | 'packaged-script' | 'self-restart' | 'ui' | 'external' | 'unknown';
+  /** `launchedBy` 判据当时看到的**原话**（人读；空串 = 没有痕迹） */
+  launchedEvidence: string;
+  /** 判据用的命令行原文（`process.argv` 拼回来，便于复盘"当时带的是什么参数"） */
+  argv: string;
+  /**
+   * 带没带上限、上限多少（**能读到就给**）。
+   * `enabled: false` = V8 报没有上限（命令行没带 `--max-old-space-size`）；
+   * `enabled: true` 而 `limitMb` 为 null = 带了参数但读不出那个数（不许猜，如实留空）。
+   */
+  heapCap: { enabled: boolean; limitMb: number | null };
+  /**
+   * 这一任起来时**有没有真的叫过她**（`wake/manual{via:'restart'}` 落了没有）。
+   *
+   * 为什么把它也落进事件：判据（`abnormal`）与动作（叫没叫）是两件事，而"这一任叫过她"
+   * 这件事**只需要回答一次**——同一次启动**只喊一次**的去重判据就是它（见写入点：
+   * 日志里已经有 `runtime/restart` 就整段跳过；这条事件在，就说明该叫的已经叫了）。
+   */
+  wake: boolean;
+}> {}
+
 // ──────────────────────────────── 联合类型 ────────────────────────────────
 
 export type AppEvent =
   | SessionStart | SessionEnd
+  | RuntimeRestart
   | TurnStart | TurnEnd | StepStart | StepEnd
   | UserMessage | AssistantMessage | ReasoningMessage | DeveloperMessage
   | ToolCall | ToolResult
@@ -1787,6 +1921,12 @@ export type AppEventType = AppEvent['type'];
 /** 事件类型 → 默认可见性（写入时必须显式落定，此表用于校验与渲染分类） */
 export const EVENT_VISIBILITY: Record<string, Visibility> = {
   'session/start': 'internal', 'session/end': 'internal',
+  // 进程重启的留痕（2026-10-11）：**internal，而"叫她"是另一条事件**。
+  // 这条是簿记——"这一任是什么时候起的、上一任怎么没的、谁拉起的"；给她看的是紧随其后的
+  // 那条 `wake/manual{via:'restart'}`（正文才是对她说的话）。与压缩那一对
+  // （`compaction/decision` internal + `wake/manual{via:'compact'}` model）逐字同形。
+  // 写成 model 的代价是同一件事在她眼前出现两遍（见 RuntimeRestart 的注释 ②）。
+  'runtime/restart': 'internal',
   'turn/start': 'internal', 'turn/end': 'internal',
   'step/start': 'internal', 'step/end': 'internal',
   'message/user': 'model', 'message/assistant': 'model', 'developer/message': 'model',

@@ -67,7 +67,8 @@ import { sidOf } from '../channel/sessions.ts';
 import { openTodoItems } from '../persona/todo-state.ts';
 import type { EventLog } from '../log/event-log.js';
 import type {
-  AppEvent, AppEventType, CompactionDecision, MemorySelected, ModelLane, Projection, TurnEndReason, WakeSource,
+  AppEvent, AppEventType, CompactionDecision, MemorySelected, ModelLane, Projection, ToolResultStatus,
+  TurnEndReason, WakeSource,
 } from '../log/types.js';
 import { defaultVisibility, type ContextImageChosen } from '../log/types.ts';
 import {
@@ -241,6 +242,143 @@ export function repeatCallReminder(count: RepeatCount): string {
     + `（其中同参数 ${count.sameArgRepeats} 次）。重复调用工具过多，考虑检查参数或重新决定策略：`
     + '需要等就用 `timer wait`，需要重新想就直接停下重新规划。'
     + '（如果你是在逐个处理不同的目标，忽略这条。）';
+}
+
+// ──────────────────── 同一个目标的失败连击：一轮内拒绝再调它（唯一一处实现） ────────────────────
+
+/**
+ * 同一个目标**连续**失败/超时到第几次起就拒绝再调它（连续 `3` 次 ⇒ 第 4 次起拒）。
+ *
+ * 为什么要有这条硬守卫（2026-10-10 的事故）：`read_channel` 在一个消息量很大的群上会**结构性**
+ * 超时（`admin.ts` 给它 `timeoutMs: 10_000`），她一轮里把 `limit` 换了 20 次（6/8/10/12）反复
+ * 重试，自己也说了"停了停了，我刚才钻死循环了"，**然后又调了一次**。
+ *
+ * 软提醒（{@link repeatCallReminder}）为什么拦不住它：软提醒只数**调用次数**、从不看结果，
+ * 而她每一次都"改了参数"——`sameArgRepeats` 每次都回到 1，那两句提示在她读来正是
+ * "再换个参数试试"的意思。所以判据必须换成"**同一个目标连续失败了几次**"。
+ *
+ * 为什么是 3：允许的每一次都真付一次超时代价（`read_channel` 10 s、`pwsh` 60 s），而同一个目标上
+ * **连续**三次超时已经不是抖动、是结构问题（目标不可达，或那个会话就是读不出来）。取 1 会把偶发
+ * 抖动误杀；取更大等于把"再烧三次 10 秒"当默认。
+ */
+export const FAILURE_STREAK_MAX = 3;
+
+/**
+ * **"什么算同一个目标"的唯一判据**——工具层与循环层都不许再判一遍。
+ *
+ * 返回 `null` = 这件工具**没有"目标"这个概念**，失败连击守卫不管它。2026-10-10 的口径是只做
+ * `read_channel` 这一条路，所以这里**只认它**：别的工具的名字/参数/描述一个字都不碰，也不给它们
+ * 猜一个"目标"（猜错就是误杀，而误杀比漏拦贵得多）。
+ *
+ * 为什么只认 `read_channel` 的 `sid`：它的失败是**冲着那个会话**去的——同一个 sid 上换 `limit`、
+ * 换 `before` 都还是"再读一次同一个群"，那正是要拦的那件事。而"同一件工具"这个粒度太粗：
+ * 她一轮里读十个不同的会话是**正当的**，不该被算成一串失败。
+ *
+ * 判不出来就返回 `null`（不是合法 JSON、不是对象、`sid` 不是非空字符串）：**判不出来就不拦**——
+ * 判据只往"确定是同一个目标"那一侧收，宁可少拦一次也不误杀。
+ */
+export function toolTargetOf(tool: string, rawArguments: string): string | null {
+  if (tool !== 'read_channel') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const sid = (parsed as Record<string, unknown>)['sid'];
+  return typeof sid === 'string' && sid !== '' ? sid : null;
+}
+
+/**
+ * 拒绝那一次的**回执正文**（逐字：这是进她上下文的东西，措辞改动要当成行为改动看）。
+ *
+ * 三件必须说清的事，缺一件这句回执就会误导她：
+ *   ① **是哪个目标、这一轮已经连续失败几次**——她据此知道"不是我参数没调对"（这正是现场那句
+ *      "缩小参数范围"的错处：它把结构性超时归因到参数上，于是她一次次改 `limit`）；
+ *   ② **别再试了**（唯一诉求——"换个参数再来一次"正是这一版要掐掉的行为）；
+ *   ③ **两条出路**：换做法，或如实报告用户。不给她"硬着头皮再试一次"这条路，也不许她
+ *      假装这件事办成了。
+ */
+export function failureStreakRefusal(tool: string, target: string, streak: number): string {
+  return `工具 ${tool} 在 ${target} 这个目标上这一轮已经连续失败 ${streak} 次，别再试了——`
+    + '换做法，或如实报告用户。';
+}
+
+/** 派发前的裁决：拒的那一支带上理由要用的两个数（否则调用点得自己再算一遍） */
+export type FailureStreakVerdict =
+  | { refused: false }
+  | { refused: true; target: string; streak: number };
+
+/**
+ * **同一个目标**的失败连击计数（turn 级状态：判据是"这一轮内、同一件工具 + 同一个目标"）。
+ *
+ * 为什么是一个类、而不是"在落回执那里数一数"：判"该不该拒"必须发生在**派发之前**（否则又白付
+ * 一次 10 s 超时），而"已经失败几次"要等结果回来才知道 ⇒ 派发前问一次、结果落地时记一次，
+ * 两处必须读同一份状态。而"什么算同一个目标"只有 {@link toolTargetOf} 一处实现（那是本类唯一的
+ * 分桶依据，工具层不参与判断）。
+ *
+ * 三条"不许误杀"的纪律（与 2026-10-10 的口径逐条对应）：
+ *   · **换目标不算**：按 (工具, 目标) 分桶，她一轮里读十个会话互不影响，别的工具压根不进桶；
+ *   · **只有真失败/超时累加**：`ok` 清零；`denied` / `aborted` / `over-limit` / `unknown` 这些
+ *     **框架侧**的终态既不累加也不清零（"这次没派发"不等于"这个目标试过又失败了"）；
+ *   · **成功即清零**（`failed.delete`）。
+ */
+class FailureStreakGuard {
+  /** key → 已结算的**连续**失败次数 */
+  private readonly failed = new Map<string, number>();
+  /**
+   * key → **本批**已放行、结果还没回来的次数。
+   *
+   * 为什么需要它：一次 `executeCalls` 里的多个调用**全都在任何结果回来之前**过判据（同一步里
+   * `executionMode: 'parallel'` 的还会并发跑）。只看已结算的失败数，一批 4 个同目标的调用会一起
+   * 放行——守卫就变成"一次多要几个"可以绕过的东西。
+   *
+   * 为什么它**只在批内**有效（每批 {@link beginBatch} 清空）：它是**预扣**，不是事实。若那批调用
+   * 其实都成功了，预扣留着就会在下一次调用上变成误杀。它绝不跨批存活，所以不可能泄漏成假计数。
+   */
+  private batch = new Map<string, number>();
+
+  /** 一批调用开始（`executeCalls` 每次进它一次）：丢掉上一批的预扣 */
+  beginBatch(): void {
+    this.batch = new Map();
+  }
+
+  /**
+   * 派发前问一次（唯一判据）。`streak` 回的是"已结算失败 + 本批已放行"——它就是回执里报给她的 N。
+   *
+   * 拒的那一支**不预扣**：拒了就没有"在途"，而 `failed` 已经 ≥ 上限，于是这一轮里后续每一次
+   * 到同一个目标都会被拒（"这一轮内拒绝再调它"）。
+   */
+  admit(tool: string, rawArguments: string): FailureStreakVerdict {
+    const target = toolTargetOf(tool, rawArguments);
+    if (target === null) return { refused: false };
+    const key = `${tool}\u0000${target}`;
+    const streak = (this.failed.get(key) ?? 0) + (this.batch.get(key) ?? 0);
+    if (streak >= FAILURE_STREAK_MAX) return { refused: true, target, streak };
+    this.batch.set(key, (this.batch.get(key) ?? 0) + 1);
+    return { refused: false };
+  }
+
+  /**
+   * 结果落地时记一笔。`status` 是**执行器**给的终态，这里只查表、不在循环层重判"这算不算失败"
+   * （重判就是又一处判据）。
+   *
+   * 认的是**实际执行的那份参数**：PreToolUse 钩子改写过的调用连 `tool/call` 落的都是改写后的
+   * 那一份，失败当然也该记在改写后的目标上。
+   */
+  settle(tool: string, rawArguments: string, status: ToolResultStatus): void {
+    const target = toolTargetOf(tool, rawArguments);
+    if (target === null) return;
+    const key = `${tool}\u0000${target}`;
+    if (status === 'ok') {
+      this.failed.delete(key);
+      return;
+    }
+    if (status === 'timeout' || status === 'error') {
+      this.failed.set(key, (this.failed.get(key) ?? 0) + 1);
+    }
+  }
 }
 
 // ──────────────────────────────── 对外类型 ────────────────────────────────
@@ -848,6 +986,14 @@ class TurnRunner {
   private readonly repeatGuard = new RepeatGuard();
   /** callId → 该次回执末尾要追加的软提醒（`executeCalls` 写入，`recordToolResult` 取走即删） */
   private readonly repeatReminders = new Map<string, string>();
+  /**
+   * 本 turn 的**同一个目标失败连击**计数（失败连击守卫）。
+   *
+   * turn 级状态的理由同 {@link repeatGuard}：`runTurn` 每次新建一个 `TurnRunner`，跨 turn 自然
+   * 重置——"这一轮内拒绝再调它"里的"这一轮"就是它。派发前问（{@link executeCalls}）、结果落地
+   * 时记（{@link recordToolResult}），两处读的是这一份。
+   */
+  private readonly failureGuard = new FailureStreakGuard();
 
   constructor(deps: AgentLoopDeps, wakeEvents: readonly AppEvent[]) {
     this.deps = deps;
@@ -1111,14 +1257,59 @@ class TurnRunner {
 
     if (allowed.length === 0) return over.length;
 
-    // 工具软提醒（连续重复调用）：**计数在这个位置**、按 allowed 的**调用顺序**推进。
+    // ── 失败连击守卫（同一个目标，一轮内）：**派发之前**判，判完就不派发 ──
+    //
+    // 位置与下面的软提醒同一条纪律：判据必须在执行**之前**由唯一一处按调用顺序算定（一步里多个
+    // 调用的完成顺序是并发的，放到结果那一侧数，"连续"就会取决于谁先跑完）。
+    // 被拒的那一次**不派发**——`read_channel` 一次超时是 10 s，白付这一笔正是守卫要省的东西。
+    //
+    // 落库形状与 `over-limit` 完全一致（两阶段：先 `tool/call` 再 `tool/result`）：这次调用**她确实
+    // 发过**，日志里就该有那一笔；只是框架没派发它。
+    //
+    // status 为什么是 `'error'` 而不是新造一个：渲染层 `case 'error'` 打的是
+    // `工具执行错误：${error?.message ?? content}`（`model/render.ts` 的 `renderToolOutput`），
+    // 于是**回执正文原样进她的上下文**。这一条非将就不可——`timeout` 那条路的渲染会**丢掉
+    // content**（同一个 switch 的 `case 'timeout'` 只打一句固定文本），所以拒绝若走 timeout 形状，
+    // 她根本看不到"别再试了"。新造一种 status 则要同时动 log/types、render、handoff-note 三处
+    // 的穷举分支，为一个回执改那么多地方不划算。
+    //
+    // **这一条不带 `error` 对象**（2026-10-10 的判据）：`error.message` 一给，渲染打的就是它，
+    // `content` 那一段反而成了没被读到的那一份；而拒绝回执**必须原样可见**的正是 `content`。
+    // 于是这里只写 `content`（`error?.message ?? content` 取的就是它），`handoff-note.ts` 同一条
+    // 表达式也取到同一句话。辨识"这是守卫拒的、不是工具报的"靠正文那句固定前缀
+    // （`failureStreakRefusal`：`工具 X 在 Y 这个目标上这一轮已经连续失败 N 次，别再试了——`）
+    // ——**不再另造一个错误码**：一个只在这一处写、没人读的 code 就是死代码。
+    this.failureGuard.beginBatch();
+    const ready: ToolCallRequest[] = [];
+    for (const call of allowed) {
+      const verdict = this.failureGuard.admit(call.name, call.arguments);
+      if (!verdict.refused) {
+        ready.push(call);
+        continue;
+      }
+      const callSeq = this.recordToolCall(step, call, this.deps.registry.get(call.name));
+      this.write('tool/result', {
+        turn: this.turn,
+        step,
+        callId: call.callId,
+        callSeq,
+        status: 'error',
+        content: failureStreakRefusal(call.name, verdict.target, verdict.streak),
+        durationMs: 0,
+      }, { sync: true });
+    }
+    if (ready.length === 0) return over.length;
+
+    // 工具软提醒（连续重复调用）：**计数在这个位置**、按 ready 的**调用顺序**推进。
     //
     // 为什么在这里而不是在 `recordToolResult` 里"数回执"：那一步是并发的（一组 parallel 调用
     // 各自跑完提交），在那里数就会让"连续"取决于谁先跑完——同一批同样的调用，两次运行可能
     // 得出不同的第 N 次。执行之前、按模型给的顺序算一次，判据才是确定的、可测的。
     //
-    // 只数 allowed：超限那部分**未派发**（上面已记 over-limit），不是"她调了"。
-    for (const call of allowed) {
+    // 只数 ready：超限那部分**未派发**（上面已记 over-limit），被守卫拒的那部分同样**没派发**
+    // ——"她调了"与"框架派发了"是两件事，重复计数只认后者（否则"连续第 N 次"里会混进根本没跑过
+    // 的那些，提醒里的数字就不再是"她真的试了几次"）。
+    for (const call of ready) {
       const count = this.repeatGuard.note(call.name, canonicalArgumentsOf(call.arguments));
       if (this.repeatGuard.reminderDueAt(count)) {
         this.repeatReminders.set(call.callId, repeatCallReminder(count));
@@ -1155,7 +1346,7 @@ class TurnRunner {
     }
     if (this.deps.modelVisibility !== undefined) ctx.modelVisibility = this.deps.modelVisibility;
     if (this.deps.isolation !== undefined) ctx.isolation = this.deps.isolation;
-    await executeToolCalls(allowed, ctx);
+    await executeToolCalls(ready, ctx);
     return over.length;
   }
 
@@ -1189,6 +1380,14 @@ class TurnRunner {
       durationMs: result.durationMs,
     };
     if (result.error !== undefined) data['error'] = result.error;
+
+    // 失败连击守卫的**记账口**：就放在回执定形这一处（同一次调用只会到这里一次——被 PreToolUse
+    // 钩子或计划模式拦下的那些连 `tool/call` 都没有，执行器也不会回调 `onToolResult`，所以这里
+    // 记下的每一笔都对应一次**真派发过**的调用）。status 由执行器给出，守卫只查表。
+    //
+    // 放在 blob 外置与软提醒**之前**：那两件都可能抛（外置要写盘），而计数该在结果一到就落定，
+    // 不能因为回执排版失败就漏记——漏记的后果是守卫少算一次、下一轮继续白付超时。
+    this.failureGuard.settle(call.name, call.arguments, result.status);
 
     // 单条回执的上限（§4.12，2026-10-06 加）：**先写 blob 再写事件**——事件里只有预览，
     // blob 没落盘就等于丢全文。两个维度取小（估算 21k token / 64 KiB，见 BlobOffloadOptions）。

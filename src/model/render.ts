@@ -27,6 +27,28 @@ import { estimateTokens } from '../tools/registry.ts';
 /**
  * 渲染模板版本：任何模板变更必须递增并接受一次缓存全 miss。
  *
+ * v50（**超时回执不再丢掉 `content`：框架软提醒这才第一次真进得了她的上下文**，2026-10-10）：
+ *      **改的是什么（一处判据）**：`renderToolOutput` 的 `case 'timeout'` 从"只打一句固定文本"
+ *      改成"固定文本 + `data.content`"——与同一条 switch 里的 `case 'error'`（`error?.message
+ *      ?? content`）和 `case 'denied'` 同一个口径：事件里写了什么，她就读到什么。
+ *      **为什么非改不可（2026-10-10 那次死循环的因果链，逐环可查）**：
+ *        ① 超时回执的正文在 `tools/executor.ts` 的 `timeoutResult()`（**全工具共用这一处**）；
+ *        ② "连续第 N 次调用同一个工具"的**框架软提醒**是 `runtime/agent-loop.ts` 的
+ *           `recordToolResult` **追加进这条回执的 `content`** 的（软提醒唯一的落点就是它）；
+ *        ③ 而渲染层把 `content` 整个丢掉，只回一句"结果未知，不要假设成功"
+ *        ⇒ 软提醒**一次都没进过她的上下文**，可写入侧照旧记着"已提示"（判据与文本同源、
+ *        只是文本到不了她眼前）。守卫因此在**她那一侧完全失效**：她看不到"你已经连续调了几次"
+ *        这个事实，剩下的唯一读法就是"再换个参数试试"。现场正是这样滚起来的——
+ *        `read_channel` 打同一个大群，一轮 58 次，limit 反复改（8×19 / 10×15 / 6×12 / 12×7 /
+ *        5×4 / 15×1），turn 1277/1278/1279/1280 四个 turn 交错同时跑，`runtime/recover`
+ *        之后不收敛、越滚越多。
+ *      **为什么必须递增（判据）**：这一版真的动了可见历史的字节——此后**每一条**
+ *      `tool/result{status:'timeout'}` 渲染出的 output 都与 v49 不同（多出正文那一段）。
+ *      代价如实说：**一次缓存全 miss（设计内）**——`tool/result` 是历史 item，历史一变，
+ *      请求前缀从**第一处超时回执**起就失守；这一笔换回来的是"框架对她说的那句话真的到得了她"。
+ *      **没实测的**：改后她不再陷进同一个循环这件事没有实测（现场的直接诱因已消除，
+ *      但"软提醒可见 ⇒ 她自己停手"这一步是判断，不是读数）。
+ *
  * v49（**历史那一侧不再收"重投集合"：` · 重投` 只出现在她要开口的那一拍**，2026-10-10）：
  *      **改的是什么（一处判据）**：交给 `renderEvents`（历史那一侧）的集合换成 `NO_REQUEUED`
  *      （空集）；当前输入那一侧（`renderWake` 的第 3 个参数）**照旧收真集合**。
@@ -619,7 +641,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '49';
+export const RENDER_VERSION = '50';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -2224,7 +2246,20 @@ function renderToolOutput(e: AppEvent & { type: 'tool/result' }): string {
     case 'error':
       return `工具执行错误：${d.error?.message ?? d.content}`;
     case 'timeout':
-      return `工具执行超时（${d.durationMs ?? '?'}ms）。结果未知，不要假设成功。`;
+      // v50：**带上 `content`**——这不是措辞问题，是"框架对她说的那句话到底进不进上下文"的问题。
+      //
+      // 因果（三处必须连起来读，见文件头 v50 那一篇）：超时回执的正文来自 `tools/executor.ts`
+      // 的 `timeoutResult()`（全工具共用一处），而"连续第 N 次调用同一个工具"的**框架软提醒**是
+      // `runtime/agent-loop.ts` 的 `recordToolResult` **追加进这条回执的 `content`** 的——
+      // 这条回执的正文是软提醒**唯一的落点**。这里只打一句固定文本，等于把两者一起丢掉：
+      // 写入侧记着"已提示"，她一次都读不到，守卫就成了只在日志里存在的东西。
+      // 2026-10-10 那次 `read_channel` 死循环（同一个大群、一轮 58 次、limit 反复改、
+      // 四个 turn 交错）就是这么滚起来的。
+      //
+      // 固定那句**留在最前面**：它是唯一说"结果未知"的地方（不要假设成功），
+      // 正文那一段是"接下来该怎么办"。空 content（不该有，但事件是外部写入的）不留空行。
+      return `工具执行超时（${d.durationMs ?? '?'}ms）。结果未知，不要假设成功。`
+        + (d.content === '' ? '' : `\n${d.content}`);
     case 'denied':
       return `操作被策略拒绝：${d.error?.message ?? d.content}\n请换一条不越界的路径。`;
     case 'unknown':
