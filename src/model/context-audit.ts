@@ -78,10 +78,46 @@ export interface ContextSectionFact {
   hash: string;
 }
 
+/**
+ * 四档可信级别（观测字段的**词表**，2026-10-11 加）。
+ *
+ * ⚠ 它是 `runtime/trust.ts` 的 `TurnTrust` 的**逐字镜像**，刻意不 import 那一个：本模块在
+ * `model/` 层（渲染的事实 + 比对），而 `runtime/trust.ts` 是运行期模块。让渲染层的**事实类型**
+ * 依赖运行期的判定模块，会把这个"事件与渲染的纯函数"拖成"要跑起一整条运行期链路才编得过"。
+ * 词表本身只有这四个字面量（`trust.ts:27`），两处漂移的代价是**一格日志读不出来**，不是判据
+ * 分岔——判据仍然只在 `real-loop.ts` 的 `trustOfTurn` → `trust.ts` 的 `trustOfBatch` 一处。
+ *
+ * 传值的那一端（`agent-loop` 的 `AgentLoopDeps.trust`）用的是**真身** `TurnTrust`（它本来就在
+ * `runtime/` 层里，import 那一个不跨层）；这里这份只当**字段形状的文档**，并在测试里被钉住。
+ */
+export type TurnTrustLevel = 'owner' | 'self' | 'trusted' | 'external';
+
 /** 请求的上下文构成（`budget/consumed.context`，internal 可见性——**不进她的上下文**） */
 export interface ContextBreakdown {
   /** 渲染版本（`RENDER_VERSION`）：它一变，请求体整体就变了，不是某一段的事 */
   renderVersion: string;
+  /**
+   * **这一轮的可信级别**（`owner` / `self` / `trusted` / `external`），2026-10-11 加。
+   *
+   * 为什么要有它：`external` 与 `owner/self` 拿到的 `tools` 段是**两版**（实测 24 件 / 5480 tok
+   * ↔ 4 件 / 888 tok，见 `runtime/trust.ts` 的 `EXTERNAL_TOOL_ALLOWLIST`），而换档那一次会让
+   * `tools` 段之后的一切重算。在此之前**日志里查不到"这一拍是哪个档"**——`budget/consumed.context`
+   * 没有这一格，事后只能从 `input/claimed.wakeSeqs` → `wake/*` 事件按判据**反推**，
+   * 于是现场看到的是一句"原因不明"（这正是用户问的"为什么又失守了"答不上来的直接原因）。
+   *
+   * **它是纯观测字段：一个字节都不进请求体**。证据面与 `builtAtSeq` 逐字同形——
+   * `ds-client.buildRequestBody` 只发 model / input / instructions / tools / reasoning /
+   * max_output_tokens / text / temperature / top_p，不碰 `context`；所以加它**不需要动
+   * `RENDER_VERSION`**（渲染口径没变）。
+   *
+   * **它与其他格的口径差别（必须说清）**：`context` 的其余每一格都是**渲染的纯函数**（同一份日志
+   * ⇒ 同一份归因）；这一格是"**宿主轮首定下的事实**"（同 `budget/consumed.model`：运行期写下的
+   * 观察值）。重建路径（`replay` / 界面预览）手里没有它 ⇒ 那一格**不出现**，而不是编一个。
+   * 所以读的一侧一律按 `undefined` = "当时没记"处理，绝不当成某一档。
+   *
+   * **可选**：这一条改动之前写下的 `budget/consumed` 里没有它。
+   */
+  trust?: TurnTrustLevel;
   /**
    * **请求体构造点**：渲染这一次请求时看得见的最大事件 seq（含本轮唤醒）。
    *
@@ -389,8 +425,16 @@ export interface CacheBreakSectionDiff {
   deltaBytes?: number;
 }
 
-/** 一整段的对照（{@link CacheBreakDiff} 的展开形态，见那边的口径） */
-export interface CacheBreakDiff extends Omit<CacheBreakSectionDiff, 'name' | 'side' | 'changed'> {
+/**
+ * 一整段的对照（{@link CacheBreakSectionDiff} 的展开形态，见那边的口径）。
+ *
+ * `changed` / `side` **必填**（2026-10-11 补齐）：它们本来就在继承来的那两格上（`Omit` 只去掉
+ * `name`），可实参一直没给——于是 `persona` / `tools` / `state` 三种段级条目**永远显示不出"变了"**，
+ * 读的人只能去 `class` 或哈希上猜。口径：
+ *   · `changed` —— 两边哈希不等（**缺一边也算变**：形状变了就是变了）；
+ *   · `side`    —— 这一段出现在哪一边（`prev-only` / `next-only` / `both`）。
+ */
+export interface CacheBreakDiff extends Omit<CacheBreakSectionDiff, 'name'> {
   class: CacheBreakClass;
   /**
    * 分节对照（只有 `memory` / `history` 有）：
@@ -462,7 +506,7 @@ function normalizeSlashes(text: string): string {
  * 上一轮那一步的块与这一轮第 1 步的块本来就不可比（一边有块、一边没有，或内容随轮首快照换版）。
  *
  * 这正是 `history` 尾巴那条纪律的同一形态：**"快照换了"不等于"前缀被改坏了"**。
- * 判据（三个都要，且**只对 `state` 这一段**生效——别的段该报照报）：
+ * 判据（四个都要，且**只对 `state` 这一段**生效——别的段该报照报）：
  *
  *   ① 两次调用**分属不同的轮**（轮号从日志里读：`budget/consumed.turn`，见 {@link turnOfCall}）；
  *   ② 两次**都真发了块**（`state.items > 0`；一边没发就是"一边有一边没有"，更不可比）；
@@ -471,6 +515,22 @@ function normalizeSlashes(text: string): string {
  *   ④ 窗口里没有"她自己动了块里那几样"的证据（`persona/updated` 改 STATE / 关系档案，
  *      或写 `MEMORIES/` 导致索引重建）——**这一条是判据只紧不松的关键**：她真改了资产时，
  *      块的换版是**有内容变化**的换版，必须报出来（归因 `asset`，不告警）。
+ *
+ * ── 2026-10-11 补的一条：**"索引注入与否"也是形状**（用户报的 06:27 那张卡就是它） ──
+ *
+ * 现场（本地 10-11 06:27，seq 78793）：`state` 段从 962 tok / 4316 B 变成 1857 tok / 8271 B
+ * （+3955 B ≈ `MEMORIES/INDEX.md` 的 3990 字节），卡片措辞读起来像"她改了 STATE"——
+ * 而**她一个字节的 STATE / 关系档案都没动**。真相是那两拍分属不同的轮，且**块的形状本就不同**：
+ *   · prev 是**心跳轮**（`memory/selected{turn, injection:'heartbeat', entries:0}`）——
+ *     心跳轮**整段不注入**记忆索引（`real-loop.ts` 的 `agentDeps`：`isHeartbeatTurn` ⇒ 索引不出现）；
+ *   · cur 是**人说的轮**（`injection:'human'`, `entries:30`）——索引进固定块的最后一段。
+ * 判据（放在第 ④ 条**之后**，所以"她真写了资产"那条从严的口径一个字没松）：
+ *   · 窗口里认得出 `memory/selected` 的注入理由，且这是"**一边注入、一边不注入**"的形态
+ *     （一侧 `entries === 0`/`injection === 'heartbeat'`，另一侧不是）⇒ 这一格的差**不需要**
+ *     `persona/updated` 或写 MEMORIES 也能解释 ⇒ 不算她改了资产（按形状差异放过，照旧留一句 note）。
+ *
+ * 第四条与这一条的分工：**先问"她动没动资产"（动了就照旧报 `asset`），再问"是不是注入与否"**。
+ * 两条都不成立、轮号又读不出来时才按段失守走——宁可多报一条。
  *
  * 判据用到的三样事实（轮号、`state.items`、事件窗口）**全在日志里**，重放可复算。
  */
@@ -481,10 +541,90 @@ function blockIsShapeDifference(prev: AuditedCall, cur: AuditedCall, window: rea
   if (nonBlockBreaks(prev.context, cur.context).length > 0) return false;
   // 她真动了块里那几样 ⇒ 有内容变化，必须报出来（归因 asset，不告警）
   if (assetTargets(window).fixedBlock) return false;
+  // 她没动资产，而这一格的差又能被"索引注入与否"解释（心跳轮 ↔ 人说的轮）⇒ 同样是形状差异
+  if (memoryIndexInjectionFlipped(prev, cur, window)) return true;
   // 轮号读不出来（老日志 / 手写调用）：认不出"换轮重建"，按段失守走——宁可多报一条
   if (prev.turn === undefined || cur.turn === undefined) return false;
   return prev.turn !== cur.turn;
 }
+
+/**
+ * 这两拍之间**记忆索引的注入与否**翻转了没有（2026-10-11，06:27 那张卡的判据）。
+ *
+ * 背景：`state` 段 = `[当前状态]` + `[关系档案]` + **记忆索引**（`render.ts` 的
+ * `turnBlock = renderTurnBlock(turnBlock, memoryIndex)`）。索引是这份块里唯一"按轮决定进不进"的
+ * 素材——心跳轮整段不注入（设计如此，2026-10-04 用户口径："只有用户输入时才注入"）。
+ * 于是"心跳轮那一步"与"人说的那一轮第 1 步"的块哈希不同**是必然的**，与"她改了资产"无关。
+ *
+ * 判据（四条都要。**只用日志里现成的事实**，见 `MemorySelected` 事件）：
+ *   · 窗口里至少有一条 `memory/selected`——它是"这一轮的注入账"，`injection` 与 `entries` 都在上面；
+ *     一条都没有（老日志 / 手写调用）⇒ **认不出**，一句话都不说（退回按段失守走，宁可多报一条）；
+ *   · 账里的轮号要**认得出这两拍各是哪一轮**：两条账（或一条账 + 一侧本身是心跳拍）能覆盖
+ *     `{prev.turn, cur.turn}`——两拍同轮时本就轮不到这条判据，所以这里要求覆盖数 ≥ 2；
+ *   · 两侧**逐条取到"这一轮注入了几条"**，且**恰好一侧是 0、另一侧不是**（这就是"翻转"）；
+ *     两边都是 0 或两边都不是 0 ⇒ 不是这条形状差异，不提它；
+ *   · 轮号缺一侧 ⇒ 认不出，不认。
+ *
+ * ⚠ 口径上刻意**不猜**：`entries` 是要紧的那一格（"索引到底进没进请求"），`injection` 只是它的
+ * 旁注——账里写着 `heartbeat` 就一定是 0 条，写着 `human` 也可能是 0 条（记忆还空着），
+ * 而**空的索引段与"没有索引段"在请求里都是那一段为空**，所以判据认 `entries`。
+ */
+function memoryIndexInjectionFlipped(
+  prev: AuditedCall,
+  cur: AuditedCall,
+  window: readonly AppEvent[],
+): boolean {
+  const turns: number[] = [];
+  if (prev.turn !== undefined) turns.push(prev.turn);
+  if (cur.turn !== undefined && cur.turn !== prev.turn) turns.push(cur.turn);
+  if (turns.length < 2) return false;
+  const entriesOf = new Map<number, number>();
+  let sawLedger = false;
+  for (const event of window) {
+    if (event.type !== 'memory/selected') continue;
+    sawLedger = true;
+    // 同一个 turn 写两条时取最后一条（与 replay 的 `memorySelectedOf` 同口径：最后一条为准）
+    entriesOf.set(event.data.turn, event.data.entries);
+  }
+  if (!sawLedger) return false;
+  const sides = turns.filter((turn) => turn !== undefined).map((turn) => entriesOf.get(turn));
+  if (sides.some((entries) => entries === undefined)) return false;
+  const zeroes = sides.filter((entries) => entries === 0).length;
+  return zeroes === 1;
+}
+
+/**
+ * 两次调用**分属不同的轮**（轮号从日志里读：`budget/consumed.turn`）。
+ *
+ * 判不出来（老日志 / 手写调用缺 `turn`）就算"同轮"——宁可多报一条，也不许凭缺字段替一段失守
+ * 开脱（与 {@link blockIsShapeDifference} 第 ④ 条同一条纪律）。
+ */
+function crossesTurnBoundary(prev: AuditedCall, cur: AuditedCall): boolean {
+  if (prev.turn === undefined || cur.turn === undefined) return false;
+  return prev.turn !== cur.turn;
+}
+
+/** 跨轮那句话（**唯一一处措辞**：它与 `blockIsShapeDifference` 那张 note 共用） */
+const CROSS_TURN_NOTE =
+  '（本次比对的两次调用**分属不同的轮**——跨轮的前缀本来就不可比：固定块在轮首重建、工具清单与记忆层都可能整体换版，'
+  + '所以这一次不报段失守，只留这一句。）';
+
+/**
+ * **预期内换档**那句话（2026-10-11 加，用户报的四张"tools 段失守"卡的归因）。
+ *
+ * 与"MCP 掉线"分开的**唯一**判据写在 {@link inventoryTrustShifted}：事件自带的
+ * `tools/inventory-changed.kind`。落到这一句上的条件（逐字）：
+ *   · 窗口里真有一条 `tools/inventory-changed`，且它落库时被判成 `kind: 'trust-tier'`
+ *     ——即**同一条 RENDER_VERSION 下、工具表的父子集关系**造成的增删（信任档收窄/放开：
+ *     同一件工具从"常规可见"变成"白名单放行"，名字集合只减不增）；
+ *   · 而**不是** `kind: 'mcp'`（`mcp__*` 那批进出清单：掉线/上线，是**真变化**，要人去查）
+ *     或 `kind: 'registry'`（工具表本身被换过：注册/注销，也不是换档）。
+ */
+const TRUST_SHIFT_NOTE =
+  '（这一次是**信任档换档**：同一版 `RENDER_VERSION` 下工具表只发生了"父子集"式的增减——'
+  + '外部轮拿到严格白名单那四件 vs 用户/她自己那一轮拿到全部；`tools/inventory-changed.kind = '
+  + '\'trust-tier\'` 就是凭据。它**不是** MCP 掉线/上线（那一类记 `kind: \'mcp\'`）也不是工具表'
+  + '被换过（`kind: \'registry\'`）。）';
 
 /** 除固定块以外的段失守（{@link segmentBreaks} 与"形状差异"判据共用，免得两处各写一份） */
 function nonBlockBreaks(prev: ContextBreakdown, cur: ContextBreakdown): CacheBreakClass[] {
@@ -521,6 +661,15 @@ interface WindowEvidence {
   restarted: boolean;
   assets: AssetTargets;
   inventoryChanged: boolean;
+  /**
+   * 这一次清单变化是**信任档换档**（`tools/inventory-changed.kind === 'trust-tier'`），
+   * 而**不是**"MCP 掉线 / 工具表真换了"那一种（2026-10-11 加，见 {@link inventoryTrustShifted}）。
+   *
+   * 两个字段分开的理由：`inventoryChanged` 回答"清单动没动"（动没动决定**能不能归因**），
+   * 这一格回答"**动的是哪一类**"（决定措辞与读账的人该不该去查）。**判据只在这一处**，
+   * 措辞与分级都读它，不另写一份。
+   */
+  trustShifted: boolean;
   compacted: boolean;
   /** 事件窗口本身（固定块的形状判据要拿它读轮号） */
   window: readonly AppEvent[];
@@ -528,27 +677,62 @@ interface WindowEvidence {
 
 /** 从事件窗口里认证据。**判据只在这一处** */
 function evidenceOf(window: readonly AppEvent[]): WindowEvidence {
+  const inventory = window.filter(inventoryMoved);
   return {
     restarted: window.some((event) => RESTART_EVENTS.has(event.type)),
     assets: assetTargets(window),
-    inventoryChanged: window.some(inventoryMoved),
+    // 前三种（配置热更 / 技能安装 / MCP 上下线）与 `tools/inventory-changed` **并列**：
+    // 它们都不是"出事了"，但它们的**处置方式不同**（前三种要人去核配置/技能/MCP，
+    // 换档只是"下一拍就回去"）——分档在下面那一格，这里只回答"动没动"。
+    inventoryChanged: inventory.length > 0,
+    trustShifted: inventory.some(inventoryTrustShifted),
     compacted: window.some((event) => event.type === 'compaction/summary'),
     window,
   };
 }
 
 /**
- * 工具清单换过版的证据（三种，都是**我们自己的动作**，不是"出事了"）：
+ * 工具清单换过版的证据（四种，都是**我们自己的动作**，不是"出事了"）：
  *   · `config/changed` 落在 `tools` / `mcp` 段（destructive 开关、清单开关是热更字段）；
  *   · `skill/installed`（技能过信任门 ⇒ 技能目录与 catalog 换版）；
- *   · `mcp/server-started` / `mcp/server-stopped`（MCP 上下线 ⇒ `mcp__*` 那批工具进出清单）。
+ *   · `mcp/server-started` / `mcp/server-stopped`（MCP 上下线 ⇒ `mcp__*` 那批工具进出清单）；
+ *   · **`tools/inventory-changed`**（2026-10-11 加，BUG-3）：构请求那一刻现取的清单指纹变了。
+ *
+ * 第四条为什么必须在这一份判据里（而不是只当一条观测）：进请求的 `tools` 数组是
+ * `registry.listForModel(...)` 在**构请求那一刻**现取的活值，上面那三种动作**一条都不是**的时候
+ * 它照样会变（现场：2026-10-11 03:00:05 那拍，24 件 → 4 件、−4592 token，窗口里一条 `mcp/*`、
+ * `config/*`、`skill/*` 都没有 ⇒ 必然落 `unattributable` 并告警）。有了它，tools 段的失守才归得了因。
  */
 function inventoryMoved(event: AppEvent): boolean {
   if (event.type === 'skill/installed') return true;
   if (event.type === 'mcp/server-started' || event.type === 'mcp/server-stopped') return true;
+  if (event.type === 'tools/inventory-changed') return true;
   if (event.type !== 'config/changed') return false;
   return event.data.fields.some((field) => field === 'tools' || field.startsWith('tools.')
     || field === 'mcp' || field.startsWith('mcp.'));
+}
+
+/**
+ * 这一次清单变化**是信任档换档**吗（2026-10-11 加）——"**预期内换档**"与"**MCP 掉线**"的**唯一**
+ * 区分判据点。判据**不在这里现算**：`kind` 由构请求处（`runtime/agent-loop.ts` 的
+ * `toolInventoryChangeOf`）在**看得见两份清单名字**的地方定好落进事件——事后读日志的人
+ * 手里只有这条事件，判据必须是它自带的字段，否则"复盘时读不出是哪一类"。
+ *
+ * 两条边界（**判据只紧不松**）：
+ *   · 事件里四格**缺一格就返回 false**：宁可让 tools 段照旧落"清单变更"（仍不告警、仍留痕），
+ *     也不许凭一条我们没看全的账替它换一个说法；
+ *   · `kind !== 'trust-tier'` 一律 false：**`mcp` 那一类（掉线/上线）与 `registry` 那一类
+ *     （工具表真被换过）都走不进来**——它们要和"换档"分开读，正是加这一格的全部目的。
+ *
+ * 为什么信任档换档要单独认出来：四档（`owner`/`self`/`trusted`/`external`）各自给一份清单，
+ * "用户/她自己 ↔ 群里的人"来回切时 `tools` 段就在两版之间对调（实测 24 ↔ 4 件，见
+ * `runtime/trust.ts` 的 `EXTERNAL_TOOL_ALLOWLIST`）。那是 `render.ts` v44 那篇**有意写下的取舍**
+ * （安全压过缓存），所以它**不是异常**——但读账的人得一眼看出"这次不是 MCP 掉了"。
+ */
+function inventoryTrustShifted(event: AppEvent): boolean {
+  if (event.type !== 'tools/inventory-changed') return false;
+  const kind: unknown = event.data.kind;
+  return kind === 'trust-tier';
 }
 
 /**
@@ -556,6 +740,12 @@ function inventoryMoved(event: AppEvent): boolean {
  *
  * 顺序是有意的：**接管/重启最先**——它能解释任何一段，而且窗口里真发生重启时，
  * 后面几条证据（人格被改、配置热更）往往同时存在，报"重启"比报"工具清单变更"更接近真相。
+ *
+ * ⚠ 归因**只到这一层**：`tools` 段一律归 `tool-inventory`，**不再按"换档 / MCP 掉线"分两个
+ * 原因值**——那两种的处置（都**不告警**）与分级完全一样，分成两个值只会让 `CacheBreakCause`
+ * 的每一张表（`CAUSE_TEXT` / `EXPECTED_CAUSES` / 界面短标签）都跟着长一格。要分开读的那一半
+ * 走**证据字段**：{@link WindowEvidence.trustShifted} → `reason` 里那句
+ * {@link TRUST_SHIFT_NOTE}，凭据是事件自带的 `kind`（见 {@link inventoryTrustShifted}）。
  */
 function segmentCause(segment: CacheBreakClass, evidence: WindowEvidence): CacheBreakCause {
   // ① 接管/重启能解释任何一段：进程换代时工具清单、人格、记忆层都可能重算
@@ -662,7 +852,13 @@ export function detectCacheBreak(
     && (windowTo === undefined || (includeTo ? event.seq <= windowTo : event.seq < windowTo)));
   const evidence = evidenceOf(window);
 
-  const broken = segmentBreaks(prev, cur, evidence);
+  // **跨轮不比段**（2026-10-11 修，BUG-2）。判据与理由见 {@link crossesTurnBoundary}：
+  // 两次调用分属不同的轮 ⇒ 逐段比对拿的是两个形状不同的请求（固定块在轮首重建、工具清单与记忆层
+  // 都可能整体换版），"哪一段失守"这个问题本身不成立 ⇒ 一段都不报，只留一句说明。
+  // 正交判据（`render` / `idle`）**不在此列**：它们比的是版本号与命中率，与"两拍可不可比"无关，
+  // 跨轮时照旧成立。基线取错那一半由 `runtime/agent-loop.ts` 的 `TurnRunner` 自己记（同轮内才比）。
+  const crossedTurn = crossesTurnBoundary(prev, cur);
+  const broken = crossedTurn ? [] : segmentBreaks(prev, cur, evidence);
   const versionChanged = prev.context.renderVersion !== cur.context.renderVersion;
   const idle = idleCollapse(prev, cur, gapMs, thresholds);
   if (broken.length === 0 && !versionChanged && !idle) return null;
@@ -689,11 +885,19 @@ export function detectCacheBreak(
   const stateShapeNote = blockChanged(prev.context, cur.context) && !broken.includes('state')
     ? '（本轮固定块的哈希与上次不同，但那是换轮重建/块没发造成的形状差异，不算前缀失守）'
     : '';
+  // 跨轮那一句（BUG-2）：**跨轮不比段**是主判据，这一句只是让"被放过去的那几段"在日志里仍然有痕
+  // ——放过去不等于没发生，与上面那张 note 同一条纪律。同轮时一个字都不写（形状与改动前一致）。
+  const crossTurnNote = crossedTurn ? CROSS_TURN_NOTE : '';
+  // 预期内换档那一句（2026-10-11）：只在**这一次 tools 段真的按段失守、且证据是换档**时出现
+  // ——归因已经由 `tool-inventory` 给出（`silent = true`，不告警），这一句回答的是读账的人
+  // 接下来要问的那个问题："那我该不该去查 MCP / 配置？"（答案：不用）。
+  const trustShiftNote = broken.includes('tools') && evidence.trustShifted ? TRUST_SHIFT_NOTE : '';
   const hit = hitRate(cur);
   const reason = `缓存前缀失守（${classes.join(' + ')}）：${detail.join('；')}。`
     + `距上次调用 ${Math.round(gapMs / 60_000)} 分钟，本次 input ${cur.context.input.tokens} token`
     + `${hit === null ? '' : `，缓存命中 ${(hit * 100).toFixed(1)}%`}。`
-    + `${CAUSE_TEXT[cause]}${silent ? '（预期内，不告警）' : '（**归因不明 ⇒ 仍然告警**）'}。${stateShapeNote}`;
+    + `${CAUSE_TEXT[cause]}${silent ? '（预期内，不告警）' : '（**归因不明 ⇒ 仍然告警**）'}。`
+    + `${trustShiftNote}${stateShapeNote}${crossTurnNote}`;
   // 新旧分段对照：只对"真的按段失守"的那几类做（render / idle 不是某一段的字节，不编）
   const diff = diffOf(prev.context, cur.context, broken);
   return {
@@ -738,14 +942,30 @@ function diffOf(
   return out;
 }
 
-/** 一段的新旧对照（缺一边时只出那一边的事实，差额一律不出现） */
+/**
+ * 一段的新旧对照（缺一边时只出那一边的事实，差额一律不出现）。
+ *
+ * `changed` / `side` **必填**（{@link CacheBreakDiff} 继承的是 {@link CacheBreakSectionDiff} 的
+ * 那一对字段）：缺了它们，"哪一段变了"这句话在 `diff[]` 里根本读不出来——而 `class` 回答的是
+ * "哪一类失守了"，那是判据的结论、不是新旧对照的读数，拿它顶替必然读错。
+ *
+ * 三态 `side` 与"变了没变"的分工（与 {@link sectionDiffsOf} 逐字同规则，两处不许各写一套）：
+ *   · `prev-only` —— 这一次请求里那一段整个不见了（`state` 只在每轮第 1 步发，这是常态）；
+ *   · `next-only` —— 上一次没有、这一次有；
+ *   · `both`      —— 两边都在，此时 `changed` 就是**两边哈希不等**。
+ * 缺一边时 `changed` 恒为 `true`：形状变了就是变了，**不拿"没得比"冒充"没变"**。
+ */
 function segmentDiff(
   cls: CacheBreakClass,
   a: ContextSegment | undefined,
   b: ContextSegment | undefined,
 ): CacheBreakDiff {
+  const side: CacheBreakSectionDiff['side'] =
+    a === undefined ? 'next-only' : (b === undefined ? 'prev-only' : 'both');
   return {
     class: cls,
+    side,
+    changed: a?.hash !== b?.hash,
     ...(a === undefined ? {} : { prevHash: a.hash, prevTokens: a.tokens, ...(a.bytes === undefined ? {} : { prevBytes: a.bytes }) }),
     ...(b === undefined ? {} : { nextHash: b.hash, nextTokens: b.tokens, ...(b.bytes === undefined ? {} : { nextBytes: b.bytes }) }),
     ...(a === undefined || b === undefined ? {} : {

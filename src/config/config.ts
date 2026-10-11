@@ -1026,15 +1026,28 @@ function buildDefaults(dir: string): AppConfig {
       inputNotify: true,
     },
     persona: {
-      // 出厂压缩阈值 = 100000（可见历史估算超过它就压一次）：对齐现场 config.json 的实测值
-      //（`persona.compactionThresholdTokens: 100000`）。
+      // 出厂压缩阈值 = 200000（可见历史估算超过它就压一次）：把**可见历史预算放大一倍**
+      //（`persona.compactionThresholdTokens: 200000`）。
       //
-      // 为什么现场从 32000 抬到了 100000：32000 太勤——可见历史刚过 3 万 token 就压一次，
-      // 摘要本身也要花一次 light 调用，压得太勤反而把"省上下文"变成"多花钱"。
+      // 为什么是 200000（用户 2026-10-12 的裁决：「预算 compact 线（history 大小），
+      // 默认从 100k 提升到 200k」）：这一格量的是**她干活时能直接看见的那段历史**——
+      // 抬高它 = 一次完整工作（读几份文件、改几处代码、跑一轮测试）不必中途被折成交接笔记。
+      // 为什么原来是 100000：现场 2026-10-04 从 32000 抬上来的口径是"32000 太勤"——
+      // 每次压缩自己也要花一次 light 调用，压得太勤反而把"省上下文"变成"多花钱"；
+      // 200000 是同一条理由再往前走一步（压得更少 = 更少次摘要调用）。
+      //
+      // ⚠️ 单位是**估算器读数**，不是供方计数。已知校准（现场口径，本仓未复测）：
+      // `estimateHistoryTokens`（src/persona/handoff-note.ts）按"中文约 1.5 字/token"折算，
+      // **比供方回报的 input 计数偏低约 1.65~1.66 倍**——同一段历史，这里算出 100k 时
+      // 供方那边约 165k~166k。所以"这条线 = 200000 估算"对应供方口径约 33 万，
+      // **不是"供方 200k"**；别拿这个数字直接去跟上下文上限比余量。
       //
       // ⚠️ 写**十进制字面量**（不写 `1e5`、也不写算式）：出包脚本 Read-CodeDefaults 按正则抓字段
       // 默认值，算式抓不到就当场拒绝出包（"字段改名了？"）。理由与 budget.taskTokens 那条同源。
-      compactionThresholdTokens: 100_000,
+      // ⚠️ 上面那段注释里的 `persona.compactionThresholdTokens: 200000` **与这一行必须同值**：
+      // 那个脚本按**行序**取"第一次出现的 `名字: 字面量`"（注释里的那次也算），两处不一致时
+      // 它以注释里的数为准，于是出包会报"出厂值 ≠ 代码默认值"。改这一格要连注释一起改。
+      compactionThresholdTokens: 200_000,
       handoffBudgetTokens: 4_096,
       handoffFoldTokens: 1_024,
       owner: 'owner',
@@ -1319,7 +1332,7 @@ function defaultDocument(dir: string): JsonObject {
     persona: {
       $comment: [
         '人格连续性与上下文压缩（design.md §4.11/§4.13、persona.md §4）。',
-        'compactionThresholdTokens：可见历史估算超过它就在 turn 结束时压缩（写 compaction/summary，历史只遮蔽不重写）。默认 100000：这个量级够一段完整工作留在可见历史里，又远在上下文上限之下；调小会压得更勤（每次压缩自己也要花一次调用）。',
+        'compactionThresholdTokens：可见历史估算超过它就在 turn 结束时压缩（写 compaction/summary，历史只遮蔽不重写）。默认 200000（用户 2026-10-12 把可见历史预算放大一倍）：这个量级够一段完整工作留在可见历史里，又远在上下文上限之下；调小会压得更勤（每次压缩自己也要花一次调用）。单位是估算器读数，不是供方计数——估算比供方偏低约 1.65~1.66 倍，200000 估算约合供方 33 万。同一格也是"压缩临近（80%）"那条维护窗口信号的分母（预警与压缩读的是同一个键）。',
         'handoffBudgetTokens / handoffFoldTokens：交接笔记的总预算与最近条目的单条满预算。',
         'owner：本机用户的档案标识。你在聊天框说话时它会作为 person 注入，于是 persona/RELATIONSHIPS/<owner>.md 自动生效——文件名必须和这里一致（默认 owner）。',
         'memoryEnabled：**框架代管记忆**的总开关，默认 true（框架生成 MEMORIES/INDEX.md、每轮注入索引、每日 4 点整理、并维护 !pinned 与条目 TTL）。',

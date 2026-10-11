@@ -30,7 +30,7 @@
  * | 门 | 落点 | 这一件怎么办 |
  * |---|---|---|
  * | `authz`（场景鉴权） | 执行器，按**工具名**判 | `mcp` **刻意不进 `SOCIAL_TOOLS`**：名单外一律当本机类 ⇒ 客人 + 硬拒绝档里她没有它（`tools.groupSceneHardRefusal`，**默认关**；软提醒档下客人调得动）。**不要加进去**：加了等于把整台机器（`pwsh`/文件/该 server 的一切）交给群里的人。 |
- * | `trust`（轮次可信度） | `runtime/trust.ts` 的 `EXTERNAL_TOOL_ALLOWLIST`，经 `modelVisibilityFor` → `real-loop.ts` 的 `modelVisibility` | `mcp` **不在**那张白名单里，而这道门**2026-10-09 之前根本没接上**（`modelVisibilityFor` 在 `src/**` 里零调用点，生产传的是恒为 `{includeDestructive}` 的那一份）⇒ 外部轮次**看得见也调得动** `mcp`——这一行以前写的就是你正在读的这句"天然拿不到它"，而它是假的。现在接上了：`external` 轮次拿到的清单是那四件，`mcp` 不在里面（同批 `RENDER_VERSION` 43 → 44，见 `render.ts` 的 v44 那一篇）。 |
+ * | `trust`（轮次可信度） | `runtime/trust.ts` 的 `EXTERNAL_TOOL_ALLOWLIST`，经 `modelVisibilityFor` | **这一层当前不参与清单**（2026-10-11 用户裁决）：工具清单对所有轮次恒定，`modelVisibility` 只吃全局 `destructiveEnabled`，所以外部轮次**看得见也调得动** `mcp`——与「硬拒绝档默认关」叠加之后，客人确实拿得到它。**这曾经在 `481db36`（v44）被接上过一次**（外部轮次裁到白名单四件，`mcp` 不在里面，同批 `RENDER_VERSION` 43 → 44），但那次违反"tool 数组绝对不动"这条铁律，2026-10-11 已按裁决恢复恒定。**今天拦 `mcp` 的是下面 `authz` 那一行 + 本件自己的 `destructiveEnabled` 三处检查**，不是这一层。要收窄就去动 `authzGate`，别把 `modelVisibilityFor` 接回来。 |
  * | `planMode` | 执行器，只拦 `sideEffect === 'destructive'` 的调用（`plan-mode.ts:110`） | 这一件**不是** destructive（它是入口，不是动作）。⇒ planMode 对 MCP 的破坏性动作**不再逐次拦截**，这是一处**知情的口径收窄**，理由与代价见下面那段长注释。 |
  * | `destructiveEnabled` | 装配期（决定工具造不造/列不列） | **唯一还管得住这条路的那道门**：本件把它读成运行期判据（`isDestructiveCall` + `destructiveAllowed`），三态**逐工具**判（数组 = 只放名单里那几件）。 |
  *

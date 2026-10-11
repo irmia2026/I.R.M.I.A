@@ -53,11 +53,11 @@
 
 import type { DsClient, DsRequest, DsStreamResult } from '../model/ds-client.js';
 import { isDsClientError } from '../model/ds-client.ts';
-import type { MachineFacts, RenderImageRef, RenderPersona, RenderedRequest, TurnBlockFacts, UsageFacts } from '../model/render.js';
+import type { MachineFacts, MaintenanceWindowNote, RenderImageRef, RenderPersona, RenderedRequest, TurnBlockFacts, UsageFacts } from '../model/render.js';
 import { RENDER_VERSION, clipTaskTitle, render, renderWake, stateBytesOf, wakeTitle } from '../model/render.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import {
-  DEFAULT_CACHE_BREAK_THRESHOLDS, detectCacheBreak, lastAuditedCall,
+  DEFAULT_CACHE_BREAK_THRESHOLDS, detectCacheBreak,
   type AuditedCall, type CacheBreakThresholds,
 } from '../model/context-audit.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
@@ -67,8 +67,8 @@ import { sidOf } from '../channel/sessions.ts';
 import { openTodoItems } from '../persona/todo-state.ts';
 import type { EventLog } from '../log/event-log.js';
 import type {
-  AppEvent, AppEventType, CompactionDecision, MemorySelected, ModelLane, Projection, ToolResultStatus,
-  TurnEndReason, WakeSource,
+  AppEvent, AppEventType, CompactionDecision, MemorySelected, ModelLane, Projection,
+  ToolsInventoryChanged, ToolResultStatus, TurnEndReason, WakeSource,
 } from '../log/types.js';
 import { defaultVisibility, type ContextImageChosen } from '../log/types.ts';
 import {
@@ -88,9 +88,11 @@ import { executeToolCalls } from '../tools/executor.ts';
 import { notedWarningsOf } from '../channel/injection.ts';
 import type { WarnExemptJudge } from '../channel/warn-exempt.ts';
 import { ASK_HUMAN_BLOCKED_BY, hasPendingSystemAsk, pendingAgentAsks } from './plan-mode.ts';
-import type { ListForModelOptions, ToolDefinition } from '../tools/registry.js';
+import type { ListForModelOptions, ToolDefinition, ToolModelSpec } from '../tools/registry.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { HookRunner } from '../hook/hooks.js';
+// 本轮可信级别的**唯一来源**（`runtime/trust.ts` 的 `trustOfBatch`）：循环层不判它、只把它记进账
+import type { TurnTrust } from './trust.js';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -451,6 +453,26 @@ export interface AgentLoopDeps {
   interruptEpoch?: () => number;
   /** 进模型清单的工具口径；默认 {}，即 destructive 工具默认不列（§4.10 第三级门） */
   modelVisibility?: ListForModelOptions;
+  /**
+   * **本轮的可信级别**（`owner` / `self` / `trusted` / `external`），2026-10-11 加。
+   *
+   * 唯一的用处是**观测**：`accountStep` 把它落进 `budget/consumed.context.trust`
+   * ——这一格**一个字节都不进请求体**（`context` 本来就不进，见 `ContextBreakdown.trust`），
+   * 所以它**不改任何判据、也不动 `RENDER_VERSION`**。
+   *
+   * 为什么必须由宿主给、循环层自己不判：判据在 `runtime/trust.ts` 的 `trustOfBatch` 一处，
+   * 而它要的是**唤醒批次 + 联系人表 + 用户 id 集合**——那三样都在宿主手里（`real-loop` 的
+   * `trustOfTurn`）。循环层不读配置、不读联系人表（与 `workspaceRoot` / `boundaryRoot` /
+   * `contact` / `machine` 同一条纪律：**渲染与循环都不读盘**，事实由宿主递进来）。
+   *
+   * **缺省 ⇒ 事件里那一格不出现**（不是"编一个 owner"）：子代理链、诊断、以及所有既有
+   * 测试都不传它——它们的请求字节与事件形状因此与引入这一格之前**逐字节相同**。
+   *
+   * ⚠ 它与 `modelVisibility` 是**同一个判定的两半**（`real-loop.agentDeps` 里两行紧挨着，
+   * 都读那一个 `trust` 局部量）：清单按它收紧，账按原样记它。两处读同一份结论，
+   * 所以日志里那一格**必然**能解释清单为什么是那一版——这正是它存在的理由。
+   */
+  trust?: TurnTrust;
   /** 子进程隔离配置，原样透传给执行器（不响应中断的工具走隔离，超时即杀） */
   isolation?: IsolationConfig;
   /**
@@ -469,6 +491,24 @@ export interface AgentLoopDeps {
   blobOffload?: BlobOffloadOptions;
   /** 压缩触发（M5 临时口径，persona.md §4 / design.md §4.13）；不传即不压缩 */
   compaction?: AgentLoopCompaction;
+  /**
+   * 本轮的**收尾计时**（2026-10-11 加，BUG-4；纯观测，缺省 = 不报）。
+   *
+   * 为什么需要它：`runtime/slow-tick` 只记了"这一拍总共多久"（实测有 131 s 与 221 s 的），
+   * 而诊断明确写了"没有刻度可判"——分不清**模型往返慢**与**收尾的同步扫描把事件循环占死**
+   * （`maybeCompact` 里的 `renderHandoffNote` / `countMaskedEvents` / `estimateMaskedTokens`
+   * 都声称 O(事件数)，而那一刻日志已到 7.8 万条）。两者都表现为 `elapsedMs` 很大、`busy=false`。
+   *
+   * 刻度的分工（**判据一个都不动**，只加观测）：
+   *   · `turnMs`    —— 整轮（`run()` 从头到尾，含压缩那一段）；
+   *   · `compactMs` —— **收尾那一段**（`maybeCompact`：判定 + 交接笔记渲染 + 摘要落盘），
+   *     恒 ≤ `turnMs`。它与 `turnMs - compactMs` 一比，"花钱在等模型"与"花钱在自己扫日志"就分开了；
+   *   · `events`    —— 那一刻日志的事件条数（那几个扫描的**规模输入**，也是本仓涨势的读数）。
+   *
+   * 它**不参与任何判据**：压缩阈值、遮蔽点、写不写摘要，一个都不看它（诊断的口径是
+   * "补刻度之前不要动阈值"，这里只补刻度）。回调抛错也不许影响这一轮——调用点包了 try。
+   */
+  onTurnTiming?: (timing: TurnTiming) => void;
   /**
    * 技能 catalog 文本（design §4.19 渐进披露第 1 层）。缺省/null 表示没有可用技能，
    * 状态层该段整体不出现；SKILL.md 正文永不在此——模型按需自己 safe_read（M7-4）。
@@ -525,6 +565,17 @@ export interface AgentLoopDeps {
    * 缺省取 `DEFAULT_STATE_BUDGET_BYTES`：漏传时按出厂口径判，而不是"永不提醒"。
    */
   stateBudgetBytes?: number;
+  /**
+   * **维护窗口那条信号**（2026-10-11，此刻层 `维护窗口：` 那一行）。
+   *
+   * 宿主在轮首算一次（`real-loop` 的 `maintenanceWindowFor` → `render.ts` 的
+   * `maintenanceWindowOf`），循环层只把那一格**原样转手**——判据要的时钟、事件、投影与
+   * "上一次窗口"，渲染层一样都拿不到（缓存铁律 1：它不读环境值、不读时钟）。
+   *
+   * **一轮之内它是常量**：所以此刻层这一行不会逐 step 抖，前缀照旧命得中。
+   * 缺省/`null` = 这一轮不是窗口 ⇒ **整行不出现**（子代理、重放、诊断，以及绝大多数轮次）。
+   */
+  maintenanceWindow?: MaintenanceWindowNote | null;
   /**
    * 本轮的**记忆索引注入账**（B2，docs/memory-injection.md §4）：给一个函数，循环层在**轮首**
    * 调它一次，把结论写成 `memory/selected` 事件（索引全文不落事件）。
@@ -687,6 +738,22 @@ export function isHeartbeatTurn(wakeEvents: readonly AppEvent[]): boolean {
 }
 
 /**
+ * 一轮的**收尾计时**（BUG-4 的观测面；见 {@link AgentLoopDeps.onTurnTiming}）。
+ *
+ * 纯观测：这三个数**不进请求体、不参与任何判据**，只是把"这一轮的时间花在哪"记下来。
+ * `turnMs` 不在这里——整轮的总时长只有调用方（`real-loop` 的 `tickOnce`）量得到，
+ * 它把本对象与自己的读数合起来落成 `runtime/slow-tick` 的那几格。
+ */
+export interface TurnTiming {
+  /** 收尾那一段（`maybeCompact`：判定 + 交接笔记渲染 + 摘要落盘）的耗时，毫秒 */
+  compactMs: number;
+  /** 那一刻本 runner 可见的事件条数（那几个同步扫描的**规模输入**） */
+  events: number;
+  /** 上面那些事里最后一条的 seq（0 = 一条都没有；与 `events` 一起看才知道读数是不是那一份快照） */
+  eventsThroughSeq: number;
+}
+
+/**
  * 请求派生输入。全部字段都能从日志 + 人格资产取回：
  * `now` 取该 step 的 `step/start.ts`，`events` 取 seq 小于该 step/start 的日志快照，
  * `wakeEvent` 取该 turn 认领的首条输入（仅首 step）。
@@ -732,6 +799,11 @@ export interface RequestDerivation {
    * 重放与预览都从**当时生效的那份配置**里取同一个数，所以三处判据一致。
    */
   stateBudgetBytes?: number;
+  /**
+   * **本轮那条维护窗口信号**（2026-10-11，见 AgentLoopDeps.maintenanceWindow / RenderInput）：
+   * 宿主在轮首算好递进来，循环层每步原样转手。缺省 = 不是窗口 ⇒ 此刻层那一行整行不出现。
+   */
+  maintenanceWindow?: MaintenanceWindowNote | null;
   /** 联络事实（状态层素材，见 AgentLoopDeps.contact） */
   contact?: ContactFacts | null;
   /** 本机事实（此刻层 `本机：` 素材，见 AgentLoopDeps.machine）：宿主算好，循环层只转手 */
@@ -893,6 +965,10 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     // 多出来的那一截是幻影字节，不该把一份其实没超的 STATE 报成超限（见 stateBytesOf 的注释）。
     stateBytes: stateBytesOf(persona.state),
     stateBudgetBytes: input.stateBudgetBytes ?? DEFAULT_STATE_BUDGET_BYTES,
+    // 维护窗口（2026-10-11）：**原样转手**——判据不在这里（渲染层是纯函数，它不读时钟、
+    // 不读事件、不自己记"上次窗口是什么时候"），宿主轮首算一次，每个 step 拿到的是同一条。
+    // 缺省 = 不是窗口 ⇒ 此刻层那一行整行不出现（重放/子代理/诊断都是这一支）。
+    maintenanceWindow: input.maintenanceWindow ?? null,
     contact: contactWithWakeStamp(input.contact ?? null, input.wakeEvent, input.timezone),
     // 本机与用度：与 contact 同一条纪律——**渲染层不读环境值**，所以磁盘余量、进程已运行多久、
     // 今日用量这些只能由拿得到 os/fs/投影的调用方算好递进来；缺省（重放、子代理、诊断）时
@@ -946,7 +1022,21 @@ export async function runTurn(deps: AgentLoopDeps, wakeEvents: readonly AppEvent
 
 // ──────────────────────────────── 实现 ────────────────────────────────
 
-class TurnRunner {
+/**
+ * 一轮 turn 的执行者（**导出只为测试留一个缝**，见下）。
+ *
+ * 生产入口是 {@link runTurn}（它每轮新建一个本类实例）。这里导出类本身，是因为有两件观测上的
+ * 事实**只能在类的方法上验证**，而它们都关乎"慢拍到底慢在哪"（BUG-4，诊断要求把
+ * "模型慢"与"收尾的同步扫描占死"分开）：
+ *   · **收尾那一段的计时口径**：`compactMs` 必须真的包住 `maybeCompact`（判定 + 交接笔记渲染
+ *     + 摘要落盘），而不是包住别的东西。要钉住它，得能让那一段**变慢**；
+ *   · **`events` 的读数口径**：它是"本 runner 可见的那一份快照条数"，不是日志里的总条数。
+ *
+ * 测试用 `TurnRunner.prototype.maybeCompact` 临时换成一个"慢"的等价物来钉第一件事
+ * （`test/slow-tick-timing.test.ts`）——**不导出就没有这个缝**，那两个刻度只能靠读代码相信。
+ * 它**不改任何判据**：换掉的是测试进程里的一份方法，生产路径一个字都没动。
+ */
+export class TurnRunner {
   private readonly deps: AgentLoopDeps;
   private readonly wakeEvents: AppEvent[];
   private readonly log: EventLog;
@@ -995,6 +1085,42 @@ class TurnRunner {
    */
   private readonly failureGuard = new FailureStreakGuard();
 
+  /**
+   * **本 runner 上一次记账的那一拍**（`accountStep` 末尾存）。
+   *
+   * 为什么必须是它、而不是从 `this.events` 现取（2026-10-11 修，BUG-2）：
+   * `this.events` 是**轮首对齐的日志快照**（`syncEvents` 每次从最后一条的 seq+1 增量读），
+   * 而 `budget/consumed` 由本 runner 自己 `write` 出来——`write` 只 `append` + 折投影，
+   * **不回填快照**。于是基准恒等于"上一轮开始前日志里的最后一条 `budget/consumed`"，
+   * 也就是**上一轮的那一拍**（现场：turn 1302 的第 3 步取到 turn 1300 的 step 1，
+   * 于是 00:27:38 / 00:30:36 / 00:30:52 三拍**共用同一个 prev**，diff 逐字段相同）。
+   * 换成这一格之后，"与上一次真实请求比对"这句话在 turn 内才真的成立。
+   *
+   * 归因窗口仍然用 `this.events`（它要的是"两次调用之间发生了什么"，日志才是真源）。
+   * 跨 turn 的边界由 `context-audit.detectCacheBreak` 的跨轮判据兜住（本字段每轮归零）。
+   */
+  private previousAuditedCall: AuditedCall | null = null;
+
+  /**
+   * 模块级：**上一次构请求时进模型的那份工具清单指纹**（BUG-3 的观测面，2026-10-11 加）。
+   *
+   * 为什么是模块级而不是 runner 字段：清单的变化**天然发生在轮边界之间**（registry 由宿主在
+   * 每轮装配 deps 时给，`runTurn` 每轮新建一个 runner），记在 runner 上等于每轮都从"没有基线"
+   * 重新开始 ⇒ 永远比不出变化。与 `compactWakeTurns`（real-loop）、`memWarnedOnce`（persona）
+   * 同一条：**进程内即可判定的观测基线**，重启后重新开始也是对的（新进程第一次构请求本来就没有
+   * 可比的前一拍）。
+   *
+   * **为什么连 registry 一起记**：指纹只有在"比的是**同一张工具表**"时才有意义。
+   * 生产里 registry 是进程级单例，这一格于是就是"上一次构请求时的清单"；而换个 registry
+   * （子代理的隔离视图、诊断、测试各造一张表）就是换了一张表 —— 那时**没有基线**才对，
+   * 拿上一张表的读数去比会凭空报一条"少了 N 件"（本用例第一版正是这么红的：
+   * 上一个套件的 registry 与这一套的 registry 不是同一张，却共用了同一格基线）。
+   * 于是基线按 registry 实例归属：不是同一个实例 ⇒ 从"没有基线"重新开始。
+   *
+   * 它**只服务观测**：不参与任何请求装配、不进请求体、丢了不影响任何判据。
+   */
+  private static lastToolInventory: { registry: ToolRegistry; lines: ToolInventoryLine[] } | null = null;
+
   constructor(deps: AgentLoopDeps, wakeEvents: readonly AppEvent[]) {
     this.deps = deps;
     this.wakeEvents = dedupeBySeq(wakeEvents);
@@ -1012,11 +1138,38 @@ class TurnRunner {
     const reason = await this.runInner();
     // 压缩点：本 turn 已结算，但可见历史仍然超过阈值——把交接笔记写成 compaction/summary，
     // 让它成为下一轮请求里的「早期历史」（闸蔽点后的事件逐字节保留）
+    //
+    // **计时包住整个收尾段**（BUG-4）：判定 + 交接笔记渲染 + 摘要落盘就是慢拍里"同步扫描"
+    // 最可疑的那一段。只计时，不改判据、不动阈值（诊断口径：补刻度之前不要动阈值）。
+    const compactStartedAt = Date.now();
     const decision = await this.maybeCompact();
+    const compactMs = Date.now() - compactStartedAt;
     // 判定的留痕：**每 turn 一行**（连"为什么不压"一起）。写在这里而不是各条 return 之前——
     // 判据只允许有一个出口，见 {@link compactionDecision}。`sync: false`（观测类）：它不是承诺，
     // 丢了下次拿同一份日志还能再算一遍，不值得一次 fsync。
-    this.write('compaction/decision', decision, { sync: false });
+    //
+    // **维护窗口那一条搭在这张账上**（2026-10-11）：它本来就是"这一轮该不该给她一条维护窗口
+    // 信号"的另一面，而这道账一 turn 恰好一条 ⇒ "上一次窗口是哪一刻给的"在日志里只有这一处
+    // 答案（那道 6 小时的闸就是从它读的，见 render.ts 的 `lastMaintenanceWindowAt`）。
+    // 这一格**不进她的上下文**（本事件是 internal ⇒ 不改请求字节、不动 `RENDER_VERSION`）。
+    const window = this.deps.maintenanceWindow ?? null;
+    this.write('compaction/decision', window === null ? decision : {
+      ...decision,
+      maintenanceWindow: {
+        reason: window.reason,
+        atMs: window.atMs,
+        // 当地自然日（观测用；算不出来就不写这一格——不编一个日子）
+        ...(window.day === null || window.day === '' ? {} : { day: window.day }),
+      },
+    }, { sync: false });
+    // 收尾计时交给宿主（缺省不报）。**包 try**：观测不许反过来打断一轮——它连判据都不参与。
+    try {
+      this.deps.onTurnTiming?.({
+        compactMs,
+        events: this.events.length,
+        eventsThroughSeq: this.events[this.events.length - 1]?.seq ?? 0,
+      });
+    } catch { /* 观测回调抛错不影响本轮结局（见 onTurnTiming 的注释） */ }
     return reason;
   }
 
@@ -1538,8 +1691,10 @@ class TurnRunner {
     const inputTokens = usage.inputTokens;
     const cacheHit = Math.max(0, Math.min(usage.cachedTokens, inputTokens));
     const ts = this.deps.now();
-    // 基准取自**日志快照**（不是内存里的"上一次"）：重放时喂进同一段事件，结论逐字段一致
-    const previous = lastAuditedCall(this.events);
+    // 基准 = **本 runner 上一次记账的那一拍**（见 {@link TurnRunner.previousAuditedCall}）。
+    // 刻意**不再**从 `this.events` 现取：那是轮首对齐的日志快照，而 `budget/consumed` 由本 runner
+    // 自己写、不回填快照 ⇒ 取到的是**上一轮**那一拍（00:30 三拍共用同一 prev 的根）。
+    const previous = this.previousAuditedCall;
     const audit: AuditedCall = {
       context: request.context,
       ts,
@@ -1558,6 +1713,17 @@ class TurnRunner {
     // 压缩）来解释每一段指纹为什么变，判据只在 `context-audit.ts` 一处（见 `segmentCause`）。
     // 这里传的是同一份日志快照——重放走同一条路，所以归因也是可复算的，不是运行期才有的观测。
     const cacheBreak = detectCacheBreak(previous, audit, this.deps.cacheBreakThresholds, this.events);
+    // **本轮可信级别进账**（2026-10-11 加，纯观测）：它解释"这一拍的工具清单为什么是那一版"——
+    // `external` 那一档只看得见 `speak`/`report`/`read_channel`/`vision_read` 四件，用户/她自己
+    // 那一档 24 件，来回切时 `tools` 段在两版之间对调、其后一切重算。在此之前日志里没有这一格，
+    // 事后只能从 `wake/*` 反推 ⇒ 现场表现为一句"原因不明"。
+    //
+    // ⚠ **它不进请求体、也不改任何判据**：`context` 整体不进请求（`ds-client.buildRequestBody`
+    // 只发 model / input / instructions / tools / …），所以加它不必动 `RENDER_VERSION`。
+    // 宿主没给（子代理链、诊断、既有测试）⇒ **字段不出现**，事件形状与引入它之前逐字节相同。
+    const contextOut = this.deps.trust === undefined
+      ? request.context
+      : { ...request.context, trust: this.deps.trust };
     const data: Record<string, unknown> = {
       turn: this.turn,
       step,
@@ -1575,13 +1741,17 @@ class TurnRunner {
       retryCount: 0,
       finishReason: finishReasonOf(result, interrupted),
       tokensTodayAccum: this.projection.budget.tokensToday + inputTokens + usage.outputTokens,
-      context: request.context,
+      // 归因事实 + 那一格纯观测的 `trust`（宿主给了才有，见上面那段注释）
+      context: contextOut,
       // 构造点的**镜像**：读日志的人一眼能看到"这一拍是什么时候装出来的"（ts 是结束时刻）
       ...(request.context.builtAtSeq === undefined ? {} : { contextBuiltAtSeq: request.context.builtAtSeq }),
       // 只在真破坏时出现：没有它就代表"这次与上次的冻结前缀一致"（不是"没查"）
       ...(cacheBreak === null ? {} : { cacheBreak }),
     };
     this.write('budget/consumed', data, { sync: false });
+    // 存下这一拍，供**下一步**当基准（唯一写入点，紧挨着上面那条账：两者必须同进同出，
+    // 分开放就会漂成"记了一拍、基准是另一拍"——那正是这次修的错）。
+    this.previousAuditedCall = audit;
   }
 
   /** 模型调用抛错：分类 → 结局。失败也必须记账，否则 §4.6 的失败刹车永远看不到连续失败 */
@@ -1890,9 +2060,14 @@ class TurnRunner {
     // 本轮新输入走 wakeEvent 参数，就不能同时出现在事件流里（见文件头协同契约）
     const wakeSeq = args.wakeEvent?.seq;
     const events = wakeSeq === undefined ? this.events : this.events.filter(event => event.seq !== wakeSeq);
+    // 进请求的清单是**现取的活值**（不缓存、不从事件读）——它是 `tools` 段失守时唯一的事实来源，
+    // 所以在这一行上面比一次指纹、变了就落一条 internal 账（BUG-3）。**只读、不改字节**。
+    const options = this.deps.modelVisibility ?? {};
+    const tools = this.deps.registry.listForModel(options);
+    this.noteToolInventory(tools, options, args.step);
     return deriveRequest({
       persona: this.deps.persona,
-      tools: this.deps.registry.listForModel(this.deps.modelVisibility ?? {}),
+      tools,
       timezone: this.deps.timezone,
       lane: this.lane,
       events,
@@ -1916,6 +2091,10 @@ class TurnRunner {
       // 每步原样转手。字节数不在这里传——它在 deriveRequest 里从 `persona.state` 量，
       // 于是运行期/重放/预览三条路量的是同一份文本、用同一个函数（stateBytesOf）。
       stateBudgetBytes: this.deps.stateBudgetBytes ?? DEFAULT_STATE_BUDGET_BYTES,
+      // 维护窗口（2026-10-11）：**轮首定下、每步原样转手**（与 machine/usage 同节奏）。
+      // 不在这里现算的理由是硬纪律：渲染层不读时钟、不读事件（缓存铁律 1），
+      // 而判据要的正是"现在几点 + 上一条压缩判定读到多少 token + 上次窗口是什么时候"。
+      maintenanceWindow: this.deps.maintenanceWindow ?? null,
       contact: this.deps.contact ?? null,
       // 本机与用度：宿主在**每个 turn 装配 deps 时**算一次（与 contact 同节奏）——磁盘 statfs
       // 与进程 uptime 是会失败的 IO，不适合每个 step 都做一遍；用度是"今日累计"，一拍一算是够的。
@@ -1929,6 +2108,41 @@ class TurnRunner {
         ? {}
         : { maxContextImages: this.deps.maxContextImages }),
     });
+  }
+
+  /**
+   * **进请求的工具清单变了就落一条账**（BUG-3，2026-10-11 加）。
+   *
+   * 为什么必须有这一下：清单是**现取的活值**（上面那行 `listForModel`），不是从事件读的，
+   * 所以"清单变了几件"这件事在日志里**天生没有对应事件**——除非它恰好是 `mcp/server-started`
+   * / `skill/installed` / `config/changed{tools,mcp}` 之一。现场（本机 03:00:05，seq 78374）
+   * 那 20 件工具就是这么消失在观测之外的：`tools` 段真变了（24 件 → 4 件），窗口里一条证据都没有
+   * ⇒ 落 `unattributable` ⇒ 告警，而事后复盘翻遍日志也答不出"少了哪 20 件"。
+   *
+   * 三条边界：
+   *   · **只落账、不参与装配**：它一个字都不进请求体（可见性 internal，见 `EVENT_VISIBILITY`），
+   *     也**不改 `RENDER_VERSION`**（渲染口径没动）；
+   *   · **只在真变了时写**（判据在 {@link toolInventoryChangeOf} 一处）：第一次构请求没有可比对象、
+   *     清单空、换了一张工具表（不是同一个 registry 实例）、或那份清单表还没接上（子代理 / 诊断的
+   *     隔离视图）时**一个字都不写**；
+   *   · **比对的是清单本身**（名字 + 各自可见性），不是配置：配置没动而清单动了，照样记。
+   */
+  private noteToolInventory(
+    tools: readonly ToolModelSpec[],
+    options: ListForModelOptions,
+    step: number,
+  ): void {
+    const registry = this.deps.registry;
+    const previous = TurnRunner.lastToolInventory;
+    // 换了 registry 实例 ⇒ 没有基线（见 lastToolInventory 的注释：那不是"清单变了"，是换了一张表）
+    const baseline = previous !== null && previous.registry === registry ? previous.lines : null;
+    const next = toolInventoryLines(tools, options);
+    const changed = toolInventoryChangeOf(baseline, next, options);
+    // 基线**每次都推进**（包括"还没接上 / 换了张表"那几种）：观测不许反过来改变任何装配行为。
+    TurnRunner.lastToolInventory = { registry, lines: next };
+    if (changed === null) return;
+    const data: ToolsInventoryChanged['data'] = { ...changed, turn: this.turn, step };
+    this.write('tools/inventory-changed', data, { sync: false });
   }
 
   /** 唯一写入点：分配 seq → append（承诺类 fsync）→ 立即折进投影 */
@@ -1949,6 +2163,153 @@ class TurnRunner {
     this.deps.onEvent?.(event);
     return event;
   }
+}
+
+// ──────────────────── 工具清单指纹（BUG-3 的观测面，唯一一份口径） ────────────────────
+
+/**
+ * 清单里的一行：**这件工具叫什么 + 它这一次是怎么进来的**。
+ *
+ * 为什么要带上"怎么进来的"：同一批工具、换一个可见性开关，进请求的清单就可能整体不同
+ * （`includeDestructive: false` → 危险的那几件全不列；`allowOnly` → 只剩白名单里的几件）。
+ * 只比名字的话，"开关换了"与"工具表换了"在账上是一个形状，而这两件事的处置完全不同
+ * （前者是设计内的取舍、后者可能是 MCP 掉了）。带上它，"少了哪 20 件、为什么会少"一次读得出。
+ */
+interface ToolInventoryLine {
+  name: string;
+  /** `only` = 走了严格白名单；`visible` = 常规可见；`destructive-on` = 危险工具被显式打开 */
+  via: 'only' | 'visible' | 'destructive-on';
+}
+
+/**
+ * 进请求的清单 → 指纹行（**纯函数**：给同一份清单永远给同一串，重放与测试引同一份口径）。
+ *
+ * 顺序**照 `listForModel` 给的顺序**（注册顺序）——`added` / `removed` 也按它列，
+ * 于是"少了哪几件"读起来与请求体里的顺序对得上。
+ */
+function toolInventoryLines(
+  tools: readonly ToolModelSpec[],
+  options: ListForModelOptions,
+): ToolInventoryLine[] {
+  const allowOnly = options.allowOnly;
+  const destructive = options.includeDestructive;
+  return tools.map((tool) => {
+    let via: ToolInventoryLine['via'] = 'visible';
+    if (allowOnly !== undefined) via = 'only';
+    else if (destructive === true
+      || (Array.isArray(destructive) && destructive.includes(tool.name))) via = 'destructive-on';
+    return { name: tool.name, via };
+  });
+}
+
+/**
+ * 两次指纹的差（**纯函数**）。`null` = 不比（三种情形，见 {@link TurnRunner.noteToolInventory}）：
+ *   · `before` 为空 —— 还没有基线（本进程第一次构请求；重启后重新开始也是对的）；
+ *   · `after` 为空  —— 进请求的清单一件都没有。**空清单不是"清单被清空"的证据**：子代理与诊断
+ *     走的是隔离视图，`listForModel` 在它们那里本来就可能一件都不给 ⇒ 拿它报"少了 N 件"就是伪造事实；
+ *   · 两边逐行相同 —— 没变，一个字都不写（观测面的第一纪律：不许刷屏）。
+ *
+ * 判据是**集合差**（按名字），不是数组逐位比：清单重排不该报成"变了"——进请求的字节若因此不同，
+ * 那是 `tools` 段哈希的事（哨兵照旧报），不必在这里再记一条。
+ */
+function toolInventoryChangeOf(
+  before: readonly ToolInventoryLine[] | null,
+  after: readonly ToolInventoryLine[],
+  options: ListForModelOptions,
+): Omit<ToolsInventoryChanged['data'], 'turn' | 'step'> | null {
+  if (before === null || before.length === 0 || after.length === 0) return null;
+  const beforeNames = new Set(before.map((line) => line.name));
+  const afterNames = new Set(after.map((line) => line.name));
+  const removed = before.filter((line) => !afterNames.has(line.name)).map((line) => line.name);
+  const added = after.filter((line) => !beforeNames.has(line.name)).map((line) => line.name);
+  // 名字集合没变时还要比可见性：同一件工具从"常规可见"变成"白名单进来的"也是清单换版
+  const viaChanged = before.some((line) => after.find((other) => other.name === line.name)?.via !== line.via);
+  if (removed.length === 0 && added.length === 0 && !viaChanged) return null;
+  return {
+    before: before.length, after: after.length, added, removed,
+    fingerprint: TOOL_FINGERPRINT,
+    // **分类在这一行定**（2026-10-11 加）：它是"这一次变化是哪一类"的结论，判据在
+    // `toolInventoryKindOf` 一处——事后读日志的人手里只有这条事件，分类必须自带。
+    kind: toolInventoryKindOf(before, after, removed, added, options),
+    visibility: toolVisibilityOf(options),
+  };
+}
+
+/**
+ * 工具清单指纹的口径常量（与 `log/types.ts` 的 `fingerprint` 那格是同一句话）。
+ */
+const TOOL_FINGERPRINT = 'name+visibility' as const;
+
+/**
+ * MCP 工具名的命名空间前缀，**逐字与 `mcp/client.ts` 的 `MCP_NAME_PREFIX` 同值**。
+ *
+ * 为什么不 import 那一个：本文件是观察面的**分类**（`toolInventoryKindOf`），而 `mcp/client.ts`
+ * 是一个会拉进 `child_process` / `node:fs` / 启动器守卫的**运行期大模块**——为了一个字符串
+ * 常量把它整条链拖进循环层不合适。两处漂移的代价只是"分类落回 `registry`"（仍然不告警、
+ * 仍然留痕），不是判据分岔；而真实的前缀只可能是一种写法（`mcp__{server}__{tool}`，
+ * design §4.18 原则 2），改它等于改协议。
+ */
+const MCP_NAME_PREFIX = 'mcp__';
+
+/**
+ * **这一次清单变化是哪一类**（2026-10-11 加；判据只在这一处，落在事件的 `kind` 上）。
+ *
+ * 三分类，读账的人拿它决定"要不要去查"（口径写在 `log/types.ts` 的 `kind` 那一格）：
+ *   · `'mcp'`       —— `removed` / `added` 里有 `mcp__*`：MCP 掉线或上线。**真变化**，要人去查；
+ *   · `'trust-tier'`—— **信任档换档**（预期内）：同一条 `RENDER_VERSION` 下、清单只发生
+ *     父子集式的增减（一边是另一边的子集），且**不是** MCP 那批。现场就是用户报的那四张卡：
+ *     外部轮只许四件、用户/她自己那一轮 24 件，来回切。`render.ts` v44 那篇有意写下的取舍；
+ *   · `'registry'`  —— 上面两样都不是：工具表本身被换过（注册/注销/禁用开关）。
+ *
+ * 为什么"父子集"是这个判据的核心（而不是件数变没变）：**换档只动哪些件进清单、不动工具表**，
+ * 所以它必然表现为"一个名字集合包含在另一个里"（收窄 ⇒ 只减不增；放开 ⇒ 只增不减）。
+ * 而"换了一张表"通常会**同时**增删（现场：件数一样、内容换了），落 `'registry'`。
+ *
+ * ⚠ 判据刻意**不读配置**：`visibility` 那两格是"当时的开关"（原始输入），拿它反推类别等于把
+ * 结论建在输入的形状上——同一份开关在不同工具表下会得出不同的类别。这里只比**两份清单的
+ * 名字集合**（也就是这条账本来就记着的东西），`visibility` 只用来回答"这次换的是不是白名单那一档"。
+ */
+function toolInventoryKindOf(
+  before: readonly ToolInventoryLine[],
+  after: readonly ToolInventoryLine[],
+  removed: readonly string[],
+  added: readonly string[],
+  options: ListForModelOptions,
+): NonNullable<ToolsInventoryChanged['data']['kind']> {
+  // ① MCP 那批进出清单 ⇒ 掉线/上线（真变化）——先判它，免得被"父子集"这一条盖过去
+  if ([...removed, ...added].some((name) => name.startsWith(MCP_NAME_PREFIX))) return 'mcp';
+  const beforeNames = new Set(before.map((line) => line.name));
+  const afterNames = new Set(after.map((line) => line.name));
+  // ② 父子集式增减 ⇒ 换档。两种方向都算：
+  //    · 收窄（外部轮那份四件 ⊂ 用户轮那份 24 件）：只减不增；
+  //    · 放开（回到用户轮那份）：只增不减。
+  const narrowed = added.length === 0 && removed.length > 0
+    && after.every((line) => beforeNames.has(line.name));
+  const widened = removed.length === 0 && added.length > 0
+    && before.every((line) => afterNames.has(line.name));
+  // 换档是**可见性开关**造成的 ⇒ 必然有一侧是严格白名单（`allowOnly`，`via === 'only'`）。
+  // 两侧都没有白名单、却只有单方向的增/减：那更像注册表被动过（注册/注销/禁用开关）⇒ 落 `'registry'`。
+  const allowListed = options.allowOnly !== undefined
+    || before.some((line) => line.via === 'only') || after.some((line) => line.via === 'only');
+  if (allowListed && (narrowed || widened)) return 'trust-tier';
+  return 'registry';
+}
+
+/**
+ * 这一刻生效的可见性开关 → 事件要的那一格（`readonly` 的那些数组在这里**拷一份**：
+ * 事件是要落盘的 JSON，原样挂着调用方的只读引用等于让日志跟着别人的内存走）。
+ * 缺省（没给）⇒ 字段不出现，与 `data` 里其它可选格同一条纪律。
+ */
+function toolVisibilityOf(options: ListForModelOptions): ToolsInventoryChanged['data']['visibility'] {
+  const destructive = options.includeDestructive;
+  return {
+    // 三态如实落（两个分支都要，不许归一）：`boolean` 原样，名单**拷一份**——
+    // 事件是要落盘的 JSON，挂着调用方的只读引用等于让日志跟着别人的内存走。
+    ...(destructive === undefined ? {} : {
+      includeDestructive: typeof destructive === 'boolean' ? destructive : [...destructive],
+    }),
+    ...(options.allowOnly === undefined ? {} : { allowOnly: [...options.allowOnly] }),
+  };
 }
 
 // ──────────────────────────────── 压缩点（唯一一份口径） ────────────────────────────────

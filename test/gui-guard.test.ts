@@ -205,8 +205,13 @@ test('② 新鲜的退出标记 ⇒ 只记账、不拉回来，并且把标记**
 
 test('② 标记过期 ⇒ 按崩溃处理（拉起），且不去动那个过期标记', async (t) => {
   const h = harness(t, { markerTtlMs: 300_000 });
+  // 沙盒 APPDATA：`readGuiQuitMarker` 的 `env` 缺省是 `process.env` ⇒ 它会去读**这台机器真实的**
+  // `%APPDATA%\Irmia\gui-quit.marker`。那一份是用户真退界面时写的（2026-10-11 15:22 托盘退出），
+  // 它的 ts 比这里的假时钟新 ⇒ 命中"时钟回拨按刚写的保守处理" ⇒ 把 expired 盖成 fresh。
+  // 用例只该看自己沙盒里的那一份：`env` 一律显式给（与下面 ② 那两条同一条纪律）。
+  const env = { APPDATA: join(h.dir, 'AppData', 'Roaming') };
   writeGuiQuitMarker(h.dir, { now: () => new Date(h.fake.nowMs - 600_000) }); // 10 分钟前
-  assert.equal(readGuiQuitMarker(h.dir, { now: () => h.fake.nowMs, ttlMs: 300_000 }).state, 'expired');
+  assert.equal(readGuiQuitMarker(h.dir, { now: () => h.fake.nowMs, ttlMs: 300_000, env }).state, 'expired');
 
   h.fake.probe = GONE;
   await h.tick();
@@ -217,8 +222,9 @@ test('② 标记过期 ⇒ 按崩溃处理（拉起），且不去动那个过�
 
 test('② 标记读不懂（写到一半被杀 / 外部改写）⇒ 按崩溃处理（宁可多拉一次）', async (t) => {
   const h = harness(t);
+  const env = { APPDATA: join(h.dir, 'AppData', 'Roaming') }; // 同上：别看这台机器上真实的那一份
   writeFileSync(guiQuitMarkerPath(h.dir), '{"ts": "2026-10-11T00');
-  assert.equal(readGuiQuitMarker(h.dir, { now: () => h.fake.nowMs }).state, 'unreadable');
+  assert.equal(readGuiQuitMarker(h.dir, { now: () => h.fake.nowMs, env }).state, 'unreadable');
   h.fake.probe = GONE;
   await h.tick();
   await h.tick();
@@ -227,17 +233,22 @@ test('② 标记读不懂（写到一半被杀 / 外部改写）⇒ 按崩溃处
 
 test('② 标记的读写与消费自成一体（含时钟回拨按"刚写的"保守处理）', async (t) => {
   const dir = makeDir(t);
-  assert.equal(readGuiQuitMarker(dir, { now: () => BASE_MS }).state, 'absent');
+  // ⚠ 这条用例里两处**都不能**吃 `process.env`：读的缺省落点里第二处是这台机器真实的
+  // `%APPDATA%\Irmia\gui-quit.marker`（外部的新鲜标记会把 absent/expired 全盖成 fresh），
+  // 而 `consumeGuiQuitMarker` 更是**两处一起删** —— 缺 `env` 时它会顺手把用户那份真标记删掉。
+  // 所以下面每一个直调都显式给沙盒 `env`（判断与消费都只在自己这一份上闭环）。
+  const env = { APPDATA: join(dir, 'AppData', 'Roaming') };
+  assert.equal(readGuiQuitMarker(dir, { now: () => BASE_MS, env }).state, 'absent');
   const written = writeGuiQuitMarker(dir, { now: () => new Date(BASE_MS), pid: 45008, reason: 'window-close' });
   assert.equal(written.ok, true);
-  const fresh = readGuiQuitMarker(dir, { now: () => BASE_MS + 1_000, ttlMs: 300_000 });
+  const fresh = readGuiQuitMarker(dir, { now: () => BASE_MS + 1_000, ttlMs: 300_000, env });
   assert.equal(fresh.state, 'fresh');
   assert.equal(fresh.record?.pid, 45008);
   assert.equal(fresh.record?.reason, 'window-close');
   // 时钟回拨 ⇒ ageMs 为负 ⇒ 当"刚写的"（与 instance-lock 同一条保守口径）
-  assert.equal(readGuiQuitMarker(dir, { now: () => BASE_MS - 60_000, ttlMs: 300_000 }).state, 'fresh');
-  assert.equal(consumeGuiQuitMarker(dir), true);
-  assert.equal(consumeGuiQuitMarker(dir), false, '删两次第二次就没了（幂等）');
+  assert.equal(readGuiQuitMarker(dir, { now: () => BASE_MS - 60_000, ttlMs: 300_000, env }).state, 'fresh');
+  assert.equal(consumeGuiQuitMarker(dir, env), true);
+  assert.equal(consumeGuiQuitMarker(dir, env), false, '删两次第二次就没了（幂等）');
 });
 
 test('② 界面不知道 dataDir 也能写标记：`%APPDATA%\\Irmia\\` 那个落点同样算数（两处一起消费）', async (t) => {

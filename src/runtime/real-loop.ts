@@ -70,7 +70,7 @@ import type { PersonaAssets } from '../persona/loader.js';
 import { applyOne, finalizePressure, wakeSourceOf } from '../state/fold.ts';
 import { saveProjectionCache } from '../state/projection-cache.ts';
 import { writeSnapshot } from '../state/snapshot.ts';
-import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, mentionNoticeOf, contactWithWakeStamp, type AgentLoopBudget, type AgentLoopDeps } from './agent-loop.ts';
+import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, mentionNoticeOf, contactWithWakeStamp, type AgentLoopBudget, type AgentLoopDeps, type TurnTiming } from './agent-loop.ts';
 // 回投能力的唯一判据在 tools/admin（speak 第三路用它）：这里读同一个函数，
 // 免得「提示词告诉她能发」与「实际能不能发」变成两套口径。
 import {
@@ -89,8 +89,8 @@ import {
 } from '../channel/attachment-store.ts';
 import { deliveredToSid, replyableWakeChannel } from '../tools/admin.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
-import type { MachineFacts, RenderChannelContext, RenderImageRef, TurnBlockFacts, UsageFacts } from '../model/render.ts';
-import { RENDER_VERSION, mcpIndexOf, wakeTitle } from '../model/render.ts';
+import type { MachineFacts, MaintenanceWindowNote, RenderChannelContext, RenderImageRef, TurnBlockFacts, UsageFacts } from '../model/render.ts';
+import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, wakeTitle } from '../model/render.ts';
 // 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
 // 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
 import type { ConfigReloadOutcome } from '../config/watcher.js';
@@ -109,7 +109,7 @@ import { holdsGroupBatch } from './group-batch.ts';
 import type { SkillManager } from '../skill/skills.js';
 import type { HookRunner } from '../hook/hooks.js';
 import type { TimerStore } from '../wake/timer-store.js';
-import { modelVisibilityFor, trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
+import { trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
 import { createAuthzGate, type Scenario } from './authz.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 import { WarnExemptBook, type WarnExemptSubject } from '../channel/warn-exempt.ts';
@@ -1240,6 +1240,21 @@ export class RealLoop {
    * 每拍清零上报，不做累计（累计数会把"上一次卡顿"混进"这一次"）。
    */
   private tickSkipped = 0;
+  /**
+   * **上一轮 turn 的收尾计时**（`agent-loop` 的 `onTurnTiming` 回填，见 BUG-4）。
+   *
+   * 为什么要有这份刻度：慢拍（`runtime/slow-tick`）原来只记 `elapsedMs`，而 131 s / 221 s
+   * 这两类现场**分不清是模型往返慢，还是收尾那几个 O(事件数) 的同步扫描把事件循环占死**
+   * ——两者都表现为 `elapsedMs` 很大、`busy=false`。有了 `compactMs` 与 `events`，
+   * "`turnMs - compactMs` 远大于 `compactMs`"就是模型/工具那一段慢，"`compactMs` 自己几十秒"
+   * 才是收尾扫描。**只加观测，不动阈值**（诊断口径：补刻度之前不要动压缩阈值）。
+   *
+   * 一次 tick 只在真跑过一轮时被写一次（`runTurn` 之前清零）⇒ 慢拍账里的数永远是**本轮**的，
+   * 不会把上一拍的读数混进来。
+   */
+  private lastTurnTiming: TurnTiming | null = null;
+  /** 本轮 `runTurn` 的耗时（毫秒）；本轮没跑过 turn 就是 0（与 `lastTurnTiming` 同进同出） */
+  private lastTurnMs = 0;
   /** 附件预热扫到哪条事件了（重启后归零，从窗口起点补一次） */
   private attachmentScanSeq = 0;
   /**
@@ -1349,6 +1364,19 @@ export class RealLoop {
    * "本拍的事件"与"盘上的事件"漂开，而后面按它判重的那几处会一起被骗。
    */
   private eventView: readonly AppEvent[] = [];
+
+  /**
+   * **本轮的维护窗口信号**（2026-10-11）：轮首算一次，deps 那一格整轮原样转手。
+   *
+   * 为什么必须在轮首算、且**一轮只算一次**：
+   *   · 此刻层那条 `维护窗口：` 是**逐 step 发**的（与 v32 的 STATE 提醒同一层）——它若每个 step
+   *     现算，同一轮里就会随时刻/空拍数抖动，前缀从那一行起每一步都失配；
+   *   · 判据要的四样材料里有两样是"读日志"（上一条 `compaction/decision` 的 historyTokens 与
+   *     上一次窗口的时刻），逐 step 读一遍是白花。
+   *
+   * 它是**纯观测 + 一句提示**：不改任何判据、不动任何文档（用户的红线："框架只给信号"）。
+   */
+  private maintenanceWindowNow: MaintenanceWindowNote | null = null;
 
   /**
    * 预热跑完之前到达的**配置热更通报**（一次重载最多一条，见 `notifyConfigReloaded`）。
@@ -1773,7 +1801,20 @@ export class RealLoop {
       // 这里原来是 `prefetchAssetsLine(wakeEvents)`——轮首读 `MEMORIES/assets.md`、把索引喂给
       // light 挑 ≤3 条、渲染成任务卡上那行「本任务相关资产：…」。理由与替代（她自己照清单读）
       // 写在 `persona/assets.ts` 的文件头；`MEMORIES/assets.md` 一个字节都没动，事实层照旧。
+      // 维护窗口（2026-10-11）：**在装配 deps 之前**把这一轮的那一条定下来。
+      // 位置在"输入已经认领、turn 号还没分配"那一段之后——它读的是日志里的既有事实
+      // （上一条 `compaction/decision` 与投影里的空拍数），而不是本轮还没发生的事。
+      //
+      // 为什么不放在 `prepareTurn` 更前面：`this.eventView` 是 `mcpIndexSync` 每拍定下的那份
+      // **本拍事件快照**（上面那一行已经跑过），放在这之后读到的才是"本拍照旧的事实"，
+      // 也才不必自己再全量读一遍日志（那是一次真实的磁盘往返）。
+      this.maintenanceWindowNow = this.maintenanceWindowFor();
       let reason: TurnEndReason;
+      // 慢拍刻度（BUG-4）：先把上一轮的读数清掉，再量这一轮。**存的是"这一轮"**，
+      // 所以 `runtime/slow-tick` 里那几格永远对得上它自己那一段（见 lastTurnTiming 的注释）。
+      this.lastTurnTiming = null;
+      this.lastTurnMs = 0;
+      const turnStartedAt = Date.now();
       try {
         reason = await runTurn(this.agentDeps(wakeEvents), wakeEvents);
       } finally {
@@ -1781,6 +1822,9 @@ export class RealLoop {
         // 插话计数**不清零**（它只增不减，speak 每次开口时重新取基准值）。
         this.wakeChannelData = null;
         this.userSpokeNote = null;
+        // 计时在 finally 里收口：整轮抛错时这一段照样是"这一拍照它耗了多久"的事实
+        // （那种拍的 `compactMs` 仍为 0——收尾根本没跑到，如实缺席，不编一个数）。
+        this.lastTurnMs = Date.now() - turnStartedAt;
       }
       this.write(`[循环] turn 结束：${reason.kind}`);
       // 压缩之后**叫醒她一次**（`wake/manual` · `via: 'compact'`，2026-10-09）：压完不叫，
@@ -1856,8 +1900,21 @@ export class RealLoop {
       this.tickSkipped = 0;
       if (elapsedMs >= this.pollMs) {
         try {
+          // 刻度（BUG-4）：`turnMs` 为 0 = 这一拍没跑过模型那一轮（prepare / 快照 / 指令那几段），
+          // 那种拍的耗时全在 prepare 那一侧；`compactMs` 是 `turnMs` 的**子集**，
+          // `events` 是收尾那几个同步扫描的规模输入（读法与口径写在 lastTurnTiming 上）。
+          const timing = this.lastTurnTiming;
+          const turnMs = this.lastTurnMs;
           this.appendSync('runtime/slow-tick', {
             elapsedMs, pollMs: this.pollMs, skipped, busy: this.busy,
+            turnMs,
+            // 这一拍没跑过模型那一轮（prepare / 快照 / 指令那几段）⇒ 三格如实为 0：
+            // 那种拍的耗时**全在 prepare 那一侧**，不许拿 `elapsedMs` 冒充满 `turnMs`。
+            compactMs: timing?.compactMs ?? 0,
+            events: timing?.events ?? 0,
+            // 事件的**读数口径**与总水位：`events` 是本 runner 可见的那一份快照（子代理链与
+            // slash 指令那两类被 eventFilter 挡掉），所以两者一起看才知道这个数是不是全部。
+            ...(timing === null ? {} : { eventsThroughSeq: timing.eventsThroughSeq }),
           }, 'internal');
         } catch {
           // 观测不许反过来打断循环：这条账丢了不影响任何判据（它不是承诺类事实）
@@ -1925,8 +1982,61 @@ export class RealLoop {
    *
    * 返回"这一拍定下的文本"，便于测试直接断言（生产调用点不需要它）。
    */
-  async mcpIndexSync(): Promise<string> {
-    // ── **共用那份增量快照，不自己再 `readAll()` 一遍**（2026-10-10 修） ──
+  /**
+   * **本轮那条维护窗口信号**（2026-10-11）——判据在 `render.ts` 的 `maintenanceWindowOf`（纯函数），
+   * 这里只负责把**四样材料**凑齐（时钟、事件、投影、时区都在宿主手上，渲染层一样都拿不到）。
+   *
+   * ## 四样材料，各自为什么从这里取
+   *
+   *   ① **压缩临近**：读**上一条 `compaction/decision`** 的 `historyTokens` / `thresholdTokens`
+   *      （`lastCompactionReading`）——它与压缩判定**同源**（同一个 `estimateHistoryTokens` 的
+   *      结论），所以"她说 79%、框架说 81%"这种两套数不会出现。
+   *      ⚠ **刻意不在这里现算一遍**（那要把整份事件快照扫一次）：那位用户点名要治的毛病就是
+   *      "反复读已经知道的东西"，而 `historyTokens` 每轮收尾**已经算过一次并落了账**。
+   *      代价是它读数最多旧一轮（那一轮之后新长出来的历史还没计入）——这是**保守**的那一侧：
+   *      只会让窗口晚一拍出现，不会让它提前。
+   *   ② **凌晨**：`localHourOf(deps.now(), timezone)` ——与此刻层 `时刻：` 那一行**同一把尺子**
+   *      （同一个 `Intl` 口径），"现在几点"与"现在是凌晨"不会各说一套。
+   *   ③ **长时间空拍**：`projection.idleTicks`（每命中一拍心跳 +1，任何外部事件到达即归零）。
+   *   ④ **上一次窗口是什么时候**：`lastMaintenanceWindowAt(this.eventView)`——从日志里读回来，
+   *      不是记在内存里（重启后内存那份就没了，而那道 6 小时的闸恰恰要跨重启成立）。
+   *
+   * ## 它不是每拍都算（一次都不多算）
+   *
+   * 它**一轮只算一次**（在装配 deps 之前那一行），而且那两处日志扫描（`lastCompactionReading` /
+   * `lastMaintenanceWindowAt`）都是**顺着本拍已经读进来的那份快照走一遍**——不额外读盘、不额外
+   * 全量扫（`mcpIndexSync` 每拍已经付过那一次）。与"反复读已经知道的东西"这条毛病正相反：
+   * `historyTokens` 本来就是每轮收尾算过一次的结论，这里只把它**读回来**。
+   *
+   * 失败方向：任何一样材料读不出来（`now` 非法、时区名坏掉）⇒ 少一条窗口，绝不抛错
+   * ——它是提示，不是判据，不该有能力打断一轮。
+   */
+  private maintenanceWindowFor(): MaintenanceWindowNote | null {
+    try {
+      const now = this.deps.now();
+      const nowMs = now.getTime();
+      if (!Number.isFinite(nowMs)) return null;
+      const local = localHourOf(now.toISOString(), this.deps.timezone);
+      // 压缩那一条的两个数：**读上一条 `compaction/decision`**（同源，见方法头 ①）
+      const reading = lastCompactionReading(this.eventView);
+      const idle = this.deps.projection.idleTicks;
+
+      return maintenanceWindowOf({
+        historyTokens: reading.historyTokens,
+        compactionThresholdTokens: reading.thresholdTokens,
+        localHour: local?.hour ?? null,
+        localDay: local?.day ?? null,
+        idleTicks: typeof idle === 'number' && Number.isFinite(idle) ? idle : null,
+        lastWindowAtMs: lastMaintenanceWindowAt(this.eventView),
+      }, nowMs);
+    } catch {
+      // 提示算不出来就**当没有窗口**（不抛）：它与 `usageAlert` / `machineLine` 同一条纪律——
+      // 此刻层宁可少一行，也不许把这一层搞脏。
+      return null;
+    }
+  }
+
+  async mcpIndexSync(): Promise<string> {    // ── **共用那份增量快照，不自己再 `readAll()` 一遍**（2026-10-10 修） ──
     //
     // 这条路径原来每一拍都 `for await (…) log.readAll()` 把**全量**日志折进一个**新数组**。
     // 实测代价（`_research/probe-tick-churn.mts`，7.4 万条 / 59 MB）：
@@ -3285,11 +3395,12 @@ export class RealLoop {
     this.warnExemptBook().refresh();
     // 场合：最高档 = GUI/本机唤醒、官 bot 上用户 id 的会话（单聊与群聊都算）、她自己。
     // 其余（群里别人、陌生单聊、webhook）都是"软件里遇到的人"→ guest。
-    const scenario: Scenario = this.scenarioOf(wakeEvents);
-    // 本轮可信级别：**与上面 scenario 同源**（`trustOfTurn` 一处判定，两个消费点各取自己那半边）。
-    // 场合只有两档（owner/guest），而工具清单要区分四档——`trusted`（单聊里记过名字的熟人）
-    // 与 `external`（群里的人）拿到的清单不同，见下面的 modelVisibility。
+    // 本轮可信级别：**只判这一次**（`trustOfTurn`），下面两个消费点各取自己那半边：
+    //   · `scenario` → 给 `authzGate` 的场景档：**执行期**那道门，这里要它；
+    //   · `trust` → 只进 `budget/consumed.context.trust` 那一格账（纯观测，不进请求体）。
+    // **不再有第三个消费点**：工具清单不读它（常量口径，见下面 `modelVisibility` 那段）。
     const trust: TurnTrust = this.trustOfTurn(wakeEvents);
+    const scenario: Scenario = trust === 'owner' || trust === 'self' ? 'owner' : 'guest';
     // 本轮固定块的素材（B2）：**在这里读一次**，整轮共用同一份（见 turnBlockFacts）。
     // 读一次是这段代码的全部要点：`deriveRequest` 每步都会重新读 deps，而 deps 里的这份
     // 是**轮首快照**——一轮之内它逐字节不变，"不必每步重新编码"才成立。
@@ -3354,19 +3465,35 @@ export class RealLoop {
       // 进模型清单的工具口径（§4.10 第三级门）：destructive 工具有没有「全开」或进名单，
       // 由配置说了算——以前这里恒为空对象，界面上把 destructive 打开也不会有任何效果。
       //
-      // 再叠一层：**按本轮的可信级别收紧**（runtime/trust.ts）——外部来源只看到白名单那四件
-      // （speak / report / read_channel / vision_read），`trusted` 那一档一律不含 destructive。
-      // 合成只有一处实现：`modelVisibilityFor`（本文件这个分支上**曾经**写的是恒为
-      // `{ includeDestructive }` 的裸取值，于是"外部轮次天然拿不到 mcp"这句话在代码里不成立——
-      // 外部轮次看得见也调得动 `mcp`，而 config 里 destructiveEnabled 一开，MCP 侧的破坏性
-      // 工具全部放行。那份注释在 2026-10-09 的复核里被判为"文档写着有门、代码里没有"）。
+      // **这一行是恒定的**（2026-10-04 用户定稿"工具清单恒定"，2026-10-11 复核后恢复原设计）：
+      // **不按信任级、不按会话增减**——`tools` 段只是这一格与注册表的函数，同一份配置下
+      // 所有轮次逐字节相同。理由实测：清单随场景变会让它之后那整段历史的前缀缓存失效
+      // （同签名命中 85.2% / 换签名 41.2%，最差 2%）。
       //
-      // **工具清单恒定**（2026-10-04 用户定稿：不再按信任级增减件数）这条铁律在这里被**有意**
-      // 推翻一次：实测口径是"清单随会话变会让它之后那整段历史的前缀缓存失效"（同签名命中 85.2%、
-      // 换签名 41.2%）。安全那半边压过这一个百分数——只按信任级（不是按会话）分档，工具清单
-      // 仍然只有**四档**，同一档内的所有轮次逐字节相同。代价是换档那一次 miss，按 `render.ts` 的
-      // 红线同批递增了 `RENDER_VERSION`（43 → 44）。能力的收窄**另有一道**执行期门，见 authzGate。
-      modelVisibility: modelVisibilityFor(trust, d.config.tools.destructiveEnabled),
+      // **`trust` 与它无关**（这一点别再改动）：本轮的可信级别不再进这一格。外部来源那几轮
+      // 怎么收窄见 `docs/design.md:1029`——**不在工具清单层，在执行期**（`authzGate` +
+      // `tools.groupSceneHardRefusal`；软提醒默认 / 硬拒绝由用户在 GUI 选，见
+      // `authz.ts:16-18,20` 与 `channels_page.dart` 的"群聊场景"开关）。
+      // `runtime/trust.ts` 的 `modelVisibilityFor` 与 `EXTERNAL_TOOL_ALLOWLIST` 都还在
+      // （用例也还钉着，见 `test/trust.test.ts`），只是**刻意不调用**：它一旦接回这一行，
+      // 清单就又开始按轮次变——那正是这条铁律禁止的事（工具数组只在**版本更新**时变）。
+      //
+      // ⚠ **曾经在这里接过一次**（`481db36`，v44：`modelVisibilityFor(trust, …)` + 同批
+      // `RENDER_VERSION` 43 → 44）。那次是照 `docs/mcp-chain-review.md` 缺陷 ① 的 A1 口径做的，
+      // 它按"把清单层白名单接回来"收窄了外部轮次；用户 2026-10-11 的裁决推翻了它
+      // （"tool 数组是绝对不动的任何情况都不应该变动"⇒ 只有软提醒/硬拒绝两种选项，由用户在
+      // GUI 选）。**不要照那份评审稿的 A1 把它再接回来**——要收窄就动 `authzGate` 那一层。
+      modelVisibility: { includeDestructive: d.config.tools.destructiveEnabled },
+      // **同一份 `trust` 原样递给账**（2026-10-11 加，纯观测）：只落
+      // `budget/consumed.context.trust` 那一格。
+      //
+      // 为什么不能靠循环层自己反推：它读的是 `modelVisibility`，而上面那一行**已经是常量**
+      // ——四档合出来是同一个形状，反推不出是哪一档。而"这一拍到底是用户轮还是外部轮"
+      // 正是这张账要回答的问题（判据与场景那半边同源，见 `scenarioOf()`）。
+      //
+      // ⚠ 它**不进请求体**：`context` 是 `budget/consumed` 的观测面
+      //（`ds-client.buildRequestBody` 不碰它），所以这一格**不改字节、不动 `RENDER_VERSION`**。
+      trust,
       // 活动边界（`config.trust.mode`）：**装配层唯一的消费点**——判据是 config.ts 的
       // `trustBoundaryRoot`（'full' → null 完全信任 / 'workspace' → 只限 trust.workspaceRoot）。
       // 与 workspaceRoot 一样是启动期定下的（它进的是 `AgentLoopDeps`，每 turn 重新装配一次，
@@ -3431,6 +3558,10 @@ export class RealLoop {
       // 「她的 STATE 有多少字节」不在这里量——deriveRequest 从 `persona.state` 量，
       // 重放与界面预览因此拿到同一个数（三处判据一致，见 agent-loop 的注释）。
       stateBudgetBytes: d.config.persona.stateBudgetBytes,
+      // 维护窗口（2026-10-11）：**轮首算好的那一格**（`maintenanceWindowFor` 在 `prepareTurn`
+      // 里、装配本方法之前算一次），整轮每个 step 原样转手。
+      // 它是纯提示：不进判据、不改任何文件（用户的红线"框架只给信号"）。
+      maintenanceWindow: this.maintenanceWindowNow,
       // 记忆索引注入账（B2）：宿主给"注入了没有 + 当时那份索引的指纹与条数"，
       // 循环层在轮首写 `memory/selected` 事件（索引全文不落事件，见那个事件的注释）。
       // 心跳轮（只有 wake/heartbeat）记 injection:'heartbeat'——那一轮不注入（docs §5）。
@@ -3445,6 +3576,9 @@ export class RealLoop {
       // `WarnExemptBook.isExempt` 这一处实现，宿主在这里递一次、每步原样转手（渲染不读盘）。
       // 名单只在本方法开头 refresh 一次——粒度就是"轮"（改完下一轮生效）。
       warnExempt: (subject: WarnExemptSubject) => this.warnExemptBook().isExempt(subject),
+      // 收尾计时（BUG-4）：循环层只提供这一格，整轮时长由 `tickOnce` 量（它才知道 `runTurn`
+      // 是从哪一刻起的）。**纯观测**：压缩判据、遮蔽点、写不写摘要一个都不看它。
+      onTurnTiming: (timing) => { this.lastTurnTiming = timing; },
       // 缓存破坏哨兵的阈值（config.contextAudit）：观测阈值，只决定"要不要记一条 cacheBreak"
       cacheBreakThresholds: {
         idleMs: this.deps.config.contextAudit.cacheBreakIdleMin * 60_000,
@@ -4481,11 +4615,15 @@ export class RealLoop {
   }
 
   /**
-   * 这一轮的可信级别（`owner` / `self` / `trusted` / `external`）——**唯一一处**判定入口。
+   * 这一轮的**可信级别**（`owner` / `self` / `trusted` / `external`）——判据的**唯一入口**。
    *
-   * 两个消费点必须读同一份结论，否则会漂成"鉴权按外部算、工具清单按用户给"：
-   *   · `scenarioOf()`（authz 的场景档：用户/她自己 → owner，其余 → guest）
-   *   · `agentDeps()` 的 `modelVisibility`（工具清单白名单）
+   * 判据本身在 `runtime/trust.ts` 的 `trustOfBatch`（唤醒批次 + 联系人表 + 用户 id 集合，
+   * 三样都在宿主手里），这里只是**组装输入**。
+   *
+   * **两个消费点，都不碰工具清单**：`agentDeps()` 里 derive 出场合喂 `authzGate`（`owner`/`self`
+   * → `owner`，其余 → `guest`），以及把原始档位递给 `budget/consumed.context.trust`（纯观测）。
+   * 工具清单是**常量**口径（`agentDeps()` 的 `modelVisibility` 那一段），不读这个结论——
+   * 2026-10-04 用户定稿"工具清单恒定"，2026-10-11 裁决把它恢复过来。
    *
    * 认不出来的来源一律 `external`——判据在 `trustOfWake` 的 default 分支，不在这里补默认。
    */
@@ -4499,11 +4637,6 @@ export class RealLoop {
     );
   }
 
-  /** 这一轮的场合（owner = 自己家；guest = 软件里遇到的人）。认不出按 guest 算（从严） */
-  private scenarioOf(wakeEvents: readonly AppEvent[]): Scenario {
-    const trust = this.trustOfTurn(wakeEvents);
-    return trust === 'owner' || trust === 'self' ? 'owner' : 'guest';
-  }
   /**
    * 发言人（`person`）→ 名字：**这一条路是"她眼里这个人叫什么"的唯一判据**。
    *

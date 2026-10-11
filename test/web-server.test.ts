@@ -46,7 +46,8 @@ import { TimerStore } from '../src/wake/timer-store.ts';
 import { AUTH_FILE_NAME, SCRYPT_PARAMS, UI_TOKEN_FILE, readLegacyToken } from '../src/web/auth.ts';
 import { WebhookSecretStore } from '../src/web/webhook-secret.ts';
 import {
-  DASHBOARD_EVENT_WINDOW, buildPersonaFiles, instanceIdOf, parseRestartTrace, restartCommandLine, restartNote,
+  CONFIRM_PHRASES, DASHBOARD_EVENT_WINDOW, buildPersonaFiles, instanceIdOf, parseRestartTrace, restartCommandLine,
+  restartNote,
   startWebServer,
   type WebServer,
 } from '../src/web/server.ts';
@@ -1181,6 +1182,93 @@ test('POST /api/commands/config-update：trust.mode 要字段短语（两个方�
   });
   assert.equal(back.status, 200);
   assert.equal(disk().trust?.mode, 'full');
+});
+
+/**
+ * `POST /api/commands/set-compaction-threshold`（2026-10-12 加）：压缩线**可读可改、改完立刻生效**。
+ *
+ * 用户原话：「与之配合的，框架也得有 compact 80% 预警。然后预算 compact 线（history 大小），
+ * 默认从 100k 提升到 200k，然后暴露在 GUI。」
+ *
+ * 这一条钉四件事（缺一条这个端点就没有存在的理由）：
+ *   ① **盘上与内存一起变**：只写盘那是 `config-update` 的行为（回执写死 requiresRestart），
+ *      而这个端点要的是"界面上改一下，这一拍就按新线算"——`real-loop` 每 turn 读的是内存那份；
+ *   ② 非法值（下限之下 / 上限之上 / 小数 / 非数字 / 缺字段）：400 + **人话理由**，
+ *      且**盘上与内存一个字节都不动**（"不许写坏配置"）；
+ *   ③ `/api/config`（**生效**那份，界面读的就是它）当场给出新值 ⇒ 界面画的是运行期真值；
+ *   ④ 落痕：`config/changed` 点名这个字段（internal，不进请求）。
+ */
+test('POST /api/commands/set-compaction-threshold：写内存 + 写盘、非法值人话拒绝', async (t) => {
+  const fx = await setup(t);
+  const disk = (): { persona?: { compactionThresholdTokens?: number } } =>
+    JSON.parse(readFileSync(fx.configPath, 'utf8')) as { persona?: { compactionThresholdTokens?: number } };
+  // 夹具这份 config.json 里**没有** persona 这一节（只有 $comment / schemaVersion / budget），
+  // 所以"被拒的请求什么都没写"的判据是"盘上压根没有 persona"，比"值不等于 X"更硬。
+  assert.equal(disk().persona, undefined, '前提：夹具盘上没有 persona 这一节');
+  // 出厂默认（buildDefaults）就是新口径 200000：夹具用的是 defaultConfig，顺带钉住这一格
+  assert.equal(fx.config.persona.compactionThresholdTokens, 200_000, '出厂压缩线 = 200000');
+
+  // ① 合法值：盘上与内存一起变
+  const ok = await call(fx, '/api/commands/set-compaction-threshold', {
+    method: 'POST',
+    body: { tokens: 250_000 },
+  });
+  assert.equal(ok.status, 200);
+  const okBody = ok.body as {
+    compactionThresholdTokens: number; effective: boolean; restartRequired: boolean;
+  };
+  assert.equal(okBody.compactionThresholdTokens, 250_000);
+  assert.equal(okBody.effective, true);
+  assert.equal(okBody.restartRequired, false, '这一格是立刻生效的：回执不许叫人来重启');
+  assert.equal(disk().persona?.compactionThresholdTokens, 250_000, '盘上那份要跟着变');
+  assert.equal(fx.config.persona.compactionThresholdTokens, 250_000, '内存那份也要变（立刻生效的判据）');
+
+  // ③ 界面读的是生效那份（`/api/config` 默认那条）——同一个进程里当场就是新值
+  const live = await call(fx, '/api/config');
+  assert.equal(live.status, 200);
+  assert.equal(
+    (live.body as { persona: { compactionThresholdTokens: number } }).persona.compactionThresholdTokens,
+    250_000,
+  );
+
+  // ④ 留痕（internal：不进请求）
+  const last = (await fx.readAll()).at(-1)!;
+  assert.equal(last.type, 'config/changed');
+  assert.deepEqual((last.data as { fields: string[] }).fields, ['persona.compactionThresholdTokens']);
+
+  // ② 非法值：五连拒，逐条给人话理由，且一个字节都不许动
+  const bad: Array<[string, unknown]> = [
+    ['下限之下', 9_999],
+    ['上限之上', 2_000_001],
+    ['小数', 199_999.5],
+    ['字符串', '200000'],
+    ['缺字段', undefined],
+  ];
+  for (const [why, tokens] of bad) {
+    const res = await call(fx, '/api/commands/set-compaction-threshold', {
+      method: 'POST',
+      body: tokens === undefined ? {} : { tokens },
+    });
+    assert.equal(res.status, 400, `${why}必须被拒`);
+    assert.equal(errorOf(res).code, 'bad-request', `${why}的错误码`);
+    assert.match(errorOf(res).message, /压缩线|tokens/u, `${why}：理由要人话、并点名是哪一格`);
+    assert.equal(disk().persona?.compactionThresholdTokens, 250_000, `${why}：被拒的请求不许动盘`);
+    assert.equal(fx.config.persona.compactionThresholdTokens, 250_000, `${why}：也不许动内存`);
+  }
+
+  // 两端本身是**收**的（闭区间：正好在下限/上限上照收——边界值是"合法但极端"，不是非法）
+  for (const edge of [10_000, 2_000_000]) {
+    const res = await call(fx, '/api/commands/set-compaction-threshold', {
+      method: 'POST',
+      body: { tokens: edge },
+    });
+    assert.equal(res.status, 200, `边界值 ${edge} 应当照收（闭区间）`);
+    assert.equal(fx.config.persona.compactionThresholdTokens, edge);
+  }
+
+  // 这条命令不改能力边界：与 set-group-scene 同级，短语为 null（不带 X-Confirm 也放行——
+  // 上面每一次 call 都没带，这正是判据）
+  assert.equal(CONFIRM_PHRASES['set-compaction-threshold'], null);
 });
 
 test('POST /api/commands/webhook-test：走同一个告警出口，失败如实报告', async (t) => {

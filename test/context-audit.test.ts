@@ -16,10 +16,11 @@ import { describe, test } from 'node:test';
 import {
   CACHE_BREAK_CAUSE_LABEL, CACHE_BREAK_CLASS_LABEL, CONTEXT_LABEL, DEFAULT_CACHE_BREAK_THRESHOLDS,
   detectCacheBreak, describeContext, hashOf, isExpectedCause, lastAuditedCall,
-  type AuditedCall, type ContextBreakdown,
+  type AuditedCall, type ContextBreakdown, type ContextSectionFact,
 } from '../src/model/context-audit.ts';
 import { RENDER_VERSION, render, type RenderInput, type RenderPersona } from '../src/model/render.ts';
 import { defaultVisibility } from '../src/log/types.ts';
+import { estimateTokens } from '../src/tools/registry.ts';
 import type { AppEvent, BudgetConsumed } from '../src/log/types.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
@@ -477,15 +478,18 @@ describe('失守归因：预期内的降级成普通记录，无法归因的才�
     assert.equal(sameTurn?.cause, 'unattributable', '同一轮内改动无法归因 ⇒ 仍然告警');
     assert.equal(sameTurn?.silent, false);
 
-    // 判据只紧不松：同一次换轮里她**真改了 STATE** ⇒ 有内容变化，照旧报（归因 asset）
-    const withAsset = detectCacheBreak(t9, t10, DEFAULT_CACHE_BREAK_THRESHOLDS, [
-      evt(120, 'persona/updated', { file: 'STATE.md', diffHash: 'h', by: 'agent' }),
-      evt(150, 'turn/end'),
-      evt(160, 'turn/start'),
-    ]);
-    assert.equal(withAsset?.class, 'state', '她真改了资产时不许被"形状差异"盖掉');
-    assert.equal(withAsset?.cause, 'asset');
-    assert.equal(withAsset?.silent, true);
+    // 判据只紧不松的**旧形状**（2026-10-11 起被"跨轮不比段"整体取代，见下面那一节）：
+    // 同一次换轮里她真改了 STATE —— 以前这里报 `state`（归因 asset），现在**轮号不同就不比**。
+    // 换成同一轮内的形状，把"她真改了资产 ⇒ 报 asset"这条性质照旧钉住（判据一个字没放松）。
+    const assetSameTurn = detectCacheBreak(
+      seqCall(comparable, 100, 0, 100, 0, 9),
+      seqCall(blockChangedContext, 150, 1, 100, 0, 9),
+      DEFAULT_CACHE_BREAK_THRESHOLDS,
+      [evt(120, 'persona/updated', { file: 'STATE.md', diffHash: 'h', by: 'agent' })],
+    );
+    assert.equal(assetSameTurn?.class, 'state', '她真改了资产时必须报出来');
+    assert.equal(assetSameTurn?.cause, 'asset');
+    assert.equal(assetSameTurn?.silent, true);
   });
 
   test('渲染版本换代与空闲塌陷：各自算一条原因，都不告警', () => {
@@ -524,6 +528,236 @@ describe('失守归因：预期内的降级成普通记录，无法归因的才�
     assert.equal(CACHE_BREAK_CAUSE_LABEL.asset, '她改了资产');
     assert.equal(CACHE_BREAK_CAUSE_LABEL.unattributable, '无法归因');
     assert.equal(CACHE_BREAK_CLASS_LABEL.state, '固定块改写');
+  });
+});
+
+// ──────────────────── ④b 跨轮不比段 + 段级 changed/side（2026-10-11 修） ────────────────────
+
+/**
+ * **BUG-2 的判据那一半：跨轮不比段。**
+ *
+ * 现场：本机 00:27:38 / 00:30:36 / 00:30:52 三拍都报「缓存前缀失守（memory）」并告警，
+ * 而 `diff[0]` **逐字段完全相同**（`cfe932817dcb2a6e`(4208) → `1ad6e5ffc5306859`(4267)）。
+ * 三拍的 `turn` 都是 1302，基线却被取成了 **turn 1300 的 step 1**（seq 76203）——
+ * 拿**别的轮**的那一拍当基准，"变了"就是跨轮比出来的假差异。
+ *
+ * 两处各修一半，缺一仍会误报：
+ *   · **基线那一半**在 `agent-loop` 的 `TurnRunner`（`previousAuditedCall`：本 runner 自己记上一拍，
+ *     不再从 `this.events` 那个轮首快照里现取——那正是"同一个 prev 被连用三拍"的根）；
+ *   · **判据那一半**在 `detectCacheBreak`（本节）：轮号不同 ⇒ 两个请求形状本就不同
+ *     （固定块在轮首重建、工具清单与记忆层都可能整体换版）⇒ "哪一段失守"这个问题本身不成立。
+ *
+ * 正交判据（`render` / `idle`）**不在这条护栏里**：它们比的是版本号与命中率，
+ * 与"两拍可不可比"无关，跨轮时照旧成立（下面最后一条正面钉着）。
+ */
+describe('跨轮不比段：轮号不同就不报段失守（BUG-2 判据那一半）', () => {
+  const base = renderOnce().context;
+  /** 形状可比的那一份（与 ④ 同一份理由：块要真发过、历史前段要攒满） */
+  const comparable: ContextBreakdown = {
+    ...base,
+    state: { tokens: 120, hash: 'block-v1', items: 1 },
+    history: { tokens: 500, hash: 'hist-v1', items: 26, headHash: 'head-v1' },
+  };
+  const callsOf = (context: ContextBreakdown, seq: number, minutes: number, hit: number, miss: number,
+    turn: number): AuditedCall => ({ ...call(context, minutes, hit, miss), seq, turn });
+  const evtOf = (seq: number, type: string, data: Record<string, unknown> = {}): AppEvent =>
+    ({ seq, ts: new Date(T0_MS + seq * 1000).toISOString(), type, data, visibility: 'internal' }) as unknown as AppEvent;
+  /** 上一轮那一步发块、这一轮第 1 步的块换了个快照（现场形状） */
+  const blockV2 = { ...comparable, state: { tokens: 90, hash: 'block-v2', items: 1 } };
+
+  test('prev.turn ≠ cur.turn ⇒ 一段都不报（连"她真改了资产"也不报）——跨轮的前缀本来就不可比', () => {
+    const t9 = callsOf(comparable, 100, 0, 100, 0, 9);
+    const t10 = callsOf(blockV2, 200, 1, 100, 0, 10);
+    const found = detectCacheBreak(t9, t10, DEFAULT_CACHE_BREAK_THRESHOLDS, [
+      evtOf(120, 'persona/updated', { file: 'STATE.md', diffHash: 'h', by: 'agent' }),
+      evtOf(150, 'turn/end'),
+      evtOf(160, 'turn/start'),
+    ]);
+    assert.equal(found, null, '跨轮不比段：三段都没报，也没有告警');
+  });
+
+  test('跨轮是**整体**不比段，不是只放过固定块：tools 段同样不报', () => {
+    const before = callsOf(comparable, 100, 0, 100, 0, 1301);
+    // 现场形状：24 件 → 4 件（03:00:05 那一拍）
+    const after = callsOf(
+      { ...comparable, tools: { tokens: 888, hash: 'tools-4', count: 4 } },
+      200, 1, 0, 400, 1302,
+    );
+    assert.equal(
+      detectCacheBreak(before, after, DEFAULT_CACHE_BREAK_THRESHOLDS,
+        [evtOf(150, 'turn/end'), evtOf(160, 'turn/start')]),
+      null,
+      '工具清单整体换版也是"跨轮形状不同"的一种 ⇒ 同样不报',
+    );
+  });
+
+  test('同轮内真失守 ⇒ 照旧报（护栏只挡跨轮，不许顺手把同一轮也放过去）', () => {
+    const before = callsOf(comparable, 160, 0, 100, 0, 42);
+    const after = callsOf({ ...comparable, tools: { ...comparable.tools, hash: 'destructive-on' } },
+      170, 1, 0, 200, 42);
+    const found = detectCacheBreak(before, after, DEFAULT_CACHE_BREAK_THRESHOLDS, []);
+    assert.equal(found?.class, 'tools', '同一轮内清单变了照旧是失守');
+    assert.equal(found?.cause, 'unattributable');
+    assert.equal(found?.silent, false, '说不清就照旧告警');
+  });
+
+  test('轮号读不出来（老日志 / 手写调用）：判不出来算同轮，照旧报（宁可多报一条）', () => {
+    const noTurnBefore = call(base, 0, 100, 0);
+    const toolsV2 = { ...base, tools: { ...base.tools, hash: 'new-tools' } };
+    // ① 两边都没有 turn
+    assert.equal(detectCacheBreak(noTurnBefore, call(toolsV2, 1, 0, 100))?.class, 'tools');
+    // ② 只有一边有 turn ⇒ 同样算同轮（不许凭"另一半缺字段"替一段失守开脱）
+    assert.equal(
+      detectCacheBreak(noTurnBefore, { ...call(toolsV2, 1, 0, 100), turn: 7 })?.class,
+      'tools',
+    );
+    // ③ 正对照：两边都有、且不同 ⇒ 才是不比
+    assert.equal(
+      detectCacheBreak({ ...noTurnBefore, turn: 6 }, { ...call(toolsV2, 1, 0, 100), turn: 7 }),
+      null,
+      '两边都读得出轮号且不同 ⇒ 不比',
+    );
+  });
+
+  test('正交判据不受这条护栏影响：版本换代与空闲塌陷跨轮照旧各算一条原因', () => {
+    const renderUp = detectCacheBreak(
+      callsOf(comparable, 300, 0, 900, 100, 9),
+      callsOf({ ...comparable, renderVersion: 'next' }, 310, 1, 0, 100, 10),
+      DEFAULT_CACHE_BREAK_THRESHOLDS, [],
+    );
+    assert.equal(renderUp?.cause, 'render', '版本换代比的是版本号，与两拍可不可比无关');
+    assert.equal(renderUp?.silent, true);
+
+    const idle = detectCacheBreak(
+      callsOf(comparable, 320, 0, 900, 100, 9),
+      callsOf(comparable, 380, 60, 10, 990, 10),
+      DEFAULT_CACHE_BREAK_THRESHOLDS, [],
+    );
+    assert.equal(idle?.cause, 'idle');
+    assert.equal(idle?.silent, true);
+  });
+});
+
+/**
+ * **BUG-1：段级条目必须带 `changed` / `side`。**
+ *
+ * 现场：seq 78374 的 `diff[0]` 原始 JSON 只有 `{class, prevHash, prevTokens, nextHash,
+ * nextTokens, deltaTokens}` —— **没有 `changed`、没有 `side`**。原因在代码单点上：
+ * `persona` / `tools` / `state` 三类只走 `segmentDiff`，而它从来不设这两个字段
+ * （只有 `sectionDiffsOf` 给 `memory` / `history` 的分节设）。
+ * 于是把 `changed` 当"这段变没变"的读数会**必然读错**——`class='tools'` 与"diff 没有 changed"
+ * 并不矛盾，两者不是同一件事。
+ *
+ * 这一节钉住三件事：**变了的那一段 `changed=true`**、**三态 `side` 各有正确取值**、
+ * 以及对得上 `class`（`changed` 是新旧对照的读数，`class` 是判据的结论，两处不许互相顶替）。
+ */
+describe('段级新旧对照：changed 与三态 side（BUG-1）', () => {
+  const base = renderOnce().context;
+
+  test('tools 段变了 ⇒ diff[0].changed=true、side=both，哈希就是两边的 tools 哈希', () => {
+    const prev = call(base, 0, 100, 100);
+    const next = call({ ...base, tools: { ...base.tools, hash: 'tools-4', tokens: 888, count: 4 } },
+      1, 0, 200);
+    const found = detectCacheBreak(prev, next);
+    assert.equal(found?.class, 'tools');
+    const diff = found?.diff?.[0];
+    assert.ok(diff !== undefined, 'tools 段失守必须有 diff（判据没变）');
+    assert.equal(diff.class, 'tools');
+    assert.equal(diff.changed, true, '两边哈希不等 ⇒ 变了（这正是缺的那一格）');
+    assert.equal(diff.side, 'both', '两边都发了这一段');
+    assert.equal(diff.prevHash, base.tools.hash);
+    assert.equal(diff.nextHash, 'tools-4');
+    assert.equal(diff.deltaTokens, 888 - base.tools.tokens, '变了多少 token 照旧要能直接读出');
+  });
+
+  test('persona 段变了 ⇒ 同样 changed=true、side=both', () => {
+    const prev = call(base, 0, 100, 100);
+    const next = call({ ...base, instructions: { ...base.instructions, hash: 'p2' } }, 1, 0, 200);
+    const found = detectCacheBreak(prev, next);
+    assert.equal(found?.class, 'persona');
+    assert.equal(found?.diff?.[0].changed, true);
+    assert.equal(found?.diff?.[0].side, 'both');
+  });
+
+  test('side 三态（段级）：这一段只在一边时是 prev-only / next-only；state 那一种被形状判据吃掉（照实记）', () => {
+    // ⚠ **一个刻意的否证**：`state` 只在每轮第 1 步发，所以"旧的有、新的没有"最像 prev-only 的
+    // 现场形状 —— 但它**报不出来**，而且是既有判据的设计，不是这次改动漏掉的：
+    //   · 一边没发块 ⇒ `blockIsShapeDifference` 第 ② 条直接判"形状差异"（`state` 根本不进 classes）
+    //     ⇒ `diffOf` 只为**真的按段失守**的那几类出对照，于是连 `diff[]` 都没有这一条。
+    // 把它照实钉在这里：谁要读"state 段的 side"，得先知道它多数时候压根不在 diff 里。
+    const withBlock = { ...base, state: { tokens: 120, hash: 'block-v1', items: 1 } };
+    assert.equal(
+      detectCacheBreak(call(withBlock, 0, 100, 100), call(base, 1, 0, 200)), null,
+      '一边没发块 ⇒ 形状差异，state 不进 classes（既有判据）',
+    );
+
+    // 真能读出三态的是**分节那一层**（下面那条）：它们不受"块只在轮首发"这条约束。
+    // 段级这一层在"两边都在、内容不同"时给 `both`（上面两条已钉）——三态里的另两态由分节覆盖。
+    const both = detectCacheBreak(
+      call(withBlock, 0, 100, 100),
+      call({ ...base, state: { tokens: 90, hash: 'block-v2', items: 1 } }, 1, 0, 200),
+    );
+    assert.equal(both?.class, 'state');
+    assert.equal(both?.diff?.[0].side, 'both', '两边都发了块 ⇒ both');
+    assert.equal(both?.diff?.[0].changed, true);
+    assert.equal(both?.diff?.[0].prevHash, 'block-v1');
+    assert.equal(both?.diff?.[0].nextHash, 'block-v2');
+  });
+
+  test('side 三态（分节级）：分节事实只在一侧时是 prev-only / next-only，且哈希只出那一边', () => {
+    const fact = (name: string, text: string): ContextSectionFact => ({
+      name, tokens: estimateTokens(text), bytes: Buffer.byteLength(text, 'utf8'), hash: hashOf(text),
+    });
+    const block = { tokens: 120, hash: 'block-v1', items: 1 };
+    const prevWith = {
+      ...base,
+      state: block,
+      memory: { ...base.memory, hash: 'm-with', sections: [fact('mcp', '旧的那一版索引')] },
+    };
+    // ⚠ 这一边**也要带块**：两边都发过块时 `state` 才不落入形状差异判据，记忆层那条失守才报得出来
+    const nextWithout = { ...base, state: block, memory: { ...base.memory, hash: 'm-without' } };
+
+    const prevOnly = detectCacheBreak(call(prevWith, 0, 100, 100), call(nextWithout, 1, 0, 200));
+    assert.equal(prevOnly?.class, 'memory');
+    const gone = prevOnly?.diff?.[0].sections?.[0];
+    assert.equal(gone?.name, 'mcp');
+    assert.equal(gone?.side, 'prev-only', '这一节只在上一次的读数里');
+    assert.equal(gone?.changed, true);
+    assert.equal(gone?.prevHash, hashOf('旧的那一版索引'));
+    assert.equal(gone?.nextHash, undefined, '缺的那一边不许编哈希');
+
+    const nextOnly = detectCacheBreak(call(nextWithout, 0, 100, 100), call(prevWith, 1, 0, 200));
+    assert.equal(nextOnly?.class, 'memory');
+    assert.equal(nextOnly?.diff?.[0].sections?.[0].side, 'next-only');
+    assert.equal(nextOnly?.diff?.[0].sections?.[0].changed, true);
+    assert.equal(nextOnly?.diff?.[0].sections?.[0].prevHash, undefined);
+  });
+
+  test('memory / history 的整段条目也带这两格（它们本来由 sections 带着，整段那一层同样要对上）', () => {
+    const prev = call(base, 0, 100, 100);
+    const next = call({ ...base, memory: { ...base.memory, hash: 'm2' } }, 1, 0, 200);
+    const found = detectCacheBreak(prev, next);
+    assert.equal(found?.class, 'memory');
+    const diff = found?.diff?.[0];
+    assert.equal(diff?.class, 'memory');
+    assert.equal(diff?.changed, true);
+    assert.equal(diff?.side, 'both');
+    // 分节照旧（两边都没有分节事实 ⇒ undefined，"拿不到"与"没变"仍然分得开）
+    assert.equal(diff?.sections, undefined);
+  });
+
+  test('口径一致：changed 与 class 不是同一件事，但同一次失守里必须互相对得上', () => {
+    const prev = call(base, 0, 100, 100);
+    const next = call({ ...base, tools: { ...base.tools, hash: 't2' } }, 1, 0, 200);
+    const found = detectCacheBreak(prev, next);
+    // 判据说"tools 这一类失守了" ⇒ 那条对照里的这一段必须 `changed: true`（反之亦然）
+    for (const entry of found?.diff ?? []) {
+      assert.equal(
+        entry.changed, entry.class === 'tools',
+        `diff 里的 changed 与 class 对不上：${entry.class} changed=${entry.changed}`,
+      );
+      assert.equal(entry.side, 'both');
+    }
   });
 });
 

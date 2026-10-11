@@ -1080,6 +1080,32 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
   previousCoveredUpToSeq?: number;
   /** ④甲 闸门量：`(previousCovered, covered]` 的可见历史规模；`threshold`/`monotonic`/`no-shrink` 时缺席 */
   maskedTokens?: number;
+  /**
+   * **本轮给出的维护窗口**（2026-10-11 加，可选；internal 观测面）。
+   *
+   * 为什么寄在这条事件上、而不是另立一个事件类型：它是**每轮恰好一条**的那张留痕
+   * （`TurnRunner.run` 收尾写一次），而"这一轮该不该给她一条维护窗口信号"与压缩判定是
+   * **同一批材料算出来的**（`historyTokens` / `thresholdTokens` 就是那三个窗口里的第一个）。
+   * 一 turn 一行 ⇒ "上一次维护窗口是哪一刻给的"在日志里只有这一处答案（那道 6 小时的闸
+   * 就是从它读的，见 `render.ts` 的 `lastMaintenanceWindowAt`），不必把状态记在进程内存里
+   * ——重启之后内存里那份就没了，而这道闸恰恰要跨重启成立。
+   *
+   * **它是 Internal 观测**：`compaction/decision` 本来就不进她的上下文（`visibility: 'internal'`），
+   * 所以这一格**不改请求字节、不动 `RENDER_VERSION`**。真正进她上下文的是此刻层那一行
+   * （`维护窗口：…`），它在**渲染**那一侧、由宿主算好递进去——两者是同一件事的两面：
+   * 这一格回答"框架给过没有"（复盘/限流），那一行是她看到的话。
+   *
+   * **缺席 = 这一轮没有窗口**（绝大多数轮次都是这一支）：不许写成 `reason: null` 那种占位，
+   * 那会把"没给"与"给了但没记"混成一种形状。
+   */
+  maintenanceWindow?: {
+    /** 触发的是哪一条（三个之一；顺序即优先级，见 `render.ts` 的 `maintenanceWindowOf`） */
+    reason: 'compaction-soon' | 'late-night' | 'heartbeat-idle';
+    /** 这一条作答的时刻（毫秒时间戳）：**那道 6 小时闸的锚点**就是它 */
+    atMs: number;
+    /** 那一刻算出/给出的当地自然日（`YYYY-MM-DD`，配置时区）——观测用，缺了不影响判据 */
+    day?: string;
+  };
 }> {}
 
 export interface PersonaUpdated extends EventEnvelope<'persona/updated', {
@@ -1253,6 +1279,87 @@ export interface McpServerResource extends EventEnvelope<'mcp/server-resource', 
   rssSource: 'proc' | 'tasklist' | 'ps' | 'unavailable';
   startMs: number;
   inFlightPeak: number;
+}> {}
+
+// ────────────── 工具清单指纹的变化（2026-10-11 加，BUG-3 的观测面） ──────────────
+
+/**
+ * **进请求的工具清单换了一版**（internal；`src/runtime/agent-loop.ts` 在构请求处比对指纹）。
+ *
+ * ──────────────────────────── 它解决的是什么 ────────────────────────────
+ *
+ * 现场（本机 2026-10-11 03:00:05，seq 78374）：`cacheBreak.class = 'tools'`、`cause =
+ * unattributable`、**告警**，而 `tools` 段那次是**真变了**——24 件 → 4 件、5480 → 888 token
+ * （−4592）。归因窗口 `(78356, 78370]` 里一条 `mcp/*`、`config/changed`、`skill/*` 都没有，
+ * 全 shard 也只有 `mcp/server-started`(78221)、`mcp/index`(78322)、`mcp/server-stopped`(78443)
+ * 三条，全在窗口之外 ⇒ 那 20 件工具**被什么摘掉的，日志里一个字都没有**。
+ *
+ * 根子在"进请求的那份清单"是一个**现取的活值**：`agent-loop` 的 `deriveAt` 每一步都调
+ * `registry.listForModel(...)`，而不是从事件里读 ⇒ 只要清单的变化不是上面那四种动作之一
+ * （MCP 上下线 / 技能安装 / 配置热更），它在日志里就**天生没有对应事件**。所以这里不比"配置改了没改"，
+ * 只比**两拍之间真正进了请求的那份清单本身**：名字集合 + 各自的可见性。
+ *
+ * ──────────────────────────── 三处纪律 ────────────────────────────
+ *
+ *   ① **可见性 internal**（`EVENT_VISIBILITY` 里写明，理由与 `mcp/index` 逐字同形）：它是
+ *      **装配账**——"这一刻进请求的清单是哪几件"要能事后查，而清单**本身**已经作为 tools 段
+ *      进了请求体，再渲染一遍就是同一件事在她眼前出现两遍（纯常驻开销）。
+ *   ② **只在真变了时写**：两侧都认得（`before` / `after` 都拿到了）且指纹不同才落一条；
+ *      `after` 为空（那份工具表还没接上，例如子代理的隔离视图）时**一个字都不写**——
+ *      拿"没接上"当"清单被清空了"，正是观测面伪造事实的那一类错。
+ *   ③ **它是 `tools` 段失守的证据**（`context-audit.ts` 的 `inventoryMoved()` 认它）：
+ *      缺了它，那一段只能落 `unattributable` 并告警。
+ *
+ * `added` / `removed` 是**名字**、不是数：现场要回答的问题是"**少了哪 20 件**"，只给
+ * `before: 24, after: 4` 的话，人还得自己去两个时刻把清单重建出来对一遍——那正是这次要消灭的成本。
+ */
+export interface ToolsInventoryChanged extends EventEnvelope<'tools/inventory-changed', {
+  /** 上一次写这条账时进请求的件数（指纹里的名字数） */
+  before: number;
+  /** 这一次进请求的件数 */
+  after: number;
+  /** 这一次**多出来**的工具名（按进请求的顺序；集合差，重排不算变化） */
+  added: string[];
+  /** 这一次**少掉**的工具名（现场那 20 件就在这里，一眼看得出少了哪几件） */
+  removed: string[];
+  /**
+   * 指纹的口径（现在是 `name` + 可见性两样）。
+   *
+   * 为什么要落口径：将来若把描述也折进指纹，旧事件的"没变"与新事件的"没变"就不是同一句话
+   * ——读的人得知道这条账是按哪把尺子量的。
+   */
+  fingerprint: 'name+visibility';
+  /**
+   * **这一次变化是哪一类**（2026-10-11 加；判据在 `agent-loop.ts` 的 `toolInventoryChangeOf`，
+   * 那是唯一看得见两份清单**名字**的地方，所以分类只能在那里定）。
+   *
+   * 为什么要这一格：`added` / `removed` 只说"少了几件、多了几件"，而**同一种形状可能有三件
+   * 完全不同的事**——读账的人拿它决定"要不要去查"：
+   *   · `'trust-tier'` —— **信任档换档**（预期内）：两拍分属不同的信任档，清单只发生"父子集"式
+   *     的增减。现场就是用户报的那四张卡：`external` 那一档只许 `speak`/`report`/`read_channel`/
+   *     `vision_read` 四件，用户/她自己那一档 24 件，来回切时 `tools` 段在两版之间对调。
+   *     这是 `render.ts` v44 那篇**有意**写下的取舍，**不是故障**——读账的人看到它就不必再去
+   *     翻 `mcp/*` 与 `config/changed`（翻了也没有，本来就不是那两件事）。
+   *   · `'mcp'` —— `mcp__*` 那批工具进出清单：MCP 掉线 / 上线。**这是真变化**，要人去查。
+   *   · `'registry'` —— 上面两样都不是：工具表本身被换过（注册/注销、禁用开关…）。
+   *
+   * 与 `visibility` 那两格的分工：那两格是"**当时生效的开关**"（原始输入），这一格是"**据此得出的
+   * 结论**"。只落开关不落结论，等于把分类留给每一个事后读日志的人各判一次。
+   *
+   * **可选**：这一条改动之前写下的账里没有它——读的一侧按 `undefined` = "当时没分类"处理，
+   * 绝不当成任何一类（`context-audit.ts` 的 `inventoryTrustShifted` 就是按这个纪律写的）。
+   */
+  kind?: 'trust-tier' | 'mcp' | 'registry';
+  /**
+   * 这一刻生效的可见性开关（`agent-loop` 的 `deps.modelVisibility`，缺省 `{}`，原样落库）。
+   * 它只影响**哪几件进清单**，所以是上面那份 `added`/`removed` 的注解：落它是为了让
+   * "同一批工具、换了一个开关"与"工具表本身换了"能分开读。
+   * 两格都缺省（字段不出现）= 那一刻没有开关。`true`/`false` 两种都如实落（不归一）。
+   */
+  visibility: { includeDestructive?: boolean | string[]; allowOnly?: string[] };
+  /** 这一条是哪一轮的第几步（构请求处知道；写在 data 里，重放/复盘时与 turn 归属对得上） */
+  turn: number;
+  step: number;
 }> {}
 
 // ──────────────────────── MCP 常驻索引的快照（2026-10-10 加） ────────────────────────
@@ -1918,6 +2025,7 @@ export type AppEvent =
   | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
   | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillInstalled | HookFired | SpeakSent
+  | ToolsInventoryChanged
   | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
   | JobStarted | JobFinished
@@ -1984,6 +2092,13 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 一遍是事件自己的渲染），第二遍纯属常驻开销。写在这里而不是靠 defaultVisibility 兜底，
   // 是为了让"这条线是有意画的"看得见。
   'mcp/index': 'internal',
+  // 工具清单指纹的变化（2026-10-11，BUG-3）**同样刻意 internal**，理由与上面那条逐字同形：
+  // 它是**装配账**（"这一刻进请求的清单是哪几件、比上次少了哪几件"），而清单本身已经作为
+  // tools 段进了请求体——再把它作为一条事件渲染一遍，就是同一件事在她眼前出现两遍。
+  // 写在这里而不是靠 defaultVisibility 兜底，是为了让"这条线是有意画的"看得见，
+  // 也防住将来有人手滑把它写成 model（那会让她每轮都读一遍自己的工具清单）。
+  // ⚠ 它**不改 `RENDER_VERSION`**：事件不进请求体，渲染口径一个字节都没动。
+  'tools/inventory-changed': 'internal',
   // 申请单的两条都 **internal，刻意不进她的上下文**（2026-10-11）：
   //   · `grant/requested` —— 她**知道**自己递过单子（工具回执当场回了她一句），
   //     而"框架在下一拍把这份单子拾起来了"是簿记，进上下文只是同一件事渲染两遍；

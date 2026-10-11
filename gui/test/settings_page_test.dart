@@ -232,12 +232,23 @@ void main() {
     r'$pending': {'source': 'saved', 'restartRequired': <String>[]},
   };
 
+  /// GET /api/config **不带** `source=saved` 的回执 = **生效那份**（运行期真值）。
+  ///
+  /// 它只有一处用处：压缩线那一行（`persona.compactionThresholdTokens`）读它——那一格问的是
+  /// "现在按什么跑"（压缩判定与 80% 预警读的都是进程内存里那个数），而盘上那份在"有人手改过
+  /// config.json"时与它不同。默认与盘上那份逐字段相同，个别用例会把它改成另一个值
+  /// ——那正是"界面画的是运行期真值"这条的判据。
+  late Map<String, dynamic> liveConfig;
+
   late HttpServer server;
   late AppState state;
   /// 界面状态的临时文件目录（「关窗时收进托盘」会写它，见 setUp）
   late Directory stateTmpDir;
   Map<String, dynamic>? lastPost;
   String? lastConfirm;
+  /// 最近一条写命令的**路径**（压缩线那条走的是它自己的端点，与 config-update 分开——
+  /// 只看 body 分不出"走了哪条通道"，而那正是这一格的关键口径）
+  String? lastPath;
   /// 写命令的**次数**（⑭：逐行保存要断言"只发一条"，只看 lastPost 分不出"发了一条"还是
   /// "发了三条、最后一条正好是它"——这条计数是那次踩过之后的必备件）
   int postCount = 0;
@@ -281,6 +292,7 @@ void main() {
     closeToTray.value = false;
     lastPost = null;
     lastConfirm = null;
+    lastPath = null;
     postCount = 0;
     config = {
       'dataDir': 'D:/irmia/data',
@@ -300,6 +312,11 @@ void main() {
       'persona': {'memoryEnabled': true, 'contacts': <String, dynamic>{}},
       r'$pending': {'source': 'saved', 'restartRequired': <String>[]},
     };
+    // 生效那份：与盘上那份同形（去掉只属于"盘上那份"的 `$pending`），并补上压缩线那一格
+    // ——真服务端的生效配置一定带它（缺格按默认补齐）。要测"读的是哪一份"的用例自己改它。
+    liveConfig = Map<String, dynamic>.from(jsonDecode(jsonEncode(config)) as Map<String, dynamic>)
+      ..remove(r'$pending');
+    (liveConfig['persona'] as Map<String, dynamic>)['compactionThresholdTokens'] = 100000;
     depsFails = false;
     installReply = <String, dynamic>{'ok': true, 'step': 'done', 'version': '1.1.0.38'};
     protocolSide = protocolView();
@@ -340,7 +357,9 @@ void main() {
       final response = req.response..headers.contentType = ContentType.json;
       final path = req.uri.path;
       if (path == '/api/config') {
-        response.write(jsonEncode(config));
+        // 不带 `source=saved` = **生效那份**（运行期真值）：见 [liveConfig] 的说明
+        response.write(jsonEncode(
+            req.uri.queryParameters['source'] == 'saved' ? config : liveConfig));
       } else if (path == '/api/keys') {
         response.write(jsonEncode({'heavy': {'configured': true, 'mask': 'sk-…1a2b'}, 'light': {'configured': false}}));
       } else if (path == '/api/projection') {
@@ -379,6 +398,7 @@ void main() {
         response.write(jsonEncode(path == '/api/protocol-side/config' ? sideWriteReply : sideActionReply));
       } else if (path.startsWith('/api/commands/')) {
         postCount += 1;
+        lastPath = path;
         lastPost = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, dynamic>;
         lastConfirm = req.headers.value('X-Confirm');
         response.write(jsonEncode(installReply));
@@ -1349,16 +1369,16 @@ void main() {
     expect(find.byKey(const ValueKey('sys-value-wake.heartbeatTargetMeanMin')), findsNothing);
 
     // CappedChildren 报的是**总行数**（11 = 9 个可编辑 + 2 个只读），标签在展开后切成「收起」
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
     expect(inSystemCard(find.text('预算 · 软阈值')), findsOneWidget);
     expect(inSystemCard(find.text('destructive 工具策略')), findsOneWidget);
     expect(inSystemCard(find.text('心跳间隔 · 平均（分钟）')), findsOneWidget);
-    expect(inSystemCard(find.text('查看全部（11 行）')), findsNothing);
+    expect(inSystemCard(find.text('查看全部（12 行）')), findsNothing);
     expect(inSystemCard(find.text('收起')), findsOneWidget);
 
     await tapInCard(tester, inSystemCard(find.text('收起')));
     expect(inSystemCard(find.text('预算 · 软阈值')), findsNothing, reason: '展开后要能再收起');
-    expect(inSystemCard(find.text('查看全部（11 行）')), findsOneWidget);
+    expect(inSystemCard(find.text('查看全部（12 行）')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await drain(tester);
   });
@@ -1422,7 +1442,7 @@ void main() {
     // 100M 之后，这里若还写着 2000000，就是在教人填一个会被心跳自己吃穿的值。这条测试同时钉住
     // "只动了日额度那一个"——其余五个提示**没有**跟着改（防"顺手一起改"）。
     await pumpSettings(tester, size: const Size(1350, 3400));
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     /// 点开某一行的编辑态，读那一格输入框的 hint，再用「取消」把这行收回去
     /// （不收的话下一行要点的「编辑」胶囊不在——这正是逐行交互的样子）。
@@ -1447,7 +1467,7 @@ void main() {
   testWidgets('系统卡：非法值当场拦下，一个字节都不写盘（六种取值逐个试）', (tester) async {
     await pumpSettings(tester, size: const Size(1350, 3400));
     // 六次里有两次落在默认收起的那几行上（软阈值 / 步内工具调用上限），先把整张表展开
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     // 逐条按解析器的规则来（src/config/config.ts）。每一格试完用「取消」把这一行收掉：
     // 不然那一行还开着输入框，下一行要点的「编辑」胶囊根本不在（这正是逐行交互的样子）。
@@ -1504,7 +1524,7 @@ void main() {
 
   testWidgets('系统卡：数据目录只读，destructive 策略这一行是唯一能改它的地方', (tester) async {
     await pumpSettings(tester, size: const Size(1350, 3400));
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     // 两条只读行没有胶囊，也没有输入框（键就是点路径/行 id，找不到即证明它不可编辑）
     expect(find.byKey(const ValueKey('sys-edit-dataDir')), findsNothing);
@@ -1593,7 +1613,7 @@ void main() {
   testWidgets('系统卡 · 心跳频率：这一行渲染盘上那份的值（15），标签与说明是人话', (tester) async {
     await pumpSettings(tester, size: const Size(1350, 3400));
     // 它在默认收起的那几行里：先展开整张表（与上面几条系统卡用例同一条路）
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     // ① 读态摆的就是配置里那个数（示例配置 = 出厂默认 15）
     expect(sysValue(tester, 'wake.heartbeatTargetMeanMin'), '15',
@@ -1624,7 +1644,7 @@ void main() {
     // 这一条把盘上那份改成 40：读数必须跟着变，而那正是用户按这个框时看到的起始值。
     config['wake'] = {'heartbeatFloorMin': 5, 'heartbeatCeilMin': 60, 'heartbeatTargetMeanMin': 40};
     await pumpSettings(tester, size: const Size(1350, 3400));
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     expect(sysValue(tester, 'wake.heartbeatTargetMeanMin'), '40',
         reason: '框里必须是配置里那个值本身，不是一个写死的默认值');
@@ -1635,7 +1655,7 @@ void main() {
   });
 
   testWidgets('系统卡 · 心跳频率：改值保存走 config-update，fields 就是这一个字段、X-Confirm 不带字段短语', (tester) async {    await pumpSettings(tester, size: const Size(1350, 3400));
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     await tapInCard(tester, sysEdit('wake.heartbeatTargetMeanMin'));
     await tester.enterText(find.byKey(const ValueKey('sys-field-wake.heartbeatTargetMeanMin')), '45');
@@ -1660,7 +1680,7 @@ void main() {
 
   testWidgets('系统卡 · 心跳频率：越界的值当场拦下（一个字节都不写盘）', (tester) async {
     await pumpSettings(tester, size: const Size(1350, 3400));
-    await tapInCard(tester, inSystemCard(find.text('查看全部（11 行）')));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
 
     // 逐条按这一行的边界试（6~59）。文案由 _SysField.problem 生成，与别的数值行同一套口径。
     Future<void> check(String bad, String message) async {
@@ -1684,6 +1704,79 @@ void main() {
     await check('7.5', '心跳间隔 · 平均（分钟）要填整数，未保存');
 
     expect(postCount, 0);
+    await drain(tester);
+  });
+
+  // ── 系统卡 · 压缩线（`persona.compactionThresholdTokens`，用户 2026-10-12 点名要暴露的） ──
+
+  testWidgets('压缩线：读的是**生效那份**（运行期真值），徽章说「立刻生效」而不是「需重启」', (tester) async {
+    // 两份刻意给不同的值：盘上 100000（老现场值；`persona.` 属于 RESTART_REQUIRED_FIELDS，
+    // 手改 config.json 不会当拍接管），生效那份 200000。这一行画出来的必须是**现在按什么跑**的数。
+    config['persona'] = {'compactionThresholdTokens': 100000};
+    liveConfig['persona'] = {'compactionThresholdTokens': 200000};
+    await pumpSettings(tester, size: const Size(1350, 3400));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
+
+    expect(inSystemCard(find.text('上下文 · 压缩线（token 估算）')), findsOneWidget);
+    expect(sysValue(tester, 'persona.compactionThresholdTokens'), '200000',
+        reason: '压缩判定与 80% 预警读的都是生效那份，界面就得画它（画盘上那份是在说一个没生效的数）');
+
+    // 旁注两句口径要在（单位 = 估算器读数 / 改完立刻生效）：旁注只在编辑态出现，所以先点开
+    await tapInCard(tester, sysEdit('persona.compactionThresholdTokens'));
+    expect(sysText(tester, 'persona.compactionThresholdTokens'), '200000',
+        reason: '点开编辑态摆的是同一个值（读数与编辑态不许各写各的）');
+    expect(inSystemCard(find.textContaining('估算器读数，不是供方计数')), findsOneWidget);
+    expect(inSystemCard(find.textContaining('估算比供方偏低约 1.65~1.66 倍')), findsOneWidget,
+        reason: '这一格不能让人误读成"供方 200k"');
+    expect(inSystemCard(find.textContaining('改完立刻生效，不用重启')), findsOneWidget);
+    // 文案规则（与心跳那一行同一条，用户 2026-10-05）：说明 = 一行要点，**不带 markdown 记号**
+    // （界面 chrome 不做渲染）。旁注只在编辑态出现，所以这条检查必须在这里做——
+    // 别的用例点开的是别一行，扫不到这一行的字。
+    expect(inSystemCard(find.textContaining('**')), findsNothing, reason: '界面提示里不许再留 markdown 记号');
+
+    // 这一行挂的是「立刻生效」：挂「需重启」会叫人去做一件不必做的事
+    expect(inSystemCard(find.text('立刻生效')), findsOneWidget);
+    await tapInCard(tester, sysCancelBtn('persona.compactionThresholdTokens'));
+    await drain(tester);
+  });
+
+  testWidgets('压缩线：保存走 set-compaction-threshold（立刻生效那条路），越界的值当场拦下', (tester) async {
+    await pumpSettings(tester, size: const Size(1350, 3400));
+    await tapInCard(tester, inSystemCard(find.text('查看全部（12 行）')));
+
+    // 越界三条：**一个字节都不写**（文案由 _SysField.problem 生成，与别的数值行同一套口径），
+    // 并且拦下之后留在编辑态（人就在那个框上，改完再按一次就行）。
+    Future<void> check(String bad, String message) async {
+      await tapInCard(tester, sysEdit('persona.compactionThresholdTokens'));
+      await tester.enterText(
+          find.byKey(const ValueKey('sys-field-persona.compactionThresholdTokens')), bad);
+      await tester.pump();
+      await tapInCard(tester, sysSaveBtn('persona.compactionThresholdTokens'));
+      await pumpUntil(tester, find.text(message));
+      expect(postCount, 0, reason: 'compactionThresholdTokens = $bad 不该写进配置');
+      expect(find.byKey(const ValueKey('sys-field-persona.compactionThresholdTokens')), findsOneWidget);
+      await tapInCard(tester, sysCancelBtn('persona.compactionThresholdTokens'));
+    }
+
+    await check('9999', '上下文 · 压缩线（token 估算）最小是 10000，未保存');
+    await check('2000001', '上下文 · 压缩线（token 估算）最大是 2000000，未保存');
+    await check('200000.5', '上下文 · 压缩线（token 估算）要填整数，未保存');
+    expect(postCount, 0);
+
+    // 合法值：走它**自己的端点**（不是 config-update）。这一条是重点——
+    // 通用那条只写盘、回执写死"要重启"，用它就等于让这一格说假话。
+    await tapInCard(tester, sysEdit('persona.compactionThresholdTokens'));
+    await tester.enterText(
+        find.byKey(const ValueKey('sys-field-persona.compactionThresholdTokens')), '250000');
+    await tester.pump();
+    await tapInCard(tester, sysSaveBtn('persona.compactionThresholdTokens'));
+    await pumpUntil(tester, find.text('已保存，立刻生效（不用重启）'));
+    expect(postCount, 1);
+    expect(lastPath, '/api/commands/set-compaction-threshold');
+    expect(lastPost?['tokens'], 250000);
+    expect(lastConfirm, isNull,
+        reason: '它不改能力边界（与 set-group-scene 同级，短语为 null），界面不必多问一次');
+    expect(find.text('已保存，重启后生效'), findsNothing, reason: '这一格不叫人重启');
     await drain(tester);
   });
 

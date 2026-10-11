@@ -292,6 +292,23 @@ const PERSONA_STALE_MS = 30 * 24 * 3600 * 1000;
 const DISCARD_REASON_MAX = 500;
 
 /**
+ * 压缩线（`persona.compactionThresholdTokens`）可改区间的**唯一边界**（`set-compaction-threshold`）。
+ *
+ * 为什么要有边界、而不是"整数就收"：这一格决定的是**她的可见历史什么时候被折成一篇笔记**。
+ *   ① 太小（例如 1000）：每一轮都越线 ⇒ 每轮压一次，而每次压缩自己也要花一次 light 调用
+ *      ——把"省上下文"变成"多花钱"（现场 2026-10-04 从 32000 往上抬的理由就是这一条）；
+ *   ② 太大（例如 1e9）：等于不压 ⇒ 可见历史一路涨到**供方上下文上限**被硬截断，
+ *      那时丢掉的是整段对话，不是一篇可读的交接笔记。
+ * 两端都是"明显不可能"的边界，真正该填多少仍由人按自己的现场定（出厂 200000）。
+ *
+ * ⚠️ 与 `gui/lib/pages/settings_page.dart` 的 `kCompactionThresholdMin/Max` **同值**：
+ * 界面按同一对数做**保存前**的拦截（人话拒绝），这里是最终判据；改一处必须改另一边
+ * （Dart 侧那一对常量旁边的注释与本条互相点名，`gui/test/settings_page_test.dart` 钉着它们）。
+ */
+export const COMPACTION_THRESHOLD_MIN = 10_000;
+export const COMPACTION_THRESHOLD_MAX = 2_000_000;
+
+/**
  * 危险操作的 `X-Confirm` 短语表（frontend.md §4：短语 = 操作的英文标识，防误触而不防人）。
  * `null` = 该命令不需要确认。**只有改变能力边界的操作才算危险**：手动唤醒、结案、重入队、
  * 取消定时器、批准/拒绝提案都只推进状态，不改变"它能碰什么"——给它们加门只会让人烦。
@@ -327,6 +344,10 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 群聊场景开关（消息适配器页）：软提醒 / 硬拒绝。它改的是「本机类工具在群聊里给不给」，
   // 属于收紧而不是放宽能力边界，与 warn-exempt 同级
   'set-group-scene': null,
+  // 压缩线（设置页 · 系统卡那一行 `persona.compactionThresholdTokens`）：它改的是"可见历史攒到
+  // 多大就折成一篇交接笔记"，不改变能力边界（她能碰什么与它无关），所以与 set-group-scene 同级。
+  // ⚠️ 它与 config-update 的差别是**立刻生效**：动作里在同一个临界区改了内存那份（理由见实现）。
+  'set-compaction-threshold': null,
   // 重启（运行情况页那颗按钮）：会打断她正在做的事，按危险操作处理——短语 = 命令名，防误触不防人
   restart: 'restart',
   // 「她被怎么称呼」（设置页/消息适配器页）：写 channels.mentionKeywords。它改的是
@@ -5455,6 +5476,53 @@ class WebServerImpl implements WebServer {
           'internal',
         );
         sendJson(res, 200, { ok: true, seq: event.seq, type: event.type, hardRefusal });
+        return;
+      }
+      case 'set-compaction-threshold': {
+        // 压缩线（`persona.compactionThresholdTokens`）：可见历史估算超过它就压一次。
+        // **可读可改、改完立刻生效**——设置页 · 系统卡那一行走的就是它。
+        //
+        // 两条纪律都照 set-group-scene（同一个形状，别在这里另发明一套）：
+        //   ① 读-改-写整个进 `configFileLock`（由 `withConfigDoc` 负责，它顺带落一条
+        //      `config/changed` 留痕）；
+        //   ② **在同一个临界区里把内存那份也改掉**——`real-loop` 每 turn 装配时读的就是
+        //      内存里这份（`compaction.thresholdTokens: d.config.persona.compactionThresholdTokens`），
+        //      所以改完立刻生效、不用重启。⚠️ 这一点与 `config-update` 那条通用通道**不同**：
+        //      后者只写盘、回执写死 `requiresRestart: true`（`persona.` 在
+        //      `RESTART_REQUIRED_FIELDS` 里）。这一格要的恰恰是"界面上改一下，这一拍就按新线算"
+        //      ——而 80% 那道预警（`render.ts` 的 `maintenanceWindowOf`）读的是同一条
+        //      `compaction/decision` 账上的 `thresholdTokens` ⇒ 预警与压缩永远同一个数。
+        //
+        // 非法值一律**在写盘之前**用人话拒绝（一个字节都不落盘）：这是用户点名要的那条
+        // ——"不许写坏配置"。边界与理由见 `COMPACTION_THRESHOLD_MIN/MAX`。
+        const rawTokens = payload['tokens'];
+        if (typeof rawTokens !== 'number' || !Number.isFinite(rawTokens) || !Number.isInteger(rawTokens)) {
+          const got = typeof rawTokens === 'number' ? String(rawTokens) : JSON.stringify(rawTokens ?? null);
+          throw badRequest('缺少 tokens（可见历史的压缩线：整数，单位是 token 估算；'
+            + `形如 {"tokens": 200000}），收到 ${got}`);
+        }
+        if (rawTokens < COMPACTION_THRESHOLD_MIN || rawTokens > COMPACTION_THRESHOLD_MAX) {
+          throw badRequest(`压缩线要落在 ${COMPACTION_THRESHOLD_MIN}~${COMPACTION_THRESHOLD_MAX} 之间`
+            + `（收到 ${rawTokens}）：太小 = 每轮都压一次，而每次压缩自己也要花一次调用；`
+            + '太大 = 等于不压，可见历史会一路涨到供方上下文上限被硬截断');
+        }
+        await this.withConfigDoc((doc) => {
+          const persona = isRecord(doc['persona']) ? doc['persona'] as JsonObject : {};
+          persona['compactionThresholdTokens'] = rawTokens;
+          doc['persona'] = persona;
+          // 同一个临界区里改内存那份（real-loop 就地读它）——立刻生效，不用重启
+          (this.deps.config.persona as { compactionThresholdTokens: number })
+            .compactionThresholdTokens = rawTokens;
+          return rawTokens;
+        }, 'persona.compactionThresholdTokens');
+        sendJson(res, 200, {
+          ok: true,
+          compactionThresholdTokens: rawTokens,
+          // 这一格写的就是**生效那份**（上面同一个临界区里改了内存）：界面据此不必等重启
+          effective: true,
+          restartRequired: false,
+          bounds: { min: COMPACTION_THRESHOLD_MIN, max: COMPACTION_THRESHOLD_MAX },
+        });
         return;
       }
       case 'set-warn-exempt': {

@@ -1170,7 +1170,20 @@ test('上下文审计：每个 model call 记一条归因（挂在 budget/consum
   assert.equal(consumed[0]!.data.cacheBreak, undefined);
 });
 
-test('上下文审计：压缩改写长期记忆层 → 下一条 budget/consumed 带 memory 类别的哨兵', async (t) => {
+test('上下文审计：压缩改写长期记忆层 —— 跨轮 ⇒ 一段都不报（2026-10-11 的既定语义）', async (t) => {
+  // 这条用例原来断言的是"压缩改写记忆层 ⇒ 下一条 `budget/consumed` 必带一条 `memory` 哨兵"。
+  // **那条断言在新语义下不可能成立，而且不是缺陷**：
+  //   · `c537b65`（2026-10-11「缓存破坏哨兵三处收口」）有意收了"跨轮不比段"这条口
+  //     ——见 `model/context-audit.ts` 的 `crossesTurnBoundary`：两次调用分属不同的轮 ⇒ 段级比对
+  //     整体短路（跨轮的前缀本来就不可比：固定块在轮首重建、工具清单与记忆层都可能整体换版）。
+  //     现场那张 06:27 的假卡就是这么来的。
+  //   · 而压缩（`compaction/summary`）在运行期**只发生在轮首**，`tickOnce()` 一拍跑完一整轮
+  //     ⇒ 被压缩隔开的两次调用**天然分属两轮** ⇒ 走的就是那条短路的支。
+  //
+  // 所以这里改成钉**新语义**，并且**不许写成空跑**：先自证"记忆层真的被改写了、两次调用真的分属两轮"
+  // （否则"不报"可能只是因为什么都没发生），再断言"照样一段都不报"。
+  // 同轮内真失守照旧要报：钉在 `test/context-audit.test.ts` §④b（'同轮内真失守 ⇒ 照旧报'）
+  // 与 `test/trust-observation.test.ts`（跨轮那一支的反面）。
   const harness = await makeHarness(
     t,
     {},
@@ -1189,13 +1202,23 @@ test('上下文审计：压缩改写长期记忆层 → 下一条 budget/consume
 
   const consumed = ofType(await harness.events(), 'budget/consumed');
   assert.equal(consumed.length, 2);
-  const breaker = consumed[1]!.data.cacheBreak;
-  assert.ok(breaker !== undefined, '记忆层被改写就是真破坏，必须记一条');
-  assert.equal(breaker.class, 'memory', '主类别取最早失守的那一段：记忆层在历史之前');
-  assert.ok(breaker.classes.includes('memory'));
-  assert.match(breaker.reason, /长期记忆层被改写/u);
-  // 判据与数字都在 reason 里（界面原样贴，不加工）
-  assert.match(breaker.reason, /距上次调用 \d+ 分钟/u);
+  const before = consumed[0]!.data;
+  const after = consumed[1]!.data;
+  // ① 自证前提一：两次调用**真的**分属不同的轮（否则下面那句"跨轮"就是空话）
+  assert.notEqual(after.turn, before.turn, '两次调用分属不同的轮 —— 这正是"跨轮不比段"的前提');
+  // ② 自证前提二：记忆层**真的**被这一次压缩改写了 —— 所以"不报"不是因为什么都没发生
+  assert.ok(before.context !== undefined && after.context !== undefined, '两次调用都要带上下文归因（否则这条用例不成立）');
+  assert.notEqual(
+    after.context.memory.hash,
+    before.context.memory.hash,
+    '压缩确实改写了长期记忆层（自证不是空跑）：' + `tokens ${before.context.memory.tokens} → ${after.context.memory.tokens}`,
+  );
+  // ③ 新语义：跨轮 ⇒ 段级一条都不报（含"记忆层被改写"这一档）
+  assert.equal(
+    after.cacheBreak,
+    undefined,
+    '跨轮不比段：记忆层被改写也不报段失守（2026-10-11 有意收的口，见 context-audit.ts 的 crossesTurnBoundary）',
+  );
 });
 
 test('上下文审计：正常追加尾巴（没有任何改写）不记哨兵——它只在真破坏时出现', async (t) => {

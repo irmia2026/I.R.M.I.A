@@ -31,6 +31,10 @@
  *
  * 时间用**真延时**：这里要测的就是"真实时钟下两拍会不会叠"，用假时钟把延时抽掉，
  * 正好把要测的东西删掉了。
+ *
+ * 2026-10-11 补：`②` 那一节顺带钉住**慢拍刻度**（BUG-4，`turnMs` / `compactMs` / `events`）。
+ * 这一支不造刻度本身（那是 `test/slow-tick-timing.test.ts` 的事），只钉**形状与自洽**：
+ * 三格都有值，`compactMs ≤ turnMs ≤ elapsedMs`，且"跑过那一轮 ⟺ 带 `eventsThroughSeq`"。
  */
 
 import assert from 'node:assert/strict';
@@ -161,7 +165,10 @@ test('tick 重叠保护：任意两拍都不重叠，上一拍在飞时的到点
   // ── ② 观测的字段形状（事后读日志诊断慢拍靠它）──
   assert.ok(slowTicks.length >= 1, `应当落至少一条 runtime/slow-tick，实际 ${slowTicks.length} 条`);
   for (const event of slowTicks) {
-    const data = event.data as { elapsedMs?: unknown; pollMs?: unknown; skipped?: unknown; busy?: unknown };
+    const data = event.data as {
+      elapsedMs?: unknown; pollMs?: unknown; skipped?: unknown; busy?: unknown;
+      turnMs?: unknown; compactMs?: unknown; events?: unknown; eventsThroughSeq?: unknown;
+    };
     assert.equal(typeof data.elapsedMs, 'number', 'runtime/slow-tick.elapsedMs 必须是数');
     assert.equal(typeof data.skipped, 'number', 'runtime/slow-tick.skipped 必须是数');
     assert.equal(typeof data.busy, 'boolean', 'runtime/slow-tick.busy 必须是布尔');
@@ -170,6 +177,28 @@ test('tick 重叠保护：任意两拍都不重叠，上一拍在飞时的到点
     assert.ok(Number(data.skipped) >= 1, '每条慢拍账都该带出它压掉了几拍（本例每拍都压过）');
     assert.equal(event.visibility, 'internal', 'runtime/slow-tick 是框架的账，不许进她的上下文');
     assert.equal(event.origin, 'runtime/real-loop', 'runtime/slow-tick 由循环自己落');
+
+    // ── 慢拍刻度（BUG-4）：三格必须有值，且组合自洽 ──
+    // 判据：这一拍**跑过模型那一轮**（有 runner 的读数）⇒ `turnMs > 0` 且带 `eventsThroughSeq`；
+    // 没跑过（prepare / 快照 / 指令那几段自己慢）⇒ 三格如实为 0、水位那一格不出现。
+    // 两种组合之外一律算错：`turnMs > 0` 而没有读数、或 `compactMs > turnMs`，都是伪造刻度。
+    assert.equal(typeof data.turnMs, 'number', 'runtime/slow-tick.turnMs 必须是数（整轮耗时）');
+    assert.equal(typeof data.compactMs, 'number', 'runtime/slow-tick.compactMs 必须是数（收尾那一段）');
+    assert.equal(typeof data.events, 'number', 'runtime/slow-tick.events 必须是数（扫描的规模输入）');
+    assert.ok(Number(data.compactMs) >= 0, 'compactMs 不许为负');
+    assert.ok(
+      Number(data.compactMs) <= Number(data.turnMs),
+      `compactMs 是 turnMs 的子集（实际 ${Number(data.compactMs)} > ${Number(data.turnMs)}）`,
+    );
+    assert.ok(
+      Number(data.turnMs) <= Number(data.elapsedMs),
+      'turnMs 是这一拍的一段，不许超过 elapsedMs',
+    );
+    const ranTurn = Number(data.turnMs) > 0;
+    assert.equal(
+      ranTurn, 'eventsThroughSeq' in data,
+      'turnMs > 0 ⟺ 带 eventsThroughSeq（跑过那一轮才有 runner 的读数）',
+    );
   }
 
   // ── ③ 不额外断言"吞掉的次数"的下界 ──

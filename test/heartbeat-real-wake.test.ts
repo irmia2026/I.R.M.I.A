@@ -95,6 +95,32 @@ import { heartbeatData, makeRealWakeRig, requestFingerprint, type RealWakeRig } 
  *      脚本与打印：`_tmp/probe-v39-control.mts`（未跟踪）。
  * `RENDER_VERSION` 随之递增到 39（见 `render.ts` 顶部那一篇）。
  *
+ * **2026-10-11 重取（v51 维护窗口：装置自述第 ⑦ 段末尾多一条常驻规则）**：
+ *      这一版给 `SELF_BRIEF` 第 ⑦ 段（记忆）末尾加了一条 `MAINTENANCE_RULE_TEXT`
+ *      （"框架自身的文档只有你在维护、别人不会去改；已经在上下文里的不要反复去读；每轮都去改
+ *      也没有意义；只在维护窗口或有明确变化时改一次；没有要改的就不必动它"——判据见
+ *      `test/maintenance-window.test.ts` 与 `docs/operations.md`）。它在 `instructions` 里
+ *      ⇒ 下面两个常量必然变：
+ *        非心跳拍 `89212e1efad4970a` → `d54688eb60bc9e5e`
+ *        混批     `9e4330b5ab89cd62` → `d80a7d16ab722bce`
+ *      纯心跳拍那一个：本版实测 `3f21f616ae7d8d47`（它没有常量、只由基线脚本打印；
+ *      v44 那一篇记的 `2443213a5a7496e5` 是更早的历史留档，中间已经随 `instructions` 漂过几次）。
+ *      **重取的证据是两个对照实验**（都**不动工作区**）：
+ *        · **复制仓库法**：把仓库复制到临时目录，在那里把 `src/model/render.ts` 与
+ *          `src/model/self-brief.ts` 换回改动前的版本（其余留现状），复跑
+ *          `_research/heartbeat-real-wake-baseline.mjs` ⇒ 打出来的正是上面那两个**旧值**
+ *          逐字（`89212e1efad4970a` / `9e4330b5ab89cd62`）⇒ 差异只来自那两处；
+ *        · **同进程渲染对照**：同一份 `RenderInput` 两侧各渲染一次请求 ⇒ `instructions` 的
+ *          sha256 变了（`4c0fef48548dafa5` → `77e215b4163379a9`），而 **`input` 没变**
+ *          （`f5807591e0d88316` 两侧相同）、**`tools` 也没变**（`09a325fc87d68210` 两侧相同）；
+ *        · 真台子上再核一次（本文件同一套 rig）：那一句在 `instructions` 里出现 **1** 次、
+ *          在 `input` 里 **0** 次、在 `tools` 里 **0** 次，此刻层那条维护窗口信号 **0** 次
+ *          （这一拍不是窗口）⇒ 差异面就是"instructions 多了那一句"，别处一个字没动。
+ *      ⚠ **这次刻意没走 `git stash push` / `git checkout HEAD~1 --` 那条老路**（前面几次重取用的
+ *      都是它）：2026-10-11 本仓出现过两次"提交卷走别人改动"，其中一次正是
+ *      `git checkout HEAD~1 -- <path>` 把旧内容写进索引造成的。对照实验不需要动工作区。
+ *      `RENDER_VERSION` 随之递增到 51（见 `render.ts` 顶部那一篇 v51）。
+ *
  * **2026-10-09 重取（v45 取消「light 选取资产」：装置自述第⑰段那句假承诺换掉）**：
  * 这一版把 `SELF_BRIEF` 第⑰段里"干活时框架会挑几条放在你任务旁边"那句删了（机制被用户取消，
  * 留着就是假承诺），而它在 `instructions` 里 ⇒ 指纹的两个数必然变：
@@ -119,7 +145,9 @@ const BEFORE_MANUAL_TYPES = [
   // 本次对照实验里它出现两次都出现（改动前/改动后各一次）⇒ 它不是 v45 带来的差异。
   'compaction/decision',
 ];
-const BEFORE_MANUAL_FINGERPRINT = '89212e1efad4970a';
+// v51（2026-10-11 维护窗口）：`89212e1efad4970a` → `d54688eb60bc9e5e`（`instructions` 多了一句，
+// 对照实验与理由见文件头 2026-10-11 那一篇）
+const BEFORE_MANUAL_FINGERPRINT = 'd54688eb60bc9e5e';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
 const BEFORE_MIXED_TYPES = [
@@ -127,7 +155,8 @@ const BEFORE_MIXED_TYPES = [
   'memory/selected', 'step/start', 'message/assistant', 'budget/consumed', 'step/end', 'turn/end',
   'compaction/decision',
 ];
-const BEFORE_MIXED_FINGERPRINT = '9e4330b5ab89cd62';
+// v51（2026-10-11 维护窗口）：`9e4330b5ab89cd62` → `d80a7d16ab722bce`（同上）
+const BEFORE_MIXED_FINGERPRINT = 'd80a7d16ab722bce';
 
 /** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [

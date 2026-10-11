@@ -300,7 +300,8 @@ enum _SysKind {
 /// 都按这一份清单走；抄九遍的下场是某一格"改了却存不进去"或"存了却不显脏"，
 /// 而这两种 bug 都不会报错，只会静静地少写一个字段。
 class _SysField {
-  const _SysField(this.path, this.label, this.kind, {this.note, this.hint, this.min, this.max});
+  const _SysField(this.path, this.label, this.kind,
+      {this.note, this.hint, this.min, this.max, this.live = false});
 
   /// 写进 config.json 的点路径：既是输入框的 key（测试按它定位），也是提交时的字段名
   final String path;
@@ -317,6 +318,21 @@ class _SysField {
   /// [problem] 里：pickInt 的下限 1、端口的上限 65535、比例的开区间 0~(0,1]）。
   final int? min;
   final int? max;
+
+  /// **改完立刻生效**的那一格（当前只有压缩线 `persona.compactionThresholdTokens`）。
+  ///
+  /// 它与这张卡上其余格的差别有三处，三处都只是这一页的显示/提交口径：
+  ///   · **值读"生效那份"**（`GET /api/config`，不带 `source=saved`）：这一格问的是"现在按什么跑"
+  ///     ——压缩判定与 80% 那道预警读的都是进程内存里那个数（`persona.` 属于
+  ///     `RESTART_REQUIRED_FIELDS`：手改 config.json 是不会当拍接管的）；
+  ///   · **保存走它自己的端点**（`POST /api/commands/set-compaction-threshold`）：服务端在
+  ///     `configFileLock` 的同一个临界区里把内存那份也改掉，所以写完这一拍就按新线算，
+  ///     而通用那条 `config-update` 只写盘、回执写死"要重启"；
+  ///   · 徽章说「立刻生效」而不是「需重启」。
+  ///
+  /// 判据只此一处：另写一份"哪些格是热更的"名单，就会与服务端 `config/watcher.ts` 的
+  /// `RESTART_REQUIRED_FIELDS` 分岔——那种分岔正是"预警按 A 算、压缩按 B 算"的开头。
+  final bool live;
 
   /// 数字字段用等宽（docs/copy-guide.md §6）：20000000 与 500000 要能一眼比出量级
   bool get numeric =>
@@ -431,6 +447,46 @@ const _sysHeartbeatMean = _SysField(
       '两端仍由上下限兜住：不因这个数改变，安静不足下限不会醒、到了上限必然会醒。',
 );
 
+/// 压缩线的可改区间：**与 `src/web/server.ts` 的 `COMPACTION_THRESHOLD_MIN/MAX` 同值**。
+///
+/// 那边是**最终判据**（非法值在那里被拒、一个字节都不落盘），这里是**保存前**的拦截——
+/// 人正在框上，越界的数不该先打一趟服务端再弹一句"保存失败"。两端各自为什么是这个数，
+/// 写在服务端那两个常量自己的注释里（太小 = 每轮都压；太大 = 等于不压）。
+///
+/// ⚠️ 改一处必须改另一边：`gui/test/settings_page_test.dart` 有一条按这两个数锁的用例。
+const kCompactionThresholdMin = 10000;
+const kCompactionThresholdMax = 2000000;
+
+/// **压缩线**（`persona.compactionThresholdTokens`）——用户 2026-10-12 点名要暴露到界面的那一格：
+/// 「与之配合的，框架也得有 compact 80% 预警。然后**预算 compact 线（history 大小），
+///  默认从 100k 提升到 200k**，然后**暴露在 GUI**。」
+///
+/// 它管的是一件很具体的事：**她的可见历史攒到多大就被折成一篇交接笔记**（只遮蔽、不删除）。
+/// 摆在系统卡预算那一组的末尾（紧挨心跳那一行）：它们在使用上是同一类旋钮——都决定"她花多少
+/// token"，想省 token 的人来这一组找，找得到。
+///
+/// 三个口径都写在这一格的字段与旁注上，界面不自己另算一份：
+///   · **单位是估算器读数**（不是供方计数）：估算比供方偏低约 1.65~1.66 倍——旁注里说清，
+///     免得有人拿它直接去跟上下文上限比余量；
+///   · **改完立刻生效**（[live]，服务端在配置锁的同一个临界区里改内存那份）⇒ 徽章说「立刻生效」；
+///   · **80% 预警与压缩读的是同一个键**：那行预警说的"已达 80%"就是这个数的 80%
+///     （`src/model/render.ts` 的 `MAINTENANCE_COMPACTION_RATIO`），界面上不出现第二个阈值。
+///
+/// hint = 出厂默认值（`src/config/config.ts` 的 `buildDefaults`：`compactionThresholdTokens: 200_000`）。
+const _sysCompaction = _SysField(
+  'persona.compactionThresholdTokens',
+  '上下文 · 压缩线（token 估算）',
+  _SysKind.range,
+  min: kCompactionThresholdMin,
+  max: kCompactionThresholdMax,
+  hint: '200000',
+  live: true,
+  note: '可见历史攒到这么多 token（估算）就折成一篇交接笔记，压缩只遮蔽、不删除。'
+      '单位是估算器读数，不是供方计数（估算比供方偏低约 1.65~1.66 倍）。'
+      '填原值：200000 这类写法不接受；调小 = 压得更勤，而每次压缩自己也要花一次调用。'
+      '改完立刻生效，不用重启。',
+);
+
 /// 系统卡的全部可编辑字段（回填、脏判定与销毁都遍历它）
 const _sysFields = <_SysField>[
   _sysHost,
@@ -443,6 +499,7 @@ const _sysFields = <_SysField>[
   _sysSoftRatio,
   _sysFailStreak,
   _sysHeartbeatMean,
+  _sysCompaction,
 ];
 
 /// 信任范围的两档（`trust.mode`）——**取值与字面量与 `src/config/config.ts` 的
@@ -609,6 +666,8 @@ const _sysRowFields = <String, List<_SysField>>{
   // 心跳平均间隔（用户 2026-10-05）：行 id 与字段路径**同名**——这一行只有一个字段，
   // 没必要为它另起一个名字（监听地址那种"两字段一行"才需要）。
   'wake.heartbeatTargetMeanMin': [_sysHeartbeatMean],
+  // 压缩线（用户 2026-10-12）：同上，一个字段一行，行 id = 点路径
+  'persona.compactionThresholdTokens': [_sysCompaction],
 };
 
 class _SettingsPageState extends State<SettingsPage> {
@@ -626,6 +685,14 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 这一份配置是从哪儿读来的：`saved` = 盘上那份；`memory` = 盘读不出来、回落成生效配置。
   /// 空串表示服务端没给这个字段（老服务端）。
   String savedSource = '';
+
+  /// **生效那份**配置（`GET /api/config` 不带 `source=saved`）。
+  ///
+  /// 只有"改完立刻生效"的那一格（压缩线）读它：那一格问的是"现在按什么跑"。盘上那份在
+  /// "有人手改过 config.json"时会与它不同（`persona.` 属于 `RESTART_REQUIRED_FIELDS`），
+  /// 而压缩判定与 80% 预警读的都是进程内存里那个数——显示盘上那份就是显示一个**没在生效**的数。
+  /// 读不到时为 null：那一格回落到盘上那份（显示旧值好过显示空白，下一次回填会补上）。
+  Map<String, dynamic>? cfgLive;
 
   Map<String, dynamic>? keys;
   String? keysError;
@@ -860,7 +927,16 @@ class _SettingsPageState extends State<SettingsPage> {
       // 并回填输入框，于是刚写下去的值当场被冲掉（用户报的「编辑后点保存，前端又会弹回
       // 默认的 url」，系统卡的「编辑」也一样）。盘上那份还多带一个 `$pending`：
       // 哪些字段与生效值不同（= 还没生效），本页据此把「需重启」说准。
-      final data = await widget.state.api.get('/api/config?source=saved');
+      // 两条读**并发**发出去：它们互不依赖，串行只是白等一个往返（而这一页的每一次回读
+      // 都会走这里——保存之后、连接恢复之后）。两条的失败语义也不同：
+      //   · 盘上那份（`?source=saved`）失败 = 这一页走 error 态（下面那个 catch）；
+      //   · 生效那份（不带 source，只有"改完立刻生效"的那一格读，见 [cfgLive]）
+      //     失败**不算错**——那一格回落到盘上那份（显示旧值好过显示空白）。
+      final wantsLive = _sysFields.any((field) => field.live);
+      final savedFetch = widget.state.api.get('/api/config?source=saved');
+      final liveFetch = wantsLive ? _fetchLiveConfig() : Future<Map<String, dynamic>?>.value(null);
+      final data = await savedFetch;
+      final live = await liveFetch;
       if (!mounted) return;
       final raw = data is Map ? data.cast<String, dynamic>() : null;
       final pending = raw == null ? null : raw[r'$pending'];
@@ -869,6 +945,9 @@ class _SettingsPageState extends State<SettingsPage> {
       final next = raw == null ? null : (Map<String, dynamic>.from(raw)..remove(r'$pending'));
       setState(() {
         cfg = next;
+        // 生效那份读不到（null）时**保持上一次那份**：它只会让热更那一格显示一个稍旧的生效值，
+        // 而清成 null 会让它当场退回盘上那份——那在"刚写完还没回读"的瞬间是一个假读数。
+        if (live != null) cfgLive = live;
         pendingRestart = pending is Map && pending['restartRequired'] is List
             ? (pending['restartRequired'] as List).whereType<String>().toSet()
             : const <String>{};
@@ -878,6 +957,18 @@ class _SettingsPageState extends State<SettingsPage> {
       if (seed && next != null) _seedInputs();
     } catch (err) {
       if (mounted) setState(() => cfgError = '$err');
+    }
+  }
+
+  /// 读一次**生效那份**配置（`GET /api/config` 不带 `source=saved`）。读不到返回 null。
+  ///
+  /// 只有"改完立刻生效"的那一格用得上它（见 [cfgLive]）：那一格问的是"现在按什么跑"。
+  Future<Map<String, dynamic>?> _fetchLiveConfig() async {
+    try {
+      final data = await widget.state.api.get('/api/config');
+      return data is Map ? data.cast<String, dynamic>() : null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -927,12 +1018,16 @@ class _SettingsPageState extends State<SettingsPage> {
     // 连接恢复后重读配置），把人正在打的字冲掉属于最没道理的那种"正确"。那一行的草稿留着，
     // 只有它自己按下「保存」或「取消」才结束。
     for (final field in _sysFields) {
-      final text = field.seed(cfg);
+      final text = field.seed(_docFor(field));
       _sysBase[field.path] = text;
       if (_sysEditingPaths.contains(field.path)) continue;
       _sysCtls[field.path]!.text = text;
     }
   }
+
+  /// 这一格该显示哪一份配置：**改完立刻生效**的那一格看生效那份（"现在按什么跑"），
+  /// 其余看盘上那份（设置页编辑的是"我保存下来的值"，见 `_loadConfig` 那段注释）。
+  Map<String, dynamic>? _docFor(_SysField field) => field.live ? (cfgLive ?? cfg) : cfg;
 
   /// 正开着编辑态的那几格（点路径）：回填时跳过它们，草稿才留得住
   Set<String> get _sysEditingPaths =>
@@ -1672,6 +1767,35 @@ class _SettingsPageState extends State<SettingsPage> {
       changed[field.path] = field.decode(text);
     }
     if (changed.isEmpty) return; // 保存键本来就是灰的，这里只是兜底
+
+    // 「改完立刻生效」的那一格走**它自己的端点**：服务端在 `configFileLock` 的同一个临界区里
+    // 把内存那份也改掉 ⇒ 这一拍就按新线算。通用那条 `config-update` 只写盘、回执写死
+    // "要重启"——用它就等于让界面说一句假话（"已保存"而压缩仍按旧线跑）。
+    // 端点形状与校验规则见 `src/web/server.ts` 的 `set-compaction-threshold`（它认 `tokens`）。
+    final live = fields.where((field) => field.live).toList();
+    if (live.isNotEmpty) {
+      final value = changed[live.first.path];
+      setState(() => _sysSaving = true);
+      try {
+        await widget.state.api.post(
+          '/api/commands/set-compaction-threshold',
+          {'tokens': value},
+        );
+        // 回读：生效那份与盘上那份都变了，所以**两份一起**刷（下一拍判据用的就是生效那份）
+        await _loadConfig(seed: true);
+        if (!mounted) return;
+        setState(() {
+          _resetSysDraft(fields);
+          _sysEditing.remove(id);
+        });
+        _toast('已保存，立刻生效（不用重启）', kind: ToastKind.success);
+      } catch (err) {
+        if (mounted) _toast('保存失败：$err', kind: ToastKind.error);
+      } finally {
+        if (mounted) setState(() => _sysSaving = false);
+      }
+      return;
+    }
 
     setState(() => _sysSaving = true);
     try {
@@ -3371,7 +3495,8 @@ class _SettingsPageState extends State<SettingsPage> {
       // 顺手把它写成了"监听地址、时区、六条预算与心跳的平均间隔"——那正好把「监听地址」那一行的
       // 标签也变成了候选，锚点于是指到了行上，五条系统卡用例一起红。**别再往这句里塞行标签**。
       note: '监听地址、时区、六条预算与心跳都是这个进程的启动参数：'
-          '在这里改，保存写进 config.json，重启后生效。',
+          '在这里改，保存写进 config.json，重启后生效。'
+          '压缩线那一行例外——它写完立刻生效（服务端在同一个临界区里也改了内存那份）。',
       children: [
         // 默认露前 4 行（最常看/最常调的先摆），其余 7 行收在「查看全部」后面
         // （用户 ⑭："平时可能只暴露几项，可以全部展开"）。展开/收起由 CappedChildren 自带。
@@ -3400,11 +3525,16 @@ class _SettingsPageState extends State<SettingsPage> {
             // 而它是这一组里唯一"直接决定她多久醒一次"的一条。放在 destructive 那行之前，
             // 因为 destructive 管的是"能碰什么"，不是"跑多勤"。
             _sysEditRow('wake.heartbeatTargetMeanMin'),
+            // 压缩线（用户 2026-10-12："预算 compact 线（history 大小）…然后暴露在 GUI"）：
+            // 摆在预算/心跳那一组的**末尾**——它与上面几条是同一类旋钮（都决定"她花多少 token"），
+            // 而它决定的是"她能一眼看见多长的一段历史"。与它们唯一的差别是**改完立刻生效**
+            // （那一行自己挂「立刻生效」徽章，理由见 [_sysCompaction] 与 [_SysField.live]）。
+            _sysEditRow('persona.compactionThresholdTokens'),
             _destructiveRow(),
           ],
         ),
         _footnote('数据目录在这里改不了（它决定她的全部身家落在哪，且进程启动时就定下了）；'
-            '其余字段保存后重启进程生效。'),
+            '其余字段保存后重启进程生效——压缩线那一行除外，它保存完就当拍接管。'),
       ],
     );
   }
@@ -3450,12 +3580,16 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
               ),
               const SizedBox(width: 10),
-              // 徽章两选一（2026-10-04）：
+              // 徽章三选一（2026-10-12 加第三档）：
+              //   · 「立刻生效」= 这一格写完当拍就接管（服务端在配置锁里同时改了内存那份，
+              //     判据见 [_SysField.live]）——它不该挂"需重启"，那会叫人去做一件不必做的事；
               //   · 「尚未生效」= 盘上这份与生效那份**真的不一样**（服务端比对出来的），
               //     改完还没重启时才有——它把「需重启」的意思也包含在内，所以同时挂两枚会很吵；
               //   · 「需重启」  = 这一类字段是启动参数，改完要重启进程才接管（常态说明）。
               // 两条只读行不挂（⑭ 的原话：改不了的行喊重启没意义）。
-              if (_rowPending(fields))
+              if (fields.any((field) => field.live))
+                _badge('立刻生效', scheme.primary)
+              else if (_rowPending(fields))
                 _badge('尚未生效', IrmiaTheme.warn)
               else
                 _badge('需重启', IrmiaTheme.warn),
@@ -3549,7 +3683,7 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 为什么不恢复旧表那套紧凑写法（2M / 80%）：⑪ 定的规矩是"框里摆的就是 config.json 里的值"，
   /// 读数与编辑态各写各的，点一下「编辑」值就自己变了——那是把人当没看见。想要 20M / 80%
   /// 那种读法，旁注里"0.8 就是 80%"就是它的位置。
-  String _sysValue(_SysField field) => field.seed(cfg);
+  String _sysValue(_SysField field) => field.seed(_docFor(field));
 
   /// 监听地址那一行的读数：`host:port`。host 为空时**不补 127.0.0.1**——那正是 ⑪ 修掉的
   /// 一句假话（空 host 等于监听所有网卡，不是本机）；两半各自如实留白，缺就是缺。

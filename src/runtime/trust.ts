@@ -39,6 +39,12 @@ export type TurnTrust = 'owner' | 'self' | 'trusted' | 'external';
  *
  * 名单里没有的工具即使已经注册也不会出现在清单里；将来新增工具时**默认也不给外部**——
  * 这个白名单是"要主动加才能给"的方向，与 destructive 的"要主动开才能给"一致。
+ *
+ * ⚠ **它现在不许拿去做"过滤工具数组"那件事**（2026-10-11 用户裁决）：清单对所有轮次恒定，
+ * 收窄只在**执行期**（`authz.ts` 的 `authzGate` + `tools.groupSceneHardRefusal`）。
+ * 这条名单本身**不删、也不改口径**——它是"外部来源到底该有哪些能力"这份判断的真源，
+ * 留着给①评审时人读、②`test/trust.test.ts` 钉着这条口径、③哪天版本更新真的要改清单时当依据。
+ * 消费它的唯一活代码是 `modelVisibilityFor()`（同文件下面那一段，**刻意不调用**）。
  */
 export const EXTERNAL_TOOL_ALLOWLIST: readonly string[] = [
   'speak', 'report', 'read_channel', 'vision_read',
@@ -144,6 +150,21 @@ export interface ModelVisibility {
  * `configured` 就是 `config.tools.destructiveEnabled`（用户可能全开）。它在用户与她自己的
  * 轮次里照常生效；到了 `trusted` / `external` 一律收紧，配置再宽也压不过这里——
  * 否则"用户图方便全开"就等于"群里任何人都能使唤她"。
+ *
+ * ⚠ **当前刻意不调用**（2026-10-11 用户裁决）：
+ * 2026-10-04 用户定过"**工具清单恒定**"，2026-10-11 的裁决把它定成不可动的铁律
+ * （原话：「tool 数组是绝对不动的（除非我们版本更新）任何情况都不应该变动」）——
+ * **接上去就违反裁决**：这一函数一旦回到 `real-loop.ts` 的 `modelVisibility`，`tools` 段
+ * 就又随轮次的信任级变，而那正是被禁掉的那件事（`tools` 段是请求体最前面的稳定前缀，
+ * 清单一变，它之后那整段历史的前缀缓存全部失效；实测同签名命中 85.2% / 换签名 41.2%）。
+ *
+ * 外部来源那几轮**不是不收紧，是换了一层**：收窄挪到**执行期**——`docs/design.md:1029`
+ * 的定稿口径，落在 `authz.ts` 的 `authzGate` 上。两种选项由用户在 GUI 选（默认软提醒、
+ * 可切硬拒绝，`config.tools.groupSceneHardRefusal`）。
+ *
+ * 所以：**函数与用例都留着，接线点就是"不接"**。要动工具数组只有一条路——**版本更新**
+ * （用户明说的例外），那时连 `RENDER_VERSION` 一起递增，并按 `render.ts` 的红线走全套。
+ * 别照 `docs/mcp-chain-review.md` 的建议 A1 把它接回去：那份稿子写于裁决之前。
  */
 export function modelVisibilityFor(
   trust: TurnTrust,

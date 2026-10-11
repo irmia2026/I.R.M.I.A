@@ -15,7 +15,7 @@ import { humanAskSourceOf, isImageAttachment, contextImageAdmission, contextImag
 import type { ContextImageChosen } from '../log/types.ts';
 import { noteForFlagged, ruleNoteFor, type InjectionWarnFacts } from '../channel/injection.ts';
 import type { WarnExemptJudge } from '../channel/warn-exempt.ts';
-import { SELF_BRIEF, renderAskNote, renderContactNote, renderInjectionNote, renderMentionNote, type ContactFacts, type OpenAskFacts } from './self-brief.ts';
+import { MAINTENANCE_WINDOW_WORDS, SELF_BRIEF, renderAskNote, renderContactNote, renderInjectionNote, renderMentionNote, type ContactFacts, type OpenAskFacts } from './self-brief.ts';
 import { DEFAULT_SOFT_RATIO } from '../runtime/budget-guard.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import {
@@ -183,6 +183,39 @@ import { estimateTokens } from '../tools/registry.ts';
  *      （工具清单一个字没动，`tools` 段与 v44 逐字节相同）。
  *
 
+ * ⚠ **v44 那条"清单按信任级收窄"已被撤回**（2026-10-11 用户裁决，见下面那一段）：
+ *      生产口径**回到了 v43 的形状**（恒为 `{ includeDestructive: 配置 }`）。下面 v44 的正文
+ *      原样保留——它是"当时为什么那么做、代价怎么算的"的记录，**不是现行口径**。
+ *
+ * v51（**维护窗口：她自己那些文档"什么时候才值得动一次"**，2026-10-11 用户的要求）：
+ *      用户的原话（这一版的全部判据）：
+ *      > 「这些文档的**唯一维护源就是她**（或框架低频），根本没有别人去改。**已经读入上下文的，
+ *      >  没必要反复去读**。**每一 turn 改，也很没必要**……理想的情况是什么呢。她得知 **compact
+ *      >  即将发生（已达 compact 线的 80%）**、**凌晨**、**长时间心跳空拍后**。才去改。
+ *      >  **只有需要改、无事可做的时候，才有限地去改一次**。」
+ *      现状是他点名的毛病：**她每轮开头都想读、每轮收尾都想改**（"多数是内容没变还去改"）。
+ *      这一版给的是**两半同源**的东西，不是一段新说教：
+ *      ① **常驻那一半**（进 `instructions`）：`SELF_BRIEF` 第 ⑦ 段末尾多一条
+ *         `MAINTENANCE_RULE_TEXT`——"文档只有你在维护、别人不会去改；已经在上下文里的不要反复去读；
+ *         每轮都改也没有意义；只在维护窗口或有明确变化时改一次；没有要改的就别动它"。
+ *      ② **此刻层那一半**（不进冻结前缀）：`维护窗口：压缩临近 / 凌晨 / 长时间空拍——现在适合整理…`
+ *         一行，由 `maintenanceWindowOf` 判（三个窗口 + 一道三个窗口共用的 6 小时闸，
+ *         阈值与理由逐条写在那个函数与它上面那几个常量上）。
+ *      两半**共用**一份词表（`self-brief.ts` 的 `MAINTENANCE_WINDOW_WORDS`；测试按值锁这条配对）——
+ *      用户点名要的"要有判据：这句话必须与维护窗口信号同源，别让两处措辞漂移"就是这一条。
+ *      **为什么必须递增（判据）**：①落在 `instructions` 里——它是请求体的**最大公共前缀**
+ *      （本文件 §4.13 铁律 1 与 `self-brief.ts` 的文件头）：加上这一句之后**每一个**请求的头部
+ *      字节都变，缓存一次全 miss、下一轮整份重编码。与 v45 / v38 / v37 / v34 同一性质：
+ *      **定版本号就是让这次全 miss 可解释、可复盘**（`replay` 的 renderVersion 三指纹会如实报
+ *      "当时的模板与当前不同"），而不是被读成"缓存坏了"。
+ *      ②（此刻层那一行）**本身不改前缀**：它与 v32 的 STATE 预算提醒同一条路数——逐 step 发、
+ *      在尾部、**默认整行不出现**。判据是那条不变量：**没有窗口的轮次，请求字节与 v50 逐字节
+ *      相同**（`test/maintenance-window.test.ts` 正面钉着它）⇒ 这一版**不改变任何一个轮次的历史
+ *      字节**，只改变"她接下来往哪边使劲"。
+ *      **基线（`test/heartbeat-real-wake.test.ts` 的两个精确指纹）照规矩重取**：`instructions`
+ *      变了 ⇒ 它必然变（取数过程与对照实验记在那个文件头部）。触发面只有 `instructions` 一处
+ *      （工具清单一个字没动，`tools` 段与 v50 逐字节相同）。
+ *
  * v44（**工具清单不再恒定：非用户/非她自己发起的轮次按信任级收窄**，2026-10-09 复核后修）：
  *      这一版修的是 `docs/mcp-chain-review.md` 查出的第 1 条——"文档写着有门、代码里没有"：
  *      `modelVisibilityFor()`（`runtime/trust.ts:148`，外部轮次 ⇒ 严格白名单四件）在 `src/**` 里
@@ -196,9 +229,11 @@ import { estimateTokens } from '../tools/registry.ts';
  *        · `trusted`（单聊里记过名字的熟人）⇒ `includeDestructive:false`，`mcp` 仍在、destructive 不在
  *        · `owner` / `self` ⇒ 照旧读配置（与 v43 逐字节相同）
  *      所以"同一条历史前缀"在同一个人换档时（用户说话 ↔ 群里有人 @）会失配一次。
- *      **代价是知情接受的**：2026-10-04 用户定过"工具清单恒定"（实测依据：清单随会话变会让
- *      之后整段历史的前缀缓存失效，同签名 85.2% / 换签名 41.2%）。这里推翻的是"随会话变"那一半
- *      ——现在只随**信任级**（四档）变，同一档内所有轮次逐字节相同；而安全那半边压过这个百分数。
+ *      **⚠ 下面这半段"代价是知情接受的"已被 2026-10-11 的裁决推翻**（原文留档）：
+ *      "2026-10-04 用户定过'工具清单恒定'（实测依据：清单随会话变会让之后整段历史的前缀缓存
+ *      失效，同签名 85.2% / 换签名 41.2%）。这里推翻的是'随会话变'那一半——现在只随**信任级**
+ *      （四档）变，同一档内所有轮次逐字节相同；而安全那半边压过这个百分数。"
+ *      裁决的相反判断：**安全那半边不靠清单，靠执行期那道门**；工具数组任何情况都不动。
  *      **另有一道执行期门不变**：`authz` 按场景判（`mcp` 名单外 = 本机类，客人 + 硬拒绝档拒调），
  *      两道门管的是两件事（"看不看得见"与"调不调得动"），都在。
  *      **测试台的已知盲区照旧**（v43 记下的那条）：`test/fixtures/real-wake-rig.ts` 交给 RealLoop 的
@@ -206,6 +241,26 @@ import { estimateTokens } from '../tools/registry.ts';
  *      真链路的判据落在 `test/tool-catalog.test.ts`（假通道造一条群消息 → 真 RealLoop → 假模型记请求体）。
  *      实测：`heartbeat-real-wake` 那两条基线（都是 `wake/manual` = owner 档）**一个字节没变**
  *      （`28eed0dd9858ed11` / `9e49e6f9e0fb41a6`）⇒ 这一版的字节变化**只发生在非用户轮次上**。
+ *      （⚠ 那两条指纹后来另有变更，现行值见 `test/heartbeat-real-wake.test.ts` 文件头。v44 那一版
+ *       的用例 `test/trust-gate.test.ts` 在 2026-10-11 改成**反向判据**：owner 档与 external 档的
+ *       `tools` 段**逐字节相同**。）
+ *
+ * **2026-10-11 · v44 撤回（恢复"工具清单恒定"）：`RENDER_VERSION` 不递增**
+ *      （`481db36` 那次收窄被用户裁决推翻。原话：「tool 数组是绝对不动的（除非我们版本更新）
+ *      任何情况都不应该变动」「只有两种选项，框架软提醒和硬拒绝。由用户在 GUI 选择模式」）
+ *      撤的是什么：`real-loop.ts` 的 `modelVisibility` 从 `modelVisibilityFor(trust, …)` 换回
+ *      恒定的 `{ includeDestructive: d.config.tools.destructiveEnabled }`；`trustOfTurn()` 那层
+ *      只留给 `authzGate` 的场合判定与观测账。收窄回到**执行期**——`authzGate` +
+ *      `tools.groupSceneHardRefusal`，定稿口径见 `docs/design.md:1029`（"**不在工具清单层**"）。
+ *      **为什么不递增**（判据，别照"动了 tools 段就 +1"的直觉办）：递增的规矩是"**现行清单**变了
+ *      ⇒ 同批 +1"，它保证"哪一版清单长什么样"可复盘。而这次生产口径是**回到 v43 的形状**——
+ *      `owner` 与 `external` 档的 `tools` 段现在**逐字节相同**，同一份配置下所有轮次都是 v44
+ *      之前那一份。真正变的是**重建 v44 那批旧轮次**时：它们当时按白名单四件发出去，今天按现行
+ *      清单重建会与当时不同——这正是"定版本号就是让这次全 miss 可解释、可复盘"（本文件上面那条
+ *      纪律）要它报出来的东西，所以 **50 不许回落、也不必再 +1**：`replay` 的 renderVersion
+ *      三指纹会如实报"当时的模板与当前不同"。
+ *      ⚠ v44 的那笔账**永久留在历史里**：它确实让非用户轮次付过一次全 miss，不因撤回而消失。
+ *      下一步要动 `tools` 段的只有**版本更新**（用户明说的例外）。
  *
  * v43（**加一件内置工具 `mcp`：MCP 的唯一入口**，2026-10-09 用户拍板
  *      「增加一个内置 mcp 工具。此后 mcp 都从此工具调用。」）：
@@ -641,7 +696,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '50';
+export const RENDER_VERSION = '51';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -969,6 +1024,22 @@ export interface RenderInput {
      */
     assets?: string;
   } | null;
+  /**
+   * **维护窗口那条信号**（2026-10-11，此刻层 `维护窗口：` 那一行）。
+   *
+   * 由**宿主**在轮首装配 deps 时算一次（`real-loop` 的 `maintenanceWindowFor` 调
+   * {@link maintenanceWindowOf}，材料是"最后一条 `compaction/decision` 的 historyTokens /
+   * thresholdTokens" + "本机小时" + "投影里的空拍数" + "上一次窗口落在哪一刻"）——
+   * 与 `machine` / `usage` 同一条纪律：渲染层不读时钟、不读事件、不自己记状态。
+   *
+   * **一轮之内逐字节不变**（它是 deps 上的一格，每个 step 原样转手）⇒ 不破坏此刻层之前的
+   * 前缀，也和 v32 的 STATE 提醒同一条路数。
+   *
+   * 缺省 / `null` = 这一轮**不是**维护窗口（或者宿主没算）⇒ 那一行**整行不出现**，
+   * 与引入它之前**逐字节相同**（子代理、重放、诊断、以及绝大多数轮次都是这一支）；
+   * 传进来但 `text` 为空串时同样不出现（空串不是"一条空的窗口"）。
+   */
+  maintenanceWindow?: MaintenanceWindowNote | null;
   /**
    * `persona/STATE.md` 的**字节数**（v32 的预算提醒素材）。
    *
@@ -1322,6 +1393,9 @@ export function render(input: RenderInput): RenderedRequest {
       input.injection ?? [],
       // 提及那一轮：通知已经在她这一轮的输入里了，此刻层不再重复写「点名：」
       input.mentionNotice ?? null,
+      // 维护窗口（2026-10-11）：宿主轮首算好的那一条（三个窗口 + 一道闸，见 `maintenanceWindowOf`）。
+      // 缺省 = 不是窗口 ⇒ 整行不出现（这条路径给的是 `RenderInput` 的老调用点：子代理、诊断、重放）。
+      input.maintenanceWindow ?? null,
       // STATE 预算提醒（v32）：素材是"她的 STATE 有多少字节"与"预算多少"两个数，
       // 由调用方给（`deriveRequest` 在装配点上量一次）。没量到就整行不出现。
       input.stateBytes ?? null,
@@ -1504,8 +1578,9 @@ function renderTurnBlock(facts: TurnBlockFacts | null, memoryIndex: string | nul
  * 此刻层（尾部，**逐 step** 变化）：**声明式字段**，一项一行 `标签：值`。
  *
  * 段头（`NOW_LAYER_BANNER`）→ 时刻 → 本机 → 用度\* → 预警\* → 通道 → 会话 → 在等你答复 → 点名
- * → 任务卡 → STATE 预算提醒\*。（\* `用度：` 与 `预警：` 默认不出现：前者只在告警时出现，
- * 后者只在最近 24 小时真被示过警时出现——见 `usageAlert` 与 `renderInjectionNote`；
+ * → 任务卡 → 维护窗口\* → STATE 预算提醒\*。（\* `用度：` 与 `预警：` 默认不出现：前者只在告警时
+ * 出现，后者只在最近 24 小时真被示过警时出现——见 `usageAlert` 与 `renderInjectionNote`；
+ * 维护窗口只在三个窗口之一成立、**且**距上次窗口满 6 小时时出现（见 `maintenanceWindowOf`）；
  * 预算提醒只在 `STATE.md` 超出配置的字节预算时出现，见 `stateBudgetReminder`）
  *
  * **B2 起这里只剩真正逐 step 变的东西**：她的状态与关系档案挪去了固定块
@@ -1536,6 +1611,7 @@ function renderNowLayer(
   usage: UsageFacts | null,
   injection: readonly InjectionWarnFacts[],
   mentionNotice: { messageId: string; text: string } | null,
+  maintenanceWindow: MaintenanceWindowNote | null,
   stateBytes: number | null,
   stateBudgetBytes: number | null,
 ): string {
@@ -1605,6 +1681,12 @@ function renderNowLayer(
       : '';
     fields.push(`\n当前任务：${taskCard.title}（turn ${taskCard.turn}，已 ${taskCard.step} 步）${assetsLine}${todo}`);
   }
+  // 维护窗口（2026-10-11）：**排在 STATE 预算提醒之前**——预算提醒是"该动手了"的旧那一类，
+  // 而这一条是"现在适合动手"（两者一起出现时，先读到的该是本轮那句时机提示）。
+  // 整行不出现是默认形态（`maintenanceWindowOf` 为 null）：绝大多数轮次都没有这一行，
+  // 于是"没有窗口的日子"请求字节与引入它之前**逐字节相同**（测试正面钉着这条不变量）。
+  const maintenance = maintenanceWindow?.text.trim() ?? '';
+  if (maintenance !== '') fields.push(maintenance);
   // STATE 预算提醒（v32）：**排在最后**——它是这张字段表里最后一件"框架此刻要她知道的事"，
   // 而且放在尾部时，她压回预算内之前的那几行前缀一个字节都不受影响。
   // 超预算才出现（没超就整行不出现，不写"正常"、不写百分比）。
@@ -1616,6 +1698,294 @@ function renderNowLayer(
 }
 
 // ── 此刻层各字段的格式化（纯函数：只吃传进来的值） ──
+
+// ──────────────── 维护窗口（2026-10-11）：三个信号 + 一道闸 + 一行字 ────────────────
+//
+// 用户这一场的原话（判据照它落，措辞也照它）：
+//
+// > 「这些文档的**唯一维护源就是她**……**已经读入上下文的，没必要反复去读**。**每一 turn 改，
+// >  也很没必要**……**理想的情况是什么呢**。她得知 **compact 即将发生（已达 compact 线的 80%）**、
+// >  **凌晨**、**长时间心跳空拍后**。才去改。**只有需要改、无事可做的时候，才有限地去改一次**。」
+//
+// 这一节只产出一件事：**此刻层那一行信号**（{@link maintenanceWindowOf}）。
+// 常驻那一半（"文档只有你在维护……只在维护窗口或有明确变化时改一次"）在 `self-brief.ts` 的
+// `MAINTENANCE_RULE_TEXT` 里，两半**共用** {@link MAINTENANCE_WINDOW_WORDS} 这份词表
+// ——同步的理由写在那个文件那一块注释里（两处措辞一分岔，她读到的就是两条互不认识的规矩）。
+//
+// **这一节不替她改任何文档**（用户的红线：框架只给信号）。它连"她改没改过"都不看。
+
+/**
+ * **压缩临近**的阈值：可见历史估算达到压缩线的这个比例就给一次窗口。
+ *
+ * 为什么是 80%（用户给的数，这里只写清它为什么站得住）：自动压缩的判据是
+ * `historyTokens > config.persona.compactionThresholdTokens`（**生效值以配置为准**——
+ * 现场 2026-10-12 起是 600000，出厂默认同日起 200000；本常量是**比例**，所以那条线怎么调
+ * 它都跟着走，不必改一个字），而压缩**只遮蔽不删除**——过了那条线，那段历史就要靠交接笔记
+ * 转述。80% 剩下的是"一刀的量"：一段可见历史从 80% 涨到 100% 大致就是一轮正经干活的量
+ * （`compaction/decision` 里 `historyTokens` 的相邻读数），所以这是**压缩之前最后一次**
+ * 能把过时内容并进事实的机会。
+ * 比 80% 更晚（例如 95%）：那时她已经该被压了，整理动作会与压缩抢同一段上下文；
+ * 更早（例如 50%）：那就是"每两轮提醒一次"，等于把用户要治的那个毛病换个形式留着。
+ */
+export const MAINTENANCE_COMPACTION_RATIO = 0.8;
+
+/**
+ * **凌晨**时段：本机时间 `[1, 6)` 点——`01:00–06:00`。
+ *
+ * 为什么是这个时段（边界不是随手取的）：它要落在"**用户睡了、外面也基本没人说话**"的那一段
+ * ——上界 06:00 是用户惯常起夜/起身之前（现场配置 `Asia/Shanghai`），下界 01:00 则避开
+ * 23:00–01:00 那段他自己还在说话、她随时可能被叫走的时间。跨过这两个边界给窗口，
+ * 都会在她**可能马上要应人**的时候让她去动文档——那正是"人工位、token 白花"的形状。
+ *
+ * **每夜最多一次**这条不需要额外状态：夜这个时段只有 5 小时宽（01:00–06:00），而三个窗口
+ * 共用一道 {@link MAINTENANCE_MIN_GAP_HOURS} = 6 小时的闸——同一夜里不可能放过第二次。
+ */
+export const MAINTENANCE_LATE_NIGHT_FROM_HOUR = 1;
+export const MAINTENANCE_LATE_NIGHT_TO_HOUR = 6;
+
+/**
+ * **长时间心跳空拍**：连续这么多拍心跳都没有外部事件后给一次窗口（默认 6 拍）。
+ *
+ * 为什么是 6：心跳的"拍"数由 `projection.idleTicks` 记（每命中一拍 +1，任何外部事件到达即归零），
+ * 而心跳间隔是概率模型（现场目标均值 `wake.heartbeatTargetMeanMin` = 30 分钟）⇒ 6 拍约 **3 小时**
+ * 没有任何外面来的事。短于这个数（例如 3 拍 ≈ 1.5 小时）会把"午睡一会儿"也当成窗口；
+ * 长于它（例如 12 拍 ≈ 6 小时）则时常追不上——夜里安静 3 小时之后她的待办本来就不多了。
+ */
+export const MAINTENANCE_IDLE_TICKS = 6;
+
+/**
+ * 三个窗口**共用的一道闸**：距上一次维护窗口不足这么久，一个字都不加。
+ *
+ * 6 小时的理由：它比最长的一次"该做的事攒起来"的周期短、又比心跳空拍那条判据（约 3 小时）长，
+ * 所以三个窗口不会互相盖成连续几轮刷屏；同时它让"凌晨每夜最多一次"自然成立（见上）。
+ * ⚠ 口径是**三者共用**：压缩临近也不会因为它更急就绕过这道闸——一旦绕过，压缩线附近那几轮
+ * 就会每轮都出一条，而那正是用户要治的"每轮都想去改"。
+ *
+ * **不满足条件时一个字都不加**（这条是硬口径）：见 {@link maintenanceWindowOf} 的三条 return。
+ */
+export const MAINTENANCE_MIN_GAP_HOURS = 6;
+
+/** 维护窗口的三个理由（**词表在 `self-brief.ts`**，这里是它在本层的名字；顺序即优先级） */
+export type MaintenanceReason = 'compaction-soon' | 'late-night' | 'heartbeat-idle';
+
+/** 判据（{@link maintenanceWindowOf}）用到的**全部**输入——纯数据，一个都不可省 */
+export interface MaintenanceSignals {
+  /**
+   * 当日可见历史估算（token）。**与压缩判定同源**：调用方读的是最后一条
+   * `compaction/decision` 的 `historyTokens`（同一个 `estimateHistoryTokens` 算出来的那个数），
+   * 不是另算一份——两份判据迟早在边界上给出两个数（"她说 79%、框架说 81%"）。
+   */
+  historyTokens: number | null;
+  /** 当时生效的压缩阈值（同一份 `compaction/decision` 的 `thresholdTokens`） */
+  compactionThresholdTokens: number | null;
+  /** 本机墙上时间的**小时**（0–23；由调用方按配置时区算，渲染层不读时钟、不做时区换算） */
+  localHour: number | null;
+  /** 本机的自然日键（`YYYY-MM-DD`，配置时区）。**观测用**：她/我们复盘时能看出这一条是哪天给的 */
+  localDay?: string | null;
+  /** 连续空拍数（`projection.idleTicks`：每命中一拍心跳 +1，任何外部事件到达即归零） */
+  idleTicks: number | null;
+  /**
+   * 上一次维护窗口是在**哪一刻**给的（毫秒时间戳）；从没给过就是 `null`。
+   *
+   * 它必须由调用方持久地从日志里读回来（`render` 是纯函数，不许自己记状态）：判据要能在
+   * 重放里复算，而"这台进程记不记得"不是日志里的事实。
+   */
+  lastWindowAtMs: number | null;
+}
+
+/** 一条维护窗口信号：**要说的那句话**（此刻层的正文）与**它是在哪一刻给的**（上面那道闸要的数） */
+export interface MaintenanceWindowNote {
+  /** 此刻层那一整行（原样进上下文，别处不许再拼一次） */
+  text: string;
+  /** 触发它的是哪一条（诊断/留痕用；三个里先到先得，见下） */
+  reason: MaintenanceReason;
+  /** 这一条作答的时刻（毫秒）：调用方据此更新 {@link MaintenanceSignals.lastWindowAtMs} */
+  atMs: number;
+  /**
+   * 那一刻的**当地自然日**（`YYYY-MM-DD`，配置时区）；算不出来就是 `null`。
+   *
+   * 它只服务观测（`compaction/decision.maintenanceWindow.day`："这一条是哪天给的"），
+   * 不参与任何判据——判据只看 {@link atMs}（毫秒），免得再引入一套"日子怎么算"的口径。
+   */
+  day: string | null;
+}
+
+/**
+ * 三个窗口 + 一道闸：**该不该在此刻给她一条维护窗口信号**（纯函数，可单测）。
+ *
+ * ## 三个窗口（先到先得，同一轮**只出一条**）
+ *
+ *   ① `compaction-soon` —— 可见历史估算 ≥ 压缩线的 {@link MAINTENANCE_COMPACTION_RATIO}（80%）；
+ *   ② `late-night`      —— 本机时间落在 {@link MAINTENANCE_LATE_NIGHT_FROM_HOUR}–
+ *      {@link MAINTENANCE_LATE_NIGHT_TO_HOUR}（01:00–06:00）；**每夜最多一次**由那道闸保证；
+ *   ③ `heartbeat-idle`  —— 连续空拍 ≥ {@link MAINTENANCE_IDLE_TICKS}（6 拍 ≈ 3 小时没人找）。
+ *
+ * 为什么这个顺序：压缩临近排第一——它是**唯一有截止线**的那一个（再不动手，那段历史就要被
+ * 折成一篇笔记）；凌晨与空拍只是"她正好闲着"。同一轮只出一条是硬口径：三条一起来时写三行
+ * 等于把一条许可变成一串催促，而她要的恰好相反（"有限地改一次"）。
+ *
+ * ## 一道闸（三者共用）
+ *
+ * `nowMs − lastWindowAtMs < MAINTENANCE_MIN_GAP_HOURS` ⇒ **一个字节都不加**（连"窗口还没到"
+ * 这类占位也不写——不写才是这一层的默认形态，见此刻层那一段"默认不出现"的纪律）。
+ * 三个窗口共用同一道闸的理由写在那个常量的注释里。
+ *
+ * ## 阈值以下、闸没过、数缺了：一律 `null`
+ *
+ * 这一条是**这条改动最要紧的不变量**（测试正面钉着它）：**没有窗口的那些轮次，请求字节与
+ * 引入本函数之前逐字节相同**——`render` 只在 `null` 时什么都不往此刻层加。所以：
+ *   · `historyTokens` / `thresholdTokens` 缺任何一个，或阈值 ≤ 0 ⇒ 压缩那一条**不判**（不猜）；
+ *   · `localHour` 缺 / 非有限 / 越界 ⇒ 凌晨那一条不判（宁可少一条，也不拿 UTC 当本机时间：
+ *     v26 那次"她拿 UTC 当本地时间"的教训就是时辰换算错了没人发现）；
+ *   · `idleTicks` 缺 / 非有限 / 为负 ⇒ 空拍那一条不判；
+ *   · `lastWindowAtMs` 缺（从没给过）**不算拦**——第一次该给就给；
+ *     给了但非法（NaN / 负数）按"没给"处理，与 `stateBudgetReminder` 同一条纪律：
+ *     渲染层宁可少一行，也不把这一层搞脏。
+ *
+ * 返回的 `atMs` 取三条命中时刻里的**最小值**（都等于 `nowMs` 时就是它）：它表示"这条许可
+ * 最早是什么时候成立的"。取最小而不是取 now，是因为压缩临近那一条会**连着很多拍都成立**——
+ * 若拿每一次的 now 去刷新闸，那道闸就永远打不开了（每个 step 都在把它往后推）。
+ */
+export function maintenanceWindowOf(signals: MaintenanceSignals, nowMs: number): MaintenanceWindowNote | null {
+  const at = finiteMs(nowMs);
+  if (at === null) return null; // 时钟读不出来：一个字都不加（不猜"大概是夜里"）
+
+  const hits: Array<{ reason: MaintenanceReason; fromMs: number }> = [];
+
+  // ① 压缩临近：与压缩判定**同源**的两个数（缺任何一个都不判）
+  const history = finiteNumber(signals.historyTokens);
+  const threshold = finiteNumber(signals.compactionThresholdTokens);
+  if (history !== null && threshold !== null && threshold > 0
+    && history >= threshold * MAINTENANCE_COMPACTION_RATIO) {
+    hits.push({ reason: 'compaction-soon', fromMs: at });
+  }
+
+  // ② 凌晨：小时由调用方按配置时区算好（渲染层不做时区换算，见 MaintenanceSignals.localHour）
+  const hour = finiteNumber(signals.localHour);
+  if (hour !== null && Number.isInteger(hour)
+    && hour >= MAINTENANCE_LATE_NIGHT_FROM_HOUR && hour < MAINTENANCE_LATE_NIGHT_TO_HOUR) {
+    hits.push({ reason: 'late-night', fromMs: at });
+  }
+
+  // ③ 长时间空拍：连续这么多拍心跳都没有外面来的事
+  const idle = finiteNumber(signals.idleTicks);
+  if (idle !== null && idle >= MAINTENANCE_IDLE_TICKS) {
+    hits.push({ reason: 'heartbeat-idle', fromMs: at });
+  }
+
+  if (hits.length === 0) return null;
+
+  // ④ 那道闸：三者共用。`lastWindowAtMs` 非法/没给 ⇒ 不拦（第一次该给就给）
+  const last = finiteMs(signals.lastWindowAtMs);
+  const gapMs = MAINTENANCE_MIN_GAP_HOURS * 60 * 60 * 1000;
+  if (last !== null && at - last < gapMs) return null;
+
+  const hit = hits[0]!; // 顺序即优先级：压缩临近 > 凌晨 > 空拍（见上）
+  const day = signals.localDay ?? null;
+  return {
+    text: maintenanceWindowLine(hit.reason, day),
+    reason: hit.reason,
+    atMs: Math.min(...hits.map(item => item.fromMs)),
+    day: day === null || day === '' ? null : day,
+  };
+}
+
+/**
+ * 那一刻的当地小时（0–23）/ 自然日键（`YYYY-MM-DD`），按配置时区算。
+ *
+ * 为什么由这里给（而不是让 `real-loop` 自己再写一遍 `Intl`）：此刻层 `时刻：` 那一行
+ * (`clockLine`) 已经是"本机墙上时间"的唯一出处，两个地方各写一份时区换算就是**第二份判据**
+ * ——而"凌晨"这条窗口的全部正确性都压在"这个小时是不是本机的小时"上。同源之后，
+ * 她说"现在几点"与框架说"现在是凌晨"用的是同一把尺子（`hourCycle: 'h23'` 那一条教训
+ * 也在 `localClockOf` 里：默认的 `hour12: false` 会把午夜给成 `24`）。
+ *
+ * 算不出来（`now`/时区非法）返回 `null`/空串：调用方据此**不判**凌晨那一条（不猜）。
+ */
+export function localHourOf(now: string, timezone: string): { hour: number; day: string } | null {
+  const ms = Date.parse(now);
+  if (!Number.isFinite(ms)) return null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(ms));
+    const get = (type: string): string => parts.find(part => part.type === type)?.value ?? '';
+    const hour = Number.parseInt(get('hour'), 10);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+    return { hour, day: `${get('year')}-${get('month')}-${get('day')}` };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 那一刻维护窗口的**启动时刻**（毫秒）；没给过返回 `null`。
+ *
+ * 读法：日志里**最后一条** `compaction/decision` 的 `maintenanceWindow.atMs`。为什么只认这一条
+ * 事件：它是本轮那条信号的**唯一写入点**（`agent-loop` 收尾时一 turn 一条），所以"上一次窗口是
+ * 哪一刻给的"在日志里恰好只有这一处答案——不必另立事件类型，也不必把状态记在进程内存里
+ * （重启之后那份记录就没了，而这道闸恰恰要跨重启成立：她刚整理完又被重启，不该立刻再被催一次）。
+ *
+ * 复杂度 O(事件数)，与既有的几条同类读取（`mcpIndexOf`、`contestedWakeSeqs`）同一口径：
+ * 都在**轮首那一拍**跑一次，不在每个 step 上跑。
+ */
+export function lastMaintenanceWindowAt(events: readonly AppEvent[]): number | null {
+  let found: number | null = null;
+  for (const event of events) {
+    if (event.type !== 'compaction/decision') continue;
+    const at = finiteMs((event.data as { maintenanceWindow?: { atMs?: unknown } }).maintenanceWindow?.atMs);
+    if (at !== null) found = at;
+  }
+  return found;
+}
+
+/** 最后一条 `compaction/decision` 的 `historyTokens` / `thresholdTokens`（没有就给 null） */
+export function lastCompactionReading(
+  events: readonly AppEvent[],
+): { historyTokens: number | null; thresholdTokens: number | null } {
+  let found: { historyTokens: number | null; thresholdTokens: number | null } = {
+    historyTokens: null, thresholdTokens: null,
+  };
+  for (const event of events) {
+    if (event.type !== 'compaction/decision') continue;
+    const data = event.data as { historyTokens?: unknown; thresholdTokens?: unknown };
+    found = {
+      historyTokens: finiteNumber(data.historyTokens),
+      thresholdTokens: finiteNumber(data.thresholdTokens),
+    };
+  }
+  return found;
+}
+
+/** 那条信号的正文（**唯一一处措辞**）：一行，说清"现在适合整理"、以及**不必每轮都做** */
+function maintenanceWindowLine(reason: MaintenanceReason, day: string | null): string {
+  // 理由那一格用中性的词（`当前：…`）：她读到的是"现在正处在哪个窗口"，不是"框架在催哪一件事"。
+  // 日子只在可读时带上（`（2026-10-12）`）——它是观测用的，缺了也不影响这句话成不成立。
+  const when = day === null || day === '' ? '' : `（${day}）`;
+  const reasonWord = MAINTENANCE_WINDOW_WORDS.split(' / ')[REASON_INDEX[reason]] ?? reason;
+  return `维护窗口：${reasonWord}${when}`
+    + '——现在适合整理你自己的那些文档（过时的流水账并进事实 / 资产清单增删 / STATE 超预算的清理）；'
+    + '**不必每轮都做**，没有要改的就别动它。';
+}
+
+/** 三个理由在词表里的下标（**唯一一处映射**：`self-brief.ts` 那份词表是顺序契约） */
+const REASON_INDEX: Record<MaintenanceReason, number> = {
+  'compaction-soon': 0,
+  'late-night': 1,
+  'heartbeat-idle': 2,
+};
+
+/** 有限数（`null`/`undefined`/NaN/Infinity 一律算"没给"） */
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** 合法的时间戳（毫秒，非负有限数）；其余一律算"没给" */
+function finiteMs(value: unknown): number | null {
+  const ms = finiteNumber(value);
+  return ms !== null && ms >= 0 ? ms : null;
+}
 
 /**
  * `persona/STATE.md` 的**字节数**（v32 的预算提醒素材）。
