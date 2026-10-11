@@ -60,6 +60,21 @@ export const DEFAULT_VISION_MODEL = 'deepseek-flash';
 export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const VISION_READ_TIMEOUT_MS = 120_000;
 export const VISION_QUERY_TIMEOUT_MS = 10_000;
+/**
+ * **单次视觉模型请求**的超时（2026-10-11 补）。
+ *
+ * 120000 = 与 `vision_read` 自己的工具超时（`VISION_READ_TIMEOUT_MS`，执行器那一层）取同一个数：
+ * 一次 `vision_read` 可带 ≤20 张图，本值管的是**每一张**，所以它必须比工具超时小或相等——
+ * 反过来（比工具超时大）会让"单图卡死"永远由执行器兜底，这一层就白加了，而且报文里那句
+ * 「图 N 读失败」会退化成整个工具一句「执行超时」，哪张图卡住反而看不出来。
+ *
+ * 为什么必须有：这条路上原先**没有任何超时**（`DsRequest.signal` 根本没传），
+ * 与 `channel/injection-judge.ts:150`（6s）、`channel/topic.ts:135`（10s）两处 light 同形不同命——
+ * 一次不返回的视觉调用会一直占着这一步，直到执行器的 120s 把它整个杀掉。
+ * 定 120s 而不是照抄 10s：这两件事的输入量级差两个数量级（judge 判一条短消息；这里发一张
+ * 中位 1.35 MB 的 base64 图），照抄一个"看起来更安全"的小值只会把"图大所以慢"误判成超时。
+ */
+export const DEFAULT_VISION_REQUEST_TIMEOUT_MS = VISION_READ_TIMEOUT_MS;
 /** 目录遍历上限，防一手无意的超大树 */
 const MAX_SCAN_ENTRIES = 2_000;
 const MAX_DIR_DEPTH = 6;
@@ -160,6 +175,18 @@ export interface VisionGenerateRequest {
    * `test/thinking-effort-invariant.test.ts`（六处调用点逐个断言）。
    */
   reasoning?: { effort: DsReasoningEffort };
+  /**
+   * 调用方中断信号（**2026-10-11 补**，形状与 `DsRequest.signal` 同）。
+   *
+   * 这一格原先**根本没有**：`vision.ts` 只管在入口查一次 `ctx.signal.aborted`，从不把它传下去
+   * ⇒ 图片读到一半她按了停、或者模型一直不返回，这一发都收不到任何中断。同一条 lane 上另外两处
+   * （`channel/injection-judge.ts:150`、`channel/topic.ts:135`）都挂了 `AbortSignal.timeout`，
+   * 只有这一处没有——不是"故意不同"，是漏了。
+   *
+   * 适配器（`src/main.ts` 的 `visionClient`）**原样透传整个请求对象**，所以补上这一格之后
+   * 超时与中断才能真的走到 `DsClient` 那一侧。
+   */
+  signal?: AbortSignal;
 }
 
 /** 落盘的缓存条目 */
@@ -203,6 +230,36 @@ export interface VisionToolsOptions {
    * 那条事件写了也不会被渲染层注入，只会让她以为"我看过了"。
    */
   imagesToContext?: boolean;
+  /**
+   * **每次真发出去的模型请求**的响应出口（含 `usage`），宿主据此记一条 `budget/consumed`。
+   *
+   * 为什么必须由宿主接（工具层自己不记账）：`ToolContext` 里没有 `log` / `nextSeq()`，本工具
+   * 的事件出口只有上面那一种 `image/attached`——"vision 只该有写这一种事件的能力"。这与
+   * `memory_read` 的访问账（`tools/catalog.ts` 的 `memoryReadRecorder`）是同一条纪律、同一形状：
+   * **工具层只交事实，账本由宿主写**。
+   *
+   * 判据（**只在真发出去一次模型请求时**调它）：
+   *   · `vision_read` 的**缓存未命中**那一支 ⇒ 调一次（一张图一次，`DsResponse` 原样交出）；
+   *   · `vision_read` 命中缓存 ⇒ **不调**（`vision.ts` 的 `hit !== undefined` 分支直接 `continue`）；
+   *   · `vision_read { inline: true }` ⇒ **不调**（那条路一个模型请求都不发）；
+   *   · `vision_query` ⇒ **不调**（纯缓存读，全程只碰盘）；
+   *   · 模型调用失败 ⇒ **不调**（没有响应可交；失败那笔账归主循环，不在这里编一个 0）。
+   *
+   * 不传 = 不记账，与 2026-10-11 之前的行为逐字节相同（那时 vision 的 64 次真实请求
+   * 一条账都没有，见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+   *
+   * `turn` / `step` 由工具层从 `ctx` 交出来（**与 `memory_read` 的访问账同一条路**：
+   * `tools/catalog.ts` 那格注释写着"turn 由工具层从 `ctx.turn` 交出来，所以这里不需要
+   * '当前是哪一轮'这种跨层状态"）。宿主因此不必自己记"现在跑到哪一步了"。
+   */
+  onUsage?: (response: DsResponse, turn: number, step: number) => void;
+  /**
+   * 单次视觉模型请求的超时（毫秒），默认 {@link DEFAULT_VISION_REQUEST_TIMEOUT_MS}。
+   *
+   * 做成注入点**只为一件事**：让"到点真的会中断"这条判据可以被实测——120 秒的默认值在用例里
+   * 等不起，而"只断言 signal 存在"证明不了它会触发。生产不传，走默认值。
+   */
+  requestTimeoutMs?: number;
 }
 
 // ──────────────────────────────── 辅助函数 ────────────────────────────────
@@ -475,6 +532,7 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
   const maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   const maxPaths = options.maxPaths ?? DEFAULT_MAX_PATHS;
   const clock = options.clock ?? (() => new Date());
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_VISION_REQUEST_TIMEOUT_MS;
   const cacheDir = join(options.dataDir, VISION_CACHE_DIR_NAME);
 
   /**
@@ -729,19 +787,40 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
           };
 
           let raw: string;
+          let response: DsResponse;
           try {
-            const response = await options.dsClient.generate(request);
-            raw = extractResponseText(response);
+            response = await options.dsClient.generate({
+              ...request,
+              // 单调用超时（2026-10-11 补，见 DEFAULT_VISION_REQUEST_TIMEOUT_MS）：与
+              // `injection-judge.ts:150` / `topic.ts:135` 同形。两个信号合成一个——
+              // `AbortSignal.any` 要么等本 turn 的 `ctx.signal`（她按了停），要么等这一发自己
+              // 到点；原先一个都没挂，这条路上唯一的界是执行器那个 120s 的工具超时。
+              signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(requestTimeoutMs)]),
+            });
+            // 记账出口：**真发出去一次请求**才走到这里（缓存命中在上面的 `hit` 分支就 continue 了，
+            // `inline` 与 `vision_query` 根本不进这一段）。原样把整个响应交出去，尤其不许丢
+            // `response.usage`——2026-10-11 之前它就是在下面那一行被压成字符串之后丢掉的。
+            options.onUsage?.(response, ctx.turn, ctx.step);
           } catch (err) {
+            // 超时也是一种 `AbortError`（`AbortSignal.timeout` 的中断理由名是 `TimeoutError`），
+            // 而"她按了停"与"这一发自己卡死了"是两件事。判据落在**本 turn 的信号**上
+            // （`ctx.signal.aborted`）：它成立就是她按了停，否则只可能是这一发的超时到点了
+            // ——于是超时**新**拿到 `E_TIMEOUT`，两条路不再混成同一个码；
+            // 其余失败（网络、429、5xx）照旧 `MODEL_FAILED`，一个字节都没挪。
             items.push({
               filename,
               error: {
-                code: ctx.signal.aborted ? TOOL_ERROR_CODES.aborted : VISION_ERROR_CODES.MODEL_FAILED,
+                code: ctx.signal.aborted
+                  ? TOOL_ERROR_CODES.aborted
+                  : (err instanceof Error && err.name === 'TimeoutError'
+                    ? TOOL_ERROR_CODES.timeout
+                    : VISION_ERROR_CODES.MODEL_FAILED),
                 message: err instanceof Error ? err.message : String(err),
               },
             });
             continue;
           }
+          raw = extractResponseText(response);
           if (raw === '') {
             items.push({
               filename,

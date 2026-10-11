@@ -357,9 +357,19 @@ void main() {
       final response = req.response..headers.contentType = ContentType.json;
       final path = req.uri.path;
       if (path == '/api/config') {
-        // 不带 `source=saved` = **生效那份**（运行期真值）：见 [liveConfig] 的说明
-        response.write(jsonEncode(
-            req.uri.queryParameters['source'] == 'saved' ? config : liveConfig));
+        // 不带 `source=saved` = **生效那份**（运行期真值）：见 [liveConfig] 的说明。
+        //
+        // `bounds` 照真服务端的形状给（`src/web/server.ts` 的 `/api/config`）——界面的
+        // 保存前拦截**只从它取**（2026-10-11 收口：Dart 侧那一对常量已删）。缺这一格，
+        // 越界那一格就退回"不预拦、由服务端拒"，下面那条用例当场红——**这正是要的**：
+        // 它钉住"边界只有服务端一个真源"。
+        final body = req.uri.queryParameters['source'] == 'saved' ? config : liveConfig;
+        response.write(jsonEncode({
+          ...body,
+          'bounds': {
+            'compactionThreshold': {'min': 10000, 'max': 2000000},
+          },
+        }));
       } else if (path == '/api/keys') {
         response.write(jsonEncode({'heavy': {'configured': true, 'mask': 'sk-…1a2b'}, 'light': {'configured': false}}));
       } else if (path == '/api/projection') {
@@ -1746,6 +1756,10 @@ void main() {
 
     // 越界三条：**一个字节都不写**（文案由 _SysField.problem 生成，与别的数值行同一套口径），
     // 并且拦下之后留在编辑态（人就在那个框上，改完再按一次就行）。
+    //
+    // ⚠ 这一组拦下来的**边界来自服务端**（`/api/config` 的 `bounds.compactionThreshold`，
+    // 见上面那个假服务端），界面这一侧**没有**自己的常量（2026-10-11 收口删掉了
+    // `kCompactionThresholdMin/Max`）——所以这几条断言同时钉住"边界真的从回执流到了框上"。
     Future<void> check(String bad, String message) async {
       await tapInCard(tester, sysEdit('persona.compactionThresholdTokens'));
       await tester.enterText(

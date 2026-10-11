@@ -1014,12 +1014,26 @@ describe('onebot：正向 ws 链路（假 NapCat）', () => {
     const channels = new Map([[channel.name, channel]]) as ReadonlyMap<string, OneBotChannel>;
     const poster = createOneBotReplyPoster(channels);
     const ok = await poster.post({ url: 'onebot:group:20002', idempotencyKey: 'turn-1' }, '回投的话');
-    assert.deepEqual(ok, { ok: true, status: 200 });
+    // 平台回的 `message_id` **必须原样透传**（2026-10-12）：原来这里断言的是
+    // `{ok:true,status:200}`——签名把这一格窄化掉了，于是 `speak/sent` 里没有 id、
+    // `read_channel` 的 `（我）`那一行永远拿不到它，她**删不掉"自己刚发的那条"**
+    //（实测 T1308：为凑出这个 id 扫了两遍原始 jsonl）。假协议端这里回的是 `message_id: 1`。
+    assert.deepEqual(ok, { ok: true, status: 200, messageId: '1' });
     assert.deepEqual(cat.actions().at(-1), {
       action: 'send_group_msg',
       params: { group_id: 20002, message: '回投的话' },
       echo: cat.actions().at(-1)?.['echo'],
     });
+
+    // **反向**：协议端没回 `message_id` 时那一格**整个缺席**（不是 `messageId: ''`）——
+    // "给了但为空"在消费侧会被读成"这个 id 是空串"，比缺席更难判。
+    cat.onText = (text) => {
+      const call = JSON.parse(text) as Record<string, unknown>;
+      cat.replyJson({ status: 'ok', retcode: 0, data: {}, echo: call['echo'] });
+    };
+    const noId = await poster.post({ url: 'onebot:c2c:20002', idempotencyKey: 'turn-2' }, '没有 id 的一条');
+    assert.deepEqual(noId, { ok: true, status: 200 },
+      '协议端不给 id ⇒ 那一格缺席（照旧是一条成功的投递）');
 
     const wrong = await poster.post({ url: 'qq:c2c:1', idempotencyKey: 'turn-1' }, 'x');
     assert.equal(wrong.ok, false);

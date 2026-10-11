@@ -112,6 +112,14 @@ import type { TimerStore } from '../wake/timer-store.js';
 import { trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
 import { createAuthzGate, type Scenario } from './authz.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
+// 「我自己是谁」的判据实现（**全仓唯一一处**）：群成员登记那一档与宿主的落库口共用它
+// （递进来的是同一个 SelfIdentity 实例，见 RealLoopDeps.selfMessages）；
+// `channel/notice` 的形状与视图也出自同一处（`readChannelNotices` 是它唯一的读口）
+import { isChannelNoticeData, noticeViewOf, type ChannelNoticeView, type SelfIdentity } from '../channel/self-identity.ts';
+// 「我做过」的形状与视图（`readChannelActions` 是它唯一的读口；判据在那个模块里只有一处）
+import { isChannelSelfActionData, type ChannelSelfActionView } from '../channel/self-action.ts';
+// "这是不是我自己"那一刀（判据只有一份，两个落点共用；见 `channel/self-message-gate.ts`）
+import { groupMemberGate } from '../channel/self-message-gate.ts';
 import { WarnExemptBook, type WarnExemptSubject } from '../channel/warn-exempt.ts';
 // `msgSeqOf`：平台给不出消息序号时"补事件 seq"的**唯一判据**（信箱那条路也走它）
 import { msgSeqOf } from '../channel/inbox.ts';
@@ -969,11 +977,23 @@ export function imageAimedAtHer(data: { chatType?: string; mentionsMe?: boolean 
   return data.chatType === 'c2c' || mentionedInMessage(data);
 }
 
-function groupMemberCandidateOf(event: AppEvent): GroupCallingEvent | null {
+function groupMemberCandidateOf(event: AppEvent, selfMessages?: SelfIdentity): GroupCallingEvent | null {
   if (event.type !== 'wake/channel') return null;
   const data = event.data;
   if (data.chatType !== 'group' && data.chatType !== 'group-at') return null;
   if (!mentionedInMessage(data)) return null;
+  /**
+   * **我自己不算群成员**（2026-10-11）。
+   *
+   * 正经的闸在宿主的落库口（`main.ts` 的 `onChannelMessage`：认出是自己发的就整条不落库，
+   * 见 `channel/self-identity.ts`）。这一句是**防线第二道**，挡的是另一条路：
+   * `warmUp` 会拿**日志里已有的**事件重折一遍（`backfillGroupMembers` 那一趟）——
+   * 判据补上之前落下的那些回声还在日志里，重折一次就会把他自己重新登记成"群友C"。
+   *
+   * 它与宿主那一处**共用同一个判据实现**（`SelfIdentity.has`），不另写一份字符串比较：
+   * 两处各写一遍，迟早一边改了另一边没改，而症状（档案里那个"群友"又是谁）从行为上看不出来。
+   */
+  if (selfMessages !== undefined && groupMemberGate(data, selfMessages)) return null;
   return event;
 }
 
@@ -1173,6 +1193,17 @@ export interface RealLoopDeps {
    * 它本来就没注册，两者互不影响。
    */
   taskRuntime?: TaskLoopRuntimeDeps;
+  /**
+   * **我自己的标识集合**（宿主那一份 `SelfIdentity` 实例；2026-10-11 加）。
+   *
+   * 用途只有一个：群成员自动登记时把"我自己"挡在外面（`groupMemberCandidateOf`）。
+   * 正经的闸在宿主的落库口（自己的消息整条不落库）——这里挡的是 `warmUp` 重折**历史事件**
+   * 那一路：判据补上之前落下的那些回声还在日志里，重折一次就会把她自己重新登记成"群友C"。
+   *
+   * 递的是**同一个实例**（不是副本）：`main.ts` 每收到一条事件都往里补新学到的标识，
+   * 而登记的判据要跟着那一刻的认知走。不给 = 这一档判据不生效（测试台与旧装配照旧）。
+   */
+  selfMessages?: SelfIdentity;
 }
 
 /**
@@ -3271,12 +3302,28 @@ export class RealLoop {
   }
 
   /**
-   * 本批输入里是不是"每日整理"定时器唤醒：是就把它摘出来单独处理，不混进模型 turn。
+   * **一条唤醒是不是"每日整理"**（判据的唯一一份实现，`memoryMaintainWake` 与注入给循环层的
+   * `isFrameworkWake` 都走它）。
    *
    * **先认事件里带的 payload，再回退查表**。只查表是不够的：`at` 型定时器触发后条目就被
    * 删了，`timers.get(timerId)` 拿到 null，于是它的 payload 判不出来——`/dream` 排的唤醒
    * 会跑成普通 turn，她自己 `timer`（action=set）布的"到点提醒我做什么"也一并失效。
    * cron 型条目触发后保留，所以回退那半仍然有用（也兼容旧日志）。
+   *
+   * ⚠ **`memoryHostingEnabled` 那一格不在这里**：它是"这一拍认不认领"的门（关掉框架代管记忆
+   * 时一条都不认领），而本函数只说"这条**是不是**整理唤醒"这个事实。两者混在一起会让
+   * 循环层那一侧拿到"关掉时连排除都不做"——那是另一个判据，不该被这里顺手改掉。
+   */
+  private isMemoryMaintainWake(event: AppEvent): boolean {
+    if (event.type !== 'wake/timer') return false;
+    if (isMemoryMaintainPayload(event.data.payload)) return true;
+    if (this.deps.timers === undefined) return false;
+    const entry = this.deps.timers.get(event.data.timerId);
+    return entry !== null && isMemoryMaintainPayload(entry.payload);
+  }
+
+  /**
+   * 本批输入里是不是"每日整理"定时器唤醒：是就把它摘出来单独处理，不混进模型 turn。
    */
   private memoryMaintainWake(batch: readonly PendingInput[]): AppEvent | null {
     // **双保险**（v32）：关掉框架代管记忆时一条都不认领——即便定时器表里、或者旧日志里还留着
@@ -3286,11 +3333,7 @@ export class RealLoop {
     if (!memoryHostingEnabled(this.deps.config)) return null;
     for (const item of batch) {
       const event = this.deps.log.get(item.wakeSeq);
-      if (event === null || event.type !== 'wake/timer') continue;
-      if (isMemoryMaintainPayload(event.data.payload)) return event;
-      if (this.deps.timers === undefined) continue;
-      const entry = this.deps.timers.get(event.data.timerId);
-      if (entry !== null && isMemoryMaintainPayload(entry.payload)) return event;
+      if (event !== null && this.isMemoryMaintainWake(event)) return event;
     }
     return null;
   }
@@ -3494,6 +3537,15 @@ export class RealLoop {
       // ⚠ 它**不进请求体**：`context` 是 `budget/consumed` 的观测面
       //（`ds-client.buildRequestBody` 不碰它），所以这一格**不改字节、不动 `RENDER_VERSION`**。
       trust,
+      // 框架内部动作的判定（2026-10-11 加）：**判据只留一份**——就是本模块上面那个
+      // `isMemoryMaintainWake`（它内部用的还是布防/认领共用的 `isMemoryMaintainPayload`）。
+      // 循环层拿它把"整理唤醒"从轮内认领**与请求体**两条路上都排除掉，好让这条唤醒留在
+      // `pending` 里，本 turn 结束后由下一拍的 `tickOnce`（上面 `memoryMaintainWake(batch)`
+      // 那一处）正常认走、走整理。详细机制见 `AgentLoopDeps.isFrameworkWake` 那一篇注释。
+      //
+      // 为什么在这里注入而不是让循环层 import：判据的第二份实现必然与这一份漂开，
+      // 而"哪些唤醒是框架自己的"这种判据漂开的后果是**静默的**（唤醒消失或重复认领）。
+      isFrameworkWake: (event) => this.isMemoryMaintainWake(event),
       // 活动边界（`config.trust.mode`）：**装配层唯一的消费点**——判据是 config.ts 的
       // `trustBoundaryRoot`（'full' → null 完全信任 / 'workspace' → 只限 trust.workspaceRoot）。
       // 与 workspaceRoot 一样是启动期定下的（它进的是 `AgentLoopDeps`，每 turn 重新装配一次，
@@ -4063,7 +4115,8 @@ export class RealLoop {
   private registerGroupMembers(event: AppEvent): void {
     // **只认 @ 她/提及她**（用户 2026-10-04 的口径）：被 @ 的其他人一概不管。
     // 判据收在 `groupMemberCandidateOf` 里，与回填那趟**同一个函数**——两处各写一遍迟早会漂。
-    const calling = groupMemberCandidateOf(event);
+    // 2026-10-11 起那个函数还多一档「这是不是我自己」（判据与宿主落库口共用一份实现）。
+    const calling = groupMemberCandidateOf(event, this.deps.selfMessages);
     if (calling === null) return;
     const data = calling.data;
     this.groupMembers ??= new GroupMemberBook(this.deps.dataDir);
@@ -4104,7 +4157,7 @@ export class RealLoop {
     // 这里去重只是让"一批就是一批"这件事在调用点上看得出来。
     const byOpenid = new Map<string, { openid: string; groupSid: string; nickname?: string; at: string }>();
     for (const event of events) {
-      const calling = groupMemberCandidateOf(event);
+      const calling = groupMemberCandidateOf(event, this.deps.selfMessages);
       if (calling === null) continue;
       const data = calling.data;
       // 与运行期同一条判据：已经有名字的人（用户、她认过的别名）**不进档案**
@@ -4338,6 +4391,63 @@ export class RealLoop {
   }
 
   /**
+   * `read_channel` 的**第三个**读取口：这个会话里**发生过的事**（`channel/notice`）。
+   *
+   * 与 `readChannelMessages` 同一个理由由宿主来读（工具层不读日志），也与它同一套游标语义：
+   *   • 不给 `before` ⇒ 取最近 `limit` 条；
+   *   • 给了 ⇒ 取**事件 seq 严格小于它**的最近 `limit` 条（往回翻一页）。
+   *
+   * `sid` 是按 **`channel` + 推测的 chatType + `chatId`** 算的：notice 那一侧只有
+   * "群"与"单聊"两档（平台给的信息就这么多，见 `ChannelNoticeData.chatType`），
+   * 而 sid 的 `qq:group:<id>` / `onebot:group:<id>` 命名空间两边一致——
+   * `group` 与 `group-at` 的归一本来就在 `sidKindOf` 里（见 `channel/sessions.ts`）。
+   *
+   * 拿不准就**不摆**：某个 notice 的 sid 算出来与本会话不同 ⇒ 它不是这个会话里的事，跳过。
+   */
+  // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
+  async readChannelNotices(sid: string, limit: number, before?: number): Promise<ChannelNoticeView[]> {
+    const hits: ChannelNoticeView[] = [];
+    for await (const event of this.deps.log.readAll()) {
+      if (event.type !== 'channel/notice') continue;
+      const d = event.data;
+      // 形状再判一次：畸形事件（手工改过日志、旧版本写下的）**不进这一屏**——
+      // 一条渲染不出来的东西摆进去只会让她读到一行空的
+      if (!isChannelNoticeData(d)) continue;
+      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
+      // 游标那一刀在读完字段之前（与 readChannelMessages 同一条：翻页时绝大多数事件落在游标之后）
+      if (before !== undefined && event.seq >= before) continue;
+      hits.push(noticeViewOf(d, event.seq, event.ts));
+    }
+    return hits.slice(-limit);
+  }
+
+  /**
+   * `read_channel` 的**第四个**读取口：**她在这个会话里做过什么**（`channel/self-action`）。
+   *
+   * 与 `readChannelNotices` **逐字同一套**（同一理由由宿主读日志、同一套游标语义、
+   * 同一句"拿不准就不摆"）：差别只有事件类型与字段——这条的 sid 是**落库时就写好的**
+   * （`actionRecordOf` 从 `group_id` 算出来），所以不必像 notice 那样按 `chatType` 现推，
+   * 少一处推测就少一处错的机会。
+   *
+   * 平台不对机器人自己发起的动作发 notice ⇒ 这条凭据只能从 MCP 回执那一层来
+   * （`tools/mcp-entry.ts` 的 `onReceipt` → `channel/self-action.ts`）。
+   */
+  // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
+  async readChannelActions(sid: string, limit: number, before?: number): Promise<ChannelSelfActionView[]> {
+    const hits: ChannelSelfActionView[] = [];
+    for await (const event of this.deps.log.readAll()) {
+      if (event.type !== 'channel/self-action') continue;
+      const d = event.data;
+      // 畸形事件（手工改过日志、旧版本写下的）不进这一屏：渲染不出来的一行只是噪音
+      if (!isChannelSelfActionData(d)) continue;
+      if (normalizeSid(d.sid) !== sid) continue;
+      if (before !== undefined && event.seq >= before) continue;
+      hits.push({ ...d, seq: event.seq, ts: event.ts });
+    }
+    return hits.slice(-limit);
+  }
+
+  /**
    * `read_channel` 的第二个读取口：**她在这个会话里说过的话**（"她读群时知道自己已经回过什么"）。
    *
    * 为什么要宿主来读（2026-10-04）：她说出去的话本身是**逐段**落进 `message/assistant` 的
@@ -4375,15 +4485,34 @@ export class RealLoop {
       if (normalizeSid(deliveredSid) !== sid) continue;
       // 过完闸才取文本：`deliveredToSid` 已经保证它是非空字符串（类型也据此收窄）
       const text = d.text as string;
+      /**
+       * 平台回的这条消息 id（2026-10-12 起 `speak/sent` 才带它）。
+       *
+       * **可选、缺席是常态**：旧日志没有它（"日志只增不改"的必然），通道给不出时也没有。
+       * 缺席时这一行照旧读得出来——`（我）`那一行不过是少一格 `·m<id>`。
+       */
+      const messageId = typeof d.messageId === 'string' && d.messageId !== '' ? d.messageId : undefined;
       const atMs = Date.parse(event.ts);
       const key = d.callId !== undefined
         ? `c\u0000${d.callId}`
         : d.turn === undefined ? `\u0000${counter++}` : `t\u0000${d.turn}`;
       const prev = bySpoken.get(key);
       const parts = d.spokenParts ?? 1;
+      // 归并成一行时**保留第一条的 id**（`??` 的次序就是这条纪律：先来的那个锚不动，
+      // 只有它缺席才让后来的补上）。理由与 speak 那边取"第一条"同源：
+      // 这一行是"她这一段话"，锚要落在她开口的第一条上。
+      const mergedMessageId = prev?.messageId ?? messageId;
       bySpoken.set(key, prev === undefined
         // 第一次发言取回执自己的时刻（第一次投递那一刻）
-        ? { text, ts: event.ts, parts, seq: event.seq, atMs }
+        ? {
+            text,
+            ts: event.ts,
+            parts,
+            seq: event.seq,
+            atMs,
+            // 可选的键只在有值时才摆（`exactOptionalPropertyTypes`：缺席 ≠ 值是 undefined）
+            ...(messageId === undefined ? {} : { messageId }),
+          }
         // 同一次发言的下一段：接在她那口气后面，时刻推到最后一次（读起来是"这一段说到这时"）
         : {
             text: prev.text + text,
@@ -4391,6 +4520,7 @@ export class RealLoop {
             parts: prev.parts + parts,
             seq: event.seq,
             atMs,
+            ...(mergedMessageId === undefined ? {} : { messageId: mergedMessageId }),
           });
     }
     // 升序交给调用方（read_channel 合批时自己排），这里保持日志顺序即可

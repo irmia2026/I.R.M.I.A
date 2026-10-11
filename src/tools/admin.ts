@@ -49,6 +49,11 @@ import {
   parseReplyUrl as parseOneBotReplyUrl, replyUrlOf as oneBotReplyUrlOf,
 } from '../channel/onebot.ts';
 import { CHAT_TYPE_LABELS, channelForNamespace, normalizeSid, parseSid, sessionLabelOf, type SessionEntry } from '../channel/sessions.ts';
+// 群里动静（notice）的形状与**逐字行文**都只有一处实现（`noticeLineText`）：这里只负责
+// "给它一个查得到名字的口"，不另写一份渲染（两处各写一遍迟早给出两种说法）
+import { noticeLineText, type ChannelNoticeView, type NoticeNamer } from '../channel/self-identity.ts';
+// 「我做过」那一行的**逐字**也只有一处实现（`selfActionLineText`）；这里只给它一个查群名的口
+import { selfActionLineText, type ChannelSelfActionView, type SelfActionNamer } from '../channel/self-action.ts';
 import { renderExternalEvent } from '../model/render.ts';
 import { normalizePersonaAsset } from '../persona/loader.ts';
 // 待办的载体只有一处：`STATE.md` 的两节。解析 / 渲染 / 最小替换都在那个模块里（不在这里另写一份）
@@ -348,6 +353,18 @@ export interface SpeakSentPayload {
   callId?: string;
   /** 产生这次发言的 turn 号 */
   turn?: number;
+  /**
+   * 这一次投递出去的那条消息**在平台上的 id**（2026-10-12 补）——`read_channel` 的
+   * `（我）`那一行靠它把"我说的这一行"与平台上的那条消息对上。
+   *
+   * 为什么它必须到这一层：`delete_msg` / `get_msg` 只认平台 `message_id`，而在这条路打通
+   * 之前，她**删不掉"自己刚发的那条"**——那个 id 在适配器里就被窄化丢掉了。实测凭据：
+   * 事件 77386（T1308/S1）她自己写着「我发出去的消息——speak/sent 事件里没有 messageId」。
+   *
+   * 一次 speak 会被切成 N 条气泡（N 个 id），这一格记的是**这一段的第一条**（不是最后一条）：
+   * 一行只放一个 id，而"她开口的第一条"是这一行最自然的锚（要撤这一段，从它撤起）。
+   */
+  messageId?: string;
 }
 
 export type SpeakChannel = 'log' | 'notify' | 'reply-url';
@@ -384,6 +401,13 @@ export function deliverToSession(input: {
   callId?: string;
   /** 产生这次投递的 turn 号（复盘用；兜住旧事件没有 callId 的情形） */
   turn?: number;
+  /**
+   * 这一次投递出去的那条消息的**平台 id**（2026-10-12 补；通道层 `SendOutcome.messageId`）。
+   *
+   * 可选，理由与 `SpeakSent.messageId` 逐字同源：旧日志没有它、通道也可能给不出
+   *（协议端不回 id）——那时这一格缺席，不是缺陷。
+   */
+  messageId?: string;
 }): SpeakSentPayload {
   return {
     channel: 'reply-url',
@@ -393,6 +417,9 @@ export function deliverToSession(input: {
     spokenParts: input.parts ?? 1,
     ...(input.callId === undefined ? {} : { callId: input.callId }),
     ...(input.turn === undefined ? {} : { turn: input.turn }),
+    // 空串与缺席**分开**：通道层已经把"给不出"归一成缺席了（不带这一格），
+    // 这里再兜一次，免得一个 `messageId: ''` 落到日志里被读成"这个 id 是空串"。
+    ...(input.messageId === undefined || input.messageId === '' ? {} : { messageId: input.messageId }),
   };
 }
 
@@ -545,6 +572,17 @@ export type ReplyOutcome =
      * 「@ 到底亮没亮」。不说，就是留一个"以为发出去了、其实没 @ 到"的静默失败。
      */
     note?: string;
+    /**
+     * 平台回的**这条消息**的 id（2026-10-12 补；原样来自通道层 `SendOutcome.messageId`）。
+     *
+     * 为什么必须从通道层一路带到这里：它是"她刚发出去的那一条"的**唯一坐标**，而在这条路
+     * 打通之前它被适配器窄化掉了（`onebot.ts` 的 `createOneBotReplyPoster` 只回
+     * `{ok,status}`）——于是 `speak/sent` 里没有 id，`read_channel` 的 `（我）`那一行
+     * 永远拿不到它，她**删不掉"自己刚发的那条"**（实测 T1308 那一轮，她为此扫了两遍原始
+     * jsonl 才凑出 id，而其中一次白扫）。**可选**：通道给不出（协议端没回 id）时就不带它
+     * ——与 `SpeakSent.messageId` 同一条先例（"日志只增不改"）。
+     */
+    messageId?: string;
   }
   | { ok: false; status?: number; reason: string };
 export interface ReplyPoster {
@@ -664,6 +702,42 @@ export interface AdminToolsOptions {
    * 没接线时 read_channel 照常可用，只是读不到自己的发言（不假装她没说过）。
    */
   channelSpokenReader?: ChannelSpokenReader;
+  /**
+   * 这个会话里**发生过的事**（`channel/notice`：管理动作/入群退群/撤回……）——`read_channel` 用。
+   *
+   * 与 `channelReader` / `channelSpokenReader` 同一条纪律：宿主注入，工具层不读日志。
+   * 没接线 = 读不到动静（不是假装没有：这一屏本来就只是那一段日志的回放）。
+   *
+   * ⚠ 它**不动 `tools` 段的任何一个字节**：notice 只是 `read_channel` 结果里的数据，
+   * 而结果进的是 `input`（对话尾部），不进 `instructions`/`tools`（那才是逐字节冻结的前缀）。
+   * 所以这一件**不必递 `RENDER_VERSION`**（判据同 `log/types.ts` 那段"事件不改 RENDER_VERSION"）。
+   */
+  channelNoticeReader?: ChannelNoticeReader;
+  /**
+   * 这个会话里**她做过什么**（`channel/self-action`）——`read_channel` 用。
+   *
+   * 平台不对机器人自己发起的动作发 notice，所以这条凭据是从 MCP 管理类工具的回执那一层补的
+   * （`tools/mcp-entry.ts` 的 `onReceipt`）。与上面几个读取口同一条纪律：宿主注入，工具层不读日志。
+   * 没接线 = 读不到自己的动作（不是假装没有：这一屏本来就只是那一段日志的回放）。
+   *
+   * ⚠ 与 `channelNoticeReader` 一样**不动 `tools` 段的任何一个字节**：它只是 `read_channel`
+   * 结果里的数据（进 `input` 的对话尾部，不进 `instructions`/`tools`）⇒ **不必递 `RENDER_VERSION`**。
+   */
+  channelSelfActionReader?: ChannelSelfActionReader;
+  /**
+   * **我自己**那几个标识（宿主注入；`read_channel` 渲染群里动静时用）。
+   *
+   * 用途只有一处：notice 里说的若是**我自己**（"我被移出群聊"、我被禁言），那一行要写成
+   * `我` 而不是一个查不出名字的 id 锚——而"我自己是谁"只有宿主知道（它是两条通道各报一份、
+   * 由宿主合成的那一个集合，见 `channel/self-identity.ts`）。
+   *
+   * **给的是取值器而不是快照**（2026-10-11 修的一处"改了等于没改"）：这份认知是**运行期长出来
+   * 的**（OneBot 等 `self_id`、官方等 `/users/@me` 或群里 @ 我的事件），而工具包是在启动时
+   * 造好的。收快照 ⇒ 第一次渲染群公告时它还是空集，那一行就永远写成 id 锚。
+   *
+   * 缺省 = 空集：那一行就按"认不出这个人"如实写（短标识锚），**不猜**。
+   */
+  selfIds?: () => readonly string[];
   /**
    * 本机时区（IANA 名，`read_channel` 的短时间用）：宿主注入，缺省退回 ISO 原文。
    *
@@ -903,23 +977,68 @@ export interface ChannelSpoken {
   seq: number;
   /** 同一毫秒里的第二判据：投递那一刻的毫秒。两个相邻 segment 的 ts 可能只差 1ms，用它排稳 */
   atMs: number;
+  /**
+   * 这段话**在平台上的那条消息 id**（2026-10-12 起才有；`speak/sent` 带上它了）。
+   *
+   * 为什么现在能有（原来这一类的注释逐字写着"她的发言没有平台 messageId"）：那个 id 一直
+   * 在适配器手里，只是被回投那一层窄化丢掉了——`onebot.ts` 的 `createOneBotReplyPoster`
+   * 原来只回 `{ok, status}`。补上之后这一格才存在，她**删得掉"自己刚发的那条"**
+   * （实测 T1308：她为此扫了两遍原始 jsonl 才凑出 id）。
+   *
+   * **可选，缺席是常态**：旧日志没有它（`log/types.ts` 的"日志只增不改"先例）、通道也可能
+   * 给不出（协议端不回 id）、一次发言被切成 N 条气泡时这一格只记**第一条**
+   * （一行一个位置，锚落在她开口的第一条上——与 speak 那边同一个选择）。
+   */
+  messageId?: string;
 }
 
-/** `read_channel` 一行的两种来源：外部消息、或她自己说出去的话 */
-export type ReadChannelItem = ChannelMessageView | ChannelSpoken;
+/** `read_channel` 一行的**四种**来源：外部消息、她说出去的话、群里的一件事（notice）、她做的事（self-action） */
+export type ReadChannelItem = ChannelMessageView | ChannelSpoken | ChannelNoticeView | ChannelSelfActionView;
+
+/**
+ * 真假判据：这一行是**她自己的管理动作**（「我做过」）而不是谁说的话（2026-10-11 加）。
+ *
+ * 判据取 `receipt` 在不在——那是这条事件独有的字段（`action` 也有，但 `receipt` 是
+ * 载荷校验里必有的那一格，用它更稳）。三个标记**互斥且有序**：
+ * `noticeType`（群里的动静）> `receipt`（我做的）> 无标记（别人说的）。
+ */
+export function isChannelSelfAction(item: ReadChannelItem): item is ChannelSelfActionView {
+  // 判 `item` 本身（理由同下面那条）：混进 undefined 时退化成"不是这一类"，而不是抛异常吞掉整屏
+  return item !== undefined && item !== null && (item as ChannelSelfActionView).receipt !== undefined;
+}
+
+/**
+ * 真假判据：这一行是**群里的一件动静**（notice）而不是谁说的话（2026-10-11 加）。
+ *
+ * 判据取 `noticeType` 在不在——那是 notice 独有的字段（两扇门的适配器都填它，见
+ * `channel/self-identity.ts` 的 `ChannelNoticeData`）。与 `isChannelSpoken` 的判据**互斥且互补**：
+ * 那个认"没有平台序号"（她的发言），这个认"有事件类别"。
+ */
+export function isChannelNotice(item: ReadChannelItem): item is ChannelNoticeView {
+  // 逐字写三格：几种来源的**固有差别**是"它有什么字段"（notice 有 `noticeType`、
+  // 消息有 `msgSeq`、她的发言有 `atMs`）。**不许写 `item.noticeType` 而不判 `item` 本身**：
+  // 数组里混进一个 `undefined`（上游某个 `?? []` 没兜住）时，那一句会抛
+  // "Cannot read properties of undefined"——而这一层是**渲染**，渲染抛异常的后果是
+  // 整屏读不出来（比少一行严重得多）。判 `item` 本身则退化成"这一条不是 notice"。
+  return item !== undefined && item !== null && typeof (item as ChannelNoticeView).noticeType === 'string';
+}
 
 /**
  * 真假判据：她自己的行**没有平台序号**——`msgSeq` 是"这条是那个会话里的第几条"，只有平台消息有；
  * 她的发言来自 `speak/sent`，天然没有它。用它而不是"看 `person` 在不在"：那个字段将来若有一天
  * 允许缺省（比如平台不给发言人），判据就会把外部消息静默地当成她自己的话——那是读起来完全正常、
  * 却把"谁说的"搞反的错。这个判据只依赖**这两种事件的固有差别**。
+ *
+ * ⚠ 2026-10-11：notice 与 self-action 也都没有 `msgSeq`，所以这一条**必须先把那两类排掉**——
+ * 否则群公告会被渲染成 `（我）：[某人 被禁言 600 秒]`（把别人的动静安到她头上），
+ * 她自己的动作也会走进"她说过的话"那一支（自由文本与方括号动作两种形状会混）。
  */
 export function isChannelSpoken(item: ReadChannelItem): item is ChannelSpoken {
-  return (item as ChannelMessageView).msgSeq === undefined;
+  return !isChannelNotice(item) && !isChannelSelfAction(item) && (item as ChannelMessageView).msgSeq === undefined;
 }
 
 /**
- * 这一行**落进日志时的 seq**（两种来源都有；宿主填不出时退回 0）。
+ * 这一行**落进日志时的 seq**（每种来源都有；宿主填不出时退回 0）。
  *
  * 两种用途，同一份判据：
  *   ① 排序的最后一个键——官方单聊的 `msgSeq` **恒为 1**，一批单聊消息在主键与次序键上全部相等，
@@ -928,7 +1047,9 @@ export function isChannelSpoken(item: ReadChannelItem): item is ChannelSpoken {
  *      只有事件 seq 答得对这个问题，平台序号答不出（平台常常不给，单聊恒为 1）。
  */
 export function eventSeqOf(item: ReadChannelItem): number {
-  const raw = isChannelSpoken(item) ? item.seq : (item as ChannelMessageView).seq;
+  const raw = isChannelNotice(item) || isChannelSelfAction(item) || isChannelSpoken(item)
+    ? item.seq
+    : (item as ChannelMessageView).seq;
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
@@ -953,6 +1074,21 @@ export const SELF_SPEAK_LABEL = '（我）';
  * "有标记 = 提及"这条判据在整屏里是**单调**的（她不必去数第几列）。
  */
 export const MENTION_ROW_MARK = '▶ ';
+
+/**
+ * 行尾那个 id 单元的 sigil：`·m<平台消息 id>`（**只对 OneBot 族印**，判据在 `renderReadBatch`）。
+ *
+ * 为什么是 `·m` 这个形态（三条都是"与既有含义不打架"）：
+ *   · **不能用 `#`**：`#` 在这一屏的世界里已经是"平台 message id"——别人引用某条时适配器
+ *     写下的前缀逐字是 `[引用 #-754521710]`（`onebot.ts` 的 `quotedPrefix`）。同一个屏里
+ *     再用 `#` 当 id sigil，同一个符号就有两个所指。
+ *   · **不能用裸数字**：页脚的翻页游标就是**裸 event seq**（`带上 before=76652`），
+ *     而 `m` 后面的那个数是**平台 message id**——两个数形状都是整数串，不隔一个字符分不开。
+ *   · **不能占既有列**：`▶ `（行首、提及）、`（我）`（"谁"那一格）、`[external_event …]`
+ *     （整批框）、`［图］`（附件那一格）都各有其位，所以它**只在行尾**追加。
+ * 中圆点 `·` 在这一屏里是既有的"这是标注"符号（见 `pagingFooter` 的 `· OneBot 11 · 群聊`）。
+ */
+export const MESSAGE_ID_MARK = '·m';
 
 /**
  * 附件那一格里**一张图**的写法（`read_channel` 那一行的唯一实现）。
@@ -1149,7 +1285,7 @@ export function localOnlyNote(noun: '发言' | '报告'): string {
  * （顺序不要求），这里把两股按时间轴合起来、再压回 limit。
  */
 export function mergeChannelSpeech(
-  hits: readonly ChannelMessageView[],
+  hits: readonly (ChannelMessageView | ChannelNoticeView | ChannelSelfActionView)[],
   spoken: readonly ChannelSpoken[],
   limit: number,
 ): ReadChannelItem[] {
@@ -1164,7 +1300,11 @@ export function mergeChannelSpeech(
  * 而比较函数返回 NaN 等于把顺序交给实现——宁可退回"按日志先后排"，也不让她读到随机的因果。
  */
 function timelineOrderKeyOf(item: ReadChannelItem): number {
-  const raw = isChannelSpoken(item) ? item.atMs : (item as ChannelMessageView).msgSeq;
+  // 四种来源各用自己的"同毫秒次序键"：她的发言用投递那一刻的毫秒（atMs）、notice 与她自己的
+  // 动作都用事件 seq（这两类都没有平台序号这回事）、平台消息用它自己的平台序号（最贴近人的直觉）。
+  const raw = isChannelNotice(item) || isChannelSelfAction(item)
+    ? item.seq
+    : isChannelSpoken(item) ? item.atMs : (item as ChannelMessageView).msgSeq;
   return Number.isFinite(raw) ? raw : 0;
 }
 
@@ -1223,6 +1363,31 @@ export type ChannelReader = (
  * 与会话清单、未读、话题全都无关——它只服务 read_channel 的"她已经回过什么"这一眼。
  */
 export type ChannelSpokenReader = (sid: string) => Promise<readonly ChannelSpoken[]>;
+
+/**
+ * 这个会话里**发生过的事**（`channel/notice`：谁开了全员禁言、谁入群退群、谁撤回了一条……）——
+ * 宿主注入，与消息那一路同一个理由（工具层不读日志）。
+ *
+ * 为什么单开一个口而不是并进 `ChannelReader`：两者的**语义不同**（那条答"谁说了什么"、
+ * 这条答"群里出了什么事"），落库时也是两种事件。并进一个口就得在两边各分一次流，
+ * 而"哪一条是消息、哪一条是动静"这个判断在这里已经有唯一实现了（`isChannelNotice`）。
+ *
+ * 顺序不作要求（合批时由 `sortByTimeline` 排）。没接线 = 读不到动静，其余照旧。
+ */
+export type ChannelNoticeReader = (sid: string, limit: number, before?: number) => Promise<readonly ChannelNoticeView[]>;
+
+/**
+ * 这个会话里**她做过什么**（`channel/self-action`：全员禁言、禁言、踢人、改群名、退群……）——
+ * 宿主注入，与上面三个读取口同一条纪律（工具层不读日志）。
+ *
+ * 为什么单开一个口而不是并进 `ChannelNoticeReader`：两者答的是**不同的问题**
+ * （那条答"群里出了什么事"、这条答"我做了什么"），落库时也是两种事件、两种渲染。
+ * 并进一个口就得在两边各分一次流，而"这一条是谁的"这个判断在这里已经有唯一实现了
+ * （`isChannelSelfAction`）。
+ *
+ * 顺序不作要求（合批时由 `sortByTimeline` 排）。没接线 = 读不到自己的动作，其余照旧。
+ */
+export type ChannelSelfActionReader = (sid: string, limit: number, before?: number) => Promise<readonly ChannelSelfActionView[]>;
 
 /**
  * 外部内容的渲染器：一条消息 → 一个 `[external_event …]` 包裹。
@@ -2203,6 +2368,32 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
          * 整段；中途失败/被打断时它是"收不回来的那半截"（**不补**失败之后没发的那些）。
          */
         const deliveredSegments: string[] = [];
+        /**
+         * 送出去的那几段**在平台上的 id**（与 `deliveredSegments` 逐个对齐、只记拿得到的）。
+         *
+         * 为什么要它：`read_channel` 的 `（我）`那一行要能回答"这一行对应平台上哪条"——
+         * 少了它，她**删不掉"自己刚发的那条"**（`delete_msg` 只认平台 `message_id`）。
+         * 实测凭据是事件 77386（T1308/S1）她自己的话：「我发出去的消息——speak/sent 事件里
+         * 没有 messageId」。攒的是**真送成的那些段**（与文本同一个口径），
+         * 通道给不出 id 的段不占位——所以两个数组**只保证"顺序一致"，不保证等长**。
+         */
+        const deliveredMessageIds: string[] = [];
+        /**
+         * 这一整段话要记的那**一个** id（`read_channel` 里这一段只占**一行**，而一行只有一个行尾位置）。
+         *
+         * 取**第一条**（不是最后一条）：那一行是"她这一段话"，而"她开口的第一条"是这一行最
+         * 自然的锚（要撤这一段，从它撤起）。**同一段被切成 N 条气泡时这是刻意的选择**，
+         * 不是漏取——`spokenParts` 已经把"其实是 N 条"说清了。
+         *
+         * 为什么返回的是"可以径直 `...` 的键对象"而不是裸 `string | undefined`：本仓开着
+         * `exactOptionalPropertyTypes`，而 `{ messageId: someStringOrUndefined() }` 的类型是
+         * `{messageId: string | undefined}`——那个 `undefined` **不满足** `messageId?: string`，
+         * 编译期就红。所以"没有"必须表达成**整个键缺席**，不能表达成"键在、值是 undefined"。
+         */
+        const deliveredIdKey = (): { messageId?: string } => {
+          const id = deliveredMessageIds.find((value) => value !== '');
+          return id === undefined ? {} : { messageId: id };
+        };
         /** IM 那一路带回来的降级提醒（形态变了，但话发出去了）：要进回执 */
         let imNote: string | null = null;
         /** 一段都没开始发之前不许取消——见循环开头那段说明 */
@@ -2253,6 +2444,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             if (outcome.ok) {
               sent += 1;
               deliveredSegments.push(segment);
+              // 平台回的 id 一并攒下来（通道给不出时是 undefined ⇒ 这一段不占位）
+              if (outcome.messageId !== undefined && outcome.messageId !== '') {
+                deliveredMessageIds.push(outcome.messageId);
+              }
               // 降级事实（例如 markdown 没权限、按纯文本发的）只在回执里说，不改投递结果
               imNote = degradeLineOf(outcome.note) ?? imNote;
             } else imFailure = outcome.reason;
@@ -2277,6 +2472,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
               // 攒下来的就是**真送成的那几段**（不补失败之后没发的那些）
               text: deliveredSegments.join(''),
               parts: sent,
+              // 这一段的平台 id（拿得到就带；一行只放一个，见 firstMessageIdOfDelivered）
+              ...deliveredIdKey(),
               ...spokenKey,
             }) satisfies SpeakSentPayload);
           }
@@ -2339,6 +2536,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             chars,
             text: deliveredText,
             parts: segments.length,
+            // 整段跑完：id 是这一整段第一条气泡的（见 firstMessageIdOfDelivered）
+            ...deliveredIdKey(),
             ...spokenKey,
           }) satisfies SpeakSentPayload);
           lines.push(targetLabel === ''
@@ -2595,6 +2794,17 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
 
   const channelReader = options.channelReader ?? null;
   const channelSpokenReader = options.channelSpokenReader ?? null;
+  const channelNoticeReader = options.channelNoticeReader ?? null;
+  const channelSelfActionReader = options.channelSelfActionReader ?? null;
+  /**
+   * 「我自己是谁」的**取值器**（宿主合成的那一份，见 `AdminToolsOptions.selfIds`）。
+   *
+   * 它**不进任何判据**，只进 notice 那一行的写法（"我被移出群聊"里那个"我"），
+   * 而且是**每次渲染时现读**——收快照会让它在启动那一刻永远停在空集。
+   * 这是刻意的分工：判据（谁的标识算自己）在宿主一处，工具层只拿它做显示——
+   * 显示错一次她读得出来，判据错一次她会把别人的话丢掉。
+   */
+  const selfIdsOf = (): readonly string[] => options.selfIds?.() ?? [];
   const resolveChannelName = options.resolveChannelName ?? null;
   const timezone = options.timezone ?? null;
   const mentionMessage = options.mentionMessage ?? null;
@@ -2713,6 +2923,31 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     // 每行的"谁"按**人**算：认得出名字就给名字，认不出给一个短代号（甲/乙/丙…，同一批内稳定）。
     // 绝不写会话名（那会让"谁说的"消失），也绝不写 openid（32 位乱码认不出是同一个人）。
     const alias = makePersonAliaser(resolvePersonName);
+    /**
+     * notice 那一行里的名字（**与消息那一行共用同一个别名器**）。
+     *
+     * 为什么共用：同一个 openid 在同一屏里只能有一种写法——消息行给 `OWNER`、
+     * 而下面那件"他开了全员禁言"写成 `…9F56`，读起来就是两个人。notice 不带昵称，
+     * 所以第二个入参永远是 undefined（那个口留着只为形状一致）。
+     */
+    const noticeNamer: NoticeNamer = (id) => alias(id);
+    /**
+     * 她自己的动作那一行里的**那个群怎么称呼**（`[全员禁言 · <这一格> · 开启]`）。
+     *
+     * 与上面那个别名器**刻意分开**：那个答"**谁**说的"（按人查），这个答"**哪个会话**"
+     * （按 sid 查）——两件事在仓里本来就是两个真源（`resolvePersonName` vs
+     * `resolveChannelName`），合成一个函数迟早有一边查错表。
+     * 查不到就返回 null，由 `selfActionLineText` 写成一个如实锚（`一个群聊（…3642）`）——
+     * **不编名字**（编出来的群名比一串 id 危险得多：她会照着那个名字认群）。
+     *
+     * ⚠ **不用 `sessionLabelOf` 兜底**：那个答的是"这是个什么会话"（`OneBot 11 · 群聊`），
+     * 而这一格要的是"**哪个**会话"。拿会话类型填进名字那一格，读起来像"她在一个叫
+     * 「OneBot 11 · 群聊」的群里做过事"——同一个 box 里 `whereOf` 已经给一行 `· OneBot 11 · 群聊` 了。
+     * 名字真源给不出就让它给出锚，那比一个像名字的东西诚实。
+     */
+    const actionNamer: SelfActionNamer = (chatSid) => resolveChannelName?.(chatSid) ?? null;
+    // 每次渲染现读一次（"我是谁"是运行期长出来的；收快照会让这一行永远写成 id 锚）
+    const noticeSelfIds = new Set(selfIdsOf());
     const notes: string[] = [];
     /**
      * 两个**整批**才说一次的计数（逐行缀一句太贵，而这两件都是"整个框"的事）：
@@ -2722,6 +2957,30 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
      */
     let addressOnly = false;
     let overCount = 0;
+    /**
+     * 这一屏**印过几个 `·m<id>`**（2026-10-12 加的"每行带 id"，方案 A）。
+     *
+     * 为什么不是"印了几行"而是"印了几个 id"：它的唯一用途是决定框后那句说明**要不要出现**
+     * （一个都没印就不该解释一个没出现的东西）。
+     */
+    let idCount = 0;
+    /**
+     * 这一屏要不要印平台消息 id —— **只对 OneBot 族**（`isOneBotFamilyChannel`，覆盖别名实例）。
+     *
+     * 为什么按通道开关、而不是无条件印：两扇门的 id 是两种完全不同的东西。实测（报告 §1.5，
+     * 8494 / 2320 个真实样本）——
+     *   • OneBot 的 id 是 6–11 字符的整数串（`-754521710`），**可操作**：`get_msg` / `delete_msg`
+     *     都收它（MCP server 侧把字符串自己转整数，见 `onebot11-mcp/src/validate.js`）；
+     *   • 官方门的 id 是 **117–137 字符**的 `ROBOT1.0_…`，而**本仓没有任何官方门撤回/删除路径**
+     *     ⇒ 印出来是"每行 +30.63 token 换一个她一个工具也用不上的字符串"（一屏 20 行 ≈ +613）。
+     * 当年（2026-10-02）把逐条包裹压成整批一个框、顺手压掉 `msg=` 的那个理由，说的正是
+     * `ROBOT1.0_…` 那一串；一刀切砍在了两种不同的东西上——这条判据就是把它们分开。
+     *
+     * 判据**不另写一遍**：`isOneBotFamilyChannel` 已经是全仓"这是不是 OneBot 家族"的唯一实现
+     * （`input-notify.ts` / `media-poster.ts` / `sessions.ts` / `warn-exempt.ts` 都用它），
+     * 而且它本来就在本文件的 import 里（回投地址那一处）。
+     */
+    const printIds = isOneBotFamilyChannel(anchor.channel);
     for (const item of batch) {
       const when = shortLocalTime(item.ts, timezone);
       // "点了她的那条"的标记：加在整行最左边（见上面 `mentioned` 的说明）
@@ -2730,7 +2989,52 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // 她的行：`（我）` 占"谁"那一格，后面是她说的完整文本（一次 speak 的所有气泡拼在一起，
         // 不论几十条都只占这一行）。正文同样压成一行——换行会把"一行一条"这条预算结构打破。
         const spoken = item.text.replace(/\s+/gu, ' ').trim();
-        lines.push(`${at}${when} ${SELF_SPEAK_LABEL}：${spoken}`);
+        /**
+         * 行尾那个 id 单元：**她这一行也印**（与别人的行同一个形态、同一个判据）。
+         *
+         * 为什么她那边也要（2026-10-12，与"读别人的行"同一件）：她最想撤的恰恰是**自己刚发的
+         * 那条**——实测 T1308 那一轮的主线就是"我重复发了、删掉它"，而 `（我）`那一行原先
+         * 结构上就没有 id，她只能去扫原始 jsonl。这个 id 来自 `speak/sent.messageId`
+         *（回投那一层原样带回来的平台 id）⇒ 与别人的行**同源同形**。
+         *
+         * 缺席（旧日志 / 通道给不出）就一个字都不加：这一行照旧读得出来。
+         */
+        const spokenId = printIds && item.messageId !== undefined && item.messageId !== ''
+          ? `${MESSAGE_ID_MARK}${item.messageId}`
+          : '';
+        if (spokenId !== '') idCount += 1;
+        lines.push(`${at}${when} ${SELF_SPEAK_LABEL}：${spoken}${spokenId}`);
+        continue;
+      }
+      if (isChannelNotice(item)) {
+        /**
+         * 群里的一件动静：`时间 [某人 开启了全员禁言]`——**"谁"那一格留空**（notice 可能没有
+         * 操作者，也可能说的不是"谁说了什么"），整件事由 `noticeLineText` 逐字写成方括号里那句。
+         *
+         * 为什么"谁"那一格留空而不是塞个名字：notice 的行文里**本来就带着人**
+         *（"OWNER 开启了全员禁言"），再在前面摆一个 `OWNER：` 就成了同一件事说两遍，
+         * 而这一屏每一行都是常驻开销。
+         *
+         * 认不出来的 `notice_type` ⇒ `noticeLineText` 返回 null ⇒ **整行不摆**
+         *（宿主压根不会把那种事件落库，这里是第二道：宁可这一行没有，也不编一件没发生的事）。
+         */
+        const notice = noticeLineText(item, noticeNamer, noticeSelfIds);
+        if (notice === null) continue;
+        lines.push(`${at}${when} ${notice}`);
+        continue;
+      }
+      if (isChannelSelfAction(item)) {
+        /**
+         * 她自己的管理动作（「我做过」）：`时间 （我）：[全员禁言 · <群名> · 开启]（回执 ok）`。
+         *
+         * 与"她说过的话"**同族但不混**：两者行首都是 `（我）`（同一个常量，她一眼认得出
+         * "这行是我"），区别在后面那一段——那一族是自由文本，这一族是**方括号包住的动作 +
+         * 括号里的回执**。判据在 `isChannelSpoken` / `isChannelSelfAction` 里（互斥）。
+         *
+         * 不认识的 `action` ⇒ `selfActionLineText` 照摆**协议原名**（不编中文动作名）；
+         * 名字查不到 ⇒ 那一格写成一个如实锚（`一个群聊（…3642）`）。两条都是"宁可难看，不可编"。
+         */
+        lines.push(`${at}${when} ${SELF_SPEAK_LABEL}：${selfActionLineText(item, actionNamer)}`);
         continue;
       }
       const label = alias(item.person, item.nickname);
@@ -2755,7 +3059,31 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         })
         .join('');
       const text = item.text.replace(/\s+/gu, ' ').trim();
-      lines.push(`${at}${when} ${label}：${attach}${text}`);
+      /**
+       * 行尾那个 id 单元：`·m<平台消息 id>`（**只对 OneBot 族**，判据见上面 `printIds`）。
+       *
+       * 为什么必须让她拿得到它（2026-10-12，用户反馈"翻来翻去查 msg_id"）：`get_msg` /
+       * `delete_msg` 只认平台 `message_id`，而那个 id 原先只在她**读不到结果**的两处现过身
+       * ——别人引用某条时的 `[引用 #<id>]`（`onebot.ts` 的 `quotedPrefix`）、以及唤醒包裹头
+       * 的 `msg=<id>#<seq>`（`render.ts` 的 `renderExternalEvent`）。她读群这一屏**没有它**，
+       * 于是想撤自己刚发的重复消息时只能去 `rg` 原始 jsonl（实测 T1308：11 步里 6~7 步花在
+       * "找 id"上，`77931`/`77500` 两次扫盘，前一次白扫）。id 就在她正在读的那一行上，
+       * 那 6 步全部消失。
+       *
+       * 为什么用 `·m` 而不是 `#`：`#` 在她现在的世界里**已经是"平台 message id"**——
+       * 别人引用时的前缀逐字是 `[引用 #-754521710]`。同一个屏里用 `#` 当 id sigil，
+       * 与那个既有含义直接打架；而页脚翻页游标是**裸 `event seq`**（`带上 before=76652`），
+       * 裸数字又会与它撞。`·m` 带字母 sigil：与既有列（`▶ `、`（我）`、`[external_event …]`、
+       * `［图］`）都不冲突，且**只在行尾**、不占任何既有列。
+       *
+       * 为什么 `id === ''` 就不印、而不是印个空的：印成 `…正文·m` 等于摆一个像 id 的坑，
+       * 她可能照着它去调工具。空 id 在 OneBot 上不该出现（`readChannelMessages` 填的是
+       * `d.messageId`，而适配器对没有 `message_id` 的消息一律 `return null` 不落库），
+       * 这里只是"给不出就不摆"这条既有纪律的第二道。
+       */
+      const idCell = printIds && item.messageId !== '' ? `${MESSAGE_ID_MARK}${item.messageId}` : '';
+      if (idCell !== '') idCount += 1;
+      lines.push(`${at}${when} ${label}：${attach}${text}${idCell}`);
       // 判过注入的那条：框架那句话**留在框外**（框里是别人的话，框外才是框架说的话）。
       // 原来每条一个框、预警就挂在各自框外；现在整批一个框，所以它们统一排在框后，
       // 各自带上"哪一条"的坐标——归属没丢，字数省下来了。
@@ -2763,6 +3091,23 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       if (typeof note === 'string' && note.trim() !== '') notes.push(`· ${when} ${label}：${note.trim()}`);
     }
     lines.push('[/external_event]');
+    /**
+     * 行尾那个 `·m<id>` 是什么 —— **框外**说一次（2026-10-12）。
+     *
+     * 为什么落在这里而不是 `read_channel` 的 `description` 里：`description` 与 `parameters`
+     * 属于 `parameters` / `tools` 段，**逐字节进每一条请求**，改它们 = 一次全 miss
+     *（≈9.6 万 token）且必须同批递 `RENDER_VERSION` + 用户批（判据见 `mcp-entry.ts:58-61`）。
+     * 而这一段是**工具结果**的一部分，只在被调用的那一次付、进的是 `input` ——
+     * 与 `mcp-entry.ts` 那句"要加说明就往 `list` 的回执里加"是同一条纪律。
+     *
+     * 为什么必须说这一句：`·m` 是个**新符号**，而这一屏会永远留在历史里。不说，
+     * 她下一次读到 `·m-754521710` 时只能猜"m 后面这串是什么、能不能用、怎么用"——
+     * 那正是这次要消掉的那类猜测。两句都只说**事实**：它是什么、它不能用在哪。
+     */
+    if (idCount > 0) {
+      lines.push(`（行尾 ·m 后面那串是这一条的平台消息 id（这一屏 ${idCount} 条带它，别人的` +
+        '和你自己发的都在内）：要撤哪条、要查哪条，用的就是它。别猜——猜错就是撤掉别人的话。');
+    }
     // 只给了地址的那些图：一次性说清"为什么只有地址、想看得走哪条路"。
     // 为什么必须说：地址是**临时直链**（腾讯富媒体带 rkey，过期后服务端拒绝下载），而这一屏
     // 会永远留在历史里——不说这一句，她下一次读到这一行时只会以为图还在那儿。
@@ -2807,7 +3152,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
    */
   const attachAimedImages = (batch: readonly ReadChannelItem[]): void => {
     for (const item of batch) {
-      if (isChannelSpoken(item)) continue;
+      // 四种来源里只有外部消息带图（她的发言、群里动静、她自己的动作都没有附件这回事）
+      if (isChannelSpoken(item) || isChannelNotice(item) || isChannelSelfAction(item)) continue;
       for (const fact of item.contextImages ?? []) {
         if (fact.state !== 'ready') continue;
         emit('image/attached', {
@@ -2891,14 +3237,26 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             );
           }
           const spoken = channelSpokenReader === null ? [] : await channelSpokenReader(sid);
+          // 群里动静（notice）也按**同一个游标**切：翻页翻的是"这段历史"，不是"别人说的话"
+          //（时间轴只有一条，见 mergeChannelSpeech）。没接线就是空。
+          const notices = channelNoticeReader === null
+            ? []
+            : await channelNoticeReader(sid, limit, cursor.before);
+          // 她自己的动作（「我做过」）也按同一个游标切：翻页翻的是"这段历史"
+          const actions = channelSelfActionReader === null
+            ? []
+            : await channelSelfActionReader(sid, limit, cursor.before);
           // 她自己的行也按**同一个游标**切：翻页翻的是"这段历史"，不是"别人说的话"
           //（时间轴只有一条，见 mergeChannelSpeech）
           const pool = sortByTimeline([
             ...messages,
+            ...notices,
+            ...actions,
             ...spoken.filter((item) => eventSeqOf(item) < cursor.before),
           ]);
           const batch = mergeChannelSpeech(
-            pool.filter((item): item is ChannelMessageView => !isChannelSpoken(item)),
+            pool.filter((item): item is ChannelMessageView | ChannelNoticeView | ChannelSelfActionView =>
+              !isChannelSpoken(item)),
             pool.filter(isChannelSpoken),
             limit,
           );
@@ -2927,7 +3285,30 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           ].join('\n'));
         }
         const messages = await channelReader(sid, limit);
-        if (messages.length === 0) {
+        // 她自己在这个会话里说过的话（`speak` 的投递回执归并而来；没接线就是空）。
+        // **它不扩窗**：下面按时间轴插进去之后再压回 limit，所以这一屏最多还是 limit 行
+        //（她的发言也占行——见 mergeChannelSpeech 的取舍说明）。
+        const spoken = channelSpokenReader === null ? [] : await channelSpokenReader(sid);
+        /**
+         * 群里发生过的事（`channel/notice`：谁开了全员禁言、谁入群退群、谁撤回了一条……）。
+         *
+         * **它也不扩窗**（与她的发言同一条规矩）：插进池子、与消息同一条时间轴，
+         * 最后一起压回 `limit` 行。她读的那个群"这段时间里发生过什么"就是这一屏。
+         */
+        const notices = channelNoticeReader === null ? [] : await channelNoticeReader(sid, limit);
+        /**
+         * 她自己的管理动作（`channel/self-action`：「我做过」）。
+         *
+         * **它也不扩窗**（与她的发言、群里的动静同一条规矩）：插进池子、与消息同一条时间轴，
+         * 最后一起压回 `limit` 行。这是这条事件唯一的存在形式——平台不对她自己的动作发 notice，
+         * 没有这一眼，她翻这个群时看不到"我设过全员禁言"。
+         */
+        const actions = channelSelfActionReader === null ? [] : await channelSelfActionReader(sid, limit);
+        /**
+         * 「这个会话里什么都没有」的判据**含她自己的动作**（与上一批把 notices 算进来同一个理由）：
+         * 只做过事、没人说过话的会话（她刚建的群）读起来不该是"没有新消息"。
+         */
+        if (messages.length === 0 && notices.length === 0 && actions.length === 0) {
           // 第一句就是结论（2026-10-08 用户的口径）：这个会话里**一条都没有**，所以照实说
           // "没有新消息"，紧接着把两种可能说清（还没有过消息 / sid 写错了一位）——
           // 少了后半句，她只会知道"没有"，不知道该不该去核对 sid。
@@ -2937,12 +3318,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             + '外部会话清单上现在有哪些会话，看当前状态层那一段。',
           );
         }
-        // 她自己在这个会话里说过的话（`speak` 的投递回执归并而来；没接线就是空）。
-        // **它不扩窗**：下面按时间轴插进去之后再压回 limit，所以这一屏最多还是 limit 行
-        //（她的发言也占行——见 mergeChannelSpeech 的取舍说明）。
-        const spoken = channelSpokenReader === null ? [] : await channelSpokenReader(sid);
-        // 这一屏的候选池：外部消息 + 她的行，按时间轴（**与合批同一套排序**，见 sortByTimeline）
-        const pool = sortByTimeline([...messages, ...spoken]);
+        // 这一屏的候选池：外部消息 + 群里动静 + 她自己的动作 + 她的行，按时间轴（**同一套排序**）
+        const pool = sortByTimeline([...messages, ...notices, ...actions, ...spoken]);
         const prev = readState.get(sid);
         // "她已经看到哪了"的判据（唯一一处）：**上一屏给她看过的最大事件 seq**。
         //
@@ -2956,14 +3333,19 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // 回头核对"必然得到「没有新消息」——她要找的那一行永远拿不到，她会据此再发一遍。
         const prevSeq = prev?.seq ?? 0;
         /**
-         * 这一屏取数的下界（宿主返回的最旧那一条的 seq）——**页脚那个游标的两个来源之一**。
+         * 这一屏取数的下界——**页脚那个游标的两个来源之一**。
          *
          * `< 取数下界` 恰好是"这一屏没覆盖到的那一段"：给过她的一条不重复，没给过的一条不落。
          * 为什么不拿"她看到的最旧那一条"当游标（先写成那样，实测踩到）：默认那一屏只挑提及，
          * "看到的"常常比"取到的"新——按它往回翻会**跳过取数窗口里没给她的那几条**
          * （它们既不在这一屏里、也不在下一页里）。
+         *
+         * ⚠ 2026-10-11：**取整个池子最旧的那一条**，不再是 `messages[0]`——后者在
+         * "这个会话只有动静、没有话"时是 `undefined`（一条 notice-only 的会话正是这一轮新开的
+         * 形状），而那个 `!` 会把 `undefined` 一路喂进 `eventSeqOf` ⇒ 整屏读不出来。
+         * 池子按时间正序（`sortByTimeline`），所以第一件就是最旧的。
          */
-        const fetchFloor = eventSeqOf(messages[0]!);
+        const fetchFloor = pool.length === 0 ? 0 : eventSeqOf(pool[0]!);
         /**
          * 这一批里**最新**的那一条的 seq（含她自己发出去的凭据）——"她是不是已经读到最新了"的判据。
          *
@@ -3112,8 +3494,13 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         const shownUpTo = display.reduce((max, item) => Math.max(max, eventSeqOf(item)), prevSeq);
         // 没给她的那些里，**比这一屏更新的**那些条数（"还有多少你没看到"）。按事件 seq 数
         // 而不是按 `msgSeq`：与"未读"那套口径同源（`msgSeq` 在官方单聊恒为 1，数不出东西）。
+        //
+        // **群里动静不算在里面**（2026-10-11）：那句话问的是"还有多少**别人的话**你没看"，
+        // 而 notice 是"群里出了什么事"、本来就不计未读。算进来的话，一次"有人撤回了一条消息"
+        // 会让她以为有人在等她回话——而那是假的。
         const notShown = pool.filter((item) =>
-          !isChannelSpoken(item) && eventSeqOf(item) > shownUpTo).length;
+          !isChannelSpoken(item) && !isChannelNotice(item) && !isChannelSelfAction(item)
+          && eventSeqOf(item) > shownUpTo).length;
         if (display.length > 0) {
           // 已读那笔账的**唯一一处**写入：平台序号（"这条是这个会话里的第几条"），只由**别人**的
           // 消息推进——她自己的发言从不把自己算成未读（见 mergeChannelSpeech ②）。
@@ -3121,8 +3508,11 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           //
           // **只推到"这一屏里真的出现过的那几条"**：没给她的那些保持未读（用户 2026-10-08 的
           // 第二条口径）。她自己的行不参与（`isChannelSpoken` 那一支直接跳过）——那从来不是"未读"。
+          // 群里动静同样不参与：它没有"这个会话里第几条"的语义（未读只数别人的话）。
           const upToSeq = display.reduce(
-            (max, item) => (isChannelSpoken(item) ? max : Math.max(max, item.msgSeq)),
+            (max, item) => (isChannelSpoken(item) || isChannelNotice(item) || isChannelSelfAction(item)
+              ? max
+              : Math.max(max, item.msgSeq)),
             0,
           );
           if (upToSeq > 0) emit('channel/read', { sid, upToSeq } satisfies ChannelReadPayload);
@@ -3556,7 +3946,11 @@ function tailWindow(
 ): DigestView {
   const at = callerMessageId === null
     ? -1
-    : pool.findIndex((item) => !isChannelSpoken(item) && item.messageId === callerMessageId);
+    : pool.findIndex((item) =>
+      // "叫她的那条"只可能是**外部消息**：她自己的发言没有平台 messageId、
+      // 群里动静与她自己的动作也没有（这两个类型连这一格都没有）
+      !isChannelSpoken(item) && !isChannelNotice(item) && !isChannelSelfAction(item)
+      && item.messageId === callerMessageId);
   return {
     items: at < 0 ? pool.slice(-limit) : pool.slice(Math.max(0, at + 1 - limit), at + 1),
     mentioned: new Set(),

@@ -51,7 +51,7 @@ class SettingsPage extends StatefulWidget {
 /// 标记——beta 只体现在这里与包名/说明里；后端那边对同一版号的口径是 `AGENT_VERSION`
 /// （不带 v，见 src/main.ts）。
 /// ⚠️ 别把具体版号抄进注释：出包脚本只改这一行的字面量、不改注释，抄一处就留一处对不上。
-const guiVersion = 'v0.1.0-beta.7';
+const guiVersion = 'v0.1.0-beta.8';
 
 /// 锚点侧栏宽度（AstrBot 的左侧 section 导航）
 const _railWidth = 180.0;
@@ -316,6 +316,10 @@ class _SysField {
 
   /// [kind] 为 range 时的**闭区间**（含两端）。其余形状用不到（它们的边界写死在
   /// [problem] 里：pickInt 的下限 1、端口的上限 65535、比例的开区间 0~(0,1]）。
+  ///
+  /// **常量默认值不是这里的常客**（2026-10-11 收口）：闭区间有服务端真源的那几格
+  /// （当前只有压缩线）**不在常量里写一遍**——启动时由 [problem] 的 `bounds` 参数
+  /// 从 `GET /api/config` 的 `bounds` 注入。写死在这里就等于把同一条边界抄成两份。
   final int? min;
   final int? max;
 
@@ -359,7 +363,11 @@ class _SysField {
       };
 
   /// 不合规返回那句话（保存前拦下，一个字节都不写盘）；合规返回 null
-  String? problem(String text) {
+  ///
+  /// [bounds] 是**服务端给的**边界（`GET /api/config` 的 `bounds`，键 = 点路径）：闭区间
+  /// 只从这个参数取，不从字段自身的 `min`/`max` 取——那两个常量字段只留给"边界就写死在
+  /// 界面上"的形状（当前一个都没有）。服务端没给 ⇒ 这一格不预拦，交给服务端如实拒绝。
+  String? problem(String text, {Map<String, ({int min, int max})> bounds = const {}}) {
     switch (kind) {
       case _SysKind.host:
         return text.isEmpty ? '监听地址不能为空：空值等于监听所有网卡，未保存' : null;
@@ -380,8 +388,10 @@ class _SysField {
       case _SysKind.range:
         final value = int.tryParse(text);
         if (value == null) return '$label要填整数，未保存';
-        final lo = min;
-        final hi = max;
+        // 服务端那份优先（同一格两处写 ⇒ 迟早一边改了另一边没改）；没有才退回字段上的常量
+        final server = bounds[path];
+        final lo = server?.min ?? min;
+        final hi = server?.max ?? max;
         if (lo != null && value < lo) return '$label最小是 $lo，未保存';
         if (hi != null && value > hi) return '$label最大是 $hi，未保存';
         return null;
@@ -447,15 +457,17 @@ const _sysHeartbeatMean = _SysField(
       '两端仍由上下限兜住：不因这个数改变，安静不足下限不会醒、到了上限必然会醒。',
 );
 
-/// 压缩线的可改区间：**与 `src/web/server.ts` 的 `COMPACTION_THRESHOLD_MIN/MAX` 同值**。
+/// 压缩线的可改区间：**不在这里存**（2026-10-11 收口）。
 ///
-/// 那边是**最终判据**（非法值在那里被拒、一个字节都不落盘），这里是**保存前**的拦截——
-/// 人正在框上，越界的数不该先打一趟服务端再弹一句"保存失败"。两端各自为什么是这个数，
-/// 写在服务端那两个常量自己的注释里（太小 = 每轮都压；太大 = 等于不压）。
+/// 这两个数原先在这里另存了一份 `kCompactionThresholdMin/Max`（与 `src/web/server.ts` 的
+/// `COMPACTION_THRESHOLD_MIN/MAX` 同值），靠"改一处必须改另一边"的注释维系——那正是错的形状：
+/// 改一边不改另一边，症状是"界面放过去、服务端拒掉"（或反过来），而两边都不报错。
 ///
-/// ⚠️ 改一处必须改另一边：`gui/test/settings_page_test.dart` 有一条按这两个数锁的用例。
-const kCompactionThresholdMin = 10000;
-const kCompactionThresholdMax = 2000000;
+/// 现在**唯一真源在服务端**，界面从 `GET /api/config` 的 `bounds.compactionThreshold` 读
+/// （见下面 [_applyServerBounds]）。这一层只做**保存前**的人话拦截——人正在框上，越界的数
+/// 不该先打一趟服务端再弹一句"保存失败"；**最终判据永远是服务端那一条**。
+/// 拿不到 bounds（老服务端 / 读失败）时这一格不预拦，交给服务端如实拒绝——不是静默放行，
+/// 是"拦不住的就不假装拦得住"。
 
 /// **压缩线**（`persona.compactionThresholdTokens`）——用户 2026-10-12 点名要暴露到界面的那一格：
 /// 「与之配合的，框架也得有 compact 80% 预警。然后**预算 compact 线（history 大小），
@@ -477,8 +489,9 @@ const _sysCompaction = _SysField(
   'persona.compactionThresholdTokens',
   '上下文 · 压缩线（token 估算）',
   _SysKind.range,
-  min: kCompactionThresholdMin,
-  max: kCompactionThresholdMax,
+  // ⚠️ **边界不在这里写**（2026-10-11 收口）：这一格的闭区间由服务端给
+  //（`GET /api/config` 的 `bounds.compactionThreshold`，见 `_applyServerBounds`）。
+  // 这里原先写的是 `kCompactionThresholdMin/Max`——那一对常量已经删了，理由见上面那段注释。
   hint: '200000',
   live: true,
   note: '可见历史攒到这么多 token（估算）就折成一篇交接笔记，压缩只遮蔽、不删除。'
@@ -685,6 +698,15 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 这一份配置是从哪儿读来的：`saved` = 盘上那份；`memory` = 盘读不出来、回落成生效配置。
   /// 空串表示服务端没给这个字段（老服务端）。
   String savedSource = '';
+
+  /// **服务端给的数值边界**（`GET /api/config` 的 `bounds`；键 = 点路径）。
+  ///
+  /// 为什么由服务端给、而不是界面存一份常量（2026-10-11 收口）：同一条边界在两处各写一遍，
+  /// 改一边不改另一边的症状是"界面放过去、服务端拒掉"，而两边都不报错。
+  /// 界面这一层只做**保存前**的人话拦截；最终判据永远在服务端。
+  ///
+  /// 空表（老服务端 / 这一条读失败）⇒ 那一格不预拦，照旧打一趟服务端由它如实拒绝。
+  Map<String, ({int min, int max})> valueBounds = const {};
 
   /// **生效那份**配置（`GET /api/config` 不带 `source=saved`）。
   ///
@@ -945,9 +967,16 @@ class _SettingsPageState extends State<SettingsPage> {
       final next = raw == null ? null : (Map<String, dynamic>.from(raw)..remove(r'$pending'));
       setState(() {
         cfg = next;
+        // 服务端给的边界（`bounds`）：**跟着配置一起读**，不是我们自己存一份常量
+        valueBounds = _serverBoundsOf(raw);
         // 生效那份读不到（null）时**保持上一次那份**：它只会让热更那一格显示一个稍旧的生效值，
         // 而清成 null 会让它当场退回盘上那份——那在"刚写完还没回读"的瞬间是一个假读数。
-        if (live != null) cfgLive = live;
+        if (live != null) {
+          cfgLive = live;
+          // 两条都带 bounds（服务端那侧同一个出口）；生效那份给得出就用它刷新一份
+          final fromLive = _serverBoundsOf(live);
+          if (fromLive.isNotEmpty) valueBounds = fromLive;
+        }
         pendingRestart = pending is Map && pending['restartRequired'] is List
             ? (pending['restartRequired'] as List).whereType<String>().toSet()
             : const <String>{};
@@ -958,6 +987,28 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (err) {
       if (mounted) setState(() => cfgError = '$err');
     }
+  }
+
+  /// 从一条配置响应里读**服务端给的边界**（`bounds`）。
+  ///
+  /// 形状（`src/web/server.ts` 的 `/api/config`）：
+  /// ```json
+  /// { "bounds": { "compactionThreshold": { "min": 10000, "max": 2000000 } } }
+  /// ```
+  /// 映射成 `{ 'persona.compactionThresholdTokens': (min: …, max: …) }`——**点路径是这一层
+  /// 与 `_SysField` 之间的键**（输入框的 key 就是它），所以这里做那一次翻译，`_SysField`
+  /// 不必知道 `bounds` 的 JSON 形状。
+  ///
+  /// 缺字段/形状不对一律**跳过**（不猜一个边界出来）：那一格退回"不预拦"，由服务端判。
+  static Map<String, ({int min, int max})> _serverBoundsOf(Map<String, dynamic>? doc) {
+    final bounds = doc?['bounds'];
+    if (bounds is! Map) return const {};
+    final entry = bounds['compactionThreshold'];
+    if (entry is! Map) return const {};
+    final min = entry['min'];
+    final max = entry['max'];
+    if (min is! num || max is! num || min >= max) return const {};
+    return {'persona.compactionThresholdTokens': (min: min.toInt(), max: max.toInt())};
   }
 
   /// 读一次**生效那份**配置（`GET /api/config` 不带 `source=saved`）。读不到返回 null。
@@ -1759,7 +1810,7 @@ class _SettingsPageState extends State<SettingsPage> {
     for (final field in fields) {
       final text = _sysText(field);
       if (text == (_sysBase[field.path] ?? '')) continue; // 没变的字段不写
-      final problem = field.problem(text);
+      final problem = field.problem(text, bounds: valueBounds);
       if (problem != null) {
         _toast(problem, kind: ToastKind.warn);
         return;

@@ -704,6 +704,56 @@ test('GET /api/config 与 /api/doctor：管控页的配置读取与工具组自�
   assert.equal(anon.status, 401, '配置里有路径与端点信息，同样要 token');
 });
 
+/**
+ * `bounds` 是**数值边界唯一的出口**（2026-10-11 收口）。
+ *
+ * 界面那一侧原先自己存了一份 `kCompactionThresholdMin/Max`（与 `server.ts` 的
+ * `COMPACTION_THRESHOLD_MIN/MAX` 同值），靠"改一处必须改另一边"的注释维系——那份常量已经删了，
+ * 界面改成从这里读（`gui/test/settings_page_test.dart` 的假服务端也照这个形状给）。
+ * 这条用例钉住**服务端这一半**的契约：两条 GET 都要带、形状要照搬，否则界面那半边的
+ * 保存前拦截会静默失效（越界的值照旧走得通到服务端才被拒——那不是错，但那一层就白写了）。
+ */
+test('GET /api/config 带 bounds（两条 GET 都带）：数值边界的唯一真源在服务端', async (t) => {
+  const fx = await setup(t);
+
+  const live = (await call(fx, '/api/config')).body as {
+    bounds?: { compactionThreshold?: { min?: number; max?: number } };
+  };
+  assert.deepEqual(live.bounds?.compactionThreshold, { min: 10_000, max: 2_000_000 },
+    '生效那份要带边界（界面保存前的人话拦截读的就是它）');
+
+  const saved = (await call(fx, '/api/config?source=saved')).body as {
+    bounds?: { compactionThreshold?: { min?: number; max?: number } };
+  };
+  assert.deepEqual(saved.bounds?.compactionThreshold, { min: 10_000, max: 2_000_000 },
+    '盘上那份也要带：保存成功后界面会回读它，缺一条就会在那一刻退回无边界状态');
+
+  // 与最终判据同源：把边界外的值递进那条命令，服务端**如实拒绝**（§"不许写坏配置"）
+  const tooSmall = await call(fx, '/api/commands/set-compaction-threshold', {
+    method: 'POST',
+    body: { tokens: 9_999 },
+    confirm: 'set-compaction-threshold',
+  });
+  assert.equal(tooSmall.status, 400, '边界外的值一个字节都不落盘');
+  const tooBig = await call(fx, '/api/commands/set-compaction-threshold', {
+    method: 'POST',
+    body: { tokens: 2_000_001 },
+    confirm: 'set-compaction-threshold',
+  });
+  assert.equal(tooBig.status, 400);
+  // 回执里那一条也带同一份边界（形状与 GET 一致，界面据此不必再问一次）
+  const ok = await call(fx, '/api/commands/set-compaction-threshold', {
+    method: 'POST',
+    body: { tokens: 200_000 },
+    confirm: 'set-compaction-threshold',
+  });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(
+    (ok.body as { bounds?: { compactionThreshold?: unknown } }).bounds?.compactionThreshold,
+    { min: 10_000, max: 2_000_000 },
+  );
+});
+
 // ──────────────────────────────── 认证与错误形状 ────────────────────────────────
 
 test('无 token / 错 token：/api 一律 401，错误形状统一', async (t) => {

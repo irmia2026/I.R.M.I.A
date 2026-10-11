@@ -301,12 +301,25 @@ const DISCARD_REASON_MAX = 500;
  *      那时丢掉的是整段对话，不是一篇可读的交接笔记。
  * 两端都是"明显不可能"的边界，真正该填多少仍由人按自己的现场定（出厂 200000）。
  *
- * ⚠️ 与 `gui/lib/pages/settings_page.dart` 的 `kCompactionThresholdMin/Max` **同值**：
- * 界面按同一对数做**保存前**的拦截（人话拒绝），这里是最终判据；改一处必须改另一边
- * （Dart 侧那一对常量旁边的注释与本条互相点名，`gui/test/settings_page_test.dart` 钉着它们）。
+ * ⚠️ **这一处是唯一真源**（2026-10-11 收口）：界面**不再自己存一份**这两个数——它从
+ * `GET /api/config` 的 `bounds.compactionThreshold` 里读（同一条路上的回执也带同一份，
+ * 见 `set-compaction-threshold`）。界面那一层只是**保存前**的人话拦截（人正在框上，
+ * 越界的数不该先打一趟服务端再弹一句"保存失败"），最终判据永远是这里。
+ * 以前 Dart 侧另存了一对 `kCompactionThresholdMin/Max` 常量 + 一条按它锁的用例，
+ * 两处各写一遍 ⇒ 改一边不改另一边就会出现"界面放过去、服务端拒掉"的错位，已删。
  */
 export const COMPACTION_THRESHOLD_MIN = 10_000;
 export const COMPACTION_THRESHOLD_MAX = 2_000_000;
+
+/**
+ * 上面那两个数的**回执形态**（唯一一处的取值点）。
+ *
+ * 谁要这两个数就走这里，**不许在任何一端再抄一份常量**：界面拿它做保存前的人话拦截，
+ * 服务端拿它做最终判据——两处读的是同一个字段（见 `COMPACTION_THRESHOLD_MIN` 的注释）。
+ */
+export function compactionThresholdBounds(): { min: number; max: number } {
+  return { min: COMPACTION_THRESHOLD_MIN, max: COMPACTION_THRESHOLD_MAX };
+}
 
 /**
  * 危险操作的 `X-Confirm` 短语表（frontend.md §4：短语 = 操作的英文标识，防误触而不防人）。
@@ -3315,8 +3328,17 @@ class WebServerImpl implements WebServer {
         // 「她怎么被称呼」），它们问的都是"现在按什么跑"——生效配置才是对的答案。
         case '/api/config': {
           res.setHeader('x-config-hash', configHash(this.deps.config));
+          /**
+           * 边界的**唯一出口**（2026-10-11 收口）：界面要从这里拿到它做保存前的拦截，
+           * 而不是在自己那一侧再存一份常量（那正是"改一处必须改另一边"的来源）。
+           *
+           * 两条 GET 都带（生效那份与盘上那份）：界面两条都会读，缺一条就会在
+           * "刚保存完回读"那一刻退回无边界状态。**只加这一个顶层键**，不动任何已有字段的
+           * 形状——`$` 前缀留给元信息，所以它用一个普通名。
+           */
+          const bounds = { compactionThreshold: compactionThresholdBounds() };
           if (url.searchParams.get('source') !== 'saved') {
-            sendJson(res, 200, this.deps.config);
+            sendJson(res, 200, { ...this.deps.config, bounds });
             return;
           }
           const saved = this.readSavedConfig();
@@ -3327,6 +3349,7 @@ class WebServerImpl implements WebServer {
           sendJson(res, 200, {
             ...saved.config,
             $pending: { source: saved.source, restartRequired: pending },
+            bounds,
           });
           return;
         }
@@ -5521,7 +5544,7 @@ class WebServerImpl implements WebServer {
           // 这一格写的就是**生效那份**（上面同一个临界区里改了内存）：界面据此不必等重启
           effective: true,
           restartRequired: false,
-          bounds: { min: COMPACTION_THRESHOLD_MIN, max: COMPACTION_THRESHOLD_MAX },
+          bounds: { compactionThreshold: compactionThresholdBounds() },
         });
         return;
       }
@@ -8108,7 +8131,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.7' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.8' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

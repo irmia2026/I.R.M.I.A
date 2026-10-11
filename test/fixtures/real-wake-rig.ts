@@ -140,6 +140,15 @@ export interface RigOptions {
     sideEffect?: 'none' | 'idempotent' | 'destructive';
     executionMode?: 'parallel' | 'exclusive';
     description?: string;
+    /**
+     * 执行体（**2026-10-11 加**）。不传 = 原来的空替身（"这件工具永远不会被真的执行"）。
+     *
+     * 为什么要留这一格：有些判据要的正是"**她在第 1 步动手的时候，轮内发生了一件事**"
+     * ——例如"轮内到达的框架唤醒不许被当普通输入领走"（`claimDeliveredInputs` 只在**下一个**
+     * `runStep` 开头跑，所以插事件的时机只能是工具执行那一刻）。以前那种用例只能
+     * `registry.get(name).handler = …` 去改台子的内部对象，既绕又不稳。
+     */
+    handler?: (args: Record<string, unknown>) => Promise<{ content: string }>;
   }[];
 }
 
@@ -247,9 +256,10 @@ export async function makeRealWakeRig(options: RigOptions = {}): Promise<RealWak
       sideEffect: spec.sideEffect ?? 'none',
       // 与 catalog 里的默认同口径（`parallel`）：只读/无副作用的小件不该被串行屏障拖住
       executionMode: spec.executionMode ?? 'parallel',
-      // 这几件在台子上永远不会被真的执行（不派发工具调用），超时值只是让 register 通过
+      // 这几件在台子上默认永远不会被真的执行（不派发工具调用），超时值只是让 register 通过；
+      // 给了 `handler` 就按它执行（见那一格的注释）
       timeoutMs: 30_000,
-      handler: async () => ({ content: `${spec.name} 是台子上的空工具` }),
+      handler: spec.handler ?? (async () => ({ content: `${spec.name} 是台子上的空工具` })),
     });
   }
   const loop = new RealLoop({

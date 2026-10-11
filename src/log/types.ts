@@ -8,6 +8,8 @@
  */
 
 import type { CacheBreak, ContextBreakdown } from '../model/context-audit.js';
+import type { ChannelNoticeData } from '../channel/self-identity.js';
+import type { ChannelSelfActionData } from '../channel/self-action.js';
 
 // ──────────────────────────────── 信封 ────────────────────────────────
 
@@ -373,6 +375,40 @@ export interface ChannelMessage extends EventEnvelope<'channel/message', {
   /** 这条是不是 @/提到 了她。群里的 @ 与普通发言要能分开（适配器给得出就填） */
   mentionsMe?: boolean;
 }> {}
+
+/**
+ * 群里**发生了一件事**（不是"某个人说了句话"）——管理动作、入群退群、撤回、戳一戳……
+ *
+ * 2026-10-11 用户点的第二件（诊断报告 §3）：`notice` 这一类事件原先在适配器那一层就丢了
+ * （`channel/onebot.ts` 的 `dispatch` 对 `post_type !== 'message'` 只记一行日志），
+ * 于是**别人做的管理动作在她那儿一个字都不存在**——她读一个群，看不到半小时前有人开过全员禁言。
+ *
+ * 与 `channel/message` 的关系（三条刻意相同、一条刻意不同）：
+ *   • 相同：**internal**、**不唤醒**、**只记账**（她想看就用 `read_channel` 现取）；
+ *   • 不同：**不计未读**。未读数的必须是"**别人的话**"（`channel/sessions.ts` 的折叠只认消息）——
+ *     把"某人加入了群聊"算进未读，会让她以为有人在跟她说话。
+ *
+ * 载荷的形状与"怎么渲染成一行"同源：判据只在 `channel/self-identity.ts`（`ChannelNoticeData` /
+ * `noticeLineText`），两条通道（OneBot 的 `notice` / 官方未来的事件）都往那一个形状里填，
+ * 渲染也就只有一份。
+ */
+export interface ChannelNotice extends EventEnvelope<'channel/notice', ChannelNoticeData> {}
+
+/**
+ * 她自己的管理动作（「**我做过**」）——平台**不对机器人自己发起的动作发 notice**，所以这条
+ * 凭据只能从 **MCP 管理类工具的回执**那一层落（`tools/mcp-entry.ts` 的 `onReceipt`）。
+ *
+ * 与 `speak/sent`（"我说过什么"）同一性质的一条**她自己的凭据**，答的是"我做过什么"：
+ * 没有它，"我设过全员禁言"这件事在她那儿一个字都不存在——`read_channel` 只摆别人的话
+ * （`channel/message`）与群里的动静（`channel/notice`），她的动作两样都不是。
+ *
+ * 可见性/唤醒口径与 `channel/notice` **逐字相同**（internal、不唤醒、不计未读、不进
+ * `messages` 总数）：她的出路同样是 `read_channel` 现取——那一行长这样：
+ * `（我）：[全员禁言 · <群名> · 开启]（回执 ok）`（与"她说过的话"同族，但方括号里是**做的事**）。
+ *
+ * 载荷的形状与"记哪几件、怎么渲染"的判据都在 `channel/self-action.ts`（唯一一处）。
+ */
+export interface ChannelSelfAction extends EventEnvelope<'channel/self-action', ChannelSelfActionData> {}
 
 // ──────────────────── 附件的两个字段口径（两条通道共用，只此一处） ────────────────────
 
@@ -1690,9 +1726,10 @@ export interface SpeakSent extends EventEnvelope<'speak/sent', {
    * `deliverToSession` / `deliveredToSid` 一处（产生侧与消费侧引同一个实现），
    * `send_media` 也在内（那边的文本是 `［图］` 这类可读摘要）。
    *
-   * **待办（本次没做，留给用户定）**：本文件头一行写着"修改事件形状必须先改 schema 文档"，
-   * 而 `docs/schema.md` 里 `SpeakSent` 仍停在旧形状——本次按纪律没有动 `docs/`，
-   * 下一次碰 schema 文档时要把 `sid?` / `text?` / `spokenParts?` / `turn?` 一并补上。
+   * **待办（2026-10-12 已还）**：本文件头一行写着"修改事件形状必须先改 schema 文档"，
+   * 而 `docs/schema.md` 里 `SpeakSent` 一度停在旧形状（`sid?` / `text?` / `spokenParts?` /
+   * `turn?` 都还没补）。本次按纪律**已把那一份连同新加的 `messageId?` 一并补进文档**，
+   * 这笔待办销掉。
    */
   text?: string;
   /**
@@ -1712,6 +1749,23 @@ export interface SpeakSent extends EventEnvelope<'speak/sent', {
   callId?: string;
   /** 产生这次发言的 turn 号（复盘用；旧事件没有） */
   turn?: number;
+  /**
+   * 平台回的**这条消息自己的 id**（2026-10-12 补；来自通道层的 `SendOutcome.messageId`，
+   * 经 `tools/admin.ts` 的 `deliverToSession` 落进来）。
+   *
+   * 为什么要落它：`get_msg` / `delete_msg` 只认平台 `message_id`，而这条回执原先**没有它**
+   * ——那个 id 在适配器里就被窄化丢掉了（`onebot.ts` 的 `createOneBotReplyPoster`
+   * 只回 `{ok, status}`）。后果是**她删不掉"自己刚发的那条"**：实测 T1308 那一轮，
+   * 她扫了两遍原始 jsonl 才凑出 id（事件 77500 那一步），而她自己在事件 77386 里写着
+   * 「我发出去的消息——speak/sent 事件里没有 messageId」。
+   *
+   * **可选**：旧日志没有它，通道也可能给不出（协议端不回 id）——那时 `read_channel` 的
+   * `（我）`那一行少一格 `·m<id>`，照旧读得出来。与 `text` 同一条先例：
+   * "这不是缺陷，是'日志只增不改'的必然"。
+   *
+   * 一次发言被切成 N 条气泡时这一格记的是**第一条**（一行一个位置，锚落在她开口的第一条上）。
+   */
+  messageId?: string;
 }> {}
 
 export interface IntentionRaised extends EventEnvelope<'intention/raised', {
@@ -2015,7 +2069,7 @@ export type AppEvent =
   | UserMessage | AssistantMessage | ReasoningMessage | DeveloperMessage
   | ToolCall | ToolResult
   | WakeTimer | WakeFile | WakeWebhook | WakeManual | WakeHeartbeat | WakeIntention | WakeJob | WakeChannel
-  | ChannelMessage | ChannelRead | ChannelTopic | InjectionFlagged | InjectionNoted
+  | ChannelMessage | ChannelNotice | ChannelSelfAction | ChannelRead | ChannelTopic | InjectionFlagged | InjectionNoted
   | ImageAttached
   | TimerSet | TimerFired | TimerCancelled
   | BudgetConsumed | BudgetRollover | BudgetExhausted | BudgetToppedUp | BudgetResumed
@@ -2058,6 +2112,13 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 它们不写在这里也走 defaultVisibility 的 internal，写出来是为了让"这条线是有意画的"看得见
   // ——她通过未读计数知晓它存在，想看就用 read_channel 现取（README/review v32 记了这次取舍）。
   'channel/message': 'internal', 'channel/read': 'internal', 'channel/topic': 'internal',
+  // 群里的动静（notice：管理动作/入群退群/撤回）与消息**同一条纪律**：internal、不唤醒，
+  // 她想看用 read_channel 现取。写出来（而不是靠 defaultVisibility 兜底）是为了让
+  // "这条线是有意画的"看得见——理由与上面那三行逐字相同，见 ChannelNotice 的注释。
+  'channel/notice': 'internal',
+  // 她自己的管理动作（「我做过」，2026-10-11）：与上面那一行**逐字同一条纪律**——internal、
+  // 不唤醒、不计未读，她翻会话时用 read_channel 现取。理由见 ChannelSelfAction 的注释。
+  'channel/self-action': 'internal',
   // 注入预警同样 internal：它不是给她的输入，而是**贴在**那条外部消息旁边的一句框架话
   // （渲染时按 messageId 关联，见 model/render.ts 的 renderExternalEvent）
   'injection/flagged': 'internal',

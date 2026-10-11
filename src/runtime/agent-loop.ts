@@ -473,6 +473,25 @@ export interface AgentLoopDeps {
    * 所以日志里那一格**必然**能解释清单为什么是那一版——这正是它存在的理由。
    */
   trust?: TurnTrust;
+  /**
+   * 「这条唤醒是**框架自己的动作**、不是给人的输入」的判定，由宿主注入（2026-10-11 加）。
+   *
+   * **为什么需要它**：`claimDeliveredInputs()` 的判据是"送进这一份请求的输入＝她看见了"，
+   * 而它原先只看 `pending` 的 seq（到没到、本 turn 记过没有），**一个字节都不看 payload**。
+   * 于是每日记忆整理的唤醒（`{kind:'memory-maintain'}`）在 turn 跑着的时候到达时被当普通输入
+   * 销账 + 送进请求体：turn 正常跑完 ⇒ 没有安全网 ⇒ **那条唤醒永久消失**。
+   * 实测 10-08 那一天：`memory/maintained` 全窗口唯一缺的就是它，`diary/2026-10-08.md` 永久没有
+   * （10 次自动 cron 丢 1 次；见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ③）。
+   *
+   * **为什么是回调、不是在这里 import 业务常量**：判据只该有一份。整理唤醒的判据住在
+   * `runtime/real-loop.ts`（`isMemoryMaintainPayload`，布防/认领两处共用），循环层 import
+   * 业务模块会把它变成第三份实现——那正是"两处记一套，迟早漂"的老形状。
+   * 与 `memoryHostingEnabled` 的注释同一条纪律：判据由上层注入。
+   *
+   * **缺省 = 一条都不排除**：子代理链、诊断、以及所有既有测试都不传它，
+   * 行为与引入这一格之前逐字节相同。
+   */
+  isFrameworkWake?: (event: AppEvent) => boolean;
   /** 子进程隔离配置，原样透传给执行器（不响应中断的工具走隔离，超时即杀） */
   isolation?: IsolationConfig;
   /**
@@ -1897,10 +1916,22 @@ export class TurnRunner {
    */
   private claimDeliveredInputs(): void {
     const latest = this.events[this.events.length - 1]?.seq ?? 0;
+    const judge = this.deps.isFrameworkWake;
     const fresh = this.projection.pending
       .filter(item => item.wakeSeq > this.turnStartSeq
         && item.wakeSeq <= latest
-        && !this.claimedMidTurn.has(item.wakeSeq));
+        && !this.claimedMidTurn.has(item.wakeSeq)
+        // **框架自己的动作不许被轮内领走**（2026-10-11）：判据不是"到没到"而是"这是什么"。
+        // 它必须留在 `pending` 里 —— 本 turn 结束后的下一拍，`real-loop.tickOnce` 的
+        // `memoryMaintainWake(batch)` 会照常在开轮**之前**把它认走、走整理（那条路一直在，
+        // 缺的只是"别在半路把它摘掉"，见 `AgentLoopDeps.isFrameworkWake`）。
+        //
+        // 不写 `input/claimed` 还意味着"turn 异常中断时的退回"完全不涉及它
+        // （`claimedByTurn[turn]` 里没有它）⇒ 两条失败路径都安全。
+        //
+        // 事件取不到（日志里没有这条 seq）⇒ 不排除：那种 pending 项已经被别的路径处理过，
+        // 这里"什么都没判出来"，退回改动之前的形状最安全。
+        && !this.isFrameworkWakeSeq(judge, item.wakeSeq));
     if (fresh.length === 0) return;
     for (const item of fresh) {
       this.claimedMidTurn.add(item.wakeSeq);
@@ -1911,6 +1942,39 @@ export class TurnRunner {
       wakeSeqs: fresh.map(item => item.wakeSeq),
       claimCounts: fresh.map(item => item.claimCount),
     }, { sync: true });
+  }
+
+  /**
+   * 这一条 pending 对应的唤醒，是不是**框架自己的动作**（判据由宿主注入，见 `isFrameworkWake`）。
+   *
+   * 事件取不到 ⇒ `false`（不排除）：那种 pending 项已经被别的路径处理过，
+   * 这里"什么都没判出来"，退回改动之前的形状最安全。
+   */
+  private isFrameworkWakeSeq(judge: ((event: AppEvent) => boolean) | undefined, wakeSeq: number): boolean {
+    if (judge === undefined) return false;
+    const event = this.deps.log.get(wakeSeq);
+    return event !== null && judge(event);
+  }
+
+  /**
+   * 交给渲染层的事件流：**框架自己的动作一条都不进**（2026-10-11）。
+   *
+   * 为什么光"不认领"还不够（这一条是实测出来的，不是推的）：`this.events` 是整条日志的快照，
+   * 而 `renderEvents` 会把每一条 `wake/*` 渲染成历史里的一行——所以只把那条整理唤醒留在
+   * `pending` 里，她**照样**在下一步的请求体里看见 `[定时器触发] t_…`（那一行只是从"本轮新输入"
+   * 挪到了"历史"里）。10-08 的代价正是"她看见了"那一半：她会自己动手把账补上（花的是 heavy 的钱）。
+   * 判据与认领那一侧**同一个函数**（`isFrameworkWake`）：一条唤醒要么整条都不进她的上下文，
+   * 要么就照旧当普通输入——不存在"进了上下文但没销账"这种半吊子状态。
+   *
+   * 只在这一处过滤，**不动 `this.events` 本身**：它是"日志快照"，重放（`deriveRequest` 从日志
+   * 重算）与它读的是同一份，改它等于改写历史。
+   */
+  private requestEvents(wakeEvent: AppEvent | null): AppEvent[] {
+    // 本轮新输入走 wakeEvent 参数，就不能同时出现在事件流里（见文件头协同契约）
+    const wakeSeq = wakeEvent?.seq;
+    const judge = this.deps.isFrameworkWake;
+    return this.events.filter((event) => event.seq !== wakeSeq
+      && !(judge !== undefined && judge(event)));
   }
 
   /** 唤醒文本（Wake 钩子的入参）：与请求体里"本轮新输入"那一格**同一串字节** */
@@ -2057,9 +2121,9 @@ export class TurnRunner {
     model: string;
     softHint: string | null;
   }): RenderedRequest {
-    // 本轮新输入走 wakeEvent 参数，就不能同时出现在事件流里（见文件头协同契约）
-    const wakeSeq = args.wakeEvent?.seq;
-    const events = wakeSeq === undefined ? this.events : this.events.filter(event => event.seq !== wakeSeq);
+    // 本轮新输入走 wakeEvent 参数，就不能同时出现在事件流里（见文件头协同契约）；
+    // 框架自己的动作（整理唤醒）**两条路都不进**（见 `requestEvents`）。
+    const events = this.requestEvents(args.wakeEvent);
     // 进请求的清单是**现取的活值**（不缓存、不从事件读）——它是 `tools` 段失守时唯一的事实来源，
     // 所以在这一行上面比一次指纹、变了就落一条 internal 账（BUG-3）。**只读、不改字节**。
     const options = this.deps.modelVisibility ?? {};

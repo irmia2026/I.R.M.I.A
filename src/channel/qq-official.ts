@@ -58,6 +58,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
 import type { WakeChannel } from '../log/types.js';
+import type { ChannelNoticeData } from './self-identity.js';
 import { sidKindOf } from './sessions.ts';
 
 import { connect as wsConnect, parseWsUrl, type WsClient, type WsConnectOptions } from './ws-client.ts';
@@ -626,6 +627,70 @@ function readMentions(source: Record<string, unknown>): Array<{ bot: boolean }> 
   return out.length === 0 ? undefined : out;
 }
 
+/**
+ * 事件体里**机器人的那几个 openid**——"我自己"在这一条事件里的形态（2026-10-11）。
+ *
+ * 三个来源，都是平台自己给的、都不做任何推测：
+ *   ① `mentions[]` 里 `bot: true` 那一条的 `id` / `user_openid`：群里 @ 了机器人时的
+ *      **权威凭据**（`member_openid` 按群隔离，只有平台能告诉我们"这个群里我是谁"）；
+ *   ② `author` 上带 `bot: true` 的那一条（她自己发的话被平台推回来时就是这个形态）——
+ *      这是**兜底**，见下面 `QqGateway` 里那段"学习"的说明。
+ *
+ * 为什么必须留着 ①：它是"自己的标识"从**既有握手**里取的那一半——宿主那一处判据
+ * （`channel/self-identity.ts` 的 `isSelfMessage`）靠它才认得出"这条回声是我自己发的"。
+ * 取不到就如实降级（留痕），**绝不猜**（不知道就不知道，见 `SelfIdentity` 的注释）。
+ */
+export function botOpenidsOf(event: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const mentions = event['mentions'];
+  if (Array.isArray(mentions)) {
+    for (const raw of mentions) {
+      const record = asRecord(raw);
+      if (record === null || record['bot'] !== true) continue;
+      const id = readString(record, 'id') || readString(record, 'user_openid');
+      if (id !== '') out.push(id);
+    }
+  }
+  const author = asRecord(event['author']);
+  if (author !== null && author['bot'] === true) {
+    const id = readString(author, 'member_openid') || readString(author, 'user_openid') || readString(author, 'id');
+    if (id !== '') out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 既有握手里问一次"我是谁"：`GET /v2/users/@me`。
+ *
+ * 官方 Bot 的**开放平台接口**里就有这一条（鉴权头与发消息那几条完全一样：
+ * `Authorization: QQBot <access_token>`），返回体里的 `id` 就是机器人自己的 openid。
+ * token 走调用方给的 `token()`——**复用同一个管家**，不另换一份凭据（那会多打一次限流）。
+ *
+ * 失败**不抛**：它是"尽力取一次"的探针，不是启动的前置条件。取不到就返回 null，
+ * 由调用方留一行痕、并按"认不出自己"如实降级（方向是**宁可漏一次回声，也不丢别人的话**）。
+ */
+export async function fetchBotLoginInfo(input: {
+  apiBase: string;
+  token: () => Promise<string>;
+  http: HttpJsonFn;
+}): Promise<{ openid: string; username: string } | null> {
+  try {
+    const token = await input.token();
+    const response = await input.http({
+      method: 'GET',
+      url: `${input.apiBase.replace(/\/+$/u, '')}/users/@me`,
+      headers: { Authorization: `QQBot ${token}` },
+      timeoutMs: 10_000,
+    });
+    const body = asRecord(response.body);
+    const openid = readString(body, 'id') || readString(body, 'user_openid');
+    if (openid === '') return null;
+    return { openid, username: readString(body, 'username') };
+  } catch {
+    return null;
+  }
+}
+
 // ──────────────────────────────── 网关状态机 ────────────────────────────────
 
 export interface QqGatewayOptions {
@@ -657,6 +722,14 @@ export interface QqGatewayOptions {
   clearIntervalFn?: (handle: unknown) => void;
   /** 收到 `wake/channel` 数据（已转成事件形状）时的落地口 */
   onWake: (data: WakeChannel['data']) => void;
+  /**
+   * **学到"我自己是谁"了**（机器人 openid）——运行期回调，可以调多次，宿主按去重处理。
+   *
+   * 三个来源都会走它（见 `rememberSelfOpenid`）：`GET /users/@me` 探针、群里 @ 我的
+   * `mentions[bot]`、我自己那条回声的 `author.bot`。**必须回调到宿主**：判据在那一处，
+   * 而它建判据的时刻早于本网关学到东西（2026-10-11 修的"改了等于没改"就是这条线断了）。
+   */
+  onSelfId?: (id: string) => void;
 }
 
 interface TimerHandle { id: unknown }
@@ -712,6 +785,25 @@ export class QqGateway {
   private reconnectAttempts = 0;
   private lastReadyAt: number | null = null;
 
+  /**
+   * 机器人在这一侧的 openid（"我自己"的官方形态）。空集 = 还不知道。
+   *
+   * 三个来源（见 `botOpenidsOf` 与下面 `onDispatch` 里那段）：**@ 我的群事件里的 `mentions`**
+   * 是权威凭据（`member_openid` 按群隔离，只有平台知道"这个群里我是谁"）、
+   * 她自己的消息被推回来时 `author.bot` 那一格是兜底。宿主那一处的判据
+   * （`channel/self-identity.ts` 的 `isSelfMessage`）读的就是这一份。
+   *
+   * **为什么不是启动时一次性取好就完事**：官方 API 的 `GET /users/@me` 给的是**平台级** openid
+   * （`selfIds()` 里那一份），而群消息里 `author.member_openid` 是**按群隔离**的另一串——
+   * 两者是否同值属于**未实测**（本机没有可用凭据去试）。所以两层都要：探针给的先兜住平台级，
+   * 群里那条 @ 我的事件一到就把这一群的那一串补上。取不到就如实降级（见 `selfIds()` 的注释）。
+   */
+  private readonly selfOpenids = new Set<string>();
+  /** 探针只跑一次（首条事件触发；成功或失败都算跑过，不重复打接口） */
+  private loginProbeStarted = false;
+  /** 探针的结论留痕（null = 还没跑；'' = 跑了但没取到） */
+  private probedOpenid: string | null = null;
+
   constructor(options: QqGatewayOptions) {
     this.options = options;
     this.log = options.log ?? { info: () => {}, warn: () => {} };
@@ -741,6 +833,85 @@ export class QqGateway {
       reconnectAttempts: this.reconnectAttempts,
       hasClient: this.client !== null,
     };
+  }
+
+  /**
+   * **我自己的标识**（这一条通道上的形态：openid）——交给宿主那一处判据用。
+   *
+   * 取不到就是空集（**不是**猜一个）：宿主的方向是"认不出自己时宁可让一次回声漏进来"，
+   * 也绝不因为认不出而丢掉别人的话。留痕在两处：`loginProbeStarted`（探针跑没跑）与
+   * `probedOpenid`（跑出了什么），装配层会把结论写进启动日志与 `snapshot()`。
+   */
+  selfIds(): string[] {
+    return [...this.selfOpenids];
+  }
+
+  /** 这一侧的自我认知读数（诊断用）：探针跑没跑、跑出什么、群里学到几条 */
+  selfIdFacts(): { probeStarted: boolean; probedOpenid: string | null; known: number } {
+    return { probeStarted: this.loginProbeStarted, probedOpenid: this.probedOpenid, known: this.selfOpenids.size };
+  }
+
+  /**
+   * 接上"学到自己是谁了"的回调（宿主装配后调；见 `QqGatewayOptions.onSelfId`）。
+   *
+   * 接上时**立刻补推一次当下那份**：网关可能在接线之前就学到了（探针比宿主装配完判据更早返回，
+   * 是真会发生的）。宿主那侧按去重处理，重复推一次没有代价。
+   */
+  setSelfIdListener(listener: (id: string) => void): void {
+    this.selfIdListener = listener;
+    for (const id of this.selfOpenids) listener(id);
+  }
+
+  private selfIdListener: ((id: string) => void) | null = null;
+
+  /** 记下一个确凿属于我自己的 openid（去重、留痕只记一次，**并报给宿主**） */
+  private rememberSelfOpenid(id: string): void {
+    const key = id.trim();
+    if (key === '' || this.selfOpenids.has(key)) return;
+    this.selfOpenids.add(key);
+    this.log.info(`[QQ] 记下我自己的 openid：…${key.slice(-4)}（共 ${this.selfOpenids.size} 个形态）`);
+    /**
+     * **必须报给宿主**（2026-10-11 修的那处"改了等于没改"）：判据在宿主那一处
+     * （`channel/self-identity.ts` 的 `isSelfMessage`），而它建判据的时刻早于这里学到东西。
+     * 少了这根线，"平台推回来的自己的消息"就永远认不出来——那正是这条链要治的病。
+     *
+     * 两个出口都通到宿主那一处：构造期给的 `options.onSelfId` 与装配后接的
+     * `setSelfIdListener`（后者用得上，是因为"学到"多半发生在装配之后）。
+     */
+    this.options.onSelfId?.(key);
+    this.selfIdListener?.(key);
+  }
+
+  /**
+   * 既有握手里问一次"我是谁"（`GET /users/@me`，见 `fetchBotLoginInfo`）。
+   *
+   * **取不到就如实留痕**（`log.warn` 一行 + `probedOpenid` 留空），绝不猜一个：
+   * 猜错的后果比"认不出自己"严重得多——那会把**别人**的话当成自己的丢掉。
+   * 降级之后"自己"仍然认得出，靠的是群里那条 @ 我的事件（`mentions` 的权威凭据）。
+   */
+  private startLoginProbe(): void {
+    this.loginProbeStarted = true;
+    const apiBase = (this.options.apiBase ?? DEFAULT_QQ_API_BASE).replace(/\/+$/u, '');
+    void fetchBotLoginInfo({
+      apiBase,
+      token: () => this.options.token(),
+      http: this.options.http ?? defaultHttpJson,
+    }).then((info) => {
+      if (info === null) {
+        this.probedOpenid = '';
+        this.log.warn(
+          '[QQ] 取不到机器人自己的 openid（GET /users/@me 没给出 id）：'
+          + '「这条消息是不是我自己发的」暂时只能靠群事件里的 mentions 学——'
+          + '在那之前，平台推回来的自己的消息可能被当成群成员的话。',
+        );
+        return;
+      }
+      this.probedOpenid = info.openid;
+      this.rememberSelfOpenid(info.openid);
+    }).catch(() => {
+      // `fetchBotLoginInfo` 自己已经吞掉了所有失败，这里只是不让 promise 悬着
+      this.probedOpenid = '';
+    });
   }
 
   /** 起连。幂等：重复调用不会建第二条连接 */
@@ -944,6 +1115,15 @@ export class QqGateway {
     // 够把一条消息对上，又不把群里的正文抄进日志。
     const hint = readString(data ?? {}, 'id').slice(0, 12);
     this.log.info(`[QQ/网关] 收到分发：${eventType}${hint === '' ? '' : ` · ${hint}…`}`);
+    /**
+     * **「我自己是谁」就在这条事件里学**（2026-10-11）——见 `botOpenidsOf` 与 `selfOpenids` 的注释：
+     *   · `mentions` 里 `bot: true` 那一条 = 群里 @ 了我 ⇒ 那一串就是**这个群里我的 openid**（权威）；
+     *   · `author.bot === true` = 这条是**我自己发的话被平台推回来**（兜底那一层）。
+     */
+    for (const id of botOpenidsOf(data ?? {})) this.rememberSelfOpenid(id);
+    // 首条事件顺手把"我是谁"问一次（**一次**：成败都算问过）。为什么不放在构造/READY 里：
+    // 那条路是测试台也走的（假网关不接 http，凭空多一次真实网络请求会让单测变慢且不可控）。
+    if (!this.loginProbeStarted) this.startLoginProbe();
     const wake = mapDispatchToWakeChannel(eventType, data ?? {}, this.options.channelName ?? QQ_CHANNEL_NAME);
     if (wake === null) {
       // 非文本类订阅事件（FRIEND_ADD / GROUP_ADD_ROBOT 等）不产生 wake：它们不是"对我说的话"
@@ -1933,6 +2113,13 @@ export interface QqOfficialChannelOptions {
   log?: QqTokenLogger;
   /** 命中器：本地 mock / 隐私（无用，保留扩展点） */
   onWake?: (data: WakeChannel['data']) => void;
+  /**
+   * **学到"我自己是谁"了**（机器人 openid）——运行期回调，可以调多次，宿主按去重处理。
+   *
+   * 为什么这一格在**通道装配期**就要给（而不是像 `onMessage` 那样事后赋属性）：这个回调挂在
+   * 网关自己身上（它的 `options` 在构造时定下），而通道不再转一手——见下面构造里那句注释。
+   */
+  onSelfId?: (id: string) => void;
 }
 
 /** QQ 官方通道：凭证 + 网关 + 发送器三件套的组合，对系统只暴露 ChannelAdapter 形状 */
@@ -1950,6 +2137,18 @@ export class QqOfficialChannel implements ChannelAdapter {
   private delivered = 0;
 
   onMessage?: (event: WakeChannel['data']) => void;
+
+  /**
+   * 群里动静（`channel/notice`）的落地口——**官方这一侧刻意是个"永远不会被调用"的口**。
+   *
+   * 为什么留着（而不是让宿主按通道名分支）：宿主那一段接线是两条通道**共用**的
+   * （`main.ts` 那两行 `channel.onNotice = onChannelNotice`），通道名会变、能力在不在是事实。
+   * 留一个空口，语义是"这条通道不发这类事件"——与 `sendInputNotify` 那条可选能力口同一个成例。
+   *
+   * 什么时候会有值：官方网关的 notice 类事件（群管理动作）**尚未订阅**——那要另开订阅位，
+   * 属另一件事（本轮只做 OneBot 那一侧，见 `onebot.ts` 的 `noticeDataOf`）。
+   */
+  onNotice?: (data: ChannelNoticeData) => void;
 
   constructor(options: QqOfficialChannelOptions) {
     this.appId = options.appId;
@@ -1973,6 +2172,10 @@ export class QqOfficialChannel implements ChannelAdapter {
     });
     this.gateway = new QqGateway({
       token: () => this.tokens.acquire(),
+      // "我学到自己是谁了"：直接由网关递出去（见 `QqGatewayOptions.onSelfId`）。
+      // 这一条**不经过**通道实例上的属性：网关在构造时就建好了，而"学到"是运行期的事，
+      // 中间再加一层转手只会多一个"宿主改了属性但网关不知道"的失效点。
+      ...(options.onSelfId === undefined ? {} : { onSelfId: options.onSelfId }),
       onWake: (data) => {
         this.delivered += 1;
         this.onMessage?.(data);
@@ -2071,6 +2274,14 @@ export class QqOfficialChannel implements ChannelAdapter {
      * `attempts > 0 && sent === 0` ⇒ 走了但平台不要（看 `log.warn` 那一行的错误码）。
      */
     inputNotify: { attempts: number; sent: number; failed: number };
+    /**
+     * 「我自己是谁」的读数（2026-10-11 加）：`probeStarted` = 有没有问过 `GET /users/@me`、
+     * `probedOpenid` = 问到了没有（`''` = 问了但没取到，`null` = 还没问）、`known` = 现在认出几个形态。
+     *
+     * 它只影响一件事：**平台推回来的"我自己发的消息"认不认得出来**。`known === 0` 时那一层判据
+     * 是失效的（宿主会如实降级：宁可让一次回声漏进来，也不丢别人的话）。
+     */
+    selfIds: { probeStarted: boolean; probedOpenid: string | null; known: number };
   } {
     return {
       appId: this.appId,
@@ -2079,7 +2290,31 @@ export class QqOfficialChannel implements ChannelAdapter {
       hasToken: this.tokens.snapshot().hasToken,
       gateway: this.gateway.snapshot(),
       inputNotify: this.sender.snapshot().inputNotify,
+      selfIds: this.gateway.selfIdFacts(),
     };
+  }
+
+  /**
+   * **我自己的标识**（这一条通道上的形态：openid）——交给宿主那一处判据用
+   * （`channel/self-identity.ts` 的 `isSelfMessage`，接线在 `main.ts` 的落库口）。
+   *
+   * 三个来源合成一份（去重）：`GET /users/@me` 探针、群里 @ 我的事件 `mentions[bot].id`、
+   * 我自己那条回声的 `author.bot`。空数组 = 一个都还不知道（如实降级，不猜）。
+   * **每次调用现读**（不是快照）：探针与群事件随时可能补进新的那一份。
+   */
+  selfIds(): string[] {
+    return this.gateway.selfIds();
+  }
+
+  /**
+   * 接上"学到自己是谁了"的回调（宿主在装配后调）。
+   *
+   * 这一条**转给网关**（它的 `options.onSelfId` 是构造期定下的），所以本方法是"补接"：
+   * 网关在构造时没拿到回调也能事后接上。接上时**立刻补推一次当下那份**——网关可能在接线
+   * 之前就学到了（首条事件比宿主装配完判据更早到，是真会发生的）。
+   */
+  setSelfIdListener(listener: (id: string) => void): void {
+    this.gateway.setSelfIdListener(listener);
   }
 }
 
@@ -2209,7 +2444,7 @@ export function createChannelMediaPoster(
 export function createChannelReplyPoster(
   channels: ReadonlyMap<string, ChannelAdapter>,
   options: { timeoutMs?: number } = {},
-): { post(target: { url: string; idempotencyKey: string; msgId?: string }, text: string): Promise<{ ok: true; status: number; note?: string } | { ok: false; reason: string }> } {
+): { post(target: { url: string; idempotencyKey: string; msgId?: string }, text: string): Promise<{ ok: true; status: number; note?: string; messageId?: string } | { ok: false; reason: string }> } {
   const timeoutMs = options.timeoutMs ?? 15_000;
   return {
     // 返回"带 post 的对象"而不是裸函数：admin 的 ReplyPoster 是接口（post 方法），
@@ -2237,9 +2472,18 @@ export function createChannelReplyPoster(
           // 降级事实**原样带上**（`degraded` → `note`）：`ok: true` 只说"话发出去了"，
           // 而"这条的形态与她以为的不一样（例如 markdown 被拒、按纯文本发的）"是回执里
           // 必须说清的另一件事——不然就是"以为发出去了、其实没 @ 到"的静默失败。
-          return outcome.degraded === undefined
-            ? { ok: true, status: 200 }
-            : { ok: true, status: 200, note: outcome.degraded };
+          //
+          // 平台回的 `messageId` 与 OneBot 那条**同一处理**（2026-10-12）：它是"她刚发出去的
+          // 那一条"的唯一坐标，`speak/sent` 要靠它把 `（我）`那一行认出来。官方门的那串
+          // `ROBOT1.0_…` 今天**没有撤回路径**，所以它印不进 `read_channel`（按通道开关，
+          // 见 admin 的 `renderReadBatch`）——但**先把它记下来**：记不下来的事实，
+          // 将来有撤回路径时也推不出来（"日志只增不改"是单向的）。
+          return {
+            ok: true,
+            status: 200,
+            ...(outcome.degraded === undefined ? {} : { note: outcome.degraded }),
+            ...(outcome.messageId === '' ? {} : { messageId: outcome.messageId }),
+          };
         }
         return { ok: false, reason: outcome.reason };
       } catch (err) {

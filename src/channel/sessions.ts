@@ -116,7 +116,14 @@ export interface SessionEntry {
   channel: string;
   chatType: string;
   chatId: string;
-  /** 最近跟她说话的人：私聊是对方，群里是那位发言者（QQ 给的就是 openid） */
+  /**
+   * 最近跟她说话的人：私聊是对方，群里是那位发言者（QQ 给的就是 openid）。
+   *
+   * **空串 = 这个会话到现在为止只有"动静"、还没有人说过话**（2026-10-11 加 `channel/notice`
+   * 之后的第三种来源）：notice 里那个人可能是"被禁言的人"、也可能压根没给（平台常常不说是谁
+   * 干的），所以那一格**照实留空**，不硬塞一个名字进去（`resolveSessionName` 会退回会话 id
+   * 或别名，见那里的注释）。
+   */
   person: string;
   /** 最近一条消息的片段（她认人用，不是全文） */
   lastText: string;
@@ -153,18 +160,23 @@ export interface SessionEntry {
 }
 
 /**
- * 会进会话簿的两种事件。它们唯一的实质差别是"要不要叫她"，折叠口径完全相同。
+ * 会进会话簿的**四种**事件。前两种唯一实质差别是"要不要叫她"，折叠口径完全相同；
+ * 后两种（`channel/notice` 群里的动静、`channel/self-action` 她自己的管理动作）是**同一档**：
+ * 与它们共用同一份折叠，只在两处刻意不同（见 `applyChannelMessage` 里的 `accrues` 与 `isAside`）。
  *
  * 写成联合而不是交叉：交叉类型（`A & B`）在窄化到具体一种事件之后会被收成 never
  * （两个字面量 type 不可能同时成立），折叠函数里就一个字段都读不出来。
  */
 export type ChannelEvent =
   | (AppEvent & { type: 'wake/channel' })
-  | (AppEvent & { type: 'channel/message' });
+  | (AppEvent & { type: 'channel/message' })
+  | (AppEvent & { type: 'channel/notice' })
+  | (AppEvent & { type: 'channel/self-action' });
 
 /** 这条事件要不要并进会话簿（唯一判据，collect 与 upsert 共用一处） */
 function isChannelEvent(event: AppEvent): event is ChannelEvent {
-  return event.type === 'wake/channel' || event.type === 'channel/message';
+  return event.type === 'wake/channel' || event.type === 'channel/message'
+    || event.type === 'channel/notice' || event.type === 'channel/self-action';
 }
 
 /**
@@ -206,7 +218,7 @@ export function sidOfChannelData(data: {
   return sidOf(data.channel, data.chatType, data.chatId);
 }
 
-/** 两种通道事件共有的那段负载（折叠唯一需要的字段；`mentionsMe` 之类刻意不在其中） */
+/** 三种通道事件共有的那段负载（折叠唯一需要的字段；`mentionsMe` 之类刻意不在其中） */
 export interface ChannelMessageFields {
   channel: string;
   chatType: string;
@@ -218,13 +230,40 @@ export interface ChannelMessageFields {
 }
 
 /**
- * 取一条通道事件的共有字段。
+ * 取一条通道事件的共有字段（notice 与 self-action 的 `person` 那一格**照实留空**——都没有发言人）。
  *
- * 为什么不直接用 `event.data`：两种事件的 data 键集不同（一个带 `dedupeKey`、一个带
- * `mentionsMe`），联合类型下 TS 会把不相交的属性收成 never。折叠**只该读这几个字段**——
- * 把口径收成一份显式的清单，也顺手挡住了"顺手多读一个字段"的漂移。
+ * 为什么不直接用 `event.data`：四种事件的 data 键集不同（一个带 `dedupeKey`、一个带
+ * `mentionsMe`、一个带 `noticeType`、一个带 `receipt`），联合类型下 TS 会把不相交的属性收成 never。
+ * 折叠**只该读这几个字段**——把口径收成一份显式的清单，也顺手挡住了"顺手多读一个字段"的漂移。
  */
 export function channelDataOf(event: ChannelEvent): ChannelMessageFields {
+  if (event.type === 'channel/notice') {
+    return {
+      channel: event.data.channel,
+      chatType: event.data.chatType,
+      // 群里的一件动静**没有发言人**：照实留空，不拿"被禁言的那个人"顶替（那是两个问题）
+      person: '',
+      chatId: event.data.chatId,
+      // 清单那一行缀的是"最近说了什么"——动静那一条缀上它的类别（`group_ban` 这种协议词
+      // 摆给她是噪音，所以只作**兜底**：真正可读的那一句在 `read_channel` 那一行里）
+      text: event.data.noticeType,
+      messageId: event.data.messageId ?? '',
+      msgSeq: event.data.msgSeq ?? 0,
+    };
+  }
+  if (event.type === 'channel/self-action') {
+    return {
+      channel: event.data.channel,
+      chatType: event.data.chatType,
+      // 她自己的动作**也没有发言人**（那是"我做的"，不是"谁说的"）
+      person: '',
+      chatId: event.data.chatId,
+      // 同上：清单那一行缀协议动作名（真正可读的那一句在 `read_channel` 那一行里）
+      text: event.data.action,
+      messageId: '',
+      msgSeq: 0,
+    };
+  }
   return event.data;
 }
 
@@ -257,6 +296,16 @@ function applyChannelMessage(map: Map<string, SessionEntry>, event: ChannelEvent
    * （`messages` 那个总数仍然两种都计：它答的是"这个会话来过多少条"，与看没看过无关。）
    */
   const accrues = event.type === 'channel/message';
+  /**
+   * **不是"别人的话"的两类**（`channel/notice` 群里的动静、`channel/self-action` 她自己的动作）：
+   * 它们进会话簿的目的只有一个——让"这个会话"在她眼里存在。两处刻意与消息不同：
+   *   • **不计未读**（`accrues` 已经是 false）——未读数的必须是"别人的话"，
+   *     把"某人加入了群聊"或"我设过全员禁言"算进去会让她以为有人在等她回话；
+   *   • **不计入 `messages` 那个总数**——那个数的语义是"这个会话来过多少条**话**"
+   *     （见 `SessionEntry.messages` 与 `read_channel` 的"最近 N 条"），
+   *     混进这两类会让"他说了很多"变成一个假的量。
+   */
+  const isAside = event.type === 'channel/notice' || event.type === 'channel/self-action';
   map.set(sid, {
     sid,
     channel: d.channel,
@@ -267,7 +316,7 @@ function applyChannelMessage(map: Map<string, SessionEntry>, event: ChannelEvent
     person: d.person,
     lastText: d.text.replace(/\s+/gu, ' ').trim().slice(0, 60),
     lastSeenAt: event.ts,
-    messages: (prev?.messages ?? 0) + 1,
+    messages: (prev?.messages ?? 0) + (isAside ? 0 : 1),
     // 别名不在这里查：折叠只管事实（谁在什么时候说了什么），名字是单独的、可以随时改的一份表
     label: prev?.label ?? null,
     readUpToSeq,

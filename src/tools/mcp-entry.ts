@@ -219,6 +219,34 @@ export interface CreateMcpEntryToolOptions {
    * 没接线时（测试台的假 client）退回"去界面加"，而不是编一条路径出来。
    */
   grantsDir?: string;
+  /**
+   * **一次真执行的回执**（2026-10-11 加：「我做过」的落点）。
+   *
+   * 为什么回调挂在这里、而不是 executor 的回执那一层：**外面那层拿不到参数**
+   * （`tool/result` 里只有 `callId/name/status/content`），而"这次到底做了什么管理动作"
+   * 必须看参数。这一层 `server` / `tool` / `args` / `result` / `ctx` 全在手。
+   *
+   * **为什么必须挂在函数最末尾**：这一件有三道早返回的闸（destructive 门、名字核对、
+   * args 解析失败），被拦下的调用**根本没有回执**（executor 也不会回调）——
+   * 于是"一次真执行 = 恰好多一条事件"是**结构保证**的，不靠自觉。
+   *
+   * 这一层只**交事实**：认不认这个动作、记不记、怎么渲染，全在
+   * `channel/self-action.ts`（判据只此一处）。不接线 = 这一路整条不存在
+   * （测试台与离线装配照旧，行为与没有这一格时逐字相同）。
+   */
+  onReceipt?: (receipt: {
+    server: string;
+    tool: string;
+    /** **实际执行的那份参数**（与 `tool/call` 落的同源） */
+    args: unknown;
+    /** executor 的结论：`ok` / `error` / `timeout`（`denied` 的调用没有回执） */
+    status: string;
+    /** 回执正文（给模型看的那一份） */
+    content: string;
+    isError: boolean;
+    turn: number;
+    callId: string;
+  }) => void;
 }
 
 // ──────────────────────────────── 纯函数辅助 ────────────────────────────────
@@ -794,10 +822,29 @@ export function createMcpEntryTool(options: CreateMcpEntryToolOptions): ToolDefi
         );
       }
 
-      return options.client.callTool(server, tool, parsed.value, {
+      const result = await options.client.callTool(server, tool, parsed.value, {
         signal: ctx.signal,
         ...(options.callTimeoutMs === undefined ? {} : { timeoutMs: options.callTimeoutMs }),
       });
+      /**
+       * **这一跳真的执行完了**（上面三道闸都没拦）⇒ 把回执交出去（「我做过」的落点）。
+       *
+       * 位置是判据的一部分：放在**所有早返回之后**，所以"被拦下的调用"到不了这里——
+       * 那正是"她做过什么"这条账只记**真发生过的**事所需要的保证（见 `onReceipt` 的注释）。
+       * 这里**不做任何判断**（不认动作、不看结果、不决定记不记）：那是
+       * `channel/self-action.ts` 的事，判据只有那一处。
+       */
+      options.onReceipt?.({
+        server,
+        tool,
+        args: parsed.value,
+        status: result.isError === true ? 'error' : 'ok',
+        content: result.content,
+        isError: result.isError === true,
+        turn: ctx.turn,
+        callId: ctx.callId,
+      });
+      return result;
     },
   };
 }

@@ -24,8 +24,8 @@ import type { WakeChannel, MemoryRead } from '../log/types.js';
 // 值导入：vision 的 emit 适配层要**显式**给出可见性（见下面那一处注释）
 import { defaultVisibility } from '../log/types.ts';
 import type { DepsManager } from '../deps/manager.js';
-import type { DsClient } from '../model/ds-client.js';
-import type { MediaPoster, AdminEventEmitter, ChannelNameResolver, ChannelReader, ChannelSpokenReader, InputNotifyPoster, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
+import type { DsClient, DsResponse } from '../model/ds-client.js';
+import type { MediaPoster, AdminEventEmitter, ChannelNameResolver, ChannelNoticeReader, ChannelReader, ChannelSelfActionReader, ChannelSpokenReader, InputNotifyPoster, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
 import type { ToolDefinition } from './types.js';
 import type { ListForModelOptions, ToolModelSpec } from './registry.js';
 import type { IsolationConfig, ToolPlanGate } from './executor.js';
@@ -42,6 +42,8 @@ import { buildFsTools, DEFAULT_READ_ONLY_PREFIXES } from './fs/index.ts';
 import { createVisionTools } from './vision.ts';
 import { createMemoryReadTool } from './memory-tools.ts';
 import { createMcpEntryTool, type McpEntryClient } from './mcp-entry.ts';
+// 「我做过」的判据（认不认这个动作 / 怎么渲染）**只有那一处**：这里只把回执交给它
+import { recordSelfAction } from '../channel/self-action.ts';
 // 申请单目录（`<dataDir>/grants`）：只用于 `mcp` 入口回执里那句指路，不进 `tools` 段
 import { grantsDirOf } from '../grant/mcp-grant.ts';
 import { ToolRegistry } from './registry.ts';
@@ -169,6 +171,22 @@ export interface ToolCatalogOptions {
    */
   memoryReadRecorder?: (data: MemoryRead['data']) => void;
   /**
+   * `vision_read` 的**用量账出口**（2026-10-11 加，与上面 `memoryReadRecorder` 同形同一条纪律）。
+   *
+   * 拿到的是**整个 `DsResponse`**（含 `usage`），宿主据此记一条
+   * `budget/consumed{lane:'light', origin:'tools/vision'}`——字段与 `channel/topic.ts` 那一段
+   * 逐字段同形（那里是既有的 light 记账写法）。
+   *
+   * 为什么必须由宿主接：`ToolContext` 里没有 `log` / `nextSeq()`，而 vision 的事件出口只有
+   * `image/attached` 一种（"vision 只该有写这一种事件的能力"）⇒ **它自己一条账都写不出来**。
+   * 这正是 2026-10-11 之前的状态：64 次真实模型请求、一条账都没有（真发出去的次数是工具
+   * 自报的 `fresh` 字段数出来的，见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+   *
+   * 不传时 `vision_read` 照常注册、只是不记账。**但那时必须有人在别处说清楚**——这正是
+   * 上面那一格注释的原话，也是这一格存在的理由。
+   */
+  visionRecorder?: (response: DsResponse, turn: number, step: number) => void;
+  /**
    * 后台任务管理器（design §4.21 jobs）。传了它，pwsh 的 `runInBackground` 才能用。
    * 不传时后台模式被拒绝并说明原因（不静默降级成前台阻塞）。
    *
@@ -228,6 +246,29 @@ export interface ToolCatalogOptions {
    * 不传时 read_channel 照常可用，只是读不到自己的发言。
    */
   channelSpokenReader?: ChannelSpokenReader;
+  /**
+   * 这个会话里**发生过的事**（`channel/notice`：管理动作/入群退群/撤回……）——`read_channel` 用。
+   *
+   * 与上面两个读取口同一条纪律：宿主注入，工具层不读日志。不传时 read_channel 照常可用，
+   * 只是读不到群里动静（**不假装没有**：这一屏本来就是那一段日志的回放）。
+   */
+  channelNoticeReader?: ChannelNoticeReader;
+  /**
+   * 这个会话里**她做过什么**（`channel/self-action`：「我做过」）——`read_channel` 用。
+   *
+   * 与上面几个读取口同一条纪律：宿主注入，工具层不读日志。不传时 read_channel 照常可用，
+   * 只是读不到她自己的管理动作（**不假装没有**：这条凭据是从 MCP 回执补的，
+   * 没有它她下一次翻那个群就看不到"我设过全员禁言"）。
+   */
+  channelSelfActionReader?: ChannelSelfActionReader;
+  /**
+   * **我自己**那几个标识（`read_channel` 渲染群里动静时用）。
+   *
+   * 用途只一处：notice 里说的若是**我自己**（"我被移出群聊"），那一行要写成 `我`
+   * 而不是一个查不出名字的 id 锚。递的是宿主那一份判据对象（`channel/self-identity.ts` 的
+   * `SelfIdentity`）——**现读**，因为"我是谁"是运行期长出来的。
+   */
+  selfIds?: () => readonly string[];
   /**
    * 会话名解析（`read_channel` 的渲染用）：sid → 名字。
    *
@@ -353,6 +394,15 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     // 她自己在这个会话里说过的话（2026-10-04）：同一个来源（日志里的投递回执），
     // 只是读法不同——它不参与未读与话题，只让 read_channel 能摆出"我已经回过什么"。
     ...(options.channelSpokenReader === undefined ? {} : { channelSpokenReader: options.channelSpokenReader }),
+    // 群里发生过的事（2026-10-11）：同一个来源（日志），只是**另一种事件**——
+    // 她读一个群时，那一行 `[OWNER 开启了全员禁言]` 就走这个口进来
+    ...(options.channelNoticeReader === undefined ? {} : { channelNoticeReader: options.channelNoticeReader }),
+    // 她自己的管理动作（「我做过」，2026-10-11）：同一个来源（日志）、**第四种事件**——
+    // 她翻一个群时那一行 `（我）：[全员禁言 · <群名> · 开启]（回执 ok）` 就走这个口进来
+    ...(options.channelSelfActionReader === undefined ? {} : { channelSelfActionReader: options.channelSelfActionReader }),
+    // 「我自己是谁」（2026-10-11）：notice 那一行里说"我"的时候要用它。递的是**取值器**而不是快照：
+    // 这份认知是运行期长出来的（OneBot 等 self_id、官方等 /users/@me 或群里 @ 我的事件）
+    ...(options.selfIds === undefined ? {} : { selfIds: options.selfIds }),
     ...(options.resolveChannelName === undefined ? {} : { resolveChannelName: options.resolveChannelName }),
     // read_channel 每行那个短时间要本机时区（与此刻层 `时刻：` 同一条纪律：换算不该由她做）
     ...(options.timezone === undefined ? {} : { timezone: options.timezone }),
@@ -417,6 +467,12 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
       // ⇒ **回执写着"图片已放进你的上下文"，请求体里一张图都没有**（实测：input_image = 0）。
       emit: (type, data) => options.emit(type, data, defaultVisibility(type)),
       imagesToContext: options.visionImagesToContext === true,
+      // 用量账（2026-10-11）：同上一条纪律——工具层只交事实（原样的 `DsResponse` 与 `ctx` 里的
+      // turn/step），账本由宿主写。
+      // 不传就整格不出现（`onUsage` 是可选回调，与"不记账"逐字节同义，不必编一个空函数）。
+      ...(options.visionRecorder === undefined
+        ? {}
+        : { onUsage: (response, turn, step) => options.visionRecorder!(response, turn, step) }),
     }),
     // `memory_read`（用户的原话：「读记忆时能指定读对应索引的记忆，而不是用 read 工具，
     // 导致反复把 state、memory 的全文读入」）。放在这里而不是 fs 族里：它的根是
@@ -445,6 +501,21 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
         ...(options.mcpDestructiveEnabled === undefined
           ? {}
           : { destructiveEnabled: options.mcpDestructiveEnabled }),
+        /**
+         * 「**我做过**」（2026-10-11）：一次真执行的回执 → 一条 `channel/self-action`。
+         *
+         * 平台不对机器人自己发起的动作发 notice，所以"我设过全员禁言"这件事只能从回执补。
+         * 这里只做**一件事**：把事实交给 `actionRecordOf` 判——它不认（查询类、归不到会话的、
+         * 不是群会话里的事）就返回 null，**一个字节都不写**。判据只有那一处。
+         *
+         * 可见性显式给 `internal`：与 `channel/notice` 逐字同一条纪律（不进请求体、不唤醒、
+         * 不计未读）。**不递 `RENDER_VERSION`**——它不进 `instructions`/`tools`，只进
+         * `read_channel` 的结果（那是 `input` 的对话尾部）。
+         */
+        onReceipt: (receipt) => {
+          // 判据只有一处（`self-action.ts`）：它不认就返回 false，**一个字节都不写**
+          recordSelfAction(receipt, options.emit);
+        },
       })]),
     ...adminKit.tools,
     ...buildShellTools(options),

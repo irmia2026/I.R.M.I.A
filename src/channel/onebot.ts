@@ -43,6 +43,7 @@ import { randomUUID } from 'node:crypto';
 // 值导入写 `.ts`（`--experimental-strip-types` 不重写 `.js`，而这里真的要用那个函数：
 // 附件的两个判据是**两条通道共用**的唯一实现，见 log/types.ts 那段注释）
 import { isFetchableAttachmentUrl, type WakeChannel } from '../log/types.ts';
+import { type ChannelNoticeData } from './self-identity.ts';
 import {
   reconnectDelayMs,
   type ChannelAdapter,
@@ -334,6 +335,93 @@ export function replyIdOf(segments: readonly OneBotSegment[]): string {
   return '';
 }
 
+// ──────────────────────────────── 事件 → channel/notice ────────────────────────────────
+
+/**
+ * `post_type === 'notice'` 的事件 → `channel/notice` 的载荷（不适用/形状不全的返回 null）。
+ *
+ * ──────────────────────────── 为什么要有这条路（2026-10-11） ────────────────────────────
+ *
+ * 原先 `dispatch` 对非 message 的事件**只记一行日志就丢**，于是这类事实整条链不存在：
+ * 别人开了全员禁言、有人被踢、有人撤回——她读那个群时一个字都看不到（诊断报告 §3：
+ * `notice` 在全部事件里 0 命中，`channel/notice` 这类事件根本不存在）。
+ *
+ * ──────────────────────────── 字段口径（哪一格是谁，别串） ────────────────────────────
+ *
+ * OneBot 11 的 notice 里，**同名的 `user_id` 在不同类别里指的可能是不同的人**：
+ *   • `group_ban`：`user_id` = **被禁言的人**，`operator_id` = 谁禁的（协议端可能不给）；
+ *   • `group_admin` / `group_increase` / `group_decrease` / `group_recall`：`user_id` = **当事人**，
+ *     `operator_id` = 操作者（撤回那条里"管理员撤别人的话"就靠这两个不同判出来）。
+ * 所以这里把两者分开成 `targetId` / `actorId`：渲染时"谁被禁"与"谁禁的"是两个人。
+ *
+ * `duration` 是**秒**（OneBot 的 `set_group_ban` 就是秒）；`0` 是有效的协议值
+ * （全员禁言那一路），所以判"有没有给"只能用 `undefined`，不许用真假。
+ *
+ * 形状不全（没有 `notice_type` / 定位不到会话）⇒ 返回 null，**宁可丢也不伪造**
+ * （与消息那条纪律逐字相同：没有 message_id 的消息也一律丢）。
+ */
+export function noticeDataOf(
+  event: Record<string, unknown>,
+  context: { selfId?: string; channelName?: string } = {},
+): ChannelNoticeData | null {
+  const noticeType = readString(event, 'notice_type');
+  if (noticeType === '') return null;
+  const channel = context.channelName ?? ONEBOT_CHANNEL_NAME;
+  const subType = readString(event, 'sub_type');
+  // 除了 group_* 那几种，其余都是"谁跟谁之间的事"：friend_recall / friend_add / notify
+  const feedId = readScalar(event, 'friend_id') || readScalar(event, 'user_id');
+  const groupId = readScalar(event, 'group_id');
+  const chatType: ChannelNoticeData['chatType'] = groupId === '' ? 'c2c' : 'group';
+  const chatId = groupId !== '' ? groupId : feedId;
+  // 定位不到会话的动静**归不到任何一屏**（read_channel 是按会话读的）⇒ 丢掉，不落一条孤儿事件
+  if (chatId === '') return null;
+
+  const selfId = readScalar(event, 'self_id') || (context.selfId ?? '');
+  // `request` 那一类的主键是 `request_type`（friend / group），子类另有 `sub_type`；
+  // 两条都留着容易串，所以统一进 `subType`，`noticeType` 保留协议原样 `request`。
+  const effectiveSub = noticeType === 'request' ? readString(event, 'request_type') : subType;
+
+  const duration = readNumber(event, 'duration');
+  /**
+   * `notice` 里**只有 id、没有昵称**（OneBot 标准语义）⇒ 名字靠既有真源现查（渲染那一步）。
+   * 这里把平台原样给的字符串**照收不误**，一个字都不改：`detail` 是渲染层唯一能拿到
+   * "平台到底说了什么"的地方（比如改名片那条的 `card_new`）。
+   */
+  const detail: Record<string, string> = {};
+  for (const key of NOTICE_DETAIL_KEYS) {
+    const value = readString(event, key);
+    if (value !== '') detail[key] = value;
+  }
+
+  return {
+    channel,
+    chatId,
+    chatType,
+    noticeType,
+    ...(effectiveSub === '' ? {} : { subType: effectiveSub }),
+    ...(selfId === '' ? {} : { selfId }),
+    ...(readScalar(event, 'operator_id') === '' ? {} : { actorId: readScalar(event, 'operator_id') }),
+    /**
+     * 当事人。**大多数类别里是 `user_id`**（被禁言/被设管理员/入群的人）；
+     * 例外是 `group_upload`——那一条里 `user_id` 是**上传的人**（没有单独的 operator），
+     * 所以它同时当 actor 用（渲染那边就按"某人 上传了群文件"写，不另编一个字段）。
+     */
+    ...(readScalar(event, 'user_id') === '' ? {} : { targetId: readScalar(event, 'user_id') }),
+    ...(duration === null ? {} : { durationSec: duration }),
+    ...(readScalar(event, 'message_id') === '' ? {} : { messageId: readScalar(event, 'message_id') }),
+    ...(groupId === '' ? {} : { groupId }),
+    ...(Object.keys(detail).length === 0 ? {} : { detail }),
+  };
+}
+
+/**
+ * 进 `detail` 的那几个原样字符串字段（**只收已知有用的**，不做通配搬运）。
+ *
+ * 为什么不通通收下：`detail` 会随事件落盘、每次 `read_channel` 翻到都要读。
+ * 把整个 notice 抄进去既没有判据价值，也把协议端的自由发挥带进了我们的日志。
+ */
+const NOTICE_DETAIL_KEYS = ['card_new', 'card_old', 'honor_type', 'file_name', 'target_id'] as const;
+
 // ──────────────────────────────── 事件 → wake/channel ────────────────────────────────
 
 export interface OneBotEventContext {
@@ -402,6 +490,27 @@ export function mapEventToWakeChannel(
   if (messageType === 'private') {
     chatType = 'c2c';
     chatId = person;
+    /**
+     * **私聊里的引用也解析**（2026-10-12 修的不对称，只读、零风险）。
+     *
+     * 原来这个前缀只在**群**那一支里生产（下面 `else` 那一段），私聊一个字都不解析——
+     * 于是同一条 `reply` 段，在群里读得出"这是回复哪一条"、在私聊里**凭空消失**。
+     * 而协议这一层根本没有"私聊不给 `reply` 段"这回事：`segments` 是从事件体里统一解析出来的
+     * （`toSegments`），`replyIdOf` 只按段类型找 `reply`，**两条路拿到的是同一份东西**——
+     * 差别只在下面这个 `if` 把它写不写进前缀。
+     *
+     * 为什么这件事对私聊**更**要紧：私聊是点对点，人引用她上一句时，"这是回复哪一条"是
+     * 那条消息**唯一**的结构化线索（群里还有 @ 与昵称可当旁证）。丢了它，她读到的就是一句
+     * 没头没尾的话——与官方门那条 2026-10-02 的缺口报告第 ④ 项是同一类病
+     *（"这个不行"到底指哪个？）。
+     *
+     * `mentionsMe` **刻意不在这里填**：私聊的 `chatType` 恒为 `c2c`，而分流判据
+     *（`channel/inbox.ts`）对 `c2c` 的第一条就是"无条件进唤醒"——引用判不出来也不影响
+     * 她读得到它。给 c2c 填一个 `mentionsMe` 只会给同一个事实造出第二种说法
+     *（`self-brief` 的 `renderMentionNote` 对 c2c 一律返回 null，本来就当它没有意义）。
+     */
+    const replyId = replyIdOf(segments);
+    if (replyId !== '') quotedPrefix = `[引用 #${replyId}] `;
   } else {
     chatId = readScalar(event, 'group_id');
     if (chatId === '') return null;
@@ -432,6 +541,10 @@ export function mapEventToWakeChannel(
     // 被引用的那句**只拿得到 id**（OneBot 的 reply 段不给正文）：如实写成前缀，
     // 她至少知道"这是回复哪一条"。形状与官方的 `[引用 …] ` 同族——`speakerWordsOf` 按
     // `[引用…]` 开头整块剥掉（被引的常是她自己刚说的那句，不许拿去给她定罪）。
+    //
+    // ⚠ 这里**只做"谁引用了她"这一层**（`replyToSelf` 是提成唤醒的判据）——前缀本身
+    // 私聊那一支也会生产了（2026-10-12，见上面 `if (messageType === 'private')` 里那段）。
+    // 两处生产的是**同一个形态**：判据仍然只有 `replyIdOf` 一处。
     if (replyId !== '') quotedPrefix = `[引用 #${replyId}] `;
   }
 
@@ -741,12 +854,31 @@ export interface OneBotClientOptions {
   /** 收到 `wake/channel` 数据（已转成事件形状）时的落地口 */
   onWake: (data: WakeChannel['data']) => void;
   /**
+   * 收到 `notice` 事件（已转成 `channel/notice` 形状）时的落地口。
+   *
+   * 与 `onWake` **刻意是两个口**：notice 不是"叫她"的那条路（它不唤醒、不进消息流），
+   * 混进 `onWake` 就等于让它走一遍唤醒分流——那是"群里有人撤回了一条消息"把她叫醒一次，
+   * 显然不是要的东西。宿主那边它也落成**另一种事件**（`channel/notice`，见 main.ts）。
+   *
+   * 没接线 = 这一路整条不落（与 notice 之前的现状逐字相同，不静默改行为）。
+   */
+  onNotice?: (data: ChannelNoticeData) => void;
+  /**
    * 某个 message_id 是不是**她自己发出去的**那条（给了才判得出"被回复=在叫她"）。
    *
    * 为什么由上面那层给：这份表只有真正发过消息的一方有（`OneBotChannel.sendText` 拿回了
    * 协议端的 `message_id`）。客户端自己不维护它——那是"她说过什么"，属于会话状态，不属于链路。
    */
   isSentMessageId?: (id: string) => boolean;
+  /**
+   * **学到"我自己是谁"了**（机器人 QQ 号）——运行期回调，可以调多次，宿主按去重处理。
+   *
+   * 两个触发点：`dispatch` 里事件自带的 `self_id`（协议端每条事件都带），以及
+   * `get_login_info` 的兜底结果。**必须回调到宿主**，不能只留在客户端里：
+   * 判据（这条消息是不是我自己发的）在宿主那一处，而它建判据的时刻早于本客户端认识自己
+   * （2026-10-11 修的"改了等于没改"那处缺陷就是这条线断了）。
+   */
+  onSelfId?: (id: string) => void;
 }
 
 /**
@@ -776,6 +908,8 @@ export class OneBotClient {
   private readonly pending = new Map<string, PendingCall>();
   private incomingCount = 0;
   private actionCount = 0;
+  /** 落成 `channel/notice` 的条数（观测用；"协议端推没推 notice"看它最直接） */
+  private noticeCount = 0;
 
   /**
    * 端点缓存（`resolveEndpoint` 给了才有）。
@@ -804,7 +938,7 @@ export class OneBotClient {
   /** 可观测状态（测试与 CLI 状态页用；不含 token） */
   snapshot(): {
     connected: boolean; selfId: string; reconnectAttempts: number;
-    pendingCalls: number; incomingCount: number; actionCount: number;
+    pendingCalls: number; incomingCount: number; actionCount: number; noticeCount: number;
   } {
     return {
       connected: this.client !== null && this.client.isOpen,
@@ -813,6 +947,9 @@ export class OneBotClient {
       pendingCalls: this.pending.size,
       incomingCount: this.incomingCount,
       actionCount: this.actionCount,
+      // 落成 channel/notice 的条数：协议端**到底推没推** notice，看这一个数最直接
+      // （原先这一类只写一行英文日志，翻不出"推了几条"）
+      noticeCount: this.noticeCount,
     };
   }
 
@@ -1063,7 +1200,7 @@ export class OneBotClient {
   private dispatch(payload: Record<string, unknown>): void {
     // 每条事件都带 self_id：收到就跟着更新（比只信一次 get_login_info 更贴近事实）
     const selfId = readScalar(payload, 'self_id');
-    if (selfId !== '') this.selfId = selfId;
+    if (selfId !== '') this.learnSelfId(selfId);
 
     const postType = readString(payload, 'post_type');
     if (postType === 'meta_event') {
@@ -1084,6 +1221,21 @@ export class OneBotClient {
       const id = readScalar(payload, 'message_id') || readScalar(payload, 'notice_type')
         || readScalar(payload, 'request_type') || readScalar(payload, 'sub_type');
       const what = postType === '' ? '（缺 post_type）' : postType;
+      /**
+       * **2026-10-11：`notice` 不再"记一行就丢"**（用户点的第二件，见 `noticeDataOf`）。
+       * 这一支原先只写日志——于是"别人开了全员禁言"这类事实整条链不存在：她读那个群，
+       * 看不到半小时前发生过什么。现在它落成 `channel/notice`（internal、不唤醒、不计未读），
+       * 由 `read_channel` 按 `noticeLineText` 渲染成一行 `[OWNER 开启了全员禁言]`。
+       *
+       * 日志照旧写（那是"协议端到底推没推"的凭据），只是从"只写日志"变成"写日志 + 落事件"。
+       */
+      const notice = postType === 'notice' ? noticeDataOf(payload, { selfId: this.selfId, channelName: this.options.channelName ?? ONEBOT_CHANNEL_NAME }) : null;
+      if (notice !== null) {
+        this.noticeCount += 1;
+        this.options.onNotice?.(notice);
+        this.log.info(`[OneBot] 收到分发：notice · ${notice.noticeType}${notice.subType === undefined ? '' : `/${notice.subType}`}（已落 channel/notice）`);
+        return;
+      }
       this.log.info(`[OneBot] 收到分发：${what}${id === '' ? '' : ` · ${id.slice(0, 12)}`}（不是消息事件，已忽略）`);
       return;
     }
@@ -1122,6 +1274,39 @@ export class OneBotClient {
     this.client?.setReadTimeoutMs?.(ms);
   }
 
+  /**
+   * 学到机器人自己的 QQ 号（`self_id` / `get_login_info` 两个来源都走这里，**唯一入口**）。
+   *
+   * 除了留在客户端里（群 @ 判定要用），还要**回调给宿主**：判据在那一处
+   * （`channel/self-identity.ts` 的 `isSelfMessage`），而它建判据的时刻早于这里——
+   * 少了这根线，"平台推回来的自己的消息"就永远认不出来（2026-10-11 修的那处缺陷）。
+   */
+  private learnSelfId(id: string): void {
+    const key = id.trim();
+    if (key === '') return;
+    const changed = this.selfId !== key;
+    this.selfId = key;
+    // 只在"这是个新值"时回调：宿主那侧是幂等的，但没必要的调用会掩盖真正的变化点
+    if (!changed) return;
+    this.options.onSelfId?.(key);
+    this.selfIdListener?.(key);
+  }
+
+  /**
+   * 接上"学到自己是谁了"的回调（宿主装配后调；见 `OneBotClientOptions.onSelfId`）。
+   *
+   * 接上时**立刻补推一次当下那份**：客户端可能在接线之前就学到了（构造时的那次握手、
+   * 或第一条事件的 `self_id`——两者都比宿主装配完判据更早，是真会发生的）。
+   * 宿主那侧按去重处理，重复推一次没有代价。
+   */
+  setSelfIdListener(listener: (id: string) => void): void {
+    this.selfIdListener = listener;
+    const known = this.selfId.trim();
+    if (known !== '') listener(known);
+  }
+
+  private selfIdListener: ((id: string) => void) | null = null;
+
   private async fetchSelfId(): Promise<void> {
     const result = await this.call('get_login_info', {});
     if (!result.ok) {
@@ -1133,7 +1318,7 @@ export class OneBotClient {
       this.log.warn('[OneBot] get_login_info 响应里没有 user_id，已忽略');
       return;
     }
-    this.selfId = userId;
+    this.learnSelfId(userId);
     this.log.info(`[OneBot] 机器人 QQ 号：${userId}`);
   }
 }
@@ -1164,6 +1349,13 @@ export interface OneBotChannelOptions {
   log?: OneBotLogger;
   /** 命中器：本地 mock / 隐私（无用，保留扩展点） */
   onWake?: (data: WakeChannel['data']) => void;
+  /**
+   * 群里动静（`notice` → `channel/notice`）的落地口。
+   *
+   * 与 `onMessage`（上面那格 `onWake`，还有实例上的同名属性）**同一个成例**：装配时能给，
+   * 装配之后也能改（宿主在两个通道上写 `onMessage` 就是这么做的）。两个入口都通到同一格。
+   */
+  onNotice?: (data: ChannelNoticeData) => void;
 }
 
 /** OneBot 通道：客户端 + 发送封装的组合，对系统只暴露 `ChannelAdapter` 形状 */
@@ -1172,10 +1364,18 @@ export class OneBotChannel implements ChannelAdapter {
 
   onMessage?: (event: WakeChannel['data']) => void;
 
+  /**
+   * 群里动静（`notice` → `channel/notice`）的落地口。**与 `onMessage` 分开**：那条是"有人在说话"，
+   * 这条是"群里发生了一件事"——宿主要落的也是两种事件，混在一个口里就得在下游再分一次流。
+   */
+  onNotice?: (data: ChannelNoticeData) => void;
+
   private readonly client: OneBotClient;
   private readonly log: OneBotLogger;
   /** 观测计数：收到并已投递的通道消息条数 */
   private delivered = 0;
+  /** 观测计数：落成 `channel/notice` 的群里动静条数 */
+  private notices = 0;
   /**
    * 最近一条消息事件的时刻（毫秒），0 = 还没收到过。
    *
@@ -1217,6 +1417,14 @@ export class OneBotChannel implements ChannelAdapter {
       log: this.log,
       // "这条回复的是不是我发的那句"：表就在这一层（只有发过消息的一方有）
       isSentMessageId: (id) => this.sentMessageIds.has(id),
+      // 群里动静：转成 `channel/notice` 之后交给宿主（它落成另一种事件，见 main.ts）。
+      // **两个出口都走这里**（装配期的 `options.onNotice` 与装配后赋的 `this.onNotice`）：
+      // 与 `onWake`/`onMessage` 那一对逐字同形，宿主少一处特例。
+      onNotice: (data) => {
+        this.notices += 1;
+        options.onNotice?.(data);
+        this.onNotice?.(data);
+      },
       onWake: (data) => {
         this.delivered += 1;
         // 记下"最近一条消息是什么时候来的"——见 lastEventAt 的注释：协议端有一种
@@ -1227,6 +1435,35 @@ export class OneBotChannel implements ChannelAdapter {
         this.onMessage?.(data);
       },
     });
+  }
+
+  /**
+   * **我自己的标识**（这一条通道上的形态：机器人 QQ 号）。
+   *
+   * 为什么要有这个口（2026-10-11 用户裁决的落点）：入站那条路上原先没有任何一处判
+   * "这条是不是我自己发的"，于是协议端一旦把她自己发的话推回来，它就会被完整地当成
+   * 某个群成员说的话——落库、算未读、进群成员档案。判据收在宿主一处
+   * （`channel/self-identity.ts` 的 `isSelfMessage`），而"我自己是谁"由**各通道自己回答**：
+   * OneBot 这边就是 `self_id`（协议端每条事件都带，另有 `get_login_info` 兜底）。
+   *
+   * 拿不到就返回空数组（**不是**猜一个）：宿主那边的方向是"认不出自己时宁可让一次回声漏进来"，
+   * 也绝不因为认不出而丢掉别人的话。**每次调用现读一次**（不是快照）——协议端可能刚刚才把
+   * `self_id` 送进来，而宿主的判据每收到一条消息都要问一次。
+   */
+  selfIds(): string[] {
+    const id = this.client.loginId.trim();
+    return id === '' ? [] : [id];
+  }
+
+  /**
+   * 接上"学到自己是谁了"的回调（宿主在装配后调；见 `OneBotClientOptions.onSelfId`）。
+   *
+   * 为什么是**事后接线**而不是装配期给：通道比宿主那份判据先建好（判据还要把两条通道的
+   * `selfIds()` 当现读口），所以这一格只能装配后接。接上时**立刻补推一次当下那份**——
+   * 通道可能在接线之前就已经学到（构造时的那次握手）。
+   */
+  setSelfIdListener(listener: (id: string) => void): void {
+    this.client.setSelfIdListener(listener);
   }
 
   start(): void {
@@ -1337,9 +1574,12 @@ export class OneBotChannel implements ChannelAdapter {
   }
 
   /** 状态快照（CLI/测试观测；token 值本身从不外露） */
-  snapshot(): { delivered: number; lastEventAt: number | null } & ReturnType<OneBotClient['snapshot']> {
+  snapshot(): { delivered: number; notices: number; lastEventAt: number | null } & ReturnType<OneBotClient['snapshot']> {
     return {
       delivered: this.delivered,
+      // 群里动静（notice）另计一格：它与"有人说话"是两件事，混在一起就答不了
+      // "协议端到底推没推 notice"（那是这一类事件原先整条不存在时最先要问的问题）
+      notices: this.notices,
       // 最近一条消息事件的时刻（毫秒），还没收到过就是 null。
       //
       // 为什么要有它：协议端有一种**静默假活**——账号被悄悄踢了，但它不重登、不通知下游，
@@ -1440,7 +1680,7 @@ export function parseReplyUrl(url: string): OneBotReplyUrlParse {
 export function createOneBotReplyPoster(
   channels: ReadonlyMap<string, ChannelAdapter>,
   options: { timeoutMs?: number } = {},
-): { post(target: { url: string; idempotencyKey: string }, text: string): Promise<{ ok: true; status: number } | { ok: false; reason: string }> } {
+): { post(target: { url: string; idempotencyKey: string }, text: string): Promise<{ ok: true; status: number; messageId?: string } | { ok: false; reason: string }> } {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ONEBOT_ACTION_TIMEOUT_MS;
   return {
     async post(target, text) {
@@ -1457,7 +1697,21 @@ export function createOneBotReplyPoster(
             timerRef.handle = setTimeout(() => { reject(new Error(`回投超时（${timeoutMs}ms）`)); }, timeoutMs);
           }),
         ]);
-        if (outcome.ok) return { ok: true, status: 200 };
+        // 平台回的 `message_id` **必须原样带出去**（2026-10-12 修的静默丢失）：它是
+        // "她刚发出去的那一条"的唯一坐标，而这条回投路径就是**唯一**拿得到它的地方——
+        // 原来的签名在这里把它窄化掉了（`return { ok: true, status: 200 }`），于是
+        // `speak/sent` 里没有 id、`read_channel` 的 `（我）`那一行永远拿不到 id，
+        // 她连"撤掉我自己刚发的那条"都做不到（实测 T1308：11 步里 6~7 步花在找 id 上，
+        // 其中 S4/S8 两步是去扫原始 jsonl）。
+        //
+        // 空 id 就不带这一格（不是带一个空串）：`SendOutcome.messageId` 在协议端没给 id 时
+        // 就是空串，而"给了但为空"在消费侧会读成"这个 id 是 ''"——那比缺席更难判。
+        // 旧消费者与旧日志的形状都不变（这一格是**可选**的，见 `ReplyOutcome`）。
+        if (outcome.ok) {
+          return outcome.messageId === ''
+            ? { ok: true, status: 200 }
+            : { ok: true, status: 200, messageId: outcome.messageId };
+        }
         return { ok: false, reason: outcome.reason };
       } catch (err) {
         return { ok: false, reason: messageOf(err) };

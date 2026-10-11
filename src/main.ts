@@ -31,7 +31,7 @@ import { ConfigWatcher } from './config/watcher.ts';
 import { ensurePersonaSeeds, loadPersona, type PersonaAssets } from './persona/loader.ts';
 import { ensureMemorySeeds } from './persona/memory-maintain.ts';
 import { ensureMemoryIndex } from './persona/memory-injection.ts';
-import { DsClient } from './model/ds-client.ts';
+import { DsClient, type DsResponse } from './model/ds-client.ts';
 import { McpClientPool, type McpDeclarationChange } from './mcp/client.ts';
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
@@ -65,6 +65,13 @@ import { TimerStore } from './wake/timer-store.ts';
 import {
   QqOfficialChannel, createChannelReplyPoster,
 } from './channel/qq-official.ts';
+// 「这条是不是我自己发的」的判据（**只此一处**，见 onChannelMessage 上面那段）：
+// 标识集合与那个问句都从这一个模块来，两条通道共用同一份实现。
+import {
+  SelfIdentity, isChannelNoticeData, type ChannelNoticeData,
+} from './channel/self-identity.ts';
+// 那一道闸的**调用入口**（判据只一份，见 `channel/self-message-gate.ts` 的文件头）
+import { channelGate } from './channel/self-message-gate.ts';
 import { createWorkspaceMediaPoster } from './channel/media-poster.ts';
 import { createInputNotifyPoster } from './channel/input-notify.ts';
 import {
@@ -86,7 +93,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.7';
+export const AGENT_VERSION = '0.1.0-beta.8';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -534,6 +541,80 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   if (onebotChannel !== null) channels.set(onebotChannel.name, onebotChannel);
 
   /**
+   * **「我自己是谁」的到达点**（2026-10-11 修的一处"改了等于没改"）。
+   *
+   * 这份认知是**运行期长出来的**，而通道是在上面就建好的（那时它还什么都不知道）：
+   *   • OneBot：机器人 QQ 号要等 WS 打开或首条事件里的 `self_id`（`dispatch` 里学）；
+   *   • 官方：openid 来自 `GET /users/@me` 探针、群里 @ 我的 `mentions[bot]`、或我自己那条
+   *     回声的 `author.bot`（见 `qq-official.ts` 的 `rememberSelfOpenid`）。
+   *
+   * 所以两条通道各有一个 `onSelfId` 回调，收到的每一个都**当场**记进下面那个判据对象——
+   * 而判据对象与真循环拿的是**同一个实例**（`RealLoopDeps.selfMessages`），
+   * 于是"学到"这件事一次就到位，不需要第二份名单、也不需要重启。
+   *
+   * 为什么还要 `sources`（现读口）那一层：`onSelfId` 是**推送**，漏一次就是一次静默失效；
+   * 现读口是**拉取**——查询那一刻直接问通道"你此刻知道谁"。两条腿都有，快照那条路才真的没了。
+   */
+  const selfIdListeners: Array<(id: string) => void> = [];
+  const onSelfId = (id: string): void => {
+    for (const listener of selfIdListeners) listener(id);
+  };
+  qqChannel?.setSelfIdListener?.(onSelfId);
+  onebotChannel?.setSelfIdListener?.(onSelfId);
+
+  /**
+   * **「这条是不是我自己发的」——判据只此一处**（2026-10-11 用户裁决的落点）。
+   *
+   * 现场（`D:\IrmiaAgent\_ops-readchannel\REPORT.md` §2）：她一次 speak 的三条气泡从**平台另一扇门**
+   * （同一实体群的 qq-official 那一路）被当作"别人发来的消息"推回来，`person` 是她自己的 openid。
+   * 整条入站链路上没有任何一处判这一条，于是它被完整地当成某个群成员说的话：落
+   * `channel/message` → 算未读 → **进群成员档案**（`data/group-members.json` 里多出一条
+   * `群友C（群昵称：伊尔弥亚2号）`，与真人网友并列）。
+   *
+   * 为什么判在**宿主的落库口**而不是两个适配器各判一遍：两扇门的"自己"形状不同（OneBot 是 QQ 号、
+   * 官方是按群隔离的 openid），各判一遍就是同一条纪律的两个实现，迟早一扇门改了另一扇没改；
+   * 而两条通道的消息**都要经过这个落库口**，挡在这里等于一处判据同时盖住两扇门。
+   *
+   * **命中 ⇒ 三件事一起不做**：不落 `channel/message`、不注册群成员、不计未读
+   *（它们本就是这条路上先后发生的三件：落库 → 折叠会话簿 → 注册）。
+   *
+   * ⚠ **不动"她看得见自己的消息"这条固定设计**：她说过什么走的是**另一条路**——
+   * `speak`/`report`/`send_media` 成功投递时补的 `speak/sent` 凭据，`read_channel` 由
+   * `readChannelSpoken` 读它、渲染成行首 `（我）`。这里丢掉的是"平台把我说的话推回来"的**副本**，
+   * 不是"我说过什么"的凭据（`test/self-message-gate.test.ts` 正面钉着这一行还在）。
+   *
+   * **两条来源合一份判据**（缺一条就是那次"改了等于没改"）：
+   *   • `providers` = 现读口：`qqChannel.selfIds()` / `onebotChannel.selfIds()`——**每次判都现问**，
+   *     所以运行期学到的那些**当场**算数（快照式写法在这里恒假，见 `SelfIdentity` 的注释）；
+   *   • `selfIdListeners` = 推送口：通道学到新的就回调进来（两条通道的 `onSelfId`）。
+   *
+   * "我自己是谁"由各通道自己回答；一个都认不出时这一层是**失效**的——那是刻意的降级方向：
+   * 宁可让一次回声漏进来，也绝不因为"认不出自己"而丢掉别人的话。
+   *
+   * 造在这里（真循环之前）的理由：循环要拿**同一个实例**去挡"重折历史事件"那条路
+   * （`RealLoopDeps.selfMessages` → `groupMemberCandidateOf`）——递副本的话，
+   * 两份认知各走各的，而"档案里那个群友是谁"这种偏差从行为上看不出来。
+   */
+  const selfIdentity = new SelfIdentity([
+    () => qqChannel?.selfIds() ?? [],
+    () => onebotChannel?.selfIds() ?? [],
+  ]);
+  selfIdListeners.push((id) => { selfIdentity.add(id); });
+  // 两条通道建好之后可能已经知道一点了（构造时的握手）；listen 回调会把当下那份补推一次
+  qqChannel?.setSelfIdListener?.(onSelfId);
+  onebotChannel?.setSelfIdListener?.(onSelfId);
+  /**
+   * 认出/认不出自己都**留一行痕**（不许静默）：这一行只在启动时打一次，而且是**事实**不是承诺——
+   * 官方那侧的 `GET /users/@me` 探针与群事件里的 `mentions` 都会随后补进这个集合。
+   */
+  if (selfIdentity.size > 0) {
+    write(`[通道] 已认出「我自己的标识」${selfIdentity.size} 个（平台推回来的自己的消息不再落库、不再注册成员、不计未读）`);
+  } else if (qqChannel !== null || onebotChannel !== null) {
+    write('[通道] 还不知道「我自己的标识」：平台把自己的消息推回来时可能被当成别人说的'
+      + '（OneBot 侧等 get_login_info / 首条事件的 self_id；官方侧等 /users/@me 或群里 @ 我的事件）');
+  }
+
+  /**
    * speak 的回投出口（M9）：多通道并存时按回投 URL 的 scheme 分派（qq: / onebot:）。
    * 只装配了其中一个通道时，另一个 scheme 的地址如实报"未装配"，而不是静默当成发送失败。
    */
@@ -833,6 +914,75 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const workspaceRoot = join(dataDir, 'workspace');
     mkdirSync(workspaceRoot, { recursive: true });
 
+    /**
+     * vision 的用量账出口（2026-10-11 加）。
+     *
+     * **为什么要有这一格**：`vision_read` 真发出去的每一次模型请求原先都不记账——
+     * 适配器（下面那个 `visionClient`）无类型透传，`tools/vision.ts` 转手把 `DsResponse`
+     * 压成字符串，`usage` 在第一跳就断了；而工具层**没有**写事件的能力（`ToolContext` 里
+     * 没有 `log` / `nextSeq()`），所以这条账只能由宿主写。实测 64 次真实请求零记账。
+     *
+     * **只在真发出去一次模型请求时记一条**（工具层负责那条判据，见 `VisionToolsOptions.onUsage`）：
+     * `inline:true`（不调模型）与 `vision_query` / `vision_read` 命中缓存（纯缓存读）**一条都不记**。
+     *
+     * 字段与 `channel/topic.ts` 的 `account()` 逐字段同形（既有的 light 记账写法），
+     * 差别只有 `origin`（区分是谁花的）与 `turn`/`step`（工具层从 `ctx.turn`/`ctx.step` 交出来，
+     * 与 `memoryReadRecorder` 同一条路：这里不需要"当前是哪一轮"这种跨层状态）。
+     *
+     * ⚠ **不递 `BUDGET_ACCOUNTING_VERSION`**（判据见 `log/types.ts` 该字段的注释）：
+     * 它描述的是预算累计量的**口径**（`(input−cacheHit)+output`），加一个事件**生产点**不改
+     * 这个算式（`fold.ts` 的 `budgetTokensOf` 只看三格、不看 origin）。代价是运行中的那份投影
+     * 不会被丢弃 ⇒ **历史那 64 次永远不进基数**，预算读数在生效处会有一个台阶；
+     * 递版本也变不出历史数据（它们本来就没被记过），代价却是一次全量重放。
+     */
+    const recordVisionUsage = (response: DsResponse, turn: number, step: number): void => {
+      const usage = response.usage;
+      const inputTokens = usage.inputTokens;
+      const outputTokens = usage.outputTokens;
+      const cacheHit = Math.max(0, Math.min(usage.cachedTokens, inputTokens));
+      /**
+       * ⚠ **这里不走上面那个 `emit`，唯一的原因是 `origin`**：`emit` 写死 `origin: 'main'`，
+       * 而这条账的 `origin` 必须是 `tools/vision`——它是"这条 lane 的钱是谁花的"那唯一一格
+       * （与 `channel/topic` / `channel/injection-judge` / `persona/memory-maintain`
+       * 三个既有 light 生产者同一条口径，见 `channel/topic.ts:200`）。把 `emit` 加一格可选
+       * origin 也能做到，但那会动一个全仓共用的写入点，而这次改动只该碰 vision 这一条线。
+       * 其余三件事（落库、立刻折投影、结算压力）与 `emit` 逐条相同——预算闸门读的是内存投影，
+       * 少折一步就是"账在日志里、闸门看不见"。
+       */
+      const event = {
+        seq: log.nextSeq(),
+        ts: now().toISOString(),
+        type: 'budget/consumed',
+        data: {
+          turn,
+          step,
+          lane: 'light',
+          // 模型名取响应里那一格（`DsResponse.model`），不猜——工具请求里那个可以是别名
+          model: response.model,
+          inputTokens,
+          outputTokens,
+          cacheHitTokens: cacheHit,
+          cacheMissTokens: Math.max(0, inputTokens - cacheHit),
+          // 思维链 token：**每次都写**（没产思维链就是 0），见 log/types.ts 的字段注释
+          reasoningTokens: usage.reasoningTokens,
+          // 这一格是"这次 HTTP 往返"的量，`DsResponse` 自己带着，不必在这里读表
+          durationMs: response.durationMs,
+          retryCount: 0,
+          finishReason: response.status === 'completed'
+            ? 'completed'
+            : (response.incompleteReason === 'max_output_tokens' ? 'max_output_tokens' : 'failed'),
+          // 观测字段：本条写入之前的**内存投影**当日累计 + 本条（口径见 log/types.ts 该字段注释）
+          tokensTodayAccum: recovery.projection.budget.tokensToday + inputTokens + outputTokens,
+        },
+        // `budget/consumed` 在 schema 表里是 internal ⇒ **一个字节都不进她的上下文**
+        visibility: 'internal',
+        origin: 'tools/vision',
+      } as unknown as AppEvent;
+      log.append(event, { sync: false });
+      applyOne(recovery.projection, event);
+      finalizePressure(recovery.projection, event.ts);
+    };
+
     // 执行点钩子（design §4.19）：配置在 data/hooks.json，对 agent 只读——
     // 它定义的是「谁能改我」，所以写入口按 protectedHookPaths 拒绝（见 catalog 的 protectedPaths）。
     // 单条非法只跳过它自己并报出来：一条写错的钩子不该拦住整个进程启动。
@@ -860,8 +1010,34 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 必须拿到与运行期同一份工具说明，否则"模型当时看到了什么"就再也重建不出来。
     // vision 的模型通道适配：vision 期望 {role, content:[input_text|input_image][]}，
     // DS Responses 原生支持 input_image 块，透传即可（DsClient 类型未声明 image part，此处断言）
+    //
+    // **记账那一行是 2026-10-11 补的**：这个适配器原先把 `ds.generate()` 的返回值当
+    // **无类型透传**交出去，`tools/vision.ts` 转手就把它压成字符串（`extractResponseText`）
+    // ——`usage` 在第一跳就断了，vision 的 64 次真实模型请求因此一条账都没有，
+    // 预算闸门看不见它（见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+    // 现在**只是多交一份出去**：`return res` 与改动之前逐字节一样（同一个对象、同一个引用），
+    // 请求体更是一个字节都没动（下面那个记账函数只写事件，不碰 `DsRequest`）。
+    //
+    // 取值的**先空后填**与 `registryRef` 同一个道理：`buildCatalogRegistry` 在下面就被调用，
+    // 而它需要的那个记账函数要用到此刻还没定下来的东西——所以先给一个"不记账"的空实现占位，
+    // 注册表造好之后立刻换成真的（填上的那一行就在下面 `catalog` 那一句之后）。
+    // 工具调用发生在 turn 里，那一刻这个格子必然已经填好了。
+    //
+    // 形参就是工具层交出来的三格（响应 + 它那一步的 turn/step）——**原样收下、原样转交**。
+    // 为什么还要多一格 `visionCallSite`：适配器（`visionClient`）拿到的是"请求 + 响应"，
+    // 里面没有"这是哪一轮哪一步"；那是工具层手里的事实（`ctx` 在它那儿）。工具层在**同一次**
+    // `generate` 里先交 turn/step（`onUsage`）、适配器紧接着交出响应，两步同一个同步块、
+    // 中间不可能插进第二次调用，所以这一格读到的一定是本次那一对号。
+    let visionCallSite = { turn: 0, step: 0 };
+    let visionRecorder: (response: DsResponse, turn: number, step: number) => void = () => {};
     const visionClient = {
-      generate: async (request: unknown) => ds.generate(request as Parameters<DsClient['generate']>[0]),
+      generate: async (request: unknown) => {
+        const res = await ds.generate(request as Parameters<DsClient['generate']>[0]);
+        // turn/step 由工具层（`tools/catalog.ts` 那一层）从 `ctx` 里带出来——同一个适配器
+        // 服务的是"工具调用"这一条路，而每一次调用都有自己的 turn/step。
+        visionRecorder(res, visionCallSite.turn, visionCallSite.step);
+        return res;
+      },
     };
     /**
      * 注册表的**惰性取值点**：`task`（子代理）要的是"父注册表"本身，而它现在正在被造
@@ -875,6 +1051,17 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       timers,
       emit,
       visionClient,
+      // vision 的用量账落点（2026-10-11）：工具层只交事实（原样的 `DsResponse` 与它那一步的
+      // turn/step），写事件这件事在这里做——工具层没有 `log`/`nextSeq()`，这正是那 64 次
+      // 真实请求零记账的原因（见 `recordVisionUsage` 那一篇注释）。
+      //
+      // turn/step 由工具层从 `ctx` 里交出来（与 `memoryReadRecorder` 同一条路：`catalog.ts`
+      // 那格的注释写着"turn 由工具层从 `ctx.turn` 交出来，所以这里不需要'当前是哪一轮'
+      // 这种跨层状态"）——这一格**原样转手**即可。
+      visionRecorder: (response, turn, step) => {
+        visionCallSite = { turn, step };
+        recordVisionUsage(response, turn, step);
+      },
       // 外部依赖（v30）：pwsh 7 / ripgrep / es.exe 由框架统一探测一次，结论在本次进程内共享。
       // 三处消费同一份缓存——pwsh 的默认 shell、rg_search / es_search 注不注册、
       // 以及 GET /api/deps 与设置页的「外部依赖」卡片。构造它不发任何进程（探测是惰性的）。
@@ -899,6 +1086,21 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       // 她自己在这个会话里说过的话（2026-10-04 用户："read channel 返回的结果里应该包含 bot
       // 自己的 speak"）。同一个循环层的口——它读的是 speak 的投递回执，工具层不碰日志。
       channelSpokenReader: async (sid) => await realLoopRef.current?.readChannelSpoken(sid) ?? [],
+      // 群里发生过的事（2026-10-11）：同一个循环层、同一个日志，只是**另一种事件**
+      //（`channel/notice`：谁开了全员禁言、谁入群退群、谁撤回了一条……）。
+      // 不接这一根线，notice 就"只进不出"——落库了、可见性也对，可她永远看不见。
+      channelNoticeReader: async (sid, limit, before) =>
+        await realLoopRef.current?.readChannelNotices(sid, limit, before) ?? [],
+      // 她自己的管理动作（「我做过」，2026-10-11）：同一个循环层、同一个日志，**第四种事件**。
+      // 平台**不对她自己的动作发 notice**，所以这一眼只能从 MCP 管理类工具的回执那一层补
+      //（catalog 的 `onReceipt` → `channel/self-action`）。不接这一根线那条账就"只进不出"：
+      // 日志里有、她永远看不见——她翻那个群时看不到"我设过全员禁言"。
+      channelSelfActionReader: async (sid, limit, before) =>
+        await realLoopRef.current?.readChannelActions(sid, limit, before) ?? [],
+      // 群里动静那一行里说"我"的时候要用它（notice 不带昵称）。递**取值器**：这份认知是
+      // 运行期长出来的（OneBot 等 self_id、官方等 /users/@me 或群里 @ 我的事件），
+      // 而工具包在启动时就造好了——收快照等于永远空集。
+      selfIds: () => selfIdentity.values(),
       resolveChannelName: (sid) => realLoopRef.current?.resolveChannelName(sid) ?? null,
       // read_channel 每行那个短时间用本机时区（她不该在自己读数时做换算，见 admin.ts）
       timezone: config.timezone,
@@ -972,6 +1174,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     toolRegistry = registry;
     // 填上那个惰性格子（见上面 registryRef 的注释）：`task` 的取值器从这一刻起拿得到父注册表
     registryRef.registry = registry;
+    // 填上 vision 的记账格子（与上面同一手法，也同一个理由）：注册表已经造好，而适配器
+    // 此刻起每一次真发出去的请求都会把响应带到这里。在那之前它是空实现（不记账）——
+    // 那一刻还没有任何工具能发起调用，所以那个空窗期不丢任何一条账。
+    visionRecorder = recordVisionUsage;
     // 工具开关（设置界面的禁用名单）：从配置装载到内存注册表。关掉的工具不进模型请求，
     // 界面仍列得出来（显示为关闭态）——名单外的名字由 setDisabled 自己忽略
     registry.setDisabled(config.tools.disabled);
@@ -1001,6 +1207,9 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       // 同一个告警实例：启动告警刚写下的 alarm/sent 就是它的限流窗口起点
       notifier,
       skills,
+      // 「我自己是谁」的那一份（与宿主落库口**同一个实例**）：循环只在群成员登记那一处用它，
+      // 挡的是 warmUp 重折历史事件时把判据补上之前落下的回声又登记一遍（见那一格的注释）
+      selfMessages: selfIdentity,
       // 执行点钩子（§4.19）：三个执行点一次装配全部生效（工具两点走执行器，Wake 走循环）
       hooks,
       // 每日记忆整理（design §4.17）：布防与 payload 识别都读这张表
@@ -1199,8 +1408,25 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * （事件 seq 是它分配的）。原先唤醒那条不补，代价是 OneBot 群 @ 那一轮的通知里**永远**
    * 不出现「（这一条你还没看过）」：判据 `wakeEvent.data.msgSeq > entry.readUpToSeq`
    * 遇上恒 0 永远为假，她会把它读成"又是上一次那条"而不回（报告 §3.4）。
+   *
+   * **2026-10-11：头一件事是「这条是不是我自己发的」**（判据与来历见上面 `selfIdentity`
+   * 那一段——全仓只此一处）。命中就整条丢掉：她自己的话有 `speak/sent` 那条凭据，
+   * `read_channel` 里照旧以 `（我）` 出现，与这里丢掉的这个**副本**是两回事。
    */
   const onChannelMessage = (data: WakeChannel['data']): void => {
+    // 我自己发出去的那条（平台推回来的副本）：不落库、不注册群成员、不计未读。
+    // 放在所有分支**之前**：连下面那条关键词判定都不必做——它本来就不是"别人说的话"。
+    // 判据是 `channelGate`（唯一一处实现，见 channel/self-message-gate.ts 的文件头）——
+    // 它读的是 `selfIdentity`：**此刻**知道的那一份（运行期学到的标识当场算数）。
+    if (channelGate(data, selfIdentity)) {
+      /**
+       * 认出来了就**留一行痕**：这是"平台把我自己的话推回来了"唯一的现场凭据
+       * （原先一个字都不记，于是"她怎么变成群友了"只能靠翻事件日志反推）。
+       * 只记通道 + 那条的 id 前 12 位：够把一条对上，不抄正文、不抄标识。
+       */
+      write(`[通道] 收到一条我自己发的消息（${data.channel}），已按"自己的回声"丢弃：不落库、不注册成员、不计未读`);
+      return;
+    }
     // 文本提及（关键词）也算"在叫她"：判据在分流器里，这里只把**结论**记进事件
     // （`mentionsMe` 让渲染层说出"提到了你"而不是"@ 了你"——她据此判断该怎么接）。
     // **只有群聊才有"提及"这回事**：私聊里人家本来就在跟她说话，句子里带上名字是常事，
@@ -1221,11 +1447,35 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     );
   };
 
+  /**
+   * 群里动静（`channel/notice`）的落库口：**只记账，不唤醒**。
+   *
+   * 与 `onChannelMessage` 的两条出口刻意不同：notice 不进 `loop.wake`（"有人撤回了一条消息"
+   * 不是叫她）、也不参与未读（未读数的必须是**别人的话**）。它唯一的出路是 `read_channel`：
+   * 她翻开这个群时，那一行 `[OWNER 开启了全员禁言]` 就在时间轴上（渲染在
+   * `channel/self-identity.ts` 的 `noticeLineText`，名字走既有真源现查，查不到不编）。
+   *
+   * `msgSeq` 补成事件 seq：与 `channel/message` 同一条规则（`msgSeqOf`），
+   * 这样将来若有人给 notice 算未读，口径不会分叉。
+   */
+  const onChannelNotice = (data: ChannelNoticeData): void => {
+    // 平台原样给的载荷先过一遍形状检查：**畸形不落库**（一条渲染不出来的事件会让
+    // read_channel 每次翻到这儿都多一行空的）
+    if (!isChannelNoticeData(data)) return;
+    appendWithSeq(
+      'channel/notice',
+      (seq) => ({ ...data, msgSeq: seq }),
+      'internal',
+    );
+  };
+
   if (qqChannel !== null) {
     qqChannel.onMessage = onChannelMessage;
+    qqChannel.onNotice = onChannelNotice;
   }
   if (onebotChannel !== null) {
     onebotChannel.onMessage = onChannelMessage;
+    onebotChannel.onNotice = onChannelNotice;
   }
 
   const timerSource = new TimerWakeSource(timers, loop, now);
