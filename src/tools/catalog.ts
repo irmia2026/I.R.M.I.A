@@ -37,6 +37,7 @@ import type { TaskBudgetGuard, TaskToolDeps } from '../runtime/subagent.js';
 import { createTaskTool, TASK_TOOL_NAME } from '../runtime/subagent.ts';
 import { createAdminTools } from './admin.ts';
 import { createNetTools } from './net.ts';
+import { ANYSEARCH_SKILL_DIR, createWebSearchTool } from './web-search.ts';
 import { createPwshTool } from './pwsh.ts';
 import { buildFsTools, DEFAULT_READ_ONLY_PREFIXES } from './fs/index.ts';
 import { createVisionTools } from './vision.ts';
@@ -452,6 +453,21 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
       // 自己拼 pwsh 的 Invoke-WebRequest，或者干脆回一句"图加载不出来"（实测两次都是后者）。
       options.destructiveEnabled === true ? { enablePost: true, enableDownload: true } : {},
     ),
+    // 联网搜索（v52，用户裁决「web_search 要做就做好做强大」）。
+    //
+    // **无条件常驻**（与 `mcp` 那件同一条判据，与 `task` 相反）：它不是"多一件能力"，
+    // 而是那条**她一直在手搓的路**的固化——`skills/anysearch/` 的四条 CLI 今天没一条
+    // 干净可用（py 缺 requests、js 被 `type:module` 顶成 ESM、ps1 撞证书吊销），
+    // 她真正跑通的是手写 `curl --ssl-no-revoke` 直打端点。
+    // 条件注册在这里是有害的：判据（技能装没装）一变就改 `tools` 段 ⇒ 一次全 miss ≈9.6 万 token。
+    // 技能目录不在时它照旧注册、照旧能用（端点支持匿名，只是配额低），回执里如实说来源。
+    createWebSearchTool({
+      ...(options.onNote === undefined ? {} : { onWarning: options.onNote }),
+      // 技能根：本仓库的约定是仓库根下的 `skills/`（`SkillManager` 的 baseRoot 也是 cwd）。
+      // 读了它的 `.env` 才有"技能文档里那份 .env 快路径"；读不到就是匿名档，不报错。
+      // 目录名只有一处（`web-search.ts` 的 `ANYSEARCH_SKILL_DIR`），不在这里再写一遍字面量。
+      skillRoot: join(process.cwd(), ...ANYSEARCH_SKILL_DIR.split('/')),
+    }),
     ...createVisionTools({
       dsClient: visionClient,
       dataDir: options.dataDir,
@@ -629,6 +645,35 @@ export interface CatalogRegistryResult {
 }
 
 /**
+ * **代码级**不进模型清单的工具名单（2026-10-12 用户裁决）。
+ *
+ * 用户的原话（逐字，唯一判据）：
+ * > 「1. **ask_human 不再进入工具数组，但是项目内代码保留**。」
+ *
+ * ⇒ 所以做法刻意是**从这里排除**，不是删代码、也不是改 `config.json`：
+ *   · **模块与用例一行不删**（`tools/admin.ts` 的 `createAdminTools`、`test/human-ask.test.ts`、
+ *     `test/plan-askhuman.test.ts` 全都照旧）——`ask_human` 是 design §6.5 专门恢复过的语义
+ *     （"错在等，不在问"），而且申请单那条链路与它**共用同一套 `human/asked` 事件**；
+ *   · **随时一行改回来**：把这一行的 `'ask_human'` 删掉即可（改的是数组内容，不是任何开关）；
+ *   · **不去动 `config.json`**：那是用户现场配置的东西，而且配置那条路（`tools.disabled`）
+ *     会被 `main.ts:1183` 的 `setDisabled(config.tools.disabled)` **整份覆盖**——
+ *     代码级隐藏必须粘得住那一次覆盖，所以走 `registry.setHidden()` 这条独立的路。
+ *
+ * 为什么省得下来：`ask_human` 整件 **134 token**（name 3 / desc 55 / params 76），
+ * 而它全量 6800+ 次工具调用里**只被调过 3 次**（0.044%；其中至少 2 次还是用户让她"试一下"）。
+ * 那一件的使用价值在**保留事件与链路**（审批卡、申请单走的是同一套 `human/asked`，
+ * `source:'system'`），不在这一份常驻 schema——隐藏 schema 不碰链路。
+ *
+ * ⚠ 一处**知情的口径收窄**（写在这里防暗坑）：`settleHumanAsks()` 那条
+ * `source === 'agent'` 的超时分支从此没有写入方（她再也调不到 `ask_human`）。代码保留、
+ * 分支保留、用例保留——只是这条路上暂时不会再有新事件进来。
+ *
+ * 代价是一次性的：`tools` 段少一件 ⇒ 一次前缀全 miss（≈9.6 万 token）。
+ * 所以它与本批其余四件**同批上线**、`RENDER_VERSION` 同批递增（`render.ts` 的 v52 那一篇）。
+ */
+export const HIDDEN_FROM_MODEL: readonly string[] = ['ask_human'];
+
+/**
  * 装配一个可用的注册表。
  *
  * 两种失败的处置刻意不同：
@@ -637,6 +682,9 @@ export interface CatalogRegistryResult {
  *   - **单件注册失败**（描述 token 超预算 §4.18、名字非法等）→ 记为 problems 并跳过其余。
  *     一件文案超预算不该让整机起不来（真实实例的 register 是启动路径上的硬断言），
  *     但也绝不能静默：调用方必须把 problems 打出来，否则就是悄悄少了一件能力。
+ *
+ * 装配的最后一步固定是 `setHidden(HIDDEN_FROM_MODEL)`（见那个常量的注释）：**生产与
+ * CLI 重建/测试走的是同一个函数**，所以"她看到的清单里有哪几件"在这条路上只有一个答案。
  */
 export async function buildCatalogRegistry(options: ToolCatalogOptions): Promise<CatalogRegistryResult> {
   const registry = new ToolRegistry();
@@ -648,6 +696,7 @@ export async function buildCatalogRegistry(options: ToolCatalogOptions): Promise
       problems.push(`${def.name}：${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  registry.setHidden(HIDDEN_FROM_MODEL);
   return { registry, problems };
 }
 

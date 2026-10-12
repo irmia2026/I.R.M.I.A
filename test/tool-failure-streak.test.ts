@@ -7,13 +7,19 @@
  *   口径：**同一件工具 + 同一个目标 + 连续 N 次失败/超时 ⇒ 这一轮内拒绝再调它**，
  *   回执明说"别再试了——换做法，或如实报告用户"。
  *
- * 判据**只紧不松**（四条，全部在 `test()` 里逐条断言）：
+ * 判据**只紧不松**（全部在 `test()` 里逐条断言）：
+ *   ⓪ 目标判据只认 `read_channel` 的 `sid`，别的工具一律 `null`（不扩大打击面）；
  *   ① 同一个 sid 连续 3 次超时 ⇒ 第 4 次**被拒**、回执含"别再试了"，且第 4 次**没有真派发**
  *      （否则守卫省不下那笔超时代价，等于白拦）；
  *   ② 换一个 sid ⇒ 照旧允许（守卫按 (工具, 目标) 分桶，不许把"一轮里读十个会话"误杀）；
  *   ③ 同一个目标上**成功**一次 ⇒ 计数清零，它后面那一次不许被拒；
  *   ④ 超时回执**逐字**（不再出现"缩小参数范围 / 拆成更小的调用"这类把超时归因到参数、
- *      于是鼓励她再试一次的话）。
+ *      于是鼓励她再试一次的话）；
+ *   ④b 软提醒**真的进上下文**（走 `deriveRequest` 逐字断言她读到的那条 output）；
+ *   ⑤ 同一步一口气要几个 ⇒ 批内预扣拦得住；
+ *   ⑥ **有进展**（这一轮里真办成了一件事，哪怕落在没有"目标"概念的工具上）⇒ 连击**重置为 1**；
+ *   ⑦ **无进展** ⇒ 照旧第 4 次被拒（"assistant 产出变多"在本仓恒为真，所以它不能当进展判据）；
+ *   ⑧ **框架侧终态**（`denied` / `over-limit`）不算进展，也不清计数（它们根本到不了记账口）。
  *
  * 唯一的实现落点在 `src/runtime/agent-loop.ts`（判据 `toolTargetOf` + 计数 `FailureStreakGuard`）；
  * 本文件只通过 `runTurn` 走**真实循环**（不直接调内部函数、也不调 `failureStreakRefusal` 拼期望值
@@ -89,23 +95,31 @@ interface FakeModel {
 
 /**
  * 可编程模型替身：默认**一步一个调用**（现场也是），最后一步发一句收尾文本。
- * `callsPerStep` 用来造"一步里一口气要好几个"的那种形状（⑤ 用它）。
+ * `callsPerStep` 用来造"一步里一口气要好几个"的那种形状（⑤ 用它）；
+ * 步与步之间形状不同时用 {@link fakeModelSteps}（⑧ 用它）。
  * 与 `tool-repeat-reminder.test.ts` 的 fakeModel 同一形状。
+ *
+ * 每一步都带一句 `text`（连只发一个失败调用的那一步也带）——这是**现场的形状**，
+ * 也正是"assistant 产出变多"不能当进展判据的原因（见 ⑦）。
  */
 function fakeModel(calls: readonly ScriptedCall[], callsPerStep = 1): FakeModel {
-  const steps: Array<Partial<DsStreamResult>> = [];
-  for (let i = 0; i < calls.length; i += callsPerStep) {
-    const group = calls.slice(i, i + callsPerStep);
-    steps.push({
+  const steps: ScriptedCall[][] = [];
+  for (let i = 0; i < calls.length; i += callsPerStep) steps.push(calls.slice(i, i + callsPerStep));
+  return fakeModelSteps(steps);
+}
+
+function fakeModelSteps(steps: readonly (readonly ScriptedCall[])[]): FakeModel {
+  const script: Array<Partial<DsStreamResult>> = [
+    ...steps.map(group => ({
       text: `调 ${group.map(item => item.name).join('+')}`,
       toolCalls: group.map(item => ({
         callId: item.callId,
         name: item.name,
         arguments: JSON.stringify(item.args),
       })),
-    });
-  }
-  const script: Array<Partial<DsStreamResult>> = [...steps, { text: '做完了。' }];
+    })),
+    { text: '做完了。' },
+  ];
   const queue = [...script];
   const requests: DsRequest[] = [];
   const ds = {
@@ -142,7 +156,7 @@ const call = (sid: string, limit: number, index: number): ScriptedCall => ({
 });
 
 interface Rig {
-  depsOf: (ds: DsClient) => AgentLoopDeps;
+  depsOf: (ds: DsClient, overrides?: Partial<AgentLoopDeps>) => AgentLoopDeps;
   wake: () => AppEvent;
   results: () => Promise<Array<ToolResult['data']>>;
   calls: () => Promise<Array<ToolCall['data']>>;
@@ -152,6 +166,30 @@ interface Rig {
   hang: (sid: string, times: number) => void;
   /** sid → handler **真跑**了几次（守卫拦下的那些不许进这里） */
   dispatchCounts: Record<string, number>;
+}
+
+/**
+ * `safe_read` 替身：**一件没有"目标"概念的工具，永远成功**。
+ *
+ * ⑥ 用它当"进展"：`toolTargetOf('safe_read', …)` 恒为 null ⇒ 它**不进失败连击的桶**，
+ * 但"这一轮里有一件事真的办成了"是**与目标无关**的事实。它的存在正是这次改动的理由——
+ * 老实现里这一整类成功对守卫是完全不可见的（`settle` 在 `target === null` 时直接返回）。
+ */
+function safeReadTool(): ToolDefinition {
+  return {
+    name: 'safe_read',
+    description: '读一个文件（测试替身：永远成功）',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+    executionMode: 'parallel',
+    sideEffect: 'none',
+    timeoutMs: TIMEOUT_MS,
+    handler: async (args): Promise<ToolHandlerResult> =>
+      ({ content: `safe_read 回执：${String((args as { path?: unknown }).path ?? '')}` }),
+  };
 }
 
 /**
@@ -195,6 +233,7 @@ async function makeRig(t: TestContext): Promise<Rig> {
   const dispatchCounts: Record<string, number> = {};
   const registry = new ToolRegistry();
   registry.register(readChannelTool(hangPlan, dispatchCounts));
+  registry.register(safeReadTool());
   t.after(() => {
     log.close();
     rmSync(dir, { recursive: true, force: true });
@@ -224,7 +263,7 @@ async function makeRig(t: TestContext): Promise<Rig> {
     dispatchCounts,
     hang: (sid, times) => { hangPlan.set(sid, times); },
     wake,
-    depsOf: (ds: DsClient): AgentLoopDeps => ({
+    depsOf: (ds: DsClient, overrides: Partial<AgentLoopDeps> = {}): AgentLoopDeps => ({
       log,
       ds,
       registry,
@@ -233,6 +272,7 @@ async function makeRig(t: TestContext): Promise<Rig> {
       now: () => NOW,
       timezone: TIMEZONE,
       workspaceRoot: dir,
+      ...overrides,
     }),
     results: async () => (await readAll())
       .filter((event): event is AppEvent & { type: 'tool/result' } => event.type === 'tool/result')
@@ -452,4 +492,142 @@ test('失败连击⑤：同一步一口气要四个同目标的调用 ⇒ 第 4 
   // 才落库，所以它在日志里排在前面。
   assert.equal(results.filter(row => row.status === 'timeout').length, 3);
   assert.equal((await rig.calls()).length, 4, '四次调用她都确实发过（两阶段落库）');
+});
+
+// ──────────────── ⑥ 有进展 ⇒ 计数重置为 1（不误拒） ────────────────
+
+/**
+ * 「进展判据」的正面：**这一轮里有一件事真的办成了**（`status:'ok'`，落在哪个工具/哪个目标上都算）
+ * ⇒ 同一个目标上的失败连击**从头起算**（重置为 1 = 刚这次失败是新一串的第一笔）。
+ *
+ * 这条用例里"进展"是一件**没有目标概念**的工具办成的（`safe_read`）——老实现里这一整类成功对守卫
+ * 完全不可见（`settle` 在 `target === null` 时直接 return），所以这里也是"接上进展判据"的最小证据。
+ *
+ * 判别点在第 5 条回执：**若没有进展判据**，c1/c2 已经让 A 的计数到 2，c3 之后就是 3
+ * ⇒ `statuses[4]` 会是 `error`（被拒）；有了它，那两次失败被重置掉，第 5 条仍然真派发。
+ */
+test('失败连击⑥：有进展（别处真办成了一件事）⇒ 连击重置为 1，不从第 3 次起误拒', async (t) => {
+  const rig = await makeRig(t);
+  rig.hang(SID_A, 99);
+  const model = fakeModel([
+    call(SID_A, 5, 0), // A 超时 1
+    call(SID_A, 6, 1), // A 超时 2
+    { callId: 'call_2', name: 'safe_read', args: { path: 'MEMORIES/facts.md' } }, // **进展**
+    call(SID_A, 7, 3), // A 超时 ⇒ 有进展 ⇒ 重置为 1（不是 3）
+    call(SID_A, 8, 4), // 2
+    call(SID_A, 9, 5), // 3
+    call(SID_A, 10, 6), // 连续第 4 次失败 ⇒ 拒
+  ]);
+
+  await runTurn(rig.depsOf(model.ds), [rig.wake()]);
+  const results = await rig.results();
+
+  assert.deepEqual(
+    results.map(row => row.status),
+    ['timeout', 'timeout', 'ok', 'timeout', 'timeout', 'timeout', 'error'],
+    '第 5 条仍是真超时（没有被误拒）：进展把 A 的连击重置了',
+  );
+  assert.equal(rig.dispatchCounts[SID_A], 5, '五条 A 调用真派发（c0/c1/c3/c4/c5），只有第 7 条被拒');
+  assert.equal(results.filter(isRefusal).length, 1);
+  assert.equal(results.at(-1)!.content, REFUSAL, '拒的那条照旧逐字，且报的是当前的 3 次（不是历史累计）');
+});
+
+// ──────────────── ⑦ 无进展 ⇒ 照旧第 4 次被拒（"产出变多"不算进展） ────────────────
+
+/**
+ * 「进展判据」的反面，同时也是**判据选型**的现场证据：现场的逐字形状是"同一个大群、limit 一直改、
+ * 每一步她都还说了一句话"。"数这一段 assistant 条数有没有涨"那条口径在这里**恒为真**——
+ * 本仓每一步都写一条 `message/assistant`（连只发一个失败调用的那一步也写）⇒ 照它重置
+ * 等于把守卫删掉。所以判据落在一件**真的改变了她处境**的事上（有一次成功），
+ * 而在这种形状里一次成功都没有 ⇒ 连击照旧累加 ⇒ 第 4 次照旧被拒。
+ */
+test('失败连击⑦：无进展 ⇒ 照旧第 4 次被拒（"assistant 产出变多"不算进展）', async (t) => {
+  const rig = await makeRig(t);
+  rig.hang(SID_A, 99);
+  // 现场的四个 limit（8/10/12/15），每一步都带一句 assistant 产出
+  const model = fakeModel([8, 10, 12, 15].map((limit, index) => call(SID_A, limit, index)));
+
+  await runTurn(rig.depsOf(model.ds), [rig.wake()]);
+  const events = await rig.events();
+  const results = await rig.results();
+
+  assert.deepEqual(
+    results.map(row => row.status),
+    ['timeout', 'timeout', 'timeout', 'error'],
+    '中间没有任何一次成功 ⇒ 连击没有被重置 ⇒ 第 4 次被拒',
+  );
+  assert.equal(rig.dispatchCounts[SID_A], 3);
+  assert.equal(results[3]!.content, REFUSAL);
+  // "产出"确实一直在变多（4 步调用 + 1 步收尾 = 5 条），守卫照样拒 —— 这就是不选那条口径的理由
+  const assistants = events.filter(event => event.type === 'message/assistant').length;
+  assert.equal(assistants, 5, '每一步都写了一条 assistant 产出（含只发失败调用的那四步）');
+});
+
+// ──────────────── ⑧ 框架侧终态不算进展（denied / over-limit） ────────────────
+
+/**
+ * 判据只认**真派发并且真办成**（`status:'ok'`）。框架侧的终态既不算进展、也不算失败：
+ *   · **被钩子拒**（`denied`）：连 `tool/call` 都不写、执行器不回调 `onToolResult`
+ *     ⇒ 它根本到不了记账口（`recordToolResult` → `settle`）；
+ *   · **单步超限**（`over-limit`）：事件由循环层自己写，同样不走 `settle`。
+ * 所以"它们不算进展"不是靠 if 拦出来的，是**没有路径能到**。
+ *
+ * 两段分开钉（原因见第二段：`over-limit` 一出现就收束本 step，没法在同一个 turn 里再往后演）：
+ *   · 第一段（`denied`，turn 继续）：夹在连击中间 ⇒ 计数照旧累加 ⇒ 第 4 次照旧被拒；
+ *   · 第二段（`over-limit`）：它是独立终态 + 本 step 收束 + **没有**守卫拒绝。它**结构上**不可能
+ *     影响计数——`stepOnce` 一旦 `overLimit > 0` 就结束这一 step（连带结束本 turn），而计数是
+ *     turn 级的；所以这里钉它能被观测到的那几件事，不假装能演"它之后还有第 4 次"。
+ */
+test('失败连击⑧：框架侧终态（denied / over-limit）不算进展 —— 连击照旧累加', async (t) => {
+  // ── 第一段：钩子拒（denied）夹在两次失败中间，turn 继续，第 4 次照旧被拒 ──
+  const rig = await makeRig(t);
+  rig.hang(SID_A, 99);
+  const model = fakeModelSteps([
+    [call(SID_A, 5, 0)], // 超时 1
+    [call(SID_A, 6, 1)], // 超时 2
+    [{ callId: 'call_3', name: 'read_channel', args: { sid: SID_C, limit: 5 } }], // 钩子拒（denied）
+    [call(SID_A, 8, 4)], // 超时 ⇒ 3（denied 既不算进展也不算失败）
+    [call(SID_A, 9, 5)], // 第 4 次 ⇒ 拒
+  ]);
+
+  await runTurn(rig.depsOf(model.ds, {
+    hooks: {
+      beforeToolCall: async request => (request.callId === 'call_3'
+        ? { decision: 'deny', reason: '测试：策略拒绝' }
+        : { decision: 'allow' }),
+    },
+  }), [rig.wake()]);
+
+  const deniedEvents = (await rig.events()).filter(event => event.type === 'policy/denied');
+  const results = await rig.results();
+  const byStatus = (status: string): number => results.filter(row => row.status === status).length;
+
+  assert.equal(deniedEvents.length, 1, '被钩子拒的那一条留了痕（它连 tool/result 都没有）');
+  assert.equal(byStatus('timeout'), 3, '三次真超时');
+  assert.equal(byStatus('error'), 1, '第 4 次被守卫拒 —— denied 没有把连击重置');
+  assert.equal(results.filter(isRefusal).length, 1);
+  assert.equal(rig.dispatchCounts[SID_A], 3, 'A 只真派发了三次');
+  assert.equal(rig.dispatchCounts[SID_C] ?? 0, 0, '被钩子拒的那次根本没派发');
+
+  // ── 第二段：单步超限（over-limit）是一件事，不是"她办成了" ──
+  const rig2 = await makeRig(t);
+  rig2.hang(SID_A, 99);
+  const model2 = fakeModelSteps([
+    [call(SID_A, 5, 0)], // 超时 1
+    [call(SID_A, 6, 1)], // 超时 2
+    // 单步上限 1 ⇒ 第 2 条被拦；超限部分**先落库**（`executeCalls` 的顺序），随后本 step 收束
+    [call(SID_A, 7, 2), call(SID_A, 8, 3)],
+  ]);
+
+  const reason = await runTurn(rig2.depsOf(model2.ds, {
+    budget: { checkBeforeStep: () => null, stepCallLimit: () => 1 },
+  }), [rig2.wake()]);
+
+  const results2 = await rig2.results();
+  const byStatus2 = (status: string): number => results2.filter(row => row.status === status).length;
+  assert.equal(byStatus2('over-limit'), 1, '超限那一条落了库（独立终态）');
+  assert.equal(byStatus2('timeout'), 3, '真派发的三次都是超时');
+  assert.equal(results2.filter(isRefusal).length, 0, '超限**不是**守卫拒绝，也没有把连击当成进展');
+  assert.equal(rig2.dispatchCounts[SID_A], 3);
+  assert.deepEqual(reason, { kind: 'budget-exhausted', layer: 'step' }, '单步超限按设计收束本 step');
 });

@@ -32,10 +32,13 @@ void main() {
     expect(IrmiaTheme.danger, const Color(0xFFE03131));
   });
 
-  test('一级入口五项：运行情况在首位，日志不再占位', () {
+  test('一级入口六项：运行情况在首位、日程排在聊天与人格配置之间', () {
+    // 条数从五项变六项的由来：用户 2026-10 要一页「日程」，推翻了 docs/gui-design.md §3
+    // 原来那句"保持五项"（见 app.dart 里 navPages 上方的注释）。
     expect(navPages.map((p) => p.id).toList(), [
       'overview',
       'chat',
+      'schedule',
       'persona',
       'channels',
       'extensions',

@@ -16,8 +16,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
-  NOW_LAYER_BANNER, RENDER_VERSION, TURN_BLOCK_BANNER, render, renderWake,
-  stateBudgetReminder, stateBytesOf,
+  INSTRUCTION_RULES, LAYER_RULES, NOW_LAYER_BANNER, RENDER_VERSION, SECTION_RULE,
+  TURN_BLOCK_BANNER, render, renderWake, stateBudgetReminder, stateBytesOf,
 } from '../src/model/render.ts';
 import type {
   InputItem, MachineFacts, RenderImageRef, RenderInput, RenderPersona, RenderedRequest, UsageFacts,
@@ -244,8 +244,10 @@ function textOfItem(it: InputItem | undefined, label: string): string {
  * 用 startsWith 而非 includes：正文里出现同名串不该把一条事件流消息误当层。
  */
 function isMemoryLayer(it: InputItem): boolean {
+  // v56：这一层现在**以自己那条分割线开头**（`────【长期记忆】────`）——按段头认层，与
+  // 此刻层 / 固定块两条一样的做法（旧口径是 `startsWith('[可用技能]')`，它认的是层内第一节）。
   return it.type === 'message' && it.role === 'developer'
-    && (it.content.startsWith('[可用技能]') || it.content.startsWith('[早期历史摘要 · 覆盖至 seq '));
+    && it.content.startsWith(LAYER_RULES.memory);
 }
 
 /**
@@ -692,15 +694,17 @@ describe('此刻层 · 声明式字段（v23）', () => {
     const r = renderOnce({ contact: CONTACT_A, machine: MACHINE_A, usage: USAGE_A, asks: ASKS_A });
     const lines = envLayer(r).split('\n');
 
-    // 段头逐字（用户 2026-10-02 的原话）：18 个破折号 + 11 字 + 22 个破折号 = 51 字符
-    assert.equal(lines[0], '——————————————————以下为框架提供的此刻层——————————————————————');
+    // 段头两行（**v56 起第一行是统一分割线** `────【此刻】────`；用户 2026-10-02 那 51 字符的
+    // 破折号行在 v56 被换掉，原因是 2026-10-12 的"每一层都要有明确的分割线"口径——**换的是
+    // 分割线本身**，第二行那句原话一个字节没动）
+    assert.equal(lines[0], LAYER_RULES.now);
     assert.equal(
       lines[1],
       '（身为本机Agent应当自己领会，但并不与用户、话题、任务直接相关，非必要时也不需要特别与用户提及的信息）',
     );
-    assert.equal(lines[0]?.length, 51);
-    assert.equal((lines[0]?.match(/—/gu) ?? []).length, 40, '40 个破折号：前 18 后 22');
-    assert.equal(lines[0]?.slice(18, 29), '以下为框架提供的此刻层');
+    assert.equal(lines[0]?.length, 28, '12 + 【此刻】(4) + 12');
+    assert.equal((lines[0]?.match(/─/gu) ?? []).length, 24, 'v56：前后各 12 个 ─（旧段头是 18+22 个 —）');
+    assert.equal(lines[0]?.slice(12, 16), '【此刻】');
     assert.equal(lines[1]?.length, 53);
     assert.equal(NOW_LAYER_BANNER, `${lines[0]}\n${lines[1]}`, '导出常量就是这两行（判层用它）');
 
@@ -1852,10 +1856,23 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
       ],
     });
     const texts = eventItems(r).filter((i): i is MessageItem => i.type === 'message').map(i => i.content);
-    assert.equal(texts[0], '[system] 已安静 15 分钟。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）');
-    assert.equal(texts[1], '[system] 已安静 1 分钟。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）');
-    assert.equal(texts[2], '[system] 已安静 30 秒。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）');
+    // **v53（2026-10-12 用户裁决逐字）**：空拍唤醒末尾多附一句——旧那半句**一个字节都没动**，
+    // 只是后面接上了"这段时间是你自己的"。逐字锁在这里，别改成"包含"式断言。
+    const IDLE_APPEND = '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。'
+      + '做完记得留下点东西——一句话、一条记录都行。）';
+    const beat = (quiet: string): string =>
+      `[system] 已安静 ${quiet}。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）${IDLE_APPEND}`;
+    assert.equal(
+      texts[0],
+      '[system] 已安静 15 分钟。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）'
+      + '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。做完记得留下点东西——一句话、一条记录都行。）',
+      '整串字节逐字锁：前半句照旧 + v53 附上的那一句',
+    );
+    assert.equal(texts[1], beat('1 分钟'));
+    assert.equal(texts[2], beat('30 秒'));
     for (const t of texts) assert.ok(t.includes('已安静'));
+    // 那一句是**单行**（它也会进任务卡标题那一行，多行会把卡片撑断）
+    for (const t of texts) assert.equal(t.includes('\n'), false, '心跳唤醒的正文不许带换行');
   });
 
   test('wake/timer 的 note 取自 timer/set 的 payload', () => {
@@ -1866,6 +1883,34 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     ];
     const m = asMessage(eventItems(renderOnce({ events }))[0], '事件流第 1 条');
     assert.equal(m.content, `[定时器触发] 该查备份了（计划时刻 ${tsAfter(60)}）`);
+  });
+
+  test('v53：空拍那一句**只**附在心跳唤醒上——定时器（含她自己的 `wait`）一个字节都不加', () => {
+    // 用户的边界（逐字）：定时器唤醒与她自己的 `wait` **不许加**——那是**她安排**的事，
+    // 到点叫她本来就是那条约的全部内容，再附一句"这段时间是你自己的"是噪音。
+    // 判据落在渲染层：`renderWake` 只有 `wake/heartbeat` 那一个分支带 `HEARTBEAT_IDLE_APPEND`。
+    resetFactory();
+    const APPEND = '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。'
+      + '做完记得留下点东西——一句话、一条记录都行。）';
+    const events: AppEvent[] = [
+      // 她自己的 wait：payload 的 `kind` 就是 `wait` 那一档（`TIMER_WAIT_PAYLOAD_KIND`）
+      evt<TimerSet>('timer/set', { timerId: 'wait-1', at: tsAfter(30), payload: { kind: 'wait', reason: '过一会儿再看' } }),
+      evt<WakeTimer>('wake/timer', { timerId: 'wait-1', scheduledAt: tsAfter(30), firedAt: tsAfter(31) }),
+      // 普通的到点提醒
+      evt<TimerSet>('timer/set', { timerId: 'tm-at', at: tsAfter(60), payload: { note: '该查备份了' } }),
+      evt<WakeTimer>('wake/timer', { timerId: 'tm-at', scheduledAt: tsAfter(60), firedAt: tsAfter(61) }),
+      // 正对照：同一份历史里再放一条心跳——只许它带上那一句
+      evt<WakeHeartbeat>('wake/heartbeat', { quietSeconds: 1800, idleTicks: 6, pressure: 0.2, probability: 0.4, roll: 0.2 }),
+    ];
+    const texts = eventItems(renderOnce({ events }))
+      .filter((i): i is MessageItem => i.type === 'message')
+      .map(i => i.content);
+    assert.equal(texts.length, 3, '三条事件各一条输入');
+    assert.equal(texts[0], `[定时器触发] wait-1（计划时刻 ${tsAfter(30)}）`);
+    assert.equal(texts[1], `[定时器触发] 该查备份了（计划时刻 ${tsAfter(60)}）`);
+    assert.equal(texts[0]!.includes(APPEND), false, '她自己的 wait 不许带那一句');
+    assert.equal(texts[1]!.includes(APPEND), false, '普通定时器同样不许带');
+    assert.equal(texts[2]!.includes(APPEND), true, '正对照：心跳那一条必须在（否则上面两条只是因为整条路都坏了）');
   });
 
   test('payload 无 note / 非对象 / 已取消 → 回退 timerId', () => {
@@ -1987,10 +2032,10 @@ describe('铁律 6 · 组装顺序', () => {
     // 任务卡带 turn/step，每步都变：挂在 instructions 末尾会让人格前缀永远无法完整匹配
     assert.ok(!ins.includes('当前任务'), '任务卡不在 instructions 里（缓存纪律）');
     assert.equal(ins, [
-      'IDENTITY 段：你是 Irmia。',
-      'CONSTITUTION 段：不越权，不装懂。',
-      'STYLE 段：短句，直给。',
-      SELF_BRIEF,
+      `${INSTRUCTION_RULES.identity}\n\nIDENTITY 段：你是 Irmia。`,
+      `${INSTRUCTION_RULES.constitution}\n\nCONSTITUTION 段：不越权，不装懂。`,
+      `${INSTRUCTION_RULES.style}\n\nSTYLE 段：短句，直给。`,
+      `${INSTRUCTION_RULES.brief}\n\n${SELF_BRIEF}`,
     ].join('\n\n'));
     // 它现在在尾部此刻层里，内容不变
     const now = stateLayer(r);
@@ -2003,7 +2048,12 @@ describe('铁律 6 · 组装顺序', () => {
     assert.ok(!ins.includes('当前任务'));
     assert.equal(
       ins,
-      [BASE_PERSONA.identity, BASE_PERSONA.constitution, BASE_PERSONA.style, SELF_BRIEF].join('\n\n'),
+      [
+        `${INSTRUCTION_RULES.identity}\n\n${BASE_PERSONA.identity}`,
+        `${INSTRUCTION_RULES.constitution}\n\n${BASE_PERSONA.constitution}`,
+        `${INSTRUCTION_RULES.style}\n\n${BASE_PERSONA.style}`,
+        `${INSTRUCTION_RULES.brief}\n\n${SELF_BRIEF}`,
+      ].join('\n\n'),
     );
   });
 
@@ -2014,19 +2064,22 @@ describe('铁律 6 · 组装顺序', () => {
     assert.ok(!now.includes('未完成计划'));
   });
 
-  test('人格段为空时不留空段（filter(Boolean) 语义）', () => {
+  test('人格段为空时不留空段（配对过滤语义：线跟着它那块一起不出现）', () => {
     const persona: RenderPersona = { identity: '只有身份', constitution: '  ', style: '', state: '' };
     const ins = renderOnce({ persona }).instructions;
-    assert.equal(ins, `只有身份\n\n${SELF_BRIEF}`);
+    assert.equal(ins, `${INSTRUCTION_RULES.identity}\n\n只有身份\n\n${INSTRUCTION_RULES.brief}\n\n${SELF_BRIEF}`);
     assert.ok(!ins.includes('\n\n\n'));
+    // v56：宪法 / 风格那两条线必须**跟着空块一起消失**（不能留一根悬空的横线）
+    assert.ok(!ins.includes(INSTRUCTION_RULES.constitution), '空块不带线');
+    assert.ok(!ins.includes(INSTRUCTION_RULES.style), '空块不带线');
   });
 
-  test('装置自述与人格独立：人格全空时它照样在', () => {
+  test('装置自述与人格独立：人格全空时它照样在（连它自己那条线）', () => {
     const persona: RenderPersona = { identity: '', constitution: '', style: '', state: '' };
     assert.equal(
       renderOnce({ persona }).instructions,
-      SELF_BRIEF,
-      '装置事实是程序给她的，不该随人格为空而消失',
+      `${INSTRUCTION_RULES.brief}\n\n${SELF_BRIEF}`,
+      '装置事实是程序给她的，不该随人格为空而消失（v56 起它顶着自己那条分割线）',
     );
   });
 
@@ -2151,9 +2204,9 @@ describe('铁律 6 · 组装顺序', () => {
   test('v29/B2：固定块的段头逐字、三项顺序固定、空项不出现', () => {
     assert.equal(
       TURN_BLOCK_BANNER,
-      '————————————————以下为框架提供的本轮固定块————————————————————\n'
+      `${LAYER_RULES.turnBlock}\n`
       + '（这一轮里不会再变的状态与记忆：装置给的，不是谁在跟你说话；变化要等下一轮）',
-      '段头是判层的唯一依据，逐字锁住',
+      '段头是判层的唯一依据（v56 起第一行是统一分割线），逐字锁住',
     );
     const r = renderOnce({
       persona: { ...BASE_PERSONA, relationship: { who: 'YG', content: '  他只有一个名字。  ' } },
@@ -2322,7 +2375,8 @@ describe('铁律 6 · 组装顺序', () => {
 
     // ② 头部（长期记忆层）只剩技能目录：索引一个字节都不在
     const memory = textOfItem(r.input.find(isMemoryLayer), '长期记忆层');
-    assert.equal(memory, SKILL_CATALOG_FIXTURE.trim(), '头部只剩技能目录（摘要本轮没有）');
+    assert.equal(memory, `${LAYER_RULES.memory}\n\n${SKILL_CATALOG_FIXTURE.trim()}`,
+      '头部只剩技能目录（摘要本轮没有）——v56 起它顶着自己那条分割线');
     assert.ok(!JSON.stringify(r.input.find(isMemoryLayer)).includes('记忆索引'), '头部那一条里没有索引');
 
     // ③ 归因口径跟着挪：索引的 token 记在**固定块**那一段，记忆层那一段与有没有索引无关

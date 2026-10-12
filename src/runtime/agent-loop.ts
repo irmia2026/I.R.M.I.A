@@ -325,6 +325,20 @@ export type FailureStreakVerdict =
  *   · **只有真失败/超时累加**：`ok` 清零；`denied` / `aborted` / `over-limit` / `unknown` 这些
  *     **框架侧**的终态既不累加也不清零（"这次没派发"不等于"这个目标试过又失败了"）；
  *   · **成功即清零**（`failed.delete`）。
+ *
+ * **第四条（2026-10-10 接上「进展判据」）：有进展就说这一串连击结束了 ⇒ 计数重置为 1。**
+ *
+ * "有进展"的判据是 {@link FailureStreakGuard.settle} 里那一句（**唯一一处**）：
+ * **这一轮里有没有一次工具调用真的办成了**（`status:'ok'`），与它落在哪个工具/哪个目标上无关。
+ * 为什么是这个而不是"这一轮 assistant 产出变多了"（另一种口径：数一数这一段的 assistant 条数
+ * 有没有涨）——**在本仓它恒为真**：`stepOnce` 每一步都写一条 `message/assistant`，连"只发一个失败
+ * 调用"的那一步也写。照它重置等于把守卫删掉，而现场那种"一轮 58 次、每一步都还有一句话"的死循环
+ * 恰恰是最需要守卫的时候。判据必须落在一件**真的改变了她处境**的事上：与投影 `failStreak` 的既有
+ * 口径同源（`state/fold.ts` 的 `budget/consumed`：模型调用成功 ⇒ `failStreak = 0`）——"成功即进展"
+ * 是本仓已经用过一次的判据，不新造一套。
+ *
+ * 重置为 **1**（不是 0、也不是"这次失败不算"）：刚落的这一次失败就是**新一轮的第一笔**——抹成 0
+ * 等于"这次失败没发生过"，"连续"两个字就没了意义（另一套实现的口径同此）。
  */
 class FailureStreakGuard {
   /** key → 已结算的**连续**失败次数 */
@@ -340,6 +354,17 @@ class FailureStreakGuard {
    * 其实都成功了，预扣留着就会在下一次调用上变成误杀。它绝不跨批存活，所以不可能泄漏成假计数。
    */
   private batch = new Map<string, number>();
+  /**
+   * 本 turn 已结算的结果笔数（给下面两个"发生在第几笔"的坐标当尺子）。
+   *
+   * 为什么用笔数而不是时间戳：判据要能在测试里**逐笔复现**（同一串事件永远得到同一个结论），
+   * 而时钟在渲染层与投影层都是禁读的——这里读一次就会让"同一份日志 ⇒ 同一个结论"这条承诺作废。
+   */
+  private settled = 0;
+  /** 最近一次**有进展**（一次 `ok`）发生在第几笔；`0` = 这一轮还没有过 */
+  private progressedAt = 0;
+  /** key → 这个目标**上一次失败**发生在第几笔（没有过就不在表里）：用来判"失败之后有没有进展" */
+  private readonly failedAt = new Map<string, number>();
 
   /** 一批调用开始（`executeCalls` 每次进它一次）：丢掉上一批的预扣 */
   beginBatch(): void {
@@ -368,8 +393,19 @@ class FailureStreakGuard {
    *
    * 认的是**实际执行的那份参数**：PreToolUse 钩子改写过的调用连 `tool/call` 落的都是改写后的
    * 那一份，失败当然也该记在改写后的目标上。
+   *
+   * `status === 'ok'` 那一句就是**「有进展」的唯一判据**（见类头第四条）：
+   *   · 它必须放在下面那个"没有目标就返回"**之前**——一次成功无论落在什么工具上都说明这一轮在
+   *     往前走（`safe_read` 读到了文件、`speak` 把话说出去了都算），而**没有"目标"概念的工具有很多**，
+   *     放在后面等于把它们全漏掉；
+   *   · 框架侧的终态到不了这里（钩子/计划模式拦下的调用不写 `tool/call`、不回调 `onToolResult`；
+   *     `over-limit` 由循环层自己写事件、同样不走这里）⇒ 它们**既不算进展也不算失败**，
+   *     这一条不是靠 if 拦出来的，是**没有路径能到**。
    */
   settle(tool: string, rawArguments: string, status: ToolResultStatus): void {
+    this.settled += 1;
+    if (status === 'ok') this.progressedAt = this.settled;
+
     const target = toolTargetOf(tool, rawArguments);
     if (target === null) return;
     const key = `${tool}\u0000${target}`;
@@ -378,7 +414,12 @@ class FailureStreakGuard {
       return;
     }
     if (status === 'timeout' || status === 'error') {
-      this.failed.set(key, (this.failed.get(key) ?? 0) + 1);
+      // 有进展（这个目标上一次失败之后，这一轮里办成过一件事）⇒ 重置为 1；无进展 ⇒ 照旧 +1。
+      // 现场那种形状（58 次全是同一个目标的超时，中间没有任何一次成功）走的是 +1 那一支，
+      // 所以"连续 3 次 ⇒ 第 4 次拒"的拒绝语义**没有被放宽**。
+      const progressed = this.progressedAt > (this.failedAt.get(key) ?? 0);
+      this.failed.set(key, progressed ? 1 : (this.failed.get(key) ?? 0) + 1);
+      this.failedAt.set(key, this.settled);
     }
   }
 }

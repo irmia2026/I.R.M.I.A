@@ -9,7 +9,10 @@ import '../theme.dart';
 /// 列表默认行数：超出部分收进「查看全部」
 const kListCap = 8;
 
-/// 页头：标题 + 一句名词化副标题（说明这页干什么）；右侧可挂动作，下方可挂分段控件
+/// 页头：标题 + 一句名词化副标题（说明这页干什么）；右侧可挂动作，下方可挂分段控件。
+///
+/// [eyebrow] 与 [titleSize] 是**可选**的（默认不出现/沿用 20）：日程页照设计稿要一条英文小字
+/// 加一个更大的标题，而其余各页版式不动——所以做成参数而不是改默认值。
 class PageHeader extends StatelessWidget {
   const PageHeader({
     super.key,
@@ -17,12 +20,20 @@ class PageHeader extends StatelessWidget {
     required this.subtitle,
     this.action,
     this.bottom,
+    this.eyebrow,
+    this.titleSize,
   });
 
   final String title;
   final String subtitle;
   final Widget? action;
   final Widget? bottom;
+
+  /// 标题上方那条小字（全大写英文那种 eyebrow）；null = 不占高度
+  final String? eyebrow;
+
+  /// 标题字号；null = 20（既有各页的版式）
+  final double? titleSize;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +50,21 @@ class PageHeader extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+                    if (eyebrow != null) ...[
+                      Text(
+                        eyebrow!,
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 1.1,
+                          color: scheme.primary,
+                        ),
+                      ),
+                      const SizedBox(height: 7),
+                    ],
+                    Text(title,
+                        style: TextStyle(
+                            fontSize: titleSize ?? 20, fontWeight: FontWeight.w600)),
                     const SizedBox(height: 4),
                     Text(subtitle, style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant)),
                   ],

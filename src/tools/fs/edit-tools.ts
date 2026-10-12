@@ -85,18 +85,29 @@ export function createSafeEditTool(env: FsEnv): ToolDefinition {
         // "把两个方向各写一句 + 点明拼不出替换"至少要 20 个 token——工具描述只塞得下那句
         // 结论（"insert_at_line 插第 line 行后、delete_lines 含两端；拼不出替换，用 old/new"），
         // 例子与理由放这里（参数描述不进门禁，模型每次请求同样看得到）。
+        //
+        // 压缩（v55，2026-10-13）：这一格原本 66 token，是本批压得最狠的一格。删掉的是**重复**
+        // （"默认 replace"在 `enum` 里、"line:0=文件开头"与默认值在 `line` 那一格已各有一句）
+        // 与**废话**（"1-based"由 `line`/`start_line` 那两格承担）。
+        // ⚠ **那句错位例子必须留**——`test/fs-tools.test.ts` 有一条锁专门判它
+        // （"mode 描述里要给出那个错位的具体例子"）：它是 2026-10-05 实测那个静默错位坑的判据本身，
+        // 不是可删的废话。**两个方向的语义一个没删**：insert 是"**之后**"、delete 是"**含两端**"、
+        // 替换走 replace——三条逐字保留。
         mode: {
           type: 'string',
           enum: ['replace', 'insert_at_line', 'delete_lines'],
           description:
-            '默认 replace。insert_at_line：把 new 插在第 line 行**之后**（line:0=文件开头）；'
-            + 'delete_lines：删 start_line..end_line、**含两端**。两者拼不出「替换第 N 行」'
-            + '（删 2-2 再插 line:2，new 会落到原第 3 行之后），替换请走 replace + old/new。',
+            'insert_at_line：new 插在第 line 行**之后**（line:0=文件开头）；delete_lines：'
+            + '删 start_line..end_line、**含两端**。两者拼不出「替换第 N 行」'
+            + '（删 2-2 再插 line:2，new 落到原第 3 行之后），替换请走 replace + old/new。',
         },
         old: { type: 'string', description: 'replace 模式：要被替换的原文（行号前缀会被自动剥掉）' },
-        new: { type: 'string', description: 'replace 模式：替换后的新文本；insert_at_line 模式：要插入的文本' },
-        replace_all: { type: 'boolean', description: '替换全部匹配，默认 false（多匹配时必须显式消歧）；与 occurrence 互斥' },
-        occurrence: { type: 'integer', description: '只替换第 N 处匹配（1-based）；0 = 未指定（默认）。与 replace_all 互斥' },
+        new: { type: 'string', description: 'replace 模式：新文本；insert_at_line 模式：要插入的文本' },
+        // 这两格（v55，2026-10-13）：删的是重复的"与 occurrence 互斥"与括注里的默认值——
+        // `replace_all` 的 `false`、`occurrence` 的 `0` 都在这里逐字写着，再括注一遍是同一件事写两遍。
+        // **互斥这条边界换一处说**：`occurrence` 那一格仍写着"与 replace_all 互斥"（边界没删）。
+        replace_all: { type: 'boolean', description: '替换全部匹配，默认 false（多匹配时必须显式消歧）' },
+        occurrence: { type: 'integer', description: '只替换第 N 处匹配（1-based）；0 = 未指定；与 replace_all 互斥' },
         // ── 两个行模式的语义必须各写一句，而且**不能互相推导**（2026-10-05 实测）──
         //
         // 实测的不对称：`delete_lines 2-2` 删的是**第 2 行**（闭区间、含两端），
@@ -113,12 +124,16 @@ export function createSafeEditTool(env: FsEnv): ToolDefinition {
         //      ——替换的正路是 replace 模式（把该行原文抄进 old），它按文本匹配、与行号无关；
         //   ③ 锁测试钉住那对组合的结果（`test/fs-tools.test.ts`「先删后插 ≠ 替换第 N 行」），
         //      免得将来有人"顺手"把某一支的方向改齐，把这条已经写在文档里的取舍又改回坑里。
+        // `line` 这一格（v55）：原来的括注"（1-based；0 = 文件开头，越界报错）"里，前两项已由
+        // `mode` 那一格说清（"第几行之后"与"line:0=文件开头"），这里只留**边界**"越界报错"。
         line: {
           type: 'integer',
-          description: 'insert_at_line 模式：插到第几行**之后**（真实行号，1-based；0 = 文件开头，越界报错）',
+          description: 'insert_at_line 模式：插到第几行**之后**（越界报错）',
         },
-        start_line: { type: 'integer', description: 'delete_lines 模式：起始行（**含**，真实行号，1-based）' },
-        end_line: { type: 'integer', description: 'delete_lines 模式：结束行（**含**，真实行号，1-based）' },
+        // （v55）两格各留一句：`start_line` 说"起始行、含"，`end_line` 只说"结束行、含"——
+        // 原来两格都把"delete_lines 模式"写了一遍，同一件事写两遍。**含两端这条边界一个字没删。**
+        start_line: { type: 'integer', description: 'delete_lines 模式：起始行（**含**，1-based）' },
+        end_line: { type: 'integer', description: '结束行（**含**，1-based）' },
       },
       required: ['path'],
       additionalProperties: false,
@@ -479,18 +494,19 @@ export function createMultiEditTool(env: FsEnv): ToolDefinition {
   return {
     name: 'multi_edit',
     description:
-      '一次提交跨文件的多处替换，具备原子性：全部替换与语法检查都通过才落盘，任一失败则全量回滚。' +
-      '同一文件的多个 edits 按数组顺序叠加。适合重命名、批量改签名这类一致性修改。',
+      '一次提交跨文件的多处替换，原子性：全部替换与语法检查都通过才落盘，任一失败则全量回滚'
+      + '（落盘前自动留备份，可 safe_rollback 撤）。同一文件的多个 edits 按数组顺序叠加。'
+      + '只改**已存在**的文件（新建用 safe_write）；edits 上限 200 项。',
     parameters: {
       type: 'object',
       properties: {
         edits: {
           type: 'array',
-          description: '编辑列表，按顺序应用',
+          description: '编辑列表，按顺序应用；上限 200 项',
           items: {
             type: 'object',
             properties: {
-              file: { type: 'string', description: `文件路径（也可写作 filepath）。${PATH_BOUNDARY_HINT}` },
+              file: { type: 'string', description: '文件路径（也可写作 filepath）；必须已存在' },
               filepath: { type: 'string', description: 'file 的别名' },
               old: { type: 'string', description: '要被替换的原文' },
               new: { type: 'string', description: '替换后的新文本' },

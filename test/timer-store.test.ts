@@ -13,14 +13,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as fsp from 'node:fs/promises';
 
+import { EventLog } from '../src/log/event-log.ts';
+import {
+  emptyProjection,
+  resolveEventVisibility,
+  type AppEvent,
+  type Visibility,
+} from '../src/log/types.ts';
+import { applyOne, finalizePressure, fold } from '../src/state/fold.ts';
 import {
   MAX_TIMEOUT_MS,
   TimerStore,
   nextCronTime,
   parseCron,
   timerEntriesFromEvents,
+  type TimerEntry,
   type TimerSnapshot,
   type TimerStoreDeps,
+  type TimerStoreEventSink,
   type StoredTimerEntry,
 } from '../src/wake/timer-store.ts';
 
@@ -1011,6 +1021,435 @@ test('折叠结果经 importEntries 能被直接采用', async () => {
     assert.equal(h.store.list()[0]?.timerId, 't1');
   } finally {
     await cleanup(h);
+  }
+});
+
+// ────────────────────── 事件出口：timer/set / timer/cancelled ──────────────────────
+//
+// 这一组钉住 2026-10-12 修的那条静默失效：`TimerStore` 原先只写 `data/timers.json`、
+// 一个事件都不写，而真相源是日志 ⇒ `fold.ts` 的 `case 'timer/set'` 是死代码
+// ⇒ `projection.timers` 恒为 `[]` ⇒ 首页卡片永远空态、界面「撤销」永远 notFound。
+//
+// 判据四条（每条都能独立失败）：
+//   ① 布防恰好多一条 `timer/set`、撤销恰好多一条 `timer/cancelled`（不是"至少一条"——
+//      重复写会让 `timer/set` 的条数失去意义，而它是"她排过几次"的唯一账）；
+//   ② 事件形状与 `log/types.ts` 的 TimerSet / TimerCancelled 逐字段相同（不多不少），
+//      **重放这些事件重建出来的表 == 盘上那份**（投影不是真相源，日志才是）；
+//   ③ 恢复路径：投影非空时再走一遍 load + importEntries **不产生任何事件**
+//      ——补了事件之后投影会非空，重复布防正是这一批最容易出事的地方；
+//   ④ 反面对照：只读 `list` 不产生事件。
+
+/** 假的事件出口：既记账，又把事件折成一张表。
+ *
+ * `set` / `cancelled` 的折叠语义与 `timerEntriesFromEvents` 同口径；`fired` 那一条
+ * 按 `state/fold.ts` 的定时器分支走（一次性出表、周期留着）——下面逐条列出**就是这个原因**：
+ * 真实的重放要走 fold，而这里要能在没有 EventLog 的情况下做"重放 == 盘上"的对照。
+ */
+function makeEventLogFixture(): {
+  sink: TimerStoreEventSink;
+  events: Array<{ type: string; data: Record<string, unknown> }>;
+  counts(): { set: number; cancelled: number };
+  fired(timerId: string): void;
+  entries(): TimerEntry[];
+} {
+  const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+  const sink: TimerStoreEventSink = {
+    set: (entry) => { events.push({ type: 'timer/set', data: { ...entry } }); },
+    cancelled: (timerId) => { events.push({ type: 'timer/cancelled', data: { timerId } }); },
+  };
+  return {
+    sink,
+    events,
+    counts: () => ({
+      set: events.filter((e) => e.type === 'timer/set').length,
+      cancelled: events.filter((e) => e.type === 'timer/cancelled').length,
+    }),
+    fired: (timerId) => { events.push({ type: 'timer/fired', data: { timerId } }); },
+    entries: () => {
+      // 按 `fold.ts` 的定时器分支逐条走一遍，而不是在既有折叠结果上打补丁：
+      // 那里 timer/fired 只让**一次性**条目出表，周期条目留着（它的 at 由后续 timer/set 推进）。
+      const table = new Map<string, TimerEntry>();
+      for (const event of events) {
+        const timerId = event.data['timerId'];
+        if (typeof timerId !== 'string') continue;
+        if (event.type === 'timer/set') {
+          const atRaw = event.data['at'];
+          const cronRaw = event.data['cron'];
+          const entry: TimerEntry = {
+            timerId,
+            payload: event.data['payload'] ?? null,
+            ...(typeof atRaw === 'string' ? { at: atRaw } : {}),
+            ...(typeof cronRaw === 'string' ? { cron: cronRaw } : {}),
+          };
+          if (entry.at === undefined && entry.cron === undefined) continue;
+          table.set(timerId, entry);
+        } else if (event.type === 'timer/cancelled') {
+          table.delete(timerId);
+        } else if (event.type === 'timer/fired') {
+          const firedEntry = table.get(timerId);
+          if (firedEntry !== undefined && firedEntry.cron === undefined) table.delete(timerId);
+        }
+      }
+      return [...table.values()].sort(byTimerId);
+    },
+  };
+}
+
+/** 与 fold 的定时器分支同口径、与 log/types.ts 的 TimerEntry 同形状（`skipped` 不在投影里）。
+ * 按 timerId 排——`store.list()` 是按到期先后排的，比之前先对齐次序。 */
+function projectionOfEntries(entries: readonly StoredTimerEntry[]): TimerEntry[] {
+  return entries
+    .map((e) => ({
+      timerId: e.timerId,
+      at: e.at,
+      ...(e.cron === undefined ? {} : { cron: e.cron }),
+      payload: e.payload,
+    }))
+    .sort(byTimerId);
+}
+
+const byTimerId = (a: { timerId: string }, b: { timerId: string }): number => a.timerId.localeCompare(b.timerId);
+
+/** `EventLog.readAll()` 是异步迭代器；测试里要的是数组（与 web-server 夹具同一条） */
+async function readAllEvents(log: EventLog): Promise<AppEvent[]> {
+  const out: AppEvent[] = [];
+  for await (const event of log.readAll()) out.push(event);
+  return out;
+}
+
+test('布防恰好多一条 timer/set，字段与 TimerSet 逐字一致（重放 == 盘上）', async () => {
+  const h = await makeHarness(1_800_000_000_000);
+  const log = makeEventLogFixture();
+  h.store.setEventSink(log.sink);
+  try {
+    assert.deepEqual(log.counts(), { set: 0, cancelled: 0 }, '接线本身不产生事件');
+
+    const at = new Date(h.clock.now().getTime() + 3_600_000).toISOString();
+    const res = await h.store.set({ at, payload: { note: '到点提醒我' } });
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 0 }, '布防**恰好**多一条 timer/set');
+    const setEvent = log.events[0];
+    assert.equal(setEvent?.type, 'timer/set');
+    // 逐字段：timerId / at / payload 三个键，**没有 cron 那一格**（没给就不写，不是写 null）
+    assert.deepEqual(Object.keys(setEvent?.data ?? {}).sort(), ['at', 'payload', 'timerId']);
+    assert.equal(setEvent?.data['timerId'], res.id);
+    assert.equal(setEvent?.data['at'], h.store.list()[0]?.at, '事件里的 at 就是表里那个规范化时刻');
+    assert.deepEqual(setEvent?.data['payload'], { note: '到点提醒我' });
+
+    // 重放：日志折出来的表 == 盘上那份（逐字段）
+    await h.store.flush();
+    assert.deepEqual(await readSnapshot(h.file).then((s) => s.entries), h.store.list(), '盘上 == 内存');
+    assert.deepEqual(log.entries(), projectionOfEntries(h.store.list()), '日志折出来的 == 盘上那份');
+
+    // cron 条：多出 cron 那一格，at 是那一次到期时刻
+    const cronRes = await h.store.set({ cron: '0 9 * * *', payload: null });
+    assert.equal(cronRes.ok, true);
+    if (!cronRes.ok) return;
+    assert.deepEqual(log.counts(), { set: 2, cancelled: 0 });
+    const cronData = log.events[1]?.data ?? {};
+    assert.deepEqual(Object.keys(cronData).sort(), ['at', 'cron', 'payload', 'timerId']);
+    assert.equal(cronData['cron'], '0 9 * * *');
+    assert.equal(cronData['payload'], null, 'payload 缺省就是 null（与表项一致，不留 undefined）');
+    assert.deepEqual(log.entries(), projectionOfEntries(h.store.list()));
+  } finally {
+    await cleanup(h);
+  }
+});
+
+test('撤销恰好多一条 timer/cancelled；取消不存在的 id 一条都不写', async () => {
+  const h = await makeHarness(1_800_000_000_000);
+  const log = makeEventLogFixture();
+  h.store.setEventSink(log.sink);
+  try {
+    const res = await h.store.set({ at: new Date(h.clock.now().getTime() + 60_000).toISOString(), payload: 'x' });
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+
+    assert.equal(await h.store.cancel(res.id), true);
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 1 }, '撤销**恰好**多一条 timer/cancelled');
+    assert.deepEqual(log.events[1], { type: 'timer/cancelled', data: { timerId: res.id } });
+    assert.deepEqual(log.events[1]?.data, { timerId: res.id }, '只有 timerId 一格（与 TimerCancelled 一致）');
+    assert.deepEqual(log.entries(), [], '取消之后重放不出任何条目');
+
+    // 幂等：不在表里的 id 不产生事件（否则"撤销了几次"这条账会被重复点击写花）
+    assert.equal(await h.store.cancel(res.id), false);
+    assert.equal(await h.store.cancel('t_never_existed'), false);
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 1 }, '取消不存在的 id 一条都不写');
+  } finally {
+    await cleanup(h);
+  }
+});
+
+test('恢复路径：投影非空时重走一遍 load + importEntries，不重复导入、不重复布防、不再写事件', async () => {
+  const startMs = 1_800_000_000_000;
+  const dir = await mkdtemp(join(tmpdir(), 'irmia-timer-'));
+  const file = join(dir, 'timers.json');
+  const log = makeEventLogFixture();
+  try {
+    // ── 第一任进程：布防两条（一条 cron 周期、一条远期一次性）──
+    const clockA = createVirtualClock(startMs);
+    const a = new TimerStore(file, virtualStoreDepsForTest(clockA));
+    a.setEventSink(log.sink);
+    await a.load();
+    a.start(() => { /* 第一任：这一拍不触发任何东西 */ });
+    const futureAt = new Date(startMs + DAY_MS).toISOString();
+    const once = await a.set({ at: futureAt, payload: { note: '一次性' } });
+    const cron = await a.set({ cron: '0 4 * * *', payload: { kind: 'memory-maintain' } });
+    assert.equal(once.ok && cron.ok, true);
+    if (!once.ok || !cron.ok) return;
+    await a.flush();
+    a.stop();
+    assert.deepEqual(log.counts(), { set: 2, cancelled: 0 }, '第一任恰好两条 timer/set');
+
+    const eventsAfterFirstLife = log.events.length;
+    const fileAfterFirstLife = await readSnapshot(file);
+    const projection = log.entries(); // ≡ 重启后 fold 出来的 projection.timers（补了事件之后它**非空**）
+
+    // ── 第二任进程（重启模拟）：load 盘上 hint → importEntries(投影) → start ──
+    const clockB = createVirtualClock(startMs + 60_000);
+    const b = new TimerStore(file, virtualStoreDepsForTest(clockB));
+    b.setEventSink(log.sink);
+    await b.load();
+    assert.equal(b.list().length, 2, '盘上 hint 还在');
+    const imported = await b.importEntries(projection);
+    assert.equal(imported.imported, 2, '投影里两条都被采用');
+    assert.deepEqual(imported.rejected, [], '一条都没被拒');
+    assert.equal(b.list().length, 2, '导入**不叠加**：还是两条（不是 2 + 2 = 4）');
+    b.start(() => { /* 恢复期不触发 */ });
+    assert.equal(b.armedCount(), 2, '两条各自恰好一个在途 handle');
+
+    const before = b.list();
+    await b.flush();
+    assert.deepEqual(b.list(), before, '重走一遍 importEntries 不改变表');
+    assert.deepEqual(log.counts(), { set: 2, cancelled: 0 }, '恢复路径一条事件都不写（不重复布防）');
+    assert.equal(log.events.length, eventsAfterFirstLife, '事件流在重启前后逐条相同');
+    // 落盘的 `savedAt` 每任进程都写自己那一刻（它是"这一任什么时候存的"，不是事实），
+    // 事实是 entries 那一份：逐字段比它。
+    assert.deepEqual((await readSnapshot(file)).entries, fileAfterFirstLife.entries,
+      '盘上的表逐字段没变（重启不重排、不重复导入）');
+    assert.deepEqual(log.entries(), projectionOfEntries(b.list()));
+
+    // ── 恢复期到期（投影里那一条的 at 已经过去）：推进一拍并留下一条事件，不重复布防 ──
+    // 这条路径才是"补了事件之后"真正会变的形状：投影非空 ⇒ 恢复会布防它 ⇒ 已过期当场结算。
+    // 时间取在周期条那一次到期**之后**（'0 4 * * *' = 本地 04:00；起点是本地 01:00）。
+    // 再一次 `start()` = 宿主接管布防（`main.ts` 里 `TimerWakeSource.start()` 那一刻）：
+    // `start` 对**已布防**的条目不会重复挂两个 handle——它先清空在途 handle 再按表重排一次。
+    const staleAt = b.list().find((e) => e.cron !== undefined)?.at ?? '';
+    clockB.advance(Date.parse(staleAt) + 1_000);
+    assert.equal(Date.parse(staleAt) <= clockB.now().getTime(), true, '这一条此刻已经过期');
+    b.start((entry) => { log.fired(entry.timerId); });
+    const advanced = b.list().find((e) => e.cron !== undefined);
+    assert.notEqual(advanced?.at, staleAt, '恢复期到期 ⇒ at 推进到下一拍');
+    assert.equal(Date.parse(advanced?.at ?? '') > clockB.now().getTime(), true, '推进后的时刻在未来');
+    assert.equal(b.list().length, 2, '推进期间条目没被复制成两条');
+    assert.deepEqual(log.counts(), { set: 3, cancelled: 0 }, '推进恰好留下一条 timer/set');
+    assert.deepEqual(projectionOfEntries(b.list()), log.entries(),
+      '推进之后：重放出来的表与盘上逐字段一致');
+    await b.flush();
+    assert.deepEqual((await readSnapshot(file)).entries, b.list(), '推进后的表已落盘');
+
+    // 再走一遍（第三任）：结论必须一样——"恰好多一条"这件事在恢复上要成立任意次
+    const clockC = createVirtualClock(startMs + 120_000);
+    const c = new TimerStore(file, virtualStoreDepsForTest(clockC));
+    c.setEventSink(log.sink);
+    await c.load();
+    await c.importEntries(log.entries());
+    const setCountBeforeC = log.counts().set;
+    c.start(() => { /* 恢复期不触发 */ });
+    assert.equal(c.list().length, 2, '第三任照样两条');
+    assert.equal(c.armedCount(), 2);
+    assert.equal(log.counts().set, setCountBeforeC, '第三任的恢复一条事件都不写');
+    assert.deepEqual(projectionOfEntries(c.list()), log.entries());
+    c.stop();
+    b.stop();
+  } finally {
+    await removeTree(dir);
+  }
+});
+
+test('到期：一次性条目出表、周期条目留在表里并结算下一拍（timer/fired 的既有语义）', async () => {
+  const startMs = 1_800_000_000_000;
+  const dir = await mkdtemp(join(tmpdir(), 'irmia-timer-'));
+  const file = join(dir, 'timers.json');
+  const log = makeEventLogFixture();
+  try {
+    const clock = createVirtualClock(startMs);
+    const store = new TimerStore(file, virtualStoreDepsForTest(clock));
+    store.setEventSink(log.sink);
+    await store.load();
+    const firedIds: string[] = [];
+    store.start((entry) => { firedIds.push(entry.timerId); });
+
+    const once = await store.set({ at: new Date(startMs + 60_000).toISOString(), payload: 'g' });
+    const daily = await store.set({ cron: '0 9 * * *', payload: { kind: 'digest' } });
+    assert.equal(once.ok && daily.ok, true);
+    if (!once.ok || !daily.ok) return;
+    assert.equal(store.armedCount(), 2);
+
+    // 快进一分钟：一次性那条到期（周期那条的下一次在 09:00，不在这一拍）
+    await advanceMs(clock, 60_000);
+    assert.deepEqual(firedIds, [once.id]);
+    log.fired(once.id); // 到期记账由 WakeSink 落（本模块不发这条），这里补上真实的因果顺序
+
+    assert.equal(store.get(once.id), null, '一次性条目触发即出表');
+    assert.equal(store.get(daily.id)?.cron, '0 9 * * *', '周期条目留在表里');
+    assert.equal(store.armedCount(), 1, '周期那条已经排好下一拍');
+
+    // 折叠语义（与 state/fold.ts 的定时器分支同口径）：一次性那条被 fired 收掉、
+    // 周期那条留在表里且 at 已推进到下一拍（推进这件事本身也是一条 timer/set）
+    const afterOnce = log.entries();
+    assert.deepEqual(afterOnce.map((e) => e.timerId), [daily.id], '一次性那条被 fired 收掉');
+    assert.deepEqual(afterOnce, projectionOfEntries(store.list()), '周期那条的 at 已推进到下一拍');
+
+    // 更长的离线：跳过好几拍也只记数不重放，表里照旧只有周期那一条。
+    // 期望值按**本机时区**算（cron 走本地墙钟：09:00 是本地九点，不是 UTC 九点）——
+    // 起点是 startMs + 4 天 01:00 本地，所以下一拍就是"那一天本地 09:00"。
+    await advanceMs(clock, 3 * DAY_MS);
+    assert.equal(store.list().length, 1);
+    assert.equal(store.list()[0]?.timerId, daily.id);
+    const afterCatchup = new Date(startMs + 4 * DAY_MS);
+    afterCatchup.setHours(9, 0, 0, 0);
+    assert.equal(store.list()[0]?.at, afterCatchup.toISOString());
+    assert.deepEqual(projectionOfEntries(store.list()), log.entries(),
+      '每次推进都留下一条 timer/set：重放出来的 at 与盘上同一个时刻');
+    assert.deepEqual(log.counts(), { set: 5, cancelled: 0 },
+      '2 次布防 + 到期后 3 次重新布防；`timer/fired` 不是本模块写的事件');
+    store.stop();
+    await store.flush();
+  } finally {
+    await removeTree(dir);
+  }
+});
+
+test('反面对照：只 list / get / 重复 start 不产生任何事件', async () => {
+  const h = await makeHarness(1_800_000_000_000);
+  const log = makeEventLogFixture();
+  h.store.setEventSink(log.sink);
+  try {
+    const res = await h.store.set({ at: new Date(h.clock.now().getTime() + 3_600_000).toISOString(), payload: 1 });
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 0 });
+
+    h.store.list();
+    h.store.snapshotFromEntries();
+    h.store.get(res.id);
+    h.store.armedCount();
+    h.store.nowMs();
+    h.store.warnings();
+    h.store.start(() => { /* 再 start 一次：已在跑，不重复布防 */ });
+    await h.store.flush();
+
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 0 }, '只读动作一条事件都不该写');
+    assert.equal(h.store.armedCount(), 1);
+
+    // 没接线（CLI 只读场景）：布防照旧能用，但一个事件都不写——绝不静默造一条没有主的记录
+    const bare = new TimerStore(null, virtualStoreDepsForTest(h.clock));
+    const bareRes = await bare.set({ at: new Date(h.clock.now().getTime() + 1000).toISOString() });
+    assert.equal(bareRes.ok, true);
+    assert.equal(bare.list().length, 1);
+    assert.deepEqual(log.counts(), { set: 1, cancelled: 0 }, '未接线的实例不写事件');
+  } finally {
+    await cleanup(h);
+  }
+});
+
+// ──────────── 端到端：真 store → 真事件日志 → 真投影（首页卡片与撤销按钮读的就是它） ────────────
+//
+// 上面那一组用的是假出口；这一组按 `main.ts` 的**生产接线**把三件真东西串起来：
+// `TimerStore.setEventSink({set: emit('timer/set'), cancelled: emit('timer/cancelled')})`
+// ——`emit` 就是 `main.ts:906` 那一格（`append` 落库 + `applyOne` 折投影）。
+//
+// 它要能回答用户问的那两句话：
+//   · 首页「定时器」卡片现在列得出来吗？——投影 `timers` 里有没有那一条、字段够不够；
+//   · 「撤销」按钮现在能成功吗？——`web/server.ts` 的 `timer-cancel` 判据是
+//     `projection.timers.some(t => t.timerId === timerId)`，投影里有它就 200、没有就 404。
+// 不再重启真后端也能把这条链验穿：那两条判据读的都是**这里折出来的同一份投影**。
+
+test('端到端（生产接线）：布防 ⇒ 投影里看得见那一条（首页卡片）；撤销 ⇒ 投影里那条没了（按钮成功）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'irmia-timer-e2e-'));
+  const file = join(dir, 'timers.json');
+  const eventsDir = join(dir, 'events');
+  const clock = createVirtualClock(1_800_000_000_000);
+  let log: EventLog | null = null;
+  try {
+    log = await EventLog.open(eventsDir);
+    const projection = emptyProjection();
+    // 与 main.ts 逐字同形的接线：事件先落盘（sync）、再折投影
+    const emit = (type: string, data: unknown, visibility?: Visibility): void => {
+      const event = {
+        seq: log?.nextSeq(),
+        ts: clock.now().toISOString(),
+        type,
+        data,
+        visibility: resolveEventVisibility(type, visibility),
+        origin: 'test/timer-e2e',
+      } as unknown as AppEvent;
+      log?.append(event, { sync: true });
+      applyOne(projection, event);
+      finalizePressure(projection, event.ts);
+    };
+    const store = new TimerStore(file, virtualStoreDepsForTest(clock));
+    store.setEventSink({
+      set: (entry) => { emit('timer/set', entry, 'internal'); },
+      cancelled: (timerId) => { emit('timer/cancelled', { timerId }, 'internal'); },
+    });
+    await store.load();
+    store.start(() => { /* 本用例只看投影，不看到期 */ });
+
+    // ── 首页卡片：`gui/lib/pages/overview_page.dart` 的 `_timers` 读 proj['timers'] ──
+    assert.deepEqual(projection.timers, [], '接线前后：投影还是空的（撤销按钮此刻必然 404）');
+
+    const at = new Date(clock.now().getTime() + 3_600_000).toISOString();
+    const once = await store.set({ at, payload: { note: '到点提醒我看一眼昨天的账' } });
+    const daily = await store.set({ cron: '0 9 * * *', payload: { kind: 'digest' } });
+    assert.equal(once.ok && daily.ok, true);
+    if (!once.ok || !daily.ok) return;
+
+    // 一次性的那条：`_TimerLine` 要 `timerId` + `at` + `payload`（三格都在）
+    const cardOnce = projection.timers.find((t) => t.timerId === once.id);
+    assert.notEqual(cardOnce, undefined, '布防之后投影里就有它了（卡片的判据）');
+    assert.equal(cardOnce?.at, store.list().find((e) => e.timerId === once.id)?.at);
+    assert.deepEqual(cardOnce?.payload, { note: '到点提醒我看一眼昨天的账' },
+      'payload 就是卡片上那句「要做什么」');
+    assert.equal('cron' in (cardOnce ?? {}), false, '一次性那条不带 cron（界面据此显示时刻而不是"周期 …"）');
+
+    // 周期的那条：`cron` 那一格在（界面显示「周期 0 9 * * *」）
+    const cardDaily = projection.timers.find((t) => t.timerId === daily.id);
+    assert.equal(cardDaily?.cron, '0 9 * * *');
+    assert.notEqual(cardDaily?.at, undefined, '周期条也有下一次到期时刻（派生 nextWakeAt 用它）');
+    assert.equal(projection.timers.length, 2, '卡片上「2 个在等」');
+
+    // ── 撤销按钮：`web/server.ts` 的 timer-cancel 判据 ──
+    // 真实那条路（`web/server.ts:6429`）自己写 `timer/cancelled` 再调 `store.cancel()`；
+    // 这里走 `store.cancel()` 自己那一半——补了事件之后**它也会写**，所以 web 侧那条
+    // 手写的事件不再是唯一的来源（同一形状、同一类型，`fold` 里同一条 case）。
+    const known = projection.timers.some((t) => t.timerId === once.id);
+    assert.equal(known, true, '投影里有它 ⇒ timer-cancel 不会 404（从前恒为 false ⇒ 恒 404）');
+    assert.equal(await store.cancel(once.id), true);
+    assert.equal(projection.timers.some((t) => t.timerId === once.id), false, '撤销后投影里那条没了');
+    assert.equal(projection.timers.length, 1, '另一条不被牵连');
+    assert.equal(
+      (await readAllEvents(log)).filter((e) => e.type === 'timer/cancelled').length, 1,
+      '撤销恰好一条 timer/cancelled（不是两条）',
+    );
+    assert.equal(
+      projection.timers.some((t) => t.timerId === once.id), false,
+      '再点一次就是 404（"可能已触发或已取消"——与 UI 的文案一致）',
+    );
+
+    // ── 重放：从盘上的事件流冷折叠出来的投影，与内存这份逐字段相同 ──
+    const replay = fold(await readAllEvents(log));
+    assert.deepEqual(replay.timers, projection.timers, '冷重放 == 内存投影（逐字段）');
+    assert.deepEqual(projectionOfEntries(store.list()), replay.timers, '盘上的表 == 重放出来的表');
+
+    store.stop();
+    await store.flush();
+  } finally {
+    await log?.close();
+    await removeTree(dir);
   }
 });
 

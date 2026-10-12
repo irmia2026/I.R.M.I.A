@@ -61,6 +61,35 @@
  *
  * 内存有界：捕获层（BoundedText）与展示层（truncateOutput）是两道独立的闸，
  * 前者防一个 `Get-Content 大文件` 把进程吃爆，后者防大输出撑爆上下文。
+ *
+ * ──────────────────────────── v52：`lang`（2026-10-12） ────────────────────────────
+ *
+ * 用户裁决「**改造 pwsh 工具，并且 desc 要优化到清楚怎么用（整段脚本的用法）**」，
+ * IRMIA 本人（用的人）实测补了五条设计要求。这一版落的六件事，逐条对应的判据：
+ *
+ *   ① **整段脚本**：`command` **本来就收多行**（`requiredString(maxLength:100_000)`，
+ *      持久会话走 stdin 的一行 base64）——实测 `$sum=0; foreach…`、函数定义、多行输出、
+ *      `Set-Location` 全部照跑。"新能力"是**描述里写清了这件事**，不是改了执行路径。
+ *   ② **`lang`**：`pwsh`(默认) / `python` / `node`。她是这么说的：「省掉嵌套引号地狱、
+ *      省掉'写临时 .py/.mjs → 存盘 → 跑 → 清理'那一趟往返」。⇒ 三档**同源**：
+ *      都走 `runScriptFile`（写 `<workdir>/.irmia-tmp/` 下的唯一命名临时文件 → 跑 → **必删**），
+ *      共用 `superviseChild` 那一套超时/杀树/2 MiB 捕获/头 8k 尾 2k。
+ *   ③ **输出一套**：三档逐字同一个 `[stderr]` 段头与 `[exit code: N · <ms>ms]` 状态行
+ *      （她点名的第 1 条："不想记三套"）。为此改了两处**知情的口径**：
+ *      `SetError([Console]::Out)` 被删（它会把 PowerShell 的报错并进正文，另两档在 stderr），
+ *      以及会话档的错误改由 `$Error` 收集、经带标记的 stdout 通道搬回 stderr
+ *      （实测：pwsh 往 stderr **管道**写错误要 ~2.5 秒才落地，会话里那一轮根本读不到）。
+ *   ④ **闸门一套**：超时/工作目录/截断三档同源（同一条 `superviseChild` + `assertWorkdir`）。
+ *   ⑤ **cwd 与变量**：只有 `pwsh` 档共用持久会话；`python` / `node` 各开各的进程、
+ *      cwd 就是 `workdir`（**不跟着 shell 会话走**）——这一条写进了 `lang` 的参数描述，
+ *      并有用例钉住"上一次 `cd` 过之后下一条命令在哪"。
+ *   ⑥ **node 的 `.mjs`**：工作根的 `package.json` 是 `"type": "module"`，`.js` 会被当 ESM
+ *      （`require is not defined`）⇒ `lang=node` **一律写 `.mjs`**，默认就是 import 语义，
+ *      不让她每次自己绕。
+ *
+ * **没有做**的两件事（如实记，别当成漏掉）：`site` 与时间范围筛选。端点的文档里没有它们、
+ * 她的 curl 现场也没用过——编一个参数名塞进请求体，最坏的结果是"搜索照常返回、筛选静默失效"。
+ * 真要限定站点，把 `site:example.com` 写进 `query` 即可（本文件不解析它，原样透传）。
  */
 
 import {
@@ -70,7 +99,7 @@ import {
 } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -118,14 +147,96 @@ export const MAX_CAPTURE_CHARS = 2 * 1024 * 1024;
 /** 尾部搜索窗口：结束标记总在本轮输出的最后，64k 窗口足够容纳它和它前面的收尾输出 */
 const MARKER_WINDOW_CHARS = 64 * 1024;
 
+/**
+ * 持久会话里"认出结束标记"到"兑现结果"之间的收尾窗口（毫秒）。
+ *
+ * 为什么需要它（v52 实测踩到，**不是猜测**）：pwsh 把错误写进 stderr **管道**时不是立刻
+ * 落地的（实测要 30ms 上下才到达），而结束标记是同一轮里立刻写出来的——于是
+ * `Write-Error "boom"` 的错误在"认出标记"那一刻还在路上，`round.stderr` 读出来是空串，
+ * 报错就这么凭空消失了（实测：stderr 里只剩一个孤零零的 `#< CLIXML` 头）。
+ * 这不只是显示问题：IRMIA 2026-10-12 的第 1 条要求是"三种 lang 同一套 stderr"，
+ * 而 python / node 的报错是同步写出来的，只有 PowerShell 这一档会漏。
+ *
+ * 30ms 是**实测值**（探针 `_research/_tmp-pwsh-session-stderr.mts`：标记与 CLIXML 同轮写出，
+ * 前者先到、后者晚 20~40ms）。代价是每条会话命令多等 30ms——相对 pwsh 一次调用的
+ * 几百毫秒启动/往返，这 30ms 买的是"报错不许丢"，这笔账是划算的。
+ */
+const SESSION_STDERR_SETTLE_MS = 30;
+
 /** 后台任务输出落盘文件后缀 */
 export const JOB_LOG_SUFFIX = '.log';
 
 /** 检测不到 PS7 时回给模型的安装建议（design §4.18 pwsh 专项第 1 条） */
 export const POWERSHELL_INSTALL_HINT = 'winget install Microsoft.PowerShell';
 
+// ──────────────────────────────── 语言（v52） ────────────────────────────────
+
+/**
+ * 这段脚本是什么语言。`pwsh` 是默认档。
+ *
+ * 用户 2026-10-12 的原话：「**改造 pwsh 工具，并且 desc 要优化到清楚怎么用（整段脚本的用法）**」
+ * ——诉求是"**她不用先把脚本写成文件**，直接把整段代码交给它就能跑"。
+ * 实测依据（`_ops-audit-7/REPORT.md` §5.3）：全量 860+ 次 `pwsh` 调用里 **64 处**是在内联跑
+ * `node -e "…"` / `python -c @"…"@` / `python - <<'PY'`，其中最长的单条命令 **900+ 字符**
+ * （`seq 36476`：PIL + ctypes 截屏）——转义吃掉的是她的注意力，不是能力。
+ */
+export type PwshLang = 'pwsh' | 'python' | 'node';
+
+/** `lang` 的取值表（顺序即报错文案里的顺序，也是描述里的顺序） */
+export const PWSH_LANGS: readonly PwshLang[] = ['pwsh', 'python', 'node'];
+
+/** `lang` 缺省值：不写就是 PowerShell，与 v51 的 `command` 语义**逐字相同** */
+export const PWSH_DEFAULT_LANG: PwshLang = 'pwsh';
+
+/**
+ * 每种语言的落盘后缀与调用形状。
+ *
+ * 为什么非 PowerShell 那两档必须走**临时文件**（而不是 `python -c "…"`）：
+ * `-c` 的正文要重新过一次命令行引号规则，那正是用户要消灭的那件事
+ * （「引号/换行/中文都不需要她自己转义」）。写文件之后，引号、换行、中文、`$`、`%`
+ * 全部只是文件里的字节——`spawn` 的命令行里只有**一个我们生成的路径**。
+ */
+export const LANG_SPECS: Record<PwshLang, { suffix: string; label: string }> = {
+  pwsh: { suffix: '.ps1', label: 'PowerShell' },
+  python: { suffix: '.py', label: 'Python' },
+  node: { suffix: '.mjs', label: 'Node.js' },
+};
+
+/** 临时脚本目录名（落在**本次调用的 workdir 之下**，见 `tmpScriptDirOf`） */
+export const TMP_SCRIPT_DIR_NAME = '.irmia-tmp';
+
+/**
+ * 非 PowerShell 那两档的解释器探测顺序。
+ *
+ * 为什么 python 有两项：Windows 上官方安装器给的是 `python.exe`（Store 版是 `python3.exe`），
+ * 而 Linux/macOS 上是 `python3`（`python` 常常根本不存在或者指 python2）。
+ * 顺序按"哪个更可能是 python3"排：`python3` 先探，`python` 兜底。
+ */
+export const LANG_INTERPRETERS: Record<Exclude<PwshLang, 'pwsh'>, readonly string[]> = {
+  python: ['python3', 'python'],
+  node: ['node'],
+};
+
+/** 探测解释器时的超时：跑一次 `--version`，10s 足够（与 PROBE_TIMEOUT_MS 同一口径） */
+export const INTERPRETER_PROBE_TIMEOUT_MS = 10_000;
+
+/** 临时脚本的删除重试：Windows 上子进程刚读完时可能短暂占用（EBUSY/EPERM） */
+const TMP_SCRIPT_UNLINK_ATTEMPTS = 5;
+
 /** 会话内结束标记的前缀，中间嵌 guid */
 const END_MARKER_PREFIX = '__IRMIA_END_';
+
+/**
+ * 错误块的起止标记（v52，见 `SCRIPT_HEADER` 与 `extractSessionErrors` 的注释）。
+ *
+ * 为什么错误要**借 stdout 的一条带标记的通道**走：pwsh 把错误记录写进 stderr **管道**时
+ * 不是立刻落地的（实测：标记 444ms 到，错误块 **2.5 秒后**才到，而且只有 stdin 关闭才吐出来）
+ * ——会话是一份长驻进程，这个延迟等于"报错这一轮读不到"。所以改由 bootstrap 自己
+ * 把错误格式化成纯文本、夹在标记里写 stdout，Node 侧再把它搬回 `[stderr]` 段
+ * （用户的 `[Console]::Error.WriteLine` 照旧走真 stderr，不受影响）。
+ */
+const SESSION_ERROR_BEGIN = '__IRMIA_ERR_BEGIN__';
+const SESSION_ERROR_END = '__IRMIA_ERR_END__';
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
@@ -196,6 +307,22 @@ export interface ForbiddenPattern {
   pattern: RegExp;
   /** 回给模型的原因：说清"为什么危险"与"该改走哪条路" */
   reason: string;
+  /**
+   * 这条规则管哪些语言（`lang` 的那些取值）。
+   *
+   * 为什么要有这一格（v52 加 `lang` 之后才成立的一件事）：`screenCommand` 原先只面对
+   * PowerShell 文本，所以那些规则写成了 PowerShell/cmd 的**语法**。同一个动作在
+   * python / node 里写成 `shutil.rmtree` / `fs.rmSync(..., {recursive:true, force:true})` 时
+   * **一句都命不中**，而它的破坏力与 `Remove-Item -Recurse -Force` 一模一样。
+   * 反过来，python 脚本正文里出现 `"Remove-Item -Recurse -Force"` 这种**字符串**只是数据
+   * （她可能在写一个生成 PowerShell 的脚本），拿 PowerShell 的语法去拒它就会误伤。
+   * ⇒ 判据按语言分组：`powershell` 的规则是既有那 13 条（一个字节不改），
+   *   `python` / `node` 各有一组**按该语言真实语法**写的规则。
+   *
+   * 缺省（不写这一格）= 只对 PowerShell 生效：既有 13 条因此逐字保持原意，
+   * `screenCommand(command)` 这个单参调用点的行为与 v51 逐字节相同。
+   */
+  langs?: readonly PwshLang[];
 }
 
 /**
@@ -270,6 +397,49 @@ export const FORBIDDEN_PATTERNS: readonly ForbiddenPattern[] = [
     pattern: /\b(del|rd|rmdir)\s+(\/[a-z]+\s+)*[a-z]:(\\)?(\s|$)|\b(del|rd|rmdir)\s+\/[a-z]*[sq][a-z]*\s+\/[a-z]*[sq]/,
     reason: 'cmd 语法的递归静默删除',
   },
+  // ── 下面两组只对 `lang: 'python'` / `lang: 'node'` 生效（v52） ──
+  //
+  // 判据（写在这里防暗坑）：上面 13 条写的是 **PowerShell / cmd 的语法**，
+  // 它们在 python / node 正文里**一句都命不中**——`shutil.rmtree('C:/')` 与
+  // `fs.rmSync('C:/', {recursive:true, force:true})` 的破坏力与 `Remove-Item -Recurse -Force`
+  // 完全一样，而从前那两条路上没有任何一条规则看得见它们（语言是 v52 才有的）。
+  // 所以这里补的是**按各语言真实语法**写的同一批动作，不是把 PowerShell 的正则照搬过来
+  // （照搬会误伤：写一个"生成 PowerShell 删除命令"的 python 脚本时，正文里那句字符串只是数据）。
+  {
+    id: 'py-rmtree',
+    langs: ['python'],
+    pattern: /shutil\s*\.\s*rmtree\b|\bos\s*\.\s*removedirs\b/,
+    reason: 'shutil.rmtree / os.removedirs 是递归删除目录的 Python 写法，无人值守下不可撤销',
+  },
+  {
+    id: 'py-disk-write',
+    langs: ['python'],
+    pattern: /\b(format|diskpart|mkfs(\.\w+)?|bcdedit|vssadmin)\b|winreg\s*\.\s*(SetValue|CreateKey|DeleteKey)|shutdown\s*\.\s*(shutdown|restart)/,
+    reason: '格式化 / 分区 / 引导配置 / 写注册表 / 关机重启：系统级且跨重启生效',
+  },
+  {
+    id: 'node-rm-recursive',
+    langs: ['node'],
+    // ⚠ 这条规则**刻意不写成一个把调用语法描出来的正则**（v52 连踩两次，两次都是"看着对、
+    //    跑起来一个都不命中"）：`\b` 在 `fs.rmSync(` 上两头都成立、`[^)]*` 在
+    //    `{ recursive: true }` 上会被自己的 `)` 截断、`{0,200}?` 又要求至少一个字符……
+    //    这些细节任何一处写歪的结果都是**静默放行**，而这一条是安全规则，静默放行是最坏的失败。
+    //    所以判据拆成两条**交集**（都在归一化后的同一行上找，见下）：
+    //      ① 出现了删除调用名（`rmsync` / `rmdirsync` / 独立的 `rm`）；
+    //      ② **同一行上**同时出现 `recursive` 与 `true`（顺序、引号、空格都不拘）。
+    //    行内约束（`[^\n]`）是必须的：跨行的 `recursive: true` 多半属于另一个对象字面量，
+    //    放它过去会把一大片正常的 `fs.rm` 误判成递归删除。
+    //    代价（知情接受）：同一行里既有 `fs.rm(...)` 又有别处一个无关的 `recursive: true`
+    //    会被误判——那是**收紧**方向，且这一层本来就不是完备判定（见 FORBIDDEN_PATTERNS 说明）。
+    pattern: /(?=[^\n]*?(?<!\w)(rmsync|rmdirsync|rm)(?![\w]))(?=[^\n]*recursive[^\n]*true)/,
+    reason: 'fs.rmSync/rm/rmdirSync 带 recursive:true 等于递归强制删除，无人值守下不可撤销',
+  },
+  {
+    id: 'node-disk-write',
+    langs: ['node'],
+    pattern: /\b(format|diskpart|mkfs(\.\w+)?|bcdedit|vssadmin)\b/,
+    reason: '格式化 / 分区 / 引导配置 / 卷影删除：系统级且跨重启生效',
+  },
 ];
 
 /** 归一化：小写 + 连续空白压成一个空格。换行与制表符因此不会成为绕过通道 */
@@ -277,10 +447,16 @@ export function normalizeCommand(command: string): string {
   return command.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-/** 命中返回规则本身，未命中返回 null */
-export function screenCommand(command: string): ForbiddenPattern | null {
+/** 这条规则管不管这个语言（没写 `langs` = 只管 PowerShell，见 ForbiddenPattern.langs） */
+function appliesTo(rule: ForbiddenPattern, lang: PwshLang): boolean {
+  return (rule.langs ?? ['pwsh']).includes(lang);
+}
+
+/** 命中返回规则本身，未命中返回 null（`lang` 缺省 = PowerShell，与 v51 逐字同义） */
+export function screenCommand(command: string, lang: PwshLang = PWSH_DEFAULT_LANG): ForbiddenPattern | null {
   const normalized = normalizeCommand(command);
   for (const rule of FORBIDDEN_PATTERNS) {
+    if (!appliesTo(rule, lang)) continue;
     if (rule.pattern.test(normalized)) return rule;
   }
   return null;
@@ -371,6 +547,51 @@ export function stripClixml(text: string): string {
   return text
     .replace(/^#< CLIXML\r?\n/, '')
     .replace(/<Objs[\s\S]*?<\/Objs>\r?\n?/g, '');
+}
+
+/** ANSI 颜色序列（CLIXML 里的错误文本带着 `ESC[31;1m` 这类装饰） */
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[[0-9;]*m/gu;
+
+/** CLIXML 的字符转义：`_x001B_` = U+001B、`_x000D_` = CR */
+const CLIXML_ESCAPE_RE = /_x([0-9A-Fa-f]{4})_/gu;
+
+/**
+ * 把 PowerShell 的 **CLIXML 错误块**解成可读的纯文本（v52 新增，见 `SCRIPT_HEADER` 那段注释）。
+ *
+ * 为什么需要它：pwsh 往**非控制台的 stderr 句柄**（我们 spawn 出来的管道就是）写错误时，
+ * 会把错误记录序列化成
+ * `#< CLIXML\n<Objs …><S S="Error">_x001B_[31;1mWrite-Error: _x001B_[31;1mboom_x001B_[0m…</S></Objs>`。
+ * `stripClixml` 会把整个 `<Objs>` 块**丢掉**（它当年的用途是"别让模型读到一坨 XML"），
+ * 于是有了 `lang` 之后就不够了：IRMIA 2026-10-12 的第 1 条要求是"三种 lang 都返回同一套
+ * stdout/stderr/exit code/耗时"——python 的 traceback 与 node 的栈是她读得到的，
+ * 而 PowerShell 的 `Write-Error` 只剩一句空（实测：`stripClixml` 之后 stderr 变成空串）。
+ *
+ * 所以这里做的是**解码而不是丢弃**：把每个 `<S S="Error">…</S>` 里的文本解出来、
+ * 去掉 ANSI 装饰、还原 `_xNNNN_` 转义，逐条成行。它不是 CLIXML 的完整解析器
+ * （只认 `S="Error"` 那一类节点，够用即可），解不出来时**退回原文**而不是报错——
+ * 这是展示层，宁可多留几个字节，也不能让她的报错凭空消失。
+ */
+export function decodeClixmlErrors(text: string): string {
+  if (!text.startsWith('#< CLIXML')) return text;
+  const chunks: string[] = [];
+  const nodeRe = /<S S="Error">([\s\S]*?)<\/S>/gu;
+  for (let match = nodeRe.exec(text); match !== null; match = nodeRe.exec(text)) {
+    const decoded = (match[1] ?? '')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&apos;', "'")
+      .replace(CLIXML_ESCAPE_RE, (_all, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+      .replace(ANSI_RE, '');
+    for (const line of normalizeNewlines(decoded).split('\n')) {
+      const trimmed = line.trimEnd();
+      if (trimmed.trim() !== '') chunks.push(trimmed);
+    }
+  }
+  // 一个 Error 节点都没解出来：退回"剥掉 XML 只留散文本"的旧口径，绝不返回空串
+  return chunks.length === 0 ? stripClixml(text) : chunks.join('\n');
 }
 
 /** Windows 的 CRLF 统一成 LF：模型读长输出时能省下大量无意义字符 */
@@ -480,35 +701,39 @@ function toCommandBase64(command: string): string {
   return Buffer.from(command, 'utf8').toString('base64');
 }
 
-/** 每条命令共用的头部。三条设置各自解决一个实测问题，见文件头第 3 条 */
+/**
+ * 每条命令共用的头部。三条设置各自解决一个实测问题，见文件头第 3 条。
+ *
+ * ⚠ v52 删掉了这里的 `[Console]::SetError([Console]::Out)`（**一处知情的口径变更**）：
+ * 它当年的作用是"把 PowerShell 的 error stream 并进 stdout，否则错误会被序列化成
+ * `<# CLIXML …>` XML（模型完全读不懂）"。加了 `lang` 之后这条口径站不住了——
+ * IRMIA 2026-10-12 的第 1 条要求是"**三种 lang 都返回同一套 stdout / stderr / exit code / 耗时**"，
+ * 而 python / node 的 stderr 天然是独立流（强行合并等于把两档的报错混进正文）。
+ * 合并 stdout 之后，`Write-Error` 的文本会落在**正文**里，而另两档落在 `[stderr]` 段里
+ * ⇒ 同一件事在三个档三种位置，正是她不想记的那套东西。
+ * 所以：**stderr 就是 stderr**（`composeContent` 逐档同一个 `[stderr]` 段头）。
+ * CLIXML 那一层没有丢：`stripClixml` 照旧按锚定剥离（5.1 在非控制台句柄上仍会输出它），
+ * `ERROR_FLUSH` 那份逐条回显也不再需要（错误本来就在 stderr 上，回显只会变成第二份）。
+ */
 const SCRIPT_HEADER = [
   "$ErrorActionPreference='Continue'",
   '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
-  '[Console]::SetError([Console]::Out)',
 ].join('\n');
 
-/** 把本轮 $Error 里的错误逐条打成可读文本；随后清空，避免下一轮重复输出旧错误 */
-const ERROR_FLUSH = [
-  'for($irmiaI=0; $irmiaI -lt $Error.Count; $irmiaI++){ [Console]::Out.WriteLine("错误: " + $Error[$irmiaI].ToString()) }',
-  '$Error.Clear()',
-].join('\n');
-
-/** 把命令包进 try/catch（catch 留空：错误文本已由 ERROR_FLUSH 输出，catch 只负责不中断会话） */
+/** 把命令包进 try/catch（catch 留空：错误已经在 stderr 上，catch 只负责不中断会话） */
 function invokeExpressionLine(command: string): string {
   return `try{ Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${toCommandBase64(command)}'))) }catch{ }`;
 }
 
 /**
- * 单次执行脚本：编码设置 → 执行 → 错误回显 → 用 $LASTEXITCODE 收敛退出码。
+ * 单次执行脚本：编码设置 → 执行 → 用 $LASTEXITCODE 收敛退出码。
  * 末尾那句 `exit $LASTEXITCODE` 是必需的：实测 `-EncodedCommand` 结束时 pwsh 会把
  * `cmd /c "exit 9"` 这种非零退出码吞成 1，显式 exit 才能把真实码传出来。
  */
 export function buildSingleShotScript(command: string): string {
   return [
     SCRIPT_HEADER,
-    '$Error.Clear()',
     invokeExpressionLine(command),
-    ERROR_FLUSH,
     'if($null -ne $LASTEXITCODE){exit $LASTEXITCODE}',
   ].join('\n');
 }
@@ -523,23 +748,74 @@ export function buildSessionBootstrap(marker: string): string {
   return [
     SCRIPT_HEADER,
     `$irmiaMarker='${marker}'`,
+    `$irmiaErrBegin='${SESSION_ERROR_BEGIN}'`,
+    `$irmiaErrEnd='${SESSION_ERROR_END}'`,
     'while($true){',
     '$irmiaLine=[Console]::In.ReadLine()',
     'if($null -eq $irmiaLine){break}',
     '$irmiaCode=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($irmiaLine))',
     '$global:LASTEXITCODE=0',
     '$irmiaEc=0',
+    // `$Error` 每轮清零：不清就会把前面几轮的旧错误一遍遍重放（v52 之前用 ERROR_FLUSH
+    // 就是为了同一件事，那一版在**之后**清、这一版在**之前**清——判据见下面那段）
     '$Error.Clear()',
     'try{',
     'try{ Invoke-Expression $irmiaCode }catch{ }',
-    'for($irmiaI=0; $irmiaI -lt $Error.Count; $irmiaI++){ [Console]::Out.WriteLine("错误: " + $Error[$irmiaI].ToString()) }',
-    '$Error.Clear()',
     'if($null -ne $global:LASTEXITCODE){$irmiaEc=$global:LASTEXITCODE}',
     '} finally {',
+    // 错误块：从 `$Error` 里逐条取（**这里不能用 `2>&1` 去收**——v52 实测：`2>&1` 会把
+    // 错误流并进成功流，而 `Invoke-Expression` 里 `Write-Error` 产生的那一条**在合并时被
+    // 丢掉了**（`@(iex … 2>&1)` 只剩 `after`，`$Error` 里却明明有一条）。`$Error` 是
+    // 唯一可靠的来源：非终止错误、终止错误、native 的 stderr 都在里面。
+    'for($irmiaI=0; $irmiaI -lt $Error.Count; $irmiaI++){',
+    '[Console]::Out.WriteLine($irmiaErrBegin)',
+    '[Console]::Out.WriteLine(($Error[$irmiaI] | Out-String).TrimEnd())',
+    '[Console]::Out.WriteLine($irmiaErrEnd)',
+    '}',
+    '$Error.Clear()',
     `[Console]::Out.WriteLine(${markerExpression}); [Console]::Out.Flush()`,
     '}',
     '}',
   ].join('\n');
+}
+
+/**
+ * 从会话输出里切出错误块，剩下的才是正文（`{ stdout, stderr }` 两份）。
+ *
+ * 判据是那两个标记（`SESSION_ERROR_BEGIN` / `SESSION_ERROR_END`）：成对出现才算一块，
+ * 半块（用户自己的输出里恰好写了标记）**按正文留着**，绝不吞掉她的字节。
+ * 一块错误 = `[stderr]` 段里的一段；多块按出现顺序拼起来（顺序就是它们产生的顺序）。
+ */
+export function extractSessionErrors(text: string): { stdout: string; stderr: string } {
+  const beginAt = text.indexOf(SESSION_ERROR_BEGIN);
+  if (beginAt < 0) return { stdout: text, stderr: '' };
+  const stdoutLines: string[] = [];
+  const errorBlocks: string[] = [];
+  for (const line of normalizeNewlines(text).split('\n')) {
+    if (line === SESSION_ERROR_BEGIN) {
+      errorBlocks.push('');
+      continue;
+    }
+    if (line === SESSION_ERROR_END) {
+      errorBlocks.push('\u0000'); // 块结束哨兵：下一个非空行开新块
+      continue;
+    }
+    if (errorBlocks.length === 0) {
+      stdoutLines.push(line);
+      continue;
+    }
+    if (errorBlocks[errorBlocks.length - 1] === '\u0000') {
+      if (line.trim() === '') continue; // 块与块之间的空行不进任何一份
+      errorBlocks.push(line);
+      continue;
+    }
+    const last = errorBlocks.length - 1;
+    errorBlocks[last] = errorBlocks[last] === '' ? line : `${errorBlocks[last]}\n${line}`;
+  }
+  const stderr = errorBlocks
+    .filter((block) => block !== '' && block !== '\u0000')
+    .join('\n');
+  return { stdout: stdoutLines.join('\n'), stderr };
 }
 
 /** PowerShell 单引号字面量里唯一需要转义的是单引号本身（用两个单引号） */
@@ -551,6 +827,116 @@ function quoteSingle(text: string): string {
 export function buildSessionRoundScript(command: string, workdir: string | null): string {
   if (workdir === null) return command;
   return `Set-Location -LiteralPath '${quoteSingle(workdir)}'\n${command}`;
+}
+
+// ──────────────────────────────── 临时脚本（v52 的 lang 通道） ────────────────────────────────
+
+/**
+ * 本次调用放临时脚本的目录：**workdir 之下**（`<workdir>/.irmia-tmp`）。
+ *
+ * 为什么不是 `os.tmpdir()`：临时文件的落点必须过**同一道活动边界**。
+ * `workdir` 在走到这里之前已经过 `screenBoundary`（`workspace` 模式下必须在边界内）
+ * 与 `assertWorkdir`（必须存在且是目录），所以它是"本次调用本来就允许活动的地方"——
+ * 往它下面写一个隐藏目录，边界判据一个都不用重写，也不会与用户现场的文件撞名。
+ * 用系统 temp 则要多一套"临时目录算不算在边界内"的判据，那正是 `boundary.ts` 文件头
+ * 点名不许再出现第二份的东西。
+ */
+export function tmpScriptDirOf(workdir: string): string {
+  return join(workdir, TMP_SCRIPT_DIR_NAME);
+}
+
+/**
+ * 临时脚本名：**唯一**（同一次调用重入也不会撞）。
+ *
+ * 三段拼出来：工具名 + 随机 uuid（主段，进程内与跨进程都唯一）+ 时间戳（36 进制，给人读）。
+ * 为什么不用 `callId`：它由宿主给，格式不在工具层手里；而"两次调用撞同一个文件名"
+ * 的后果是**她跑的是别人那一段脚本**——那是这个功能里最不能出的错。
+ */
+export function tmpScriptPathOf(workdir: string, lang: PwshLang): string {
+  const unique = randomUUID().replace(/-/g, '').slice(0, 16);
+  return join(tmpScriptDirOf(workdir), `pwsh-${lang}-${Date.now().toString(36)}-${unique}${LANG_SPECS[lang].suffix}`);
+}
+
+/**
+ * 删掉临时脚本（**异常路径也要删**，这是用户点名的判据之一）。
+ *
+ * 为什么退避重试：Windows 上子进程刚读完文件时可能短暂持有句柄（EBUSY/EPERM），
+ * 而"删不掉"的后果是 `.irmia-tmp` 里越攒越多她的脚本正文。重试 5 次仍失败**不抛错**
+ * ——命令已经跑完了，为了删文件把结果变成错误是本末倒置——改为经 `onWarning` 如实告知。
+ */
+async function removeTmpScript(path: string, onWarning: (message: string) => void): Promise<void> {
+  let delay = 20;
+  for (let attempt = 0; attempt < TMP_SCRIPT_UNLINK_ATTEMPTS; attempt += 1) {
+    try {
+      await unlink(path);
+      return;
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ENOENT') return;
+      if (attempt === TMP_SCRIPT_UNLINK_ATTEMPTS - 1) {
+        onWarning(
+          `临时脚本删不掉（${path}）：${err instanceof Error ? err.message : String(err)}。`
+          + '它留在了上一次调用的工作目录下，可以手动清理。',
+        );
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+  }
+}
+
+/** 目录空就顺手删掉：不空（别的调用的脚本还在）就留着，rmdir 失败属于正常 */
+async function removeTmpDirIfEmpty(dir: string): Promise<void> {
+  try {
+    await rmdir(dir);
+  } catch {
+    /* 不空 / 不存在 / 被占用：都不是错误 */
+  }
+}
+
+/**
+ * 解释器探测（python / node）：跑一次 `--version`，成功即认定可用。
+ *
+ * 探测结果**按语言缓存**（进程生命周期内一次）：与 `detectPowerShell` 的缓存同一条纪律
+ * ——"这台机器有没有 python"在一次会话里不会变，而每次调用都起一个进程问版本是纯浪费。
+ * 找不到时**不静默降级**（不会偷偷拿 PowerShell 去跑它）：回执里如实说清"这台机器上没有
+ * 可用的 python"，因为拿错语言跑一段脚本的结果是"看起来跑了、结果全错"。
+ */
+async function probeInterpreter(exe: string): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(value);
+    };
+    let child: SingleShotChild;
+    try {
+      child = spawn(exe, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    } catch {
+      resolve(null);
+      return;
+    }
+    timer = setTimeout(() => {
+      killTree(child.pid);
+      finish(null);
+    }, INTERPRETER_PROBE_TIMEOUT_MS);
+    let out = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (data: string) => { out += data; });
+    child.stdout.on('error', () => undefined);
+    // 有的解释器把版本写 stderr（node 早期版本、部分 python 发行版），两路一起收
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (data: string) => { out += data; });
+    child.stderr.on('error', () => undefined);
+    child.on('error', () => finish(null));
+    child.on('close', () => {
+      const version = out.trim().split(/\r?\n/, 1)[0]?.trim() ?? '';
+      finish(version === '' ? null : version);
+    });
+  });
 }
 
 // ──────────────────────────────── 探测 ────────────────────────────────
@@ -740,6 +1126,20 @@ export interface ExecOutcome {
   sessionLost: boolean;
   /** 捕获层丢弃的字符数 */
   droppedChars: number;
+  /**
+   * 进程根本没起来（解释器找不到、脚本文件写不出去……）。
+   *
+   * 为什么要与 `exitCode !== 0` 分开：这两件事对她要做的事完全不同——
+   * "脚本跑了、退出码 1"是代码有问题（读 stderr 改代码），
+   * "进程没起来"是环境有问题（换解释器或让别人装一个）。混成一种会让她去改一段没错的代码。
+   */
+  spawnFailed?: boolean;
+  /**
+   * 这一趟实际花了多少毫秒（**三档同一套读数**，IRMIA 2026-10-12 点名的第 1 条）：
+   * 她要看的是"这次是慢在命令本身还是慢在别处"，而"三档各给一套格式"等于让她记三套。
+   * 缺省 null = 没量到（不该出现，只是别编一个数出来）。
+   */
+  elapsedMs?: number | null;
 }
 
 function emptyOutcome(patch: Partial<ExecOutcome> = {}): ExecOutcome {
@@ -752,15 +1152,18 @@ function emptyOutcome(patch: Partial<ExecOutcome> = {}): ExecOutcome {
     sessionRestarted: false,
     sessionLost: false,
     droppedChars: 0,
+    elapsedMs: null,
     ...patch,
   };
 }
 
-/** 把捕获结果整理成给模型看的文本：输出 + stderr + 退出码 + 状态说明 */
+/** 把捕获结果整理成给模型看的文本：输出 + stderr + 状态行（退出码 · 耗时）+ 截断说明 */
 export function composeContent(outcome: ExecOutcome): string {
   const blocks: string[] = [];
   const stdout = normalizeNewlines(stripClixml(outcome.stdout));
-  const stderr = normalizeNewlines(stripClixml(outcome.stderr));
+  // stderr 走**解码**（不是丢弃）：PowerShell 的错误在管道上会被 CLIXML 包一层，
+  // 而另两档的报错是纯文本——三档要同一套读数，见 decodeClixmlErrors 的注释
+  const stderr = normalizeNewlines(decodeClixmlErrors(outcome.stderr));
 
   if (stdout.trim() !== '') {
     blocks.push(truncateOutput(stdout).text);
@@ -776,9 +1179,15 @@ export function composeContent(outcome: ExecOutcome): string {
       + '如需完整内容，请把结果写入文件后再分段读取。',
     );
   }
-  if (outcome.exitCode !== null) {
-    blocks.push(`[exit code: ${outcome.exitCode}]`);
+  // 状态行：**三档（pwsh / python / node）逐字同一套**（IRMIA 2026-10-12 的第 1 条：
+  // "不想记三套"）。耗时与退出码贴在**同一行**：它们是同一件事的两半（"跑完了、多久、成没成"），
+  // 拆成两行会让每条回执多占一行上下文，而 `[exit code: N]` 这个前缀有既有用例钉着，不能改形状。
+  const status: string[] = [];
+  if (outcome.exitCode !== null) status.push(`exit code: ${outcome.exitCode}`);
+  if (typeof outcome.elapsedMs === 'number' && Number.isFinite(outcome.elapsedMs)) {
+    status.push(`${outcome.elapsedMs}ms`);
   }
+  if (status.length > 0) blocks.push(`[${status.join(' · ')}]`);
   return blocks.join('\n');
 }
 
@@ -790,6 +1199,18 @@ interface SessionRound {
   endRegex: RegExp;
   stdout: BoundedText;
   stderr: BoundedText;
+  /**
+   * 这一轮开始计时的那一刻（IRMIA 2026-10-12 第 1 条：三档同一套读数）。
+   *
+   * 计时起点刻意放在**写完那一行 base64 之后**：持久会话的启动/重建代价不属于"这条命令
+   * 跑了多久"，把它算进去会让第一条命令看起来比实际慢一个数量级，而她要读的正是
+   * "这条命令本身慢不慢"。
+   */
+  startedAt: number;
+  /** 收尾窗口长度（毫秒）；0 = 认出标记就立刻兑现（测试用，见 SESSION_STDERR_SETTLE_MS） */
+  windowMs: number;
+  /** 已经兑现过了（收尾窗口结束时再判一次，避免超时/中断那两条路已经被处理过） */
+  settled: boolean;
 }
 
 /**
@@ -808,6 +1229,8 @@ class PersistentSession {
    * 迟到事件会把新一轮调用误判成会话终止（实测踩过：新会话永远只能拿到空输出）。
    */
   #generation = 0;
+  /** 收尾窗口是否已经在等（见 `#trySettle` 与 SESSION_STDERR_SETTLE_MS） */
+  #settling = false;
 
   constructor(probe: PowerShellProbe) {
     this.#probe = probe;
@@ -886,17 +1309,40 @@ class PersistentSession {
   #trySettle(): void {
     const round = this.#round;
     if (round === null) return;
-    // 边界只在 stdout 上找：bootstrap 已把 PowerShell 的 error stream 并进 stdout，
-    // 因此 stderr 只剩 native 子进程的输出、不含标记，按本轮全部内容取即可
+    // 结束标记只在 stdout 上找（它是 bootstrap 自己写出来的一行）。
     const stdoutMatch = round.endRegex.exec(round.stdout.window());
     if (stdoutMatch === null) return;
+    // 已经认出标记了，但**先别兑现**：见下面 `SESSION_STDERR_SETTLE_MS` 那段。
+    if (this.#settling) return;
+    this.#settling = true;
 
-    round.resolve(emptyOutcome({
-      stdout: cutBeforeMarker(round.stdout, stdoutMatch),
-      stderr: round.stderr.text(),
-      exitCode: Number(stdoutMatch[1]),
-      droppedChars: round.stdout.droppedChars + round.stderr.droppedChars,
-    }));
+    const settle = (): void => {
+      this.#settling = false;
+      // 这一轮可能已经结束（超时/中断/会话死亡都走 finish）
+      if (this.#round !== round || round.settled) return;
+      // **在兑现前重新读一次两路缓冲**：标记那一行写出来之后，stderr 的最后一段可能还在
+      // 管道里（见 SESSION_STDERR_SETTLE_MS 的注释）。`round` 对象是同一个，所以这里
+      // 拿到的是"窗口期结束时"的完整内容，而不是"认出标记那一刻"的快照。
+      //
+      // 错误块（bootstrap 用标记搬过来的那一份）在这里切出来搬进 `stderr`：
+      // 于是 `composeContent` 对三档**逐字同一套**（stdout / [stderr] / 状态行），
+      // 而 PowerShell 那一档的报错也不会因为 stderr 管道的延迟而丢掉。
+      const split = extractSessionErrors(cutBeforeMarker(round.stdout, stdoutMatch));
+      const nativeStderr = round.stderr.text();
+      const stderr = split.stderr === '' ? nativeStderr : (nativeStderr === '' ? split.stderr : `${nativeStderr}${split.stderr}`);
+      round.resolve(emptyOutcome({
+        stdout: split.stdout,
+        stderr,
+        exitCode: Number(stdoutMatch[1]),
+        droppedChars: round.stdout.droppedChars + round.stderr.droppedChars,
+      }));
+    };
+
+    if (round.windowMs <= 0) {
+      settle();
+      return;
+    }
+    setTimeout(settle, round.windowMs).unref();
   }
 
   /**
@@ -920,6 +1366,9 @@ class PersistentSession {
       endRegex: new RegExp(`${END_MARKER_PREFIX}${this.marker}__ (-?\\d+)`),
       stdout: new BoundedText(),
       stderr: new BoundedText(),
+      startedAt: Date.now(),
+      windowMs: SESSION_STDERR_SETTLE_MS,
+      settled: false,
     };
 
     let timer: NodeJS.Timeout | null = null;
@@ -928,10 +1377,13 @@ class PersistentSession {
     const finish = (value: ExecOutcome): void => {
       if (settled) return;
       settled = true;
+      round.settled = true;
+      this.#settling = false;
       if (timer !== null) clearTimeout(timer);
       if (onAbort !== null) request.signal.removeEventListener('abort', onAbort);
       this.#round = null;
-      resolveOutcome(value);
+      // 耗时在这里补齐（三档同一套读数）：各条 finish 路径不必各自记一遍时刻
+      resolveOutcome({ ...value, elapsedMs: value.elapsedMs ?? Date.now() - round.startedAt });
     };
     // 数据到达路径（#trySettle / #onExit）也走 finish，享受同一套清理
     round.resolve = finish;
@@ -1015,24 +1467,66 @@ interface SingleShotOptions {
   signal: AbortSignal;
 }
 
-/** 单次执行：独立进程，隔离干净，不共享任何会话状态 */
-function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
-  return new Promise<ExecOutcome>((resolve) => {
-    const script = toEncodedCommand(buildSingleShotScript(options.command));
-    let child: SingleShotChild;
-    try {
-      child = spawn(
-        options.probe.exe,
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', script],
-        { cwd: options.workdir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
-      );
-    } catch (err) {
-      resolve(emptyOutcome({
-        stderr: `无法启动 ${options.probe.exe}：${err instanceof Error ? err.message : String(err)}`,
-      }));
-      return;
-    }
+/** 一个已在跑的独立子进程（单次执行与临时脚本共用同一套输出/超时/杀树管理） */
+interface SpawnedChild {
+  child: SingleShotChild;
+  /** spawn 时的异常（解释器不存在等）；非 null 时 `child` 是废的，调用方只该用这个字符串 */
+  failure: string | null;
+}
 
+/**
+ * 子进程的环境：**强制 UTF-8 输出**（`PYTHONIOENCODING` / `PYTHONUTF8`）。
+ *
+ * 为什么必须有（v52 实测踩到）：Windows 上 python 的 stdout 默认走**控制台代码页**
+ * （这台机器是 GBK/936），于是 `print("中文")` 出来的字节以 utf-8 解码后是乱码
+ * （实测回执里就是 `�������`）。PowerShell 那条路早就用 `[Console]::OutputEncoding=UTF8`
+ * 抹平了同一件事（文件头第 3 条），python 这一档缺的就是那一句的等价物。
+ * node 的 `console.log` 本来就写 utf-8，这两个环境变量对它无害。
+ */
+function utf8Env(): NodeJS.ProcessEnv {
+  return { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
+}
+
+/** 起一个独立子进程；**永不抛出**（spawn 的同步异常折成 `failure` 文本） */
+function spawnChild(exe: string, args: readonly string[], workdir: string): SpawnedChild {
+  try {
+    return {
+      child: spawn(exe, [...args], {
+        cwd: workdir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: utf8Env(),
+      }),
+      failure: null,
+    };
+  } catch (err) {
+    return {
+      child: null as unknown as SingleShotChild,
+      failure: `无法启动 ${exe}：${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * 一个独立子进程的**完整生命周期**：收输出（有界）→ 超时/中断杀树 → 兑现一个 `ExecOutcome`。
+ *
+ * 抽出来是因为 v52 有三条路要它（pwsh 单次、python、node），而这三条路的**超时与输出管理
+ * 必须逐字相同**——用户点名的那条判据是"沿用现有基建"：`PWSH_TIMEOUT_MS 60s` +
+ * `kill-tree.ts` 的 `taskkill /T /F` + 头 8k 尾 2k + 2 MiB 捕获上限。
+ * 三份复制实现迟早会漂成"某一条路上超时杀不掉"或"某一条路截断口径不同"。
+ */
+function superviseChild(spawned: SpawnedChild, options: {
+  exe: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+}): Promise<ExecOutcome> {
+  if (spawned.failure !== null) {
+    return Promise.resolve(emptyOutcome({ stderr: spawned.failure, spawnFailed: true, elapsedMs: 0 }));
+  }
+  const child = spawned.child;
+  // 计时起点在 spawn 之后、注册监听之前（这段差值在微秒级，且它属于"这一趟"）
+  const startedAt = Date.now();
+  return new Promise<ExecOutcome>((resolve) => {
     const stdout = new BoundedText();
     const stderr = new BoundedText();
     let settled = false;
@@ -1048,6 +1542,7 @@ function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
         stdout: stdout.text(),
         stderr: stderr.text(),
         droppedChars: stdout.droppedChars + stderr.droppedChars,
+        elapsedMs: Date.now() - startedAt,
         ...patch,
       }));
     };
@@ -1058,7 +1553,8 @@ function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
     child.stderr.on('data', (data: string) => stderr.push(data));
     child.stdout.on('error', () => undefined);
     child.stderr.on('error', () => undefined);
-    child.on('error', (err: Error) => finish({ stderr: err.message }));
+    // 'error' 事件（ENOENT 等）与 spawn 的同步异常是两条路，都要落到 spawnFailed
+    child.on('error', (err: Error) => finish({ stderr: err.message, spawnFailed: true }));
     child.on('close', (code: number | null) => finish({ exitCode: code }));
 
     timer = setTimeout(() => {
@@ -1073,6 +1569,169 @@ function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/** 单次执行：独立进程，隔离干净，不共享任何会话状态 */
+function runSingleShot(options: SingleShotOptions): Promise<ExecOutcome> {
+  const script = toEncodedCommand(buildSingleShotScript(options.command));
+  const spawned = spawnChild(
+    options.probe.exe,
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', script],
+    options.workdir,
+  );
+  return superviseChild(spawned, {
+    exe: options.probe.exe,
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+  });
+}
+
+// ──────────────────────────────── 临时脚本执行（v52） ────────────────────────────────
+
+/** 一次"写临时文件 → 按语言跑 → 删文件"的全部输入 */
+export interface ScriptRunRequest {
+  lang: PwshLang;
+  /** 脚本正文（整段，多行、引号、中文都不需要转义） */
+  script: string;
+  workdir: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+  /**
+   * PowerShell 档要探测出来的 shell；**另两档不用它**（各探各的解释器），可以不传。
+   *
+   * 为什么是可选而不是必填：python / node 那两档一个 PowerShell 字节都不用——
+   * 强制调用方先探一次 PowerShell 会在这台没装 PS7 的机器上白白拒掉两档能力
+   * （见 handler 里那段"lazy 探测"的注释）。
+   */
+  probe?: PowerShellProbe | undefined;
+  onWarning: (message: string) => void;
+}
+
+/** 一次脚本执行的结果：`ExecOutcome` + "这次到底用了哪个解释器、文件在哪" */
+export interface ScriptRunOutcome extends ExecOutcome {
+  /** 实际用的解释器（`C:\...\python.exe` 或 `python`），探测失败时为 null */
+  interpreter: string | null;
+  /** 解释器的版本行（探测得到时），回执里贴给她看 */
+  interpreterVersion: string | null;
+  /** 脚本落盘路径（跑完已删除；回执里给出来是为了让她能定位"是哪一段脚本"） */
+  scriptPath: string | null;
+}
+
+/**
+ * 写临时脚本 → 按 `lang` 跑它 → **无论如何删掉它**。
+ *
+ * 为什么这一档统一走文件（连 `pwsh` 也走）：用户点名的判据是"她不用先把脚本写成文件，
+ * 直接把整段代码交给它就能跑"，而**同一个功能在三档之间不该有三种形状**——
+ * `pwsh` 档若内联、另两档走文件，回执要分两种写法、临时文件那条清理纪律也只盖一半。
+ * 代价是一条 PowerShell 多一次约 1ms 的落盘，换来的是"三档同源"。
+ *
+ * 删除放在 `finally`：异常路径（超时、中断、解释器起不来、脚本语法错）**一样要删**。
+ */
+export async function runScriptFile(request: ScriptRunRequest): Promise<ScriptRunOutcome> {
+  const base: ScriptRunOutcome = {
+    ...emptyOutcome(),
+    interpreter: null,
+    interpreterVersion: null,
+    scriptPath: null,
+  };
+
+  const dir = tmpScriptDirOf(request.workdir);
+  const scriptPath = tmpScriptPathOf(request.workdir, request.lang);
+
+  // 解释器：pwsh 用本工具探测出来的 shell（必填），另两档按各自的名字链探（结果缓存）
+  let exe: string;
+  let version: string | null;
+  if (request.lang === 'pwsh') {
+    const shell = request.probe;
+    if (shell === undefined) {
+      return { ...base, stderr: '内部错误：pwsh 档缺少 shell 探测结论。', spawnFailed: true };
+    }
+    exe = shell.exe;
+    version = shell.version;
+  } else {
+    const resolved = await resolveInterpreter(request.lang);
+    if (resolved === null) {
+      return {
+        ...base,
+        stderr: `找不到可用的 ${LANG_SPECS[request.lang].label} 解释器（试过：`
+          + `${LANG_INTERPRETERS[request.lang].join(' / ')}）。`
+          + '这一段脚本没有执行；请让人在这台机器上装一个，或改用 lang 的其它取值。',
+        spawnFailed: true,
+      };
+    }
+    exe = resolved.exe;
+    version = resolved.version;
+  }
+
+  try {
+    await mkdir(dir, { recursive: true });
+    // PowerShell 的 `.ps1` **必须带 UTF-8 BOM**：不带 BOM 时 PowerShell 按**系统代码页**
+    // 解码文件（这台机器是 GBK），于是脚本里的中文在解析期就已经是乱码
+    // （v52 实测：`Write-Output "临时脚本档"` 回执里变成 `��ʱ�ű���`）。
+    // 这与"命令行里走 base64"是同一件事的两条通道——那条通道从不经过文件编码，
+    // 这一条必须显式声明 BOM。python/node 两档不需要（它们的无 BOM 默认就是 UTF-8）。
+    //
+    // 前后各一句 PowerShell 的话，两句都是 base64 通道里 `SCRIPT_HEADER` /
+    // `buildSingleShotScript` 已经有的东西，文件通道必须同样有（否则同一条命令走两条路
+    // 会得到不同的编码与不同的退出码）：
+    //   · 前置 `[Console]::OutputEncoding=UTF8`：文件头第 3 条，解决 5.1 的中文乱码；
+    //   · 后置 `exit $LASTEXITCODE`：`-File` 结束时 pwsh 不会把外部命令的退出码带出来
+    //     （实测：`cmd /c "exit 9"` 得到 `[exit code: 0]`），显式 exit 才能传出来。
+    const preamble = request.lang === 'pwsh' ? `${SCRIPT_HEADER}\n` : '';
+    const epilogue = request.lang === 'pwsh'
+      ? '\nif($null -ne $LASTEXITCODE){exit $LASTEXITCODE}\n'
+      : '';
+    const bom = request.lang === 'pwsh' ? '\uFEFF' : '';
+    await writeFile(scriptPath, `${bom}${preamble}${request.script}${epilogue}`, 'utf8');
+  } catch (err) {
+    return {
+      ...base,
+      stderr: `临时脚本写不出去（${scriptPath}）：${err instanceof Error ? err.message : String(err)}`,
+      spawnFailed: true,
+    };
+  }
+
+  try {
+    const args: string[] = request.lang === 'pwsh'
+      ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
+      : [scriptPath];
+    const spawned = spawnChild(exe, args, request.workdir);
+    const outcome = await superviseChild(spawned, {
+      exe,
+      timeoutMs: request.timeoutMs,
+      signal: request.signal,
+    });
+    return { ...outcome, interpreter: exe, interpreterVersion: version, scriptPath };
+  } finally {
+    await removeTmpScript(scriptPath, request.onWarning);
+    await removeTmpDirIfEmpty(dir);
+  }
+}
+
+/** 探测得到的解释器（进程内按名字缓存；同名共享同一次探测） */
+const interpreterCache = new Map<string, Promise<{ exe: string; version: string } | null>>();
+
+function probeInterpreterCached(name: string): Promise<{ exe: string; version: string } | null> {
+  let pending = interpreterCache.get(name);
+  if (pending === undefined) {
+    pending = probeInterpreter(name).then((version) => (version === null ? null : { exe: name, version }));
+    interpreterCache.set(name, pending);
+  }
+  return pending;
+}
+
+/** 清空解释器探测缓存（测试用：与 `resetPowerShellProbeCache` 同一条纪律） */
+export function resetInterpreterProbeCache(): void {
+  interpreterCache.clear();
+}
+
+/** 按名字链找一个可用解释器（找不到返回 null，由调用方如实报错，不降级） */
+async function resolveInterpreter(lang: Exclude<PwshLang, 'pwsh'>): Promise<{ exe: string; version: string } | null> {
+  for (const name of LANG_INTERPRETERS[lang]) {
+    const found = await probeInterpreterCached(name);
+    if (found !== null) return found;
+  }
+  return null;
 }
 
 // ──────────────────────────────── 工具工厂 ────────────────────────────────
@@ -1094,6 +1753,25 @@ interface PreparedCall {
    * string = 只允许在这个根内。决议来自 `tools/boundary.ts`，本文件不自己判。
    */
   boundary: string | null;
+  /** v52：这段脚本是什么语言。`pwsh` = 既有那条路（持久会话），另两档走临时文件 */
+  lang: PwshLang;
+  /** 她是不是**显式**要了持久会话（`lang` 非 pwsh 时的那句拒绝看它，不看缺省值） */
+  explicitPersistent: boolean;
+}
+
+/**
+ * `lang` 取值校验。写在本地而不是加进 `types.ts`：`lang` 目前只有这一件工具在用，
+ * 而"取值表只有一处"这条纪律靠的是 `PWSH_LANGS` 本身（`optionalString` + 这张表校验）。
+ * 报错文案要把**三个取值都摆出来**——与 timer 的 `action` 同一条口径：给不全她只能瞎试。
+ */
+function optionalLang(args: Record<string, unknown>): PwshLang {
+  const raw = optionalString(args, 'lang', { maxLength: 32 });
+  if (raw === undefined) return PWSH_DEFAULT_LANG;
+  if ((PWSH_LANGS as readonly string[]).includes(raw)) return raw as PwshLang;
+  throw new ToolArgumentError(
+    'lang',
+    `lang 只能是 ${PWSH_LANGS.join(' / ')} 之一，收到 ${JSON.stringify(raw)}`,
+  );
 }
 
 export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinition {
@@ -1144,8 +1822,13 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
       min: PWSH_MIN_TIMEOUT_MS,
       max: PWSH_MAX_TIMEOUT_MS,
     });
-    const persistent = optionalBoolean(args, 'persistent', true);
+    const lang = optionalLang(args);
+    const persistent = optionalBoolean(args, 'persistent', lang === PWSH_DEFAULT_LANG);
     const background = optionalBoolean(args, 'runInBackground', false);
+    // 「她是不是**显式**要了持久会话」在这里定一次（`lang` 非 pwsh 时那句拒绝的判据）。
+    // 为什么不是 `persistent === true`：缺省值本身在 pwsh 档就是 true，拿它判会把
+    // **没提这件事**的调用也拒掉——那是把默认值当成她的要求。
+    const explicitPersistent = args['persistent'] !== undefined && args['persistent'] !== null;
     return {
       command,
       workdir,
@@ -1154,6 +1837,8 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
       persistent,
       background,
       boundary,
+      lang,
+      explicitPersistent,
     };
   };
 
@@ -1235,8 +1920,11 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
       );
     }
 
-    // 命令黑名单：命中即拒绝，并把原因与替代路径回给模型
-    const forbidden = screenCommand(call.command);
+    // 命令黑名单：命中即拒绝，并把原因与替代路径回给模型。
+    // v52：判据按语言分组（`screenCommand` 的第二参）——PowerShell 那 13 条语法规则
+    // 拿去套 python/node 正文既会漏（`shutil.rmtree` 一句都命不中）又会误伤
+    // （正文里那句 `"Remove-Item -Recurse -Force"` 只是字符串）。见 FORBIDDEN_PATTERNS。
+    const forbidden = screenCommand(call.command, call.lang);
     if (forbidden !== null) {
       return errorResult(
         `命令被拒绝（规则 ${forbidden.id}）：${forbidden.reason}。`
@@ -1262,16 +1950,33 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
       return errorResult(workdirError, TOOL_ERROR_CODES.invalidArgs);
     }
 
-    let resolved: PowerShellProbe;
-    try {
-      resolved = await probe();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return errorResult(message, TOOL_ERROR_CODES.noRuntime);
+    // `lang` 非 pwsh 时 `persistent` 没有意义：python / node 没有"驻留解释器 + 跨调用变量"
+    // 这回事（每一档都是一段独立脚本）。**缺省值本身已经按语言分开**（pwsh 档 true、另两档 false），
+    // 所以这里拒的只有一种情形：她**显式**要了持久会话。**静默忽略是最坏的一种**——
+    // 她会以为上一次 `lang:python` 里定义的变量还在。
+    if (call.lang !== PWSH_DEFAULT_LANG && call.explicitPersistent && call.persistent) {
+      return errorResult(
+        `lang=${call.lang} 没有持久会话：这一档每次都是一段独立脚本（新进程，不继承上一次的变量与 cwd）。`
+        + '要么去掉 persistent，要么把 lang 换回 pwsh（那一档默认复用同一个 shell 会话）。',
+        TOOL_ERROR_CODES.invalidArgs,
+      );
+    }
+
+    // 探测：`lang` 非 pwsh 时**不探 PowerShell**——python / node 那两档一个 PowerShell
+    // 字节都不用（临时文件由 node 自己写，解释器也自己探）。这条 laziness 是有意的：
+    // 假装"跑 python 也需要先有 PowerShell"会在这台没装 PS7 的机器上白白拒掉两档能力。
+    let resolved: PowerShellProbe | undefined;
+    if (call.lang === 'pwsh') {
+      try {
+        resolved = await probe();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return errorResult(message, TOOL_ERROR_CODES.noRuntime);
+      }
     }
 
     const extra: string[] = [];
-    if (resolved.warning !== null && !warningDelivered) {
+    if (resolved !== undefined && resolved.warning !== null && !warningDelivered) {
       warningDelivered = true;
       extra.push(resolved.warning);
     }
@@ -1296,13 +2001,18 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
         warn(`job/started 回调抛错：${err instanceof Error ? err.message : String(err)}`);
       }
 
-      // 刻意不接 ctx.signal：后台任务的语义就是脱离本 turn 独立跑完
-      void runSingleShot({
-        probe: resolved,
-        command: call.command,
+      // 刻意不接 ctx.signal：后台任务的语义就是脱离本 turn 独立跑完。
+      // v52 起后台档也走**临时脚本**（与前台三条同源）：脚本写盘 → 跑 → 删，
+      // 于是一个后台 python/node 任务与一个前台 python/node 调用是**同一套输出管理、
+      // 同一套超时杀树、同一套清理**。后台任务本来就不共享持久会话，改这一档不损失能力。
+      void runScriptFile({
+        lang: call.lang,
+        script: call.command,
         workdir: call.workdir,
         timeoutMs: maxBackgroundMs,
         signal: new AbortController().signal,
+        ...(resolved === undefined ? {} : { probe: resolved }),
+        onWarning: warn,
       }).then((outcome) => finishBackground(jobId, outcome, call.command));
 
       const note = call.persistent
@@ -1316,7 +2026,27 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
     }
 
     let outcome: ExecOutcome;
-    if (call.persistent) {
+    /** 临时脚本通道（lang ≠ pwsh）才会填：这次用的是哪个解释器、脚本落在哪 */
+    let scriptRun: ScriptRunOutcome | null = null;
+    // 走临时脚本档的两种情形：① `lang` 不是 pwsh；② `lang=pwsh` 但她明确不要持久会话
+    // （`persistent:false`）。后者从前是"单次 spawn + -EncodedCommand"，v52 起也写临时文件
+    // ——用户点名的判据之一是"**三档同源**"：同一个功能不该有三种形状，而临时文件那条
+    // "跑完必删"的清理纪律只盖一半就等于没盖（见 runScriptFile 的注释）。
+    if (resolved === undefined || !call.persistent) {
+      // python / node：写临时文件再跑（引号、换行、中文都不用她转义），跑完必删。
+      // 这两档**没有持久会话**——它们的语义是"一段独立脚本"，而 python/node 的
+      // "跨调用保持状态"本来就不存在（没有 shell 那样的驻留解释器约定）。
+      scriptRun = await runScriptFile({
+        lang: call.lang,
+        script: call.command,
+        workdir: call.workdir,
+        timeoutMs: call.timeoutMs,
+        signal: ctx.signal,
+        ...(resolved === undefined ? {} : { probe: resolved }),
+        onWarning: warn,
+      });
+      outcome = scriptRun;
+    } else {
       session ??= new PersistentSession(resolved);
       // 会话不在（首次启动或已死）就重建：重建只影响"状态丢失"的告知，不影响命令语义
       let restarted = false;
@@ -1332,14 +2062,6 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
         signal: ctx.signal,
       });
       if (restarted) outcome = { ...outcome, sessionRestarted: true };
-    } else {
-      outcome = await runSingleShot({
-        probe: resolved,
-        command: call.command,
-        workdir: call.workdir,
-        timeoutMs: call.timeoutMs,
-        signal: ctx.signal,
-      });
     }
 
     const content = composeContent(outcome);
@@ -1356,11 +2078,31 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
         + '上面是终止前拿到的输出；下一次调用会自动重建会话。',
       );
     }
-    // 「这次用的是哪个 shell」贴在最末（见文件头第 1 条）：首行必须留给命令自己的输出，
-    // 而这一行是元信息——模型要读它，但它不该挡住结果本身
+    // 「这一次到底跑的是什么」贴在最末（见文件头第 1 条）：首行必须留给命令自己的输出。
+    //
+    // `[shell]` **每一档都贴**（v30 的硬要求："每次调用的回执都说明这次用的是哪个 shell"，
+    // 有既有用例钉着）。非 pwsh 档另加一行 `[lang]`：那一档真正执行的是 python/node，
+    // 只说 shell 会让她以为这段 python 是被 PowerShell 跑的。
     notes.push(await shellLine());
+    if (scriptRun !== null) {
+      notes.push(
+        `[lang] ${call.lang} · ${scriptRun.interpreter ?? '解释器未找到'}`
+        + `${scriptRun.interpreterVersion === null ? '' : ` ${scriptRun.interpreterVersion}`}`
+        + `（整段脚本写进临时文件执行，跑完已删除：${scriptRun.scriptPath ?? '(未落盘)'}；`
+        + '这一档每次都是新进程，不继承持久会话的 cwd 与变量）',
+      );
+    }
     const body = `${content}\n${notes.join('\n')}`;
 
+    if (outcome.spawnFailed === true) {
+      // 进程没起来与"跑了但退出码非零"是两件事：这里如实说清是环境问题，不是她代码的问题
+      return errorResult(
+        `这一段脚本没有执行（进程没能启动）。\n${body}\n`
+        + '这是环境问题，不是脚本内容的问题：换一个 lang，或请人在这台机器上把缺的那个运行时装上。',
+        TOOL_ERROR_CODES.noRuntime,
+        extra,
+      );
+    }
     if (outcome.aborted) {
       return errorResult(`命令已取消（进程树已终止）。\n${body}`, TOOL_ERROR_CODES.aborted, extra);
     }
@@ -1379,9 +2121,8 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
   return {
     name: PWSH_TOOL_NAME,
     description:
-      '执行 PowerShell 命令，默认持久会话（cwd/变量/函数跨调用保持）。'
-      + 'runInBackground=true 转后台，立刻返回 jobId、完成唤醒你。'
-      + '输出按头 8k 尾 2k 截断。列目录用 Get-ChildItem。',
+      '把整段脚本交给它跑（多行/引号/中文不用转义）：lang 选 pwsh(默认)/python/node，'
+      + 'pwsh 保持会话 cwd 与变量、另两档每次新进程。超时 60s，输出头 8k 尾 2k。',
     parameters: {
       type: 'object',
       properties: {
@@ -1390,8 +2131,25 @@ export function createPwshTool(options: PwshToolOptions = {}): PwshToolDefinitio
         // Get-ChildItem"这半句要花 6——两件事放在同一格里必然顶线。挪进参数描述**不省常驻
         // 开销**（参数 schema 同样随每次请求发送），但它是这句话本来就最该在的地方（黑名单
         // 判的就是 command 这一格），也让描述那条线重新有了余量。
-        command: { type: 'string', description: '要执行的 PowerShell 命令文本，可多行；危险命令会被拒并说明原因' },
-        workdir: { type: 'string', description: '工作目录；省略则继承持久会话当前目录（首轮为工作根；只限工作目录模式为边界根）' },
+        //
+        // v52 又挪了一次，同一笔账、同一个方向：新增 `lang` 与「列目录用 Get-ChildItem」
+        // 都要留在描述里就会顶线。留哪一句的判据是**她常常要用的那句**：「整段脚本怎么交」
+        // 每次调用都要用一次，"列目录用 Get-ChildItem"一个月用不上一次（`safe_read` 传目录
+        // 已经能列，v42 并进去的）⇒ 描述里留前者，后者进 `command` 的参数描述。
+        command: {
+          type: 'string',
+          description: '整段脚本正文（可多行）；危险命令会被拒并说明原因。列目录用 Get-ChildItem',
+        },
+        lang: {
+          type: 'string',
+          enum: [...PWSH_LANGS],
+          // 三个取值写全（`enum` 里也有，但参数描述是她"决定填哪一格"时读到的那一行）。
+          // "每次新进程"与"cwd 不跟 shell 会话"是**会用错**的那两格：python/node 没有
+          // 持久会话，不说清她会以为上一次 `lang:python` 里定义的变量、或者 shell 里刚
+          // `Set-Location` 过的目录，在下一档里还算数——两者都不算数，实测用例钉着。
+          description: 'pwsh(默认) / python / node；后两档每次新进程、cwd 不跟 shell 会话',
+        },
+        workdir: { type: 'string', description: '工作目录；省略则用会话当前目录（首轮=工作根）' },
         timeoutMs: {
           type: 'integer',
           description: `超时毫秒数（${PWSH_MIN_TIMEOUT_MS}..${PWSH_MAX_TIMEOUT_MS}），默认 ${PWSH_TIMEOUT_MS}`,

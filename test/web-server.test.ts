@@ -3,7 +3,7 @@
  *
  * 覆盖 docs/frontend.md §4 的读写 API 契约与 docs/design.md §4.15 的 webhook 边界：
  *   · 读：projection / events 分页 / SSE（含 Last-Event-ID 补拉）/ budget / persona / replay / dashboard
- *   · 写：wake、review-resolve、requeue、persona-approve、config-update、timer-cancel
+ *   · 写：wake、review-resolve、requeue、persona-approve、config-update、timer-set、timer-cancel
  *   · 边界：认证闸、错误形状统一（`{error:{code,message}}`）、body ≤64KB、每源令牌桶、
  *          X-Confirm 危险操作确认
  *
@@ -156,6 +156,23 @@ async function setup(
   // 测试用的出口指向一个必然连不上的本地端口：webhook-test 的失败路径反而是可断言的
   config.alerts.webhookUrl = 'http://127.0.0.1:1/nowhere';
   const timers = new TimerStore(join(dataDir, 'timers.json'), { now });
+  // 与生产同形：`main.ts` 给 TimerStore 接了事件出口（`setEventSink`），于是 `set`/`cancel`
+  // 会落 `timer/set` / `timer/cancelled`。夹具不接的话，命令建出来的定时器只进内存表、
+  // 不进日志——`projection.timers` 恒为空，测出来的就不是生产行为（`timer-cancel` 那条用例
+  // 从前之所以手写 `timer/set` 事件，正是因为这一格空着）。
+  //
+  // ⚠ 如实记一笔未能复现的红（2026-10-12）：接上这个出口之后**第一次**跑本文件时出现过
+  // 4 条失败，随后连跑 3 次全绿，再没能复现（当时的输出没留住失败用例名）。
+  // 它大概率是那一次运行的偶发（本文件里的 webhook / SSE 那几条本来就带真实超时），
+  // 但**没有证据**说清是哪 4 条，所以不当作"已解释"——留在这里给下一个人。
+  timers.setEventSink({
+    set: (entry) => {
+      append('timer/set', entry);
+    },
+    cancelled: (timerId) => {
+      append('timer/cancelled', { timerId });
+    },
+  });
   const notifier = createNotifier({
     config: config.alerts,
     dataDir,
@@ -978,27 +995,203 @@ test('POST /api/commands/discard：省略理由时留一句默认的（留痕不
   assert.equal(fx.projection.deadLetters.length, 0);
 });
 
-test('POST /api/commands/timer-cancel：落 timer/cancelled 并移出投影', async (t) => {
+test('POST /api/commands/timer-cancel：一次撤销**恰好一条** timer/cancelled，并移出投影', async (t) => {
+  // 与生产同形：那条定时器是**经 TimerStore 排的**（内存表里有它，日志里有一条 timer/set）。
+  //
+  // 为什么不能像从前那样只手写一条 `timer/set` 事件：端点在 2026-10-12 之后**不再自己 append**
+  // `timer/cancelled`（事件交给宿主出口 `main.ts:934` 的 setEventSink 写，与 `timer-set` 同口径），
+  // 而"表里没有它"时 `cancel()` 不写事件——手写事件的夹具走不到生产那条路。
   const fx = await setup(t);
-  fx.append('timer/set', {
-    timerId: 't_1', at: '2026-02-14T12:00:00.000Z', payload: { note: '每日复盘' },
+  const created = await fx.timers.set({
+    at: '2026-02-14T12:00:00.000Z',
+    payload: { note: '每日复盘' },
   });
-  assert.equal(fx.projection.timers.length, 1);
+  assert.equal(created.ok, true);
+  const timerId = created.ok ? created.id : '';
+  assert.equal(fx.projection.timers.length, 1, '排一条之后投影里就有它（宿主出口写的 timer/set）');
 
   const res = await call(fx, '/api/commands/timer-cancel', {
     method: 'POST',
-    body: { timerId: 't_1' },
+    body: { timerId },
   });
   assert.equal(res.status, 200);
   assert.equal(fx.projection.timers.length, 0);
-  assert.equal((await fx.readAll()).at(-1)!.type, 'timer/cancelled');
 
+  const events = await fx.readAll();
+  // ★ 这条是这次修的核心判据：**一次撤销恰好一条** `timer/cancelled`。
+  // 从前端点自己 append 一次、`timers.cancel()` 又让宿主出口写一次 ⇒ 生产里是两条
+  // （fold 幂等所以界面看不出来，但日志是唯一真相源，重复事件污染审计线）。
+  assert.equal(
+    events.filter((event) => event.type === 'timer/cancelled').length,
+    1,
+    '一次撤销只该留下一条 timer/cancelled：端点不许再自己写一条',
+  );
+  assert.equal(events.at(-1)!.type, 'timer/cancelled');
+  // 回执形状没变：seq 就是**那条真写进去的**事件（不是端点自己造的一条）
+  assert.equal((res.body as { seq: number }).seq, events.at(-1)!.seq);
+
+  // 反过面：撤一个**不在投影里**的 id ⇒ 404，且**零条**新事件
+  const beforeUnknown = (await fx.readAll()).length;
   const missing = await call(fx, '/api/commands/timer-cancel', {
     method: 'POST',
-    body: { timerId: 't_1' },
+    body: { timerId },
   });
   assert.equal(missing.status, 404);
   assert.equal(errorOf(missing).code, 'timer-not-found');
+  assert.equal((await fx.readAll()).length, beforeUnknown, '被拒的撤销不许留下任何事件');
+  assert.equal(fx.timers.list().length, 0);
+});
+
+test('POST /api/commands/timer-set：人直接排一条 ⇒ 落 timer/set、进投影、payload 带 by:human', async (t) => {
+  const fx = await setup(t);
+  const before = (await fx.readAll()).length;
+
+  const res = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: {
+      at: '2026-02-14T12:00:00+08:00',
+      why: '周三要交，我怕忘了',
+      note: '看一眼汇报材料定稿没有',
+      sid: 'qq:group:G1',
+    },
+  });
+  assert.equal(res.status, 200);
+  const body = res.body as { ok: boolean; timerId: string; at: string };
+  assert.equal(body.ok, true);
+  assert.ok(body.timerId.length > 0, '新号要回给界面');
+
+  const events = await fx.readAll();
+  // **恰好一条**：事件由 `TimerStore.set` 的宿主出口写（main.ts 的 setEventSink）。
+  // 这里多写一条 `timer/set` 就是两份事实，而界面的清单会把它数成两条。
+  assert.equal(events.length, before + 1, '建一条安排只该多一条事件');
+  assert.equal(events.at(-1)!.type, 'timer/set');
+
+  const entry = fx.projection.timers.find((timer) => timer.timerId === body.timerId);
+  assert.ok(entry, '新那条要进投影（界面下一拍就看得见，不必重启）');
+  assert.deepEqual(entry.payload, {
+    why: '周三要交，我怕忘了',
+    note: '看一眼汇报材料定稿没有',
+    sid: 'qq:group:G1',
+    // 来源自解释：界面据此把"人排的"与她排的分开，且不必改提示词（不付缓存钱）
+    by: 'human',
+  });
+  // 回执给的是**结算过的**时刻（存 UTC 带 Z），不是人给的那串原样
+  assert.equal(body.at, '2026-02-14T04:00:00.000Z');
+});
+
+test('POST /api/commands/timer-set：cron 型也行，回执给结算出的下一次到期', async (t) => {
+  const fx = await setup(t);
+  const res = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: { cron: '0 4 * * *', note: '读今天的素材、写流水账与日记' },
+  });
+  assert.equal(res.status, 200);
+  const body = res.body as { timerId: string; at: string; cron: string };
+  assert.equal(body.cron, '0 4 * * *', '周期那一条要说清它按什么重复');
+  assert.equal(body.at, fx.timers.get(body.timerId)!.at, '回执里的时刻就是表里那个（一处判据）');
+  // 选填的两格缺了就是缺了：why 空串、sid null（本机那一拍，不是"发到某个会话"）
+  assert.deepEqual(fx.timers.get(body.timerId)!.payload, {
+    why: '',
+    note: '读今天的素材、写流水账与日记',
+    sid: null,
+    by: 'human',
+  });
+});
+
+test('POST /api/commands/timer-set：时刻/内容缺格与非法时刻一律拒，且零事件', async (t) => {
+  const fx = await setup(t);
+  const before = (await fx.readAll()).length;
+
+  // ① 两个时刻都不给
+  const noTime = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: { note: '看一眼材料' },
+  });
+  assert.equal(noTime.status, 400);
+  assert.match(errorOf(noTime).message, /缺少时刻/);
+
+  // ② 没有"到点做什么"：到点她看见的就是这一句，没有它等于叫醒她之后什么都不说
+  const noNote = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: { at: '2026-02-14T12:00:00+08:00' },
+  });
+  assert.equal(noNote.status, 400);
+  assert.match(errorOf(noNote).message, /缺少 note/);
+
+  // ③ 时刻没有时区：`TimerStore.set` 拒收（无人值守场景里本地时间是隐患），原因原样转述
+  const noZone = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: { at: '2026-02-14T12:00:00', note: '看一眼材料' },
+  });
+  assert.equal(noZone.status, 400);
+  assert.equal(errorOf(noZone).code, 'timer-set-rejected');
+  assert.match(errorOf(noZone).message, /带时区/);
+
+  // ④ cron 非法
+  const badCron = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: { cron: '不是 cron', note: '看一眼材料' },
+  });
+  assert.equal(badCron.status, 400);
+  assert.equal(errorOf(badCron).code, 'timer-set-rejected');
+
+  // 四条都被拒 ⇒ **一条事件都不许留下**（被拒的请求不该在真相源里留下痕迹）
+  assert.equal((await fx.readAll()).length, before, '拒掉的请求零事件');
+  assert.equal(fx.projection.timers.length, 0);
+  assert.equal(fx.timers.list().length, 0, '内存里的表也不许留下半条');
+});
+
+test('POST /api/commands/timer-set：v57 的四格（title/cat/dur/action）原样进 payload，dur 非法则拒', async (t) => {
+  const fx = await setup(t);
+  const res = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    body: {
+      at: '2026-02-14T12:00:00+08:00',
+      note: '读今天的素材',
+      why: '记忆要每天并一次流水账',
+      title: '每天的整理',
+      cat: 'routine',
+      dur: 45,
+      action: 'self',
+    },
+  });
+  assert.equal(res.status, 200);
+  const id = (res.body as { timerId: string }).timerId;
+  const entry = fx.timers.get(id);
+  assert.deepEqual(entry?.payload, {
+    why: '记忆要每天并一次流水账',
+    note: '读今天的素材',
+    sid: null,
+    // 四格照原样写进去（界面按它们画周历的块、分类 chip 与那张「Agent 自主工作」卡）
+    title: '每天的整理',
+    cat: 'routine',
+    dur: 45,
+    action: 'self',
+    by: 'human',
+  });
+
+  // 反过面：`dur` 不是正整数就拒（界面拿它当块高，0/负数/小数/字符串都画不出来）
+  const before = (await fx.readAll()).length;
+  for (const bad of [0, -30, 1.5, '30']) {
+    const rejected = await call(fx, '/api/commands/timer-set', {
+      method: 'POST',
+      body: { at: '2026-02-14T12:00:00+08:00', note: '看一眼材料', dur: bad },
+    });
+    assert.equal(rejected.status, 400, `dur=${JSON.stringify(bad)} 该被拒`);
+    assert.match(errorOf(rejected).message, /dur 要是正整数分钟/);
+  }
+  assert.equal((await fx.readAll()).length, before, '被拒的四次零事件');
+});
+
+test('POST /api/commands/timer-set：不带凭证同样 401（与其余命令一个门槛）', async (t) => {
+  const fx = await setup(t);
+  const res = await call(fx, '/api/commands/timer-set', {
+    method: 'POST',
+    token: null,
+    body: { at: '2026-02-14T12:00:00+08:00', note: '看一眼材料' },
+  });
+  assert.equal(res.status, 401);
+  assert.equal(fx.timers.list().length, 0);
 });
 
 test('POST /api/commands/persona-approve：应用提案、删提案、落 persona/updated{by:human}', async (t) => {

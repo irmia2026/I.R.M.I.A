@@ -17,6 +17,7 @@ import 'pages/logs_page.dart';
 import 'pages/memory_page.dart';
 import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
+import 'pages/schedule_page.dart';
 import 'pages/settings_page.dart';
 import 'password_prompt.dart';
 import 'session_store.dart';
@@ -80,7 +81,7 @@ class IrmiaApp extends StatefulWidget {
   State<IrmiaApp> createState() => _IrmiaAppState();
 }
 
-/// 页面条目：导航与页面宿主共用同一份定义（一级五项 + 底部「更多」的二级项），
+/// 页面条目：导航与页面宿主共用同一份定义（一级六项 + 底部「更多」的二级项），
 /// 一律按 id 定位页面而不是下标——增删或重排页面时不会错位。
 class PageEntry {
   const PageEntry({
@@ -104,7 +105,13 @@ class PageEntry {
 /// 默认落点：运行情况（壳的常驻首页）
 const defaultPageId = 'overview';
 
-/// 一级入口：只放高频功能，保持五项（docs/gui-design.md §3）
+/// 一级入口：只放高频功能。
+///
+/// ⚠ 条数与判据的变更史（值得留着，免得下一个人照着旧规矩把「日程」挪走）：
+/// `docs/gui-design.md` §3 原来钉的是"**保持五项**"，而用户 2026-10 明确要一页「日程」
+/// （设计稿 `Agent 近期安排 · 周历与清单.html`）——**那条判据被推翻了**，现在是六项。
+/// 被推翻的只是"五项"这个数；"一级只放高频功能、低频进「更多」"这条仍然有效
+/// （所以记忆/日志/设置还在二级）。
 final navPages = <PageEntry>[
   PageEntry(
     id: 'overview',
@@ -119,6 +126,13 @@ final navPages = <PageEntry>[
     icon: Icons.chat_bubble_outline_rounded,
     solidIcon: Icons.chat_bubble_rounded,
     builder: (state) => ChatPage(state: state),
+  ),
+  PageEntry(
+    id: 'schedule',
+    label: '日程',
+    icon: Icons.event_available_outlined,
+    solidIcon: Icons.event_available_rounded,
+    builder: (state) => SchedulePage(state: state),
   ),
   PageEntry(
     id: 'persona',

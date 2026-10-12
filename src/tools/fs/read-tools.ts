@@ -173,16 +173,22 @@ export function createSafeReadTool(env: FsEnv): ToolDefinition {
     parameters: {
       type: 'object',
       properties: {
+        // ── safe_read 参数面压缩（v55，2026-10-13）：只删重复与废话，取值/默认值/边界一个没删 ──
+        // 逐条账见 `_research/_tmp-v55-params-account.mts`。三条口径同上：① 同一件事不写两遍；
+        // ② 工具描述已经说清的（"每行都带真实行号前缀"）不在参数里再点一次；
+        // ③ **不删能力、不删取值、不删边界**（`limit` 的两档默认 200/全部、`depth` 的 1..5、
+        //   `head`/`tail` 的互斥、`encoding` 的六个取值全部原样保留）。
         path: {
           type: 'string',
           description: '文件或目录路径：相对工作根或绝对路径；MEMORIES/ 与 diary/ 会自动落到记忆目录。'
-            + `传目录时列出里面的条目（类型/大小/修改时间，见 depth 与 limit）。${PATH_BOUNDARY_HINT}`,
+            + '目录则列出条目（类型/大小/修改时间）',
         },
-        offset: { type: 'integer', description: '起始行号，1-based，默认 1（0 与 1 等价，都表示从头）' },
-        limit: { type: 'integer', description: '最多返回多少行，默认全部（受上限保护）；path 是目录时＝最多列多少条，默认 200' },
+        offset: { type: 'integer', description: '起始行号，1-based，默认 1（0 与 1 等价）' },
+        limit: { type: 'integer', description: '最多几行，默认全部；path 是目录时＝最多列几条，默认 200' },
+        // 各档都保留：`offset` 的 1-based 口径由它自己那一格承担，`head`/`tail`/`depth` 只留互斥与边界
         head: { type: 'integer', description: '只读前 N 行，与 offset/limit/tail 互斥（目录不适用）' },
         tail: { type: 'integer', description: '只读后 N 行，与 offset/limit/head 互斥（目录不适用）' },
-        depth: { type: 'integer', description: 'path 是目录时的递归层数：1 只列直接子项，默认 1，上限 5' },
+        depth: { type: 'integer', description: 'path 是目录时的递归层数：默认 1，上限 5' },
         encoding: {
           type: 'string',
           enum: ['auto', 'utf8', 'utf16le', 'utf16be', 'gbk', 'latin1'],

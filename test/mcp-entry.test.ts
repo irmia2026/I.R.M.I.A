@@ -260,7 +260,8 @@ test('⑦ 入口工具的描述与参数表逐字节稳定（改它 = 一次全 
   assert.equal(nameTokens, 1, `工具名的 token 变了：${nameTokens}`);
   assert.equal(descTokens, 33, `描述的 token 变了：${descTokens}（不许超过 40：它是本件的红线）`);
   assert.equal(paramTokens, 76, `参数表的 token 变了：${paramTokens}`);
-  assert.equal(nameTokens + descTokens + paramTokens, 110, '整件 110 token —— 全清单 5480 / 上界 5500');
+  assert.equal(nameTokens + descTokens + paramTokens, 110,
+    '整件 110 token —— **本件自己的数一个字节没变**（v55 起全清单运行期 5390 / 上界 5500，余 110）');
   assert.ok(descTokens <= 40, `描述 ${descTokens} token，超过本件 40 的红线（预算只剩 20）`);
   assert.ok(
     MAX_DESCRIPTION_TOKENS - descTokens >= 10,
@@ -841,8 +842,9 @@ test('⑪ 回执说清"这次披露了几件 / 约多少 token"（外部稿「�
 test('⑫ `list` 的详略档：`tool="*"` 只给名字（**复用已有那一格**，常驻参数一个字节没动）', async (t) => {
   // 用户批的"零字节"方向（2026-10-09）：标准做法是给工具加一个 `detail` 参数
   //（names / names+description / full），但那样要动**逐字节冻结**的 `tools` 段：
-  // 实测最省的一档也要 +15 token（`_tmp/detail-cost.mts`），而余量只剩 5（5480/5500）
-  // ⇒ 换成"复用 `tool` 那一格的 `*` 取值"，详略指路写在**回执**里（红线：要加就往回执里加）。
+  // 实测最省的一档也要 +15 token（`_tmp/detail-cost.mts`），而余量本来就只有几十个
+  // （v55 起运行期 5390/5500，余 110；写这段时的 v52 是 5468，余 32）⇒ 换成"复用 `tool` 那一格的 `*` 取值"，
+  // 详略指路写在**回执**里（红线：要加就往回执里加）。
   const h = await createHarness(t);
 
   // ① 只给名字：那一行**没有** ` —— 描述`

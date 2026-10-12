@@ -99,11 +99,18 @@ export interface ContextBreakdown {
   /**
    * **这一轮的可信级别**（`owner` / `self` / `trusted` / `external`），2026-10-11 加。
    *
-   * 为什么要有它：`external` 与 `owner/self` 拿到的 `tools` 段是**两版**（实测 24 件 / 5480 tok
-   * ↔ 4 件 / 888 tok，见 `runtime/trust.ts` 的 `EXTERNAL_TOOL_ALLOWLIST`），而换档那一次会让
-   * `tools` 段之后的一切重算。在此之前**日志里查不到"这一拍是哪个档"**——`budget/consumed.context`
-   * 没有这一格，事后只能从 `input/claimed.wakeSeqs` → `wake/*` 事件按判据**反推**，
-   * 于是现场看到的是一句"原因不明"（这正是用户问的"为什么又失守了"答不上来的直接原因）。
+   * 为什么要有它：**2026-10-09 ~ 10-11 之间**，`external` 与 `owner/self` 拿到的 `tools` 段
+   * 是**两版**（实测 24 件 / 5480 tok ↔ 4 件 / 888 tok，见 `runtime/trust.ts` 的
+   * `EXTERNAL_TOOL_ALLOWLIST`），换档那一次会让 `tools` 段之后的一切重算；而在此之前
+   * **日志里查不到"这一拍是哪个档"**——`budget/consumed.context` 没有这一格，事后只能从
+   * `input/claimed.wakeSeqs` → `wake/*` 事件按判据**反推**，于是现场看到的是一句"原因不明"
+   * （这正是用户问的"为什么又失守了"答不上来的直接原因）。
+   *
+   * ⚠ **当下（v52）工具清单对所有轮次恒定**：2026-10-11 用户裁决撤回了那次收窄
+   * （"tool 数组是绝对不动的"），`modelVisibilityFor()` 从此**不参与清单**、只在执行期
+   * （`authzGate`）收窄。⇒ 这一格现在是**纯观测**：它照旧记下"这一拍是哪个档"
+   * （排障时仍然有用——执行期的门按它判），但**它不再预示 `tools` 段会变**。
+   * 别拿它当"清单换版"的判据：换版只看 `RENDER_VERSION`。
    *
    * **它是纯观测字段：一个字节都不进请求体**。证据面与 `builtAtSeq` 逐字同形——
    * `ds-client.buildRequestBody` 只发 model / input / instructions / tools / reasoning /

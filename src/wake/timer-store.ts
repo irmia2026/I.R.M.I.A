@@ -88,6 +88,29 @@ export interface TimerStoreDeps {
   maxTimeoutMs?: number;
 }
 
+/**
+ * 定时器表变动的事件出口（`timer/set` / `timer/cancelled`）。
+ *
+ * **为什么表变动的留痕必须由这里发**（2026-10-12）：本模块原先只 `save()` 到
+ * `data/timers.json`，一个事件都不写，而**真相源是事件日志**（见文件头第 10-12 行）——
+ * 于是 `state/fold.ts` 的 `case 'timer/set'` 成了死代码、`projection.timers` 恒为 `[]`，
+ * 界面上的「定时器」卡片永远是空态、`web/server.ts` 的 `timer-cancel` 永远 notFound。
+ * 判据只有一处：**凡是改这张表的动作，都在这里落一条事件**。
+ *
+ * 形状与 `log/types.ts` 的 `TimerSet` / `TimerCancelled` 逐字段一致（`timerId` +
+ * `at?` / `cron?` + `payload`）——那份 payload 正是 `payload` 的**唯一**去路：
+ * `at` 型条目一触发即出表，之后事件就是它留在世上仅有的那一份。
+ *
+ * 实现者（宿主）负责 seq 分配、落盘与折投影；本模块不认识 `EventLog`，与它不认识
+ * `WakeSink` 是同一条边界。**没接线（CLI 只读场景）就不写事件**，绝不静默造一条没有主的记录。
+ */
+export interface TimerStoreEventSink {
+  /** 布防事实：`at` 或 `cron` 至少一个（`at` 与 `cron` 互斥，同时给出时以 `at` 为准） */
+  set(entry: { timerId: string; at?: string; cron?: string; payload: unknown }): void;
+  /** 撤销事实。只在条目**真的在表里**时发——不在表里的 id 不产生事件（幂等调用不留痕） */
+  cancelled(timerId: string): void;
+}
+
 export interface ReconcileResult {
   /** 按 (timerId, at) 比较：日志有而盘上没有，或两者的到期时刻不一致 */
   mismatch: boolean;
@@ -432,6 +455,7 @@ export class TimerStore {
   #entries = new Map<string, StoredTimerEntry>();
   #armed = new Map<string, Armed>();
   #onDue: ((entry: StoredTimerEntry) => void) | null = null;
+  #events: TimerStoreEventSink | null = null;
   #running = false;
   #warnings: string[] = [];
   #seq = 0;
@@ -454,6 +478,17 @@ export class TimerStore {
   }
 
   // ── 生命周期 ──
+
+  /**
+   * 接上事件出口（`timer/set` / `timer/cancelled`）。**宿主装配期调一次**，此后
+   * 每一次改表的动作都会落下一条事件——回执发出去时，日志里已经有它了。
+   *
+   * 允许传 `null` 摘掉（当前没有调用点，留它是为了让"没接线"是一个**显式状态**
+   * 而不是一个忘记调用的坑）：与构造函数同一条纪律，本模块不替宿主决定要不要留痕。
+   */
+  setEventSink(sink: TimerStoreEventSink | null): void {
+    this.#events = sink;
+  }
 
   /** 载入盘上的 hint 表。文件缺失、损坏、含非法条目都只记 warning，绝不让启动失败 */
   async load(): Promise<void> {
@@ -597,8 +632,12 @@ export class TimerStore {
       : { timerId: id, at, cron, payload, skipped: 0 };
     this.#entries.set(id, entry);
     this.arm(id, { resetSkip: true });
-    // 先落盘再返回：崩溃恢复时表里不该缺掉一个已经报过 ok 的定时器
+    // 先落盘再写事件：盘上那份只是 hint，但"已经报过 ok 的定时器"两处都不该缺。
+    // 顺序是刻意的——**盘 → 日志**：崩在两者之间时留下的是"表里有、日志里没有"，
+    // 恢复流程按日志重建（reconcile/importEntries）会把它抹掉，盘不覆盖日志。
+    // 反过来（日志有、盘上无）则会多出一条恢复不掉的定时器，那才是真丢事实。
     await this.save();
+    this.emitSet(entry);
     return { ok: true, id };
   }
 
@@ -606,8 +645,10 @@ export class TimerStore {
   async cancel(id: string): Promise<boolean> {
     const existed = this.#entries.delete(id);
     this.armedDelete(id);
-    if (existed) await this.save();
-    return existed;
+    if (!existed) return false;
+    await this.save();
+    this.emitCancelled(id);
+    return true;
   }
 
   /** 表项的只读副本（按到期先后排序） */
@@ -971,6 +1012,16 @@ export class TimerStore {
     this.#entries.set(id, { ...entry, at: canonicalIso(upcoming), skipped: entry.skipped + crossed });
     this.persist();
     this.emit(entry);
+    /**
+     * **周期条目触发的同时就是一次重新布防**：`at` 已经推进到下一拍，而投影要能由事件
+     * 重建（本文件头第 10-12 行），所以推进这个事实必须留下一条事件——否则日志里那条
+     * `timer/set` 永远停在**过去**的到期时刻，重启时 `recover()` 拿它 importEntries
+     * 就会把表倒回一个已经过去的时刻（到期语义于是错一拍）。形状照旧是 `timer/set`：
+     * 没有"重排"这种第二形状，而这条事件说的本来就是"它现在排在什么时候"。
+     *
+     * 一次性条目**不走这里**：它触发即出表，投影里那一条由 `timer/fired` 收掉（fold.ts）。
+     */
+    this.emitSet(this.#entries.get(id) ?? entry);
 
     // 离线太久时下一次也已经过期：逐拍向前推进并让出 staggerMs，
     // 把恢复期的唤醒风暴摊成一条平滑队列；1000 拍上限防止病态表达式烧 CPU。
@@ -1005,6 +1056,38 @@ export class TimerStore {
     } catch (err) {
       // 回调抛错不能带崩调度器
       this.#warnings.push(`onDue: ${toErrorMessage(err)}`);
+    }
+  }
+
+  /**
+   * `timer/set`：字段与 `log/types.ts` 的 `TimerSet` 逐字对应。
+   * `at` 取**表项里那个规范化后的到期时刻**（`canonicalIso`），不是调用方传进来的原文——
+   * 日志与 `timers.json` 因此逐字段可比，重放出来的 `at` 与调度器认的是同一个时刻。
+   */
+  private emitSet(entry: StoredTimerEntry): void {
+    const sink = this.#events;
+    if (sink === null) return;
+    try {
+      sink.set({
+        timerId: entry.timerId,
+        at: entry.at,
+        ...(entry.cron === undefined ? {} : { cron: entry.cron }),
+        payload: entry.payload,
+      });
+    } catch (err) {
+      // 与 onDue 同一条纪律：留痕失败只是少了留痕，绝不能反过来让布防失败
+      this.#warnings.push(`timer/set: ${toErrorMessage(err)}`);
+    }
+  }
+
+  /** `timer/cancelled`：形状与 `log/types.ts` 的 `TimerCancelled` 一致（只有 timerId） */
+  private emitCancelled(timerId: string): void {
+    const sink = this.#events;
+    if (sink === null) return;
+    try {
+      sink.cancelled(timerId);
+    } catch (err) {
+      this.#warnings.push(`timer/cancelled: ${toErrorMessage(err)}`);
     }
   }
 }

@@ -15,6 +15,36 @@
  * v27 补一条：**工具数本身要有断言**。这一轮按参数级审计删了三件、压下七件描述，
  * 而"删掉了什么"这件事如果不锁，下一次有人加回一件别名工具时不会有人发现——
  * 它只会让每轮请求悄悄多付一份 schema。
+ *
+ * ──────────────────────────── ⚠ 这个测试量的是"哪一份"（v52 写死在这里） ────────────────────────────
+ *
+ * **它走 `buildCatalogRegistry`，而那个函数不读 `config.json`**（下面的 `catalog()` 传的是
+ * `dataDir: 'data'` + `destructiveEnabled` 参数）。⇒ 它给出的件数与 token 是**代码口径**的真值：
+ * 「按仓库当前的代码装配出来是哪几件、多少 token」，**不是**"她此刻请求里那一份"。
+ * 两者会在这些情况下不同（**这是唯一一条"测试说 A、线上是 B"的缝，写在这里防暗坑**）：
+ *   · `config.tools.disabled` 非空 ⇒ 线上少几件（`main.ts:1183` / `:1260` 的 `setDisabled`）；
+ *   · `config.tools.destructiveEnabled` 与这里传的值不同 ⇒ 破坏性那九件的取舍不同；
+ *   · `config.tools.taskEnabled: true` ⇒ 线上多一件 `task`；
+ *   · `mcpClient` 没传 ⇒ 这个测试**量不到 `mcp` 那一件**（它由 catalog 的条件装配决定）。
+ * ⇒ 读这条测试的人别把它的数当成"她此刻看到的清单"；要那一份，去读事件日志里
+ * `budget/consumed.context.tools`（`tokens` + `count` + `hash` 三个都在）。
+ *
+ * **当下真值（v59，2026-10-12 实测，探针 `_research/_tmp-v59-tools-account.mts`）——三条线，别混**：
+ *   · **① 硬门 · 代码口径**（**本文件量的就是它**，`registry.catalogTokens`）：
+ *     **23 件 / 5362 token**（上界 5500 ⇒ **余 138**）。**这是唯一的门**：下面
+ *     "常驻总量不许悄悄涨"（`< 5500`）与"余量 ≥30"两条断言守的都是它。
+ *   · **② 运行期口径 · 工具段本身**（含 `mcp`，与线上同集）：**24 件 / 5472**（= 5362 + `mcp` 110）。
+ *     **不是门**：本文件**量不到 `mcp`**（`buildCatalogRegistry` 不传 `mcpClient`）⇒ 这个数是**推算**的；
+ *     要真值去读事件日志 `budget/consumed.context.tools`。
+ *   · **③ 合成账**（工具段 5472 ＋ `instructions` 里那几笔常驻：v55 的 67 ＋ v58 的 185 ＋ 1 个换行）
+ *     = **5725**。**不是门**：没有任何断言拿它当界，它只是"常驻前缀这几笔加起来多少"的提醒
+ *     （下一笔开销先复测再决定）。⚠ **别把 ③ 读成某个门的余量**（它在 v58 那一笔就已经越过 5500
+ *     那条**提醒线**——那次与这次都如实记档，用户 2026-10-12 明确过：门只有 ①）。
+ *   · v59 这一批只加了一句：`timer.payload` 的描述多教一格 `scope`（`self` = 她自己的内部事、
+ *     不上日程页的周历）＋ 那句判据"这条是替用户记的，还是我自己要做的" ⇒ **+49**
+ *     （v57 的四格 `+33`、v55 的三格 `+7`、四件大工具的 `−85` 都是前几代的事，见下）。
+ *   · 权威值的出处：`docs/design.md §4.18`「口径与复测」那一段与 `src/model/render.ts` 的
+ *     **v59** 那一篇（**当次版本**那一篇；两处必须一起改）。
  */
 
 import assert from 'node:assert/strict';
@@ -23,7 +53,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { buildCatalogRegistry } from '../src/tools/catalog.ts';
+import { buildCatalogRegistry, HIDDEN_FROM_MODEL } from '../src/tools/catalog.ts';
 import { FS_ERROR_CODES } from '../src/tools/fs/index.ts';
 import { MAX_DESCRIPTION_TOKENS, estimateTokens } from '../src/tools/registry.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
@@ -64,7 +94,7 @@ test('工具清单：destructive 打开时 http_download 必须真的注册（�
   assert.ok(!closedNames.includes('http_download'), '默认关闭时不该注册（出网写入类要人显式开）');
 });
 
-test('工具清单：run_command / notify 不许回来；ask_human 回来了，但语义换成了"不挂起"', async () => {
+test('工具清单：run_command / notify 不许回来；ask_human 代码保留但**不进模型清单**', async () => {
   // 415 次真实调用的参数级审计结论：run_command 0 次、notify 与 speak 重复——这两件的理由
   // （每轮为一份重复的 schema 付费）今天照样成立，所以它们仍然不许回来。
   //
@@ -87,12 +117,22 @@ test('工具清单：run_command / notify 不许回来；ask_human 回来了，�
     'speak 必须留着 level——它是原来的 notify',
   );
 
-  // ask_human 回来了，且**必须**在模型视线内：她问不到人时只能自己猜
-  assert.ok(registry.has('ask_human'), 'ask_human 没注册：§6 的"问"就没有入口');
+  // ── ask_human（2026-10-12 用户裁决）：「**不再进入工具数组，但是项目内代码保留**」 ──
+  //
+  // 这一条从前断言的是"它必须在模型视线内"。裁决把它反过来之后，**判据的两半都要钉住**，
+  // 只钉一半会漏掉两种真实的退步：
+  //   ① 只钉"不在清单里" ⇒ 有人把 `createAdminTools` 里那件删掉也不会红，
+  //      而"代码保留"是用户的原话（随时一行改回来）；
+  //   ② 只钉"还在注册表里" ⇒ 隐藏失效（或多一件常驻 schema）也看不出来。
+  assert.ok(registry.has('ask_human'), 'ask_human 的代码必须保留（裁决：项目内代码保留，随时一行改回来）');
+  assert.equal(registry.isHidden('ask_human'), true, '它必须走"代码级隐藏"这条路');
   const spec = registry.listForModel({ includeDestructive: true }).find((tool) => tool.name === 'ask_human');
-  assert.ok(spec !== undefined, 'ask_human 不在模型清单里，提示词让她问也没用');
-  // 描述预算是硬门（§4.18）：这一件的常驻开销与其它件同一把尺子
-  const tokens = estimateTokens(spec!.description);
+  assert.equal(spec, undefined, 'ask_human 不许再进模型清单：它整件 134 token 常驻，全量只被调过 3 次');
+  // 隐藏 ≠ 关闭：界面上的"关闭"是另一份存储（用户开关），两者不许互相覆盖
+  assert.equal(registry.isDisabled('ask_human'), false, '隐藏不该写成"用户关掉了它"');
+  assert.deepEqual(HIDDEN_FROM_MODEL, ['ask_human'], '隐藏名单就是这一件（改它 = 一次全 miss，见 catalog.ts）');
+  // 描述预算是硬门（§4.18）：即使它不在清单里，这一件的文案也仍按同一把尺子量
+  const tokens = estimateTokens(registry.get('ask_human')!.description);
   assert.ok(tokens < 60, `ask_human 的描述 ${tokens} token，超过本轮 60 的线`);
 });
 
@@ -168,7 +208,7 @@ test('工具清单：任何一件的描述都不许贴到硬门上（距硬门�
 
 test('工具清单：常驻总量不许悄悄涨（防"文档与实测各说各话"复发）', async () => {
   // 为什么要有这一条：件数与 token 是**每轮请求都要付的常驻开销**，而它历史上一直是"悄悄涨、
-  // 事后才发现"的（4391 / 3875 / 3699 / 3931 / 4587 / 4645 / 4839 / 4874 / 5088 / 5167 / 5435 / 5497 / 5370，
+  // 事后才发现"的（4391 / 3875 / 3699 / 3931 / 4587 / 4645 / 4839 / 4874 / 5088 / 5167 / 5435 / 5497 / 5370 / 5480，
   // docs/design.md §4.18 记着这一串）。单件都在各自的门内，加起来仍然可能多付一份 schema
   // ——所以钉的是**总量**。
   //
@@ -176,13 +216,63 @@ test('工具清单：常驻总量不许悄悄涨（防"文档与实测各说各�
   // （`_research/tool-count-recount-es.mts` 与 `tool-count-recount.mts`）。留 85 token 余量：
   // 够一次措辞微调，不够再加一件（一件整件 ≥100 token）。**涨过这条线不是"改大这个数"就完事**：
   // 先按 §4.18 那段口径复测、把权威值改准，再决定要不要接受这笔常驻开销。
+  //
+  // v52（2026-10-12）的本条视角真值：**23 件 / 5358**（= 运行期 24 件 / 5468 − `mcp` 110）。
+  // v55（2026-10-13，timer `payload` 三格约定那一批）的本条视角真值：**23 件 / 5280**
+  // （= 运行期 24 件 / 5390 − `mcp` 110）。净变化 = **−78**：`+7`（`timer.payload` 点明三格）
+  // 抵掉 **−85**（四件大工具的参数说明压缩：`es_search` −43（描述 −22 / 参数面 −21）/
+  // `safe_edit` −24 / `safe_read` −18 / `rg_search` 未动；逐条 diff 表见提交说明与
+  // `_research/_tmp-v55-params-account.mts`）。
+  // ⚠ 这一批真正要装的是 `instructions` 那段（`PAYLOAD_SHAPE_TEXT` **+67**）：①②同批之后
+  // 运行期 = 5390 + 67 = **5457 / 5500（余 43）**，`<5500` 与"余量 ≥30"两条都还绿。
+  // v57（2026-10-12，timer `payload` 再约四格 `title`/`cat`/`dur`/`action`）：**23 件 / 5313**（+33）；
+  // v59（2026-10-12，timer `payload` 再约一格 `scope` = 她自己的内部事不上日程页的周历）：
+  // **23 件 / 5362**，净变化 = **+49**（只加了那一句描述）⇒ 余量 **187 → 138**（本条判据 ≥30 仍绿）。
+  //   另两条线只记在文件头、不在这里判：② 运行期口径（含 `mcp`）**5472**、③ 合成账（＋那段 `instructions`
+  //   的几笔常驻）**5725**——**③ 不是门**，别拿它当余量（本文件量不到 `mcp`，②③ 都只是推算出来的账）。
+  // ⚠ 这个测试**不读 `config.json`**（文件头的"量的是哪一份"那一段）：它给的是**代码口径**，
+  // 不是"她此刻请求里那一份"。
   const { registry } = await catalog();
   const total = registry.catalogTokens({ includeDestructive: true });
   assert.ok(
     total < 5500,
     `常驻工具说明 ${total} token（上界 5500）：要么加了新工具，要么某件的描述/参数 schema 又长回去了。`
-    + '先按 docs/design.md §4.18「口径与复测」复测（_research/tool-count-recount.mts / -es.mts），'
+    + '先按 docs/design.md §4.18「口径与复测」复测（_research/tool-count-recount.mts / -es.mts，'
+    + 'v52 起还可以用 _research/_tmp-tools-token-before.mts 量"含 mcp"那一档；'
+    + 'v59 那一代的实录见 _research/_tmp-v59-tools-account.mts），'
     + '把那段权威值改准，再动这个上界——两处必须一起动',
+  );
+});
+
+test('工具清单：v52 的五件一批在上界之内（余量别被下一件吃掉）', async () => {
+  // 为什么单独立一条：上一条只判"<5500"，而**余量本身**是这一批真正在管的东西——
+  // v52 落进来之前，余量是 20（再来一件 ≥100 的工具就塞不下）。这一批靠
+  // "隐藏 `ask_human` −134、加 `web_search` +258、参数说明压缩 −160"把余量拉到 **32**。
+  //
+  // 判据刻意是"余量 ≥ 30"而不是"余量 = 32"：措辞微调会让它上下动（那是有意允许的），
+  // 但**再加一件工具**（≥100）必然把它打到线下——那正是这条要拦的事。
+  // 口径与文件头一致：这是**代码口径**（不含 `mcp`），运行期口径 = 这个数 + 110。
+  // v55（2026-10-13）：代码口径 5358 → **5280** ⇒ 余量 142 → **220**；运行期 5468 → **5390**。
+  // 这一批**腾出来的地方**是给 `instructions` 那段（① `PAYLOAD_SHAPE_TEXT`，**+67**）用的：
+  // ①②同批之后运行期 = 5390 + 67 = **5457 / 5500（余 43）**，两条线都还在门内。
+  const MIN_HEADROOM = 30;
+  const { registry, problems } = await catalog();
+  assert.deepEqual(problems, [], `有工具被跳过：${problems.join('；')}`);
+  const total = registry.catalogTokens({ includeDestructive: true });
+  const names = registry.listForModel({ includeDestructive: true }).map((tool) => tool.name);
+  assert.equal(names.length, 23, `代码口径的件数变了（v52：23 件，= 运行期 24 件 − mcp）：${names.length}`);
+  // 两件"这一批动过的"必须在场：`web_search` 是新加的、`pwsh` 是改造过的
+  assert.ok(names.includes('web_search'), 'web_search 必须常驻（它固化的是她一直在手搓的那条路）');
+  assert.ok(names.includes('pwsh'), 'pwsh 必须常驻');
+  // `ask_human` 不在（裁决），但代码保留（`has` 照旧为真）
+  assert.ok(!names.includes('ask_human'), 'ask_human 不许再进工具数组');
+  assert.ok(registry.has('ask_human'), '但代码要保留（随时一行改回来）');
+  assert.ok(
+    5500 - total >= MIN_HEADROOM,
+    `上界 5500 只剩 ${5500 - total} token（v55 之后的余量是 220；判据 ≥ ${MIN_HEADROOM}）：`
+    + '再加一件工具（整件 ≥100 token）或让某件的说明长回去，都会把余量吃到线下。'
+    + '要加就先按 docs/design.md §4.18 复测、再决定从哪里腾地方（v52 腾的是 ask_human 那 134、'
+    + 'v55 腾的是四件大工具参数说明里重复与废话那 85）',
   );
 });
 
@@ -243,10 +333,18 @@ test('工具清单：list_dir 已删（v42 并入 safe_read），旧名不许回
   assert.match(String((props['limit'] as { description?: string }).description), /目录/u,
     'limit 兼作列目录的条数上限——这件事必须写在它自己的参数描述里');
   assert.match(safeRead.description, /目录/u, '工具描述里要有"传目录则列目录"，否则没有任何地方告诉她');
-  // `pwsh` 是递归/隐藏项/按时间排这些少数用法的出口，指路必须留在它的描述里
+  // `pwsh` 是递归/隐藏项/按时间排这些少数用法的出口，指路必须留着——**只是换了一格**
+  // （v52：那句从工具描述搬进了 `command` 的参数描述，见下"权威值"那一段的说明）。
+  // 判据不变：她"想列目录"时总读得到这一句；断言的落点跟着那句所在的格子走，别把
+  // "换位置"当成"删了"（这条用例钉的是**能力在不在**，不是它在哪一格）。
   const pwsh = registry.get('pwsh');
   assert.ok(pwsh !== null);
-  assert.match(pwsh.description, /Get-ChildItem/u, '少了指路她会在"想列目录"时发懵');
+  const pwshProps = pwsh.parameters['properties'] as Record<string, { description?: string }>;
+  assert.match(
+    String(pwshProps['command']?.description),
+    /Get-ChildItem/u,
+    '少了指路她会在"想列目录"时发懵',
+  );
 });
 
 test('人格资产只读（P2）：fs 写工具拒绝 data/persona/**，并把该走哪条路说清楚', async (t) => {

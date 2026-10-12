@@ -215,7 +215,19 @@ export interface NetDeps {
   fetch: typeof fetch;
 }
 
-const defaultDeps: NetDeps = {
+/**
+ * **默认的网络出口**（真 DNS + 真 fetch）。
+ *
+ * ⚠ 这两个值是**共享**的（v52 之后由 `web-search.ts` 一起用）：它原先只是一个模块私有的
+ * `defaultDeps`，而 `web-search.ts` 自己写了一份"没有 lookup 就返回空数组"的兜底
+ * ⇒ 线上 `web_search` 每一次调用都在 SSRF 复查那一步就断（`DNS 解析 api.anysearch.com
+ * 没有返回任何地址`，`durationMs: 0`，2026-10-12 seq 88395/88402/88416 三条真现场）。
+ * 所以这里显式导出，让"默认出口"只有一处实现、也只可能有一份语义。
+ *
+ * **测试仍然可以整体注入**（`createNetTools(opts, deps)` / `createWebSearchTool(opts, deps)`
+ * 的第二个参数），所以导出它不会让测试意外打真网络——它们本来就是显式给的。
+ */
+export const defaultNetDeps: NetDeps = {
   lookup: async (host) => {
     const records = await dnsLookup(host, { all: true });
     return records.map((record) => record.address);
@@ -237,7 +249,7 @@ export interface NetToolsOptions {
   userAgent?: string;
 }
 
-interface SsrfPolicy {
+export interface SsrfPolicy {
   allowedHosts: Set<string>;
   maxRedirects: number;
 }
@@ -248,7 +260,7 @@ interface GuardFailure {
   code: string;
 }
 
-async function checkUrlAllowed(
+export async function checkUrlAllowed(
   rawUrl: string,
   policy: SsrfPolicy,
   deps: NetDeps,
@@ -301,7 +313,7 @@ async function checkUrlAllowed(
   return { ok: true };
 }
 
-interface FetchSuccess {
+export interface FetchSuccess {
   ok: true;
   response: Response;
   /** 最终落地的地址（最后一条重定向之后） */
@@ -339,7 +351,7 @@ function classifyFetchError(err: unknown, ctx: ToolContext, timeout: AbortSignal
 }
 
 /** 跟跳并逐跳复查 SSRF；POST 遇 301/302/303 按规范降级为 GET */
-async function fetchFollowingRedirects(
+export async function fetchFollowingRedirects(
   initialUrl: string,
   req: { method: 'GET' | 'POST'; headers: Record<string, string>; body?: string },
   policy: SsrfPolicy,
@@ -412,8 +424,11 @@ async function fetchFollowingRedirects(
   };
 }
 
-/** 限字节读取响应体：超限即截断并取消流，绝不把整个响应往内存里塞 */
-async function readBodyLimited(response: Response, limit: number): Promise<{ buf: Buffer; truncated: boolean }> {
+/**
+ * 限字节读取响应体：超限即截断并取消流，绝不把整个响应往内存里塞。
+ * `web_search` 复用它与下面的 `decodeBody`（同一个上限、同一套编码判定）。
+ */
+export async function readBodyLimited(response: Response, limit: number): Promise<{ buf: Buffer; truncated: boolean }> {
   const body = response.body;
   if (body === null) return { buf: Buffer.alloc(0), truncated: false };
   const reader = body.getReader();
@@ -439,7 +454,7 @@ async function readBodyLimited(response: Response, limit: number): Promise<{ buf
 }
 
 /** 按响应头 charset 解码（中文站点常见 gbk），解码器不认识就退回 utf-8 */
-function decodeBody(buf: Buffer, contentType: string): string {
+export function decodeBody(buf: Buffer, contentType: string): string {
   const match = /charset\s*=\s*"?([\w-]+)"?/i.exec(contentType);
   const charset = match?.[1]?.toLowerCase();
   if (charset !== undefined && charset !== 'utf-8' && charset !== 'utf8') {
@@ -520,7 +535,7 @@ function readHeaders(source: Record<string, unknown>, field: string): Record<str
   return out;
 }
 
-function timeoutSignal(ctx: ToolContext, timeoutMs: number): AbortSignal {
+export function timeoutSignal(ctx: ToolContext, timeoutMs: number): AbortSignal {
   return AbortSignal.any([ctx.signal, AbortSignal.timeout(timeoutMs)]);
 }
 
@@ -542,7 +557,7 @@ async function guarded(
 // ──────────────────────────────── 工具实现 ────────────────────────────────
 
 export function createNetTools(options: NetToolsOptions = {}, depsOverride: Partial<NetDeps> = {}): ToolDefinition[] {
-  const deps: NetDeps = { ...defaultDeps, ...depsOverride };
+  const deps: NetDeps = { ...defaultNetDeps, ...depsOverride };
   const policy: SsrfPolicy = {
     allowedHosts: new Set(
       (options.allowedHosts ?? []).map((host) => host.trim().toLowerCase()).filter((host) => host !== ''),

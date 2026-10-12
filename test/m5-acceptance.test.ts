@@ -53,7 +53,7 @@ import { EventLog } from '../src/log/event-log.ts';
 import type { AppEvent, ModelLane, Projection, TurnEndReason } from '../src/log/types.ts';
 import { defaultVisibility } from '../src/log/types.ts';
 import type { DsClient, DsOutputItem, DsRequest, DsResponse, DsStreamResult, DsUsage } from '../src/model/ds-client.ts';
-import { NOW_LAYER_BANNER, TURN_BLOCK_BANNER, render, RENDER_VERSION } from '../src/model/render.ts';
+import { INSTRUCTION_RULES, NOW_LAYER_BANNER, TURN_BLOCK_BANNER, render, RENDER_VERSION } from '../src/model/render.ts';
 import type { RenderedRequest, RenderPersona, TurnBlockFacts } from '../src/model/render.ts';
 import { ensurePersonaSeeds, loadPersona, type PersonaAssets } from '../src/persona/loader.ts';
 import { deriveRequest, runTurn, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
@@ -470,11 +470,15 @@ describe('M5-1 人格连续性：压缩 / 崩溃恢复后的首个 turn', () => 
     });
 
     // ① 人格常驻层在最前，且顺序 IDENTITY → CONSTITUTION → STYLE
-    assert.ok(request.instructions.startsWith(PERSONA.identity), 'instructions 必须以 IDENTITY 开头');
+    //    （v56 起每一块顶着自己那条分割线 ⇒ "最前"指的是**第一块正文**在最前，线在它上面）
+    assert.ok(
+      request.instructions.startsWith(`${INSTRUCTION_RULES.identity}\n\n${PERSONA.identity}`),
+      'instructions 以 IDENTITY 那一块（连同它那条线）开头',
+    );
     const iId = request.instructions.indexOf(PERSONA.identity);
     const iCons = request.instructions.indexOf(PERSONA.constitution);
     const iStyle = request.instructions.indexOf(PERSONA.style);
-    assert.ok(iId === 0 && iCons > iId && iStyle > iCons, '人格常驻层顺序：IDENTITY → CONSTITUTION → STYLE');
+    assert.ok(iId > 0 && iCons > iId && iStyle > iCons, '人格常驻层顺序：IDENTITY → CONSTITUTION → STYLE');
 
     // ② 摘要进记忆层（input 头部，跨轮稳定）；STATE 进**本轮固定块**（历史之后、此刻层之前，v29）
     const memory = request.input[0] as { type: string; role: string; content: string };
@@ -579,7 +583,10 @@ describe('M5-1 人格连续性：压缩 / 崩溃恢复后的首个 turn', () => 
 
     const request = requests[0];
     assert.ok(request, '恢复后的首个 turn 必须真的发起模型调用');
-    assert.ok(instructionsOf(request).startsWith(PERSONA.identity), '恢复后首 turn 仍以 IDENTITY 开头');
+    assert.ok(
+      instructionsOf(request).startsWith(`${INSTRUCTION_RULES.identity}\n\n${PERSONA.identity}`),
+      '恢复后首 turn 仍以 IDENTITY 那一块（连同它那条线）开头',
+    );
     assert.ok(turnBlockOf(request).includes('[当前状态]'), 'STATE 注入在本轮固定块里');
     assert.ok(!nowLayerOf(request).includes('[当前状态]'), '此刻层不再背 STATE（B2）');
     assert.ok(bytesOf(request.input).includes('崩溃前那一刻的输入'), '崩溃前的输入必须回到上下文里');

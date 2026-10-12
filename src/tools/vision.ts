@@ -580,7 +580,7 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
         paths: {
           type: 'array',
           items: { type: 'string' },
-          description: `图片文件或目录路径（相对工作根），目录会递归收集图片；GIF 只取首帧。${PATH_BOUNDARY_HINT}`,
+          description: '图片文件或目录路径（相对工作根），目录会递归收集图片；GIF 只取首帧',
         },
         question: { type: 'string', description: '针对这批图片的问题；不传则用通用描述要求' },
         inline: {

@@ -376,6 +376,13 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 维护提前一次，所以与 reset-context 同级：短语 null。
   dream: null,
   'timer-cancel': null,
+  // 人在 GUI 里**直接排**一条定时器（日程页「新建安排 → 我直接建」）。
+  //
+  // 为什么与 `timer-cancel` 同级（短语 null）：它撤一条、这条建一条，**都不改变能力边界**
+  // （到点叫醒她这件事本来就在她手里，`timer` 工具的 set/wait 一直能排），也不放宽她能碰什么。
+  // 防误触由**卡面说清后果**承担——日程页那张卡上逐字写着"直接建是给你急用的、
+  // 落下去就是一条到点会叫醒她的安排"，与 `grant-decide` / `dream` 那几族同一条纪律。
+  'timer-set': null,
   'webhook-test': null,
   // 技能信任门：把某个技能目录标成「由 human 确认」（写 skill/installed）。它只放宽"谁能进
   // catalog"，不放宽"能碰什么"，所以与 persona-approve 同级：短语 null。
@@ -6426,15 +6433,101 @@ class WebServerImpl implements WebServer {
         });
         return;
       }
+      case 'timer-set': {
+        // 人在界面上**直接排**一条（日程页「新建安排 → 我直接建」）——这是这条通道上唯一
+        // 由人排定时器的地方，所以三件事必须在这里一次说清（口径见 GUI.md §1.4）：
+        //
+        //   · **why 是谁的理由**：`payload.why` 写的是**他给的理由**，与 v55 的约定一致
+        //     （`PAYLOAD_SHAPE_TEXT` 逐字："why 记他提的要求"）。人自己排的那条 `why` 本来就
+        //     该是他的话，所以这条路不产生"她读到一句不是自己想的理由"那个问题。
+        //   · **来源自解释**：`by: 'human'` 写在 payload 里，界面据此能把"人排的"与她排的分开；
+        //     也正因为这一格自解释，不需要改提示词、不付 `instructions` 的缓存钱。
+        //   · **事件不由这里写**：`TimerStore.set` 的出口是宿主接的（`main.ts` 的 `setEventSink`
+        //     → `emit('timer/set', …)`）。这里再 `appendSync` 一条就会出现两条 `timer/set`。
+        //   · **`sid` 不校验存在性**（如实记，不假装）：这一格只要求非空串。界面那边是从会话
+        //     清单里选的（`GET /api/sessions` 的 `sid`），但 API 仍可被手打一个不存在的 sid——
+        //     那等于给"到点那一刻"埋一颗哑弹（GUI.md §1.4 的原话）。这一期**接受这个口子**：
+        //     要挡它得扫日志/会话表去核这个名字，超出这条端点的授权范围（只加这一条 ~40 行）。
+        const atRaw = typeof payload['at'] === 'string' ? payload['at'].trim() : '';
+        const cronRaw = typeof payload['cron'] === 'string' ? payload['cron'].trim() : '';
+        if (atRaw === '' && cronRaw === '') {
+          throw badRequest('缺少时刻：at（带时区的 ISO 8601）与 cron 至少给一个');
+        }
+        const note = typeof payload['note'] === 'string' ? payload['note'].trim() : '';
+        if (note === '') {
+          // 到点她看见的就是这一句（`render.ts` 的 `wake/timer` 只读 `payload.note`）：
+          // 没有它，这条定时器到点等于叫醒她之后什么都不说
+          throw badRequest('缺少 note：到点做什么（她到点看见的就是这一句）');
+        }
+        const why = typeof payload['why'] === 'string' ? payload['why'].trim() : '';
+        const sidRaw = typeof payload['sid'] === 'string' ? payload['sid'].trim() : '';
+        // v57 的四格（`title`/`cat`/`dur`/`action`）：界面要画周历的块、清单的分类与状态 chip、
+        // 「Agent 自主工作」那张卡，而投影里除了 `at`/`cron` 就只有 `payload` ⇒ 这几格只能由约定补。
+        // 校验只做"类型不对就拒"这一层：`dur` 必须是正整数分钟（界面按它画块高），
+        // 其余三格是自由文本（`cat`/`action` 的取值口径写在工具描述里，服务端不设白名单——
+        // 认不出的值界面**不涂色、不归类**，不猜）。
+        const title = typeof payload['title'] === 'string' ? payload['title'].trim() : '';
+        const cat = typeof payload['cat'] === 'string' ? payload['cat'].trim() : '';
+        const actionRaw = typeof payload['action'] === 'string' ? payload['action'].trim() : '';
+        const durRaw = payload['dur'];
+        let dur: number | null = null;
+        if (durRaw !== undefined && durRaw !== null) {
+          if (typeof durRaw !== 'number' || !Number.isInteger(durRaw) || durRaw <= 0) {
+            throw badRequest('dur 要是正整数分钟（它是周历块高用的那格；不填按 30 分钟算）');
+          }
+          dur = durRaw;
+        }
+        const created = await this.deps.timers.set({
+          ...(atRaw === '' ? {} : { at: atRaw }),
+          ...(cronRaw === '' ? {} : { cron: cronRaw }),
+          // 七格 + 来源：形状与 `TimerStore.set` / v55 的约定一致（`sid: null` = 本机那一拍）
+          payload: {
+            why,
+            note,
+            sid: sidRaw === '' ? null : sidRaw,
+            ...(title === '' ? {} : { title }),
+            ...(cat === '' ? {} : { cat }),
+            ...(dur === null ? {} : { dur }),
+            ...(actionRaw === '' ? {} : { action: actionRaw }),
+            by: 'human',
+          },
+        });
+        if (!created.ok) {
+          // 时刻非法 / cron 非法 / 超前超过 50 年都由 `TimerStore.set` 判：这里**原样转述它的原因**
+          // （自己再判一遍就是两份判据，迟早给出两种说法）
+          throw badRequest(`这条安排没能排上：${created.error}`, 'timer-set-rejected');
+        }
+        const entry = this.deps.timers.get(created.id);
+        sendJson(res, 200, {
+          ok: true,
+          timerId: created.id,
+          // 回执里给**结算出来的**那个时刻（cron 型的下一次到期是服务端算的），人才能核对
+          at: entry?.at ?? null,
+          ...(entry?.cron === undefined ? {} : { cron: entry.cron }),
+        });
+        return;
+      }
       case 'timer-cancel': {
         const timerId = typeof payload['timerId'] === 'string' ? payload['timerId'] : '';
         if (timerId === '') throw badRequest('缺少 timerId');
         const known = this.deps.projection.timers.some((timer) => timer.timerId === timerId);
         if (!known) throw notFound(`定时器 ${timerId} 不在投影里（可能已触发或已取消）`, 'timer-not-found');
-        // 先落事件（真相源），再取消内存里的布防：反过来会在事件写失败时留下"日志说还在、实际已被取消"
-        const event = this.appendSync('timer/cancelled', { timerId }, 'internal');
+        // **事件由宿主出口写，这里不自己 append**（2026-10-12 与 `timer-set` 统一口径）。
+        //
+        // 原先这里是"自己 `appendSync('timer/cancelled')` 一次、随后 `timers.cancel()` 又让宿主出口
+        // 写一次"——生产里 `main.ts:934` 的 `setEventSink` 是接上的，于是**一次撤销写两条**
+        // 一模一样的 `timer/cancelled`。fold 对它是幂等的（按 id 过滤），所以界面上看不出来；
+        // 但**日志是唯一真相源**：重复事件污染审计线（数一次撤销数出两条），而"重复/账目"
+        // 正是我们刚花过力气的那一类问题。所以判据与 `timer-set` 一样：端点只动内存布防，
+        // 事件交给 `emitCancelled` → 宿主出口那一处写。
+        //
+        // 代价说清楚：`cancel()` 在"投影里有、内存表里没有"这种撕裂状态（生产的 `reconcile()`
+        // 会按日志重建表，正常不该出现）下不写事件——那时 `seq` 如实回 `null`，
+        // 而不是拿一个**上一条**事件的号冒充"这次写进去了"。
+        const beforeSeq = this.deps.projection.lastSeq;
         await this.deps.timers.cancel(timerId);
-        sendJson(res, 200, { ok: true, seq: event.seq, type: event.type, timerId });
+        const seq = this.deps.projection.lastSeq > beforeSeq ? this.deps.projection.lastSeq : null;
+        sendJson(res, 200, { ok: true, seq, type: 'timer/cancelled', timerId });
         return;
       }
       default:
@@ -8131,7 +8224,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.8' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.9' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

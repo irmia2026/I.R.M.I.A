@@ -32,6 +32,7 @@ import { defaultConfig } from '../src/config/config.ts';
 import { EventLog } from '../src/log/event-log.ts';
 import type { AppEvent } from '../src/log/types.ts';
 import { emptyProjection } from '../src/log/types.ts';
+import { TURN_BLOCK_BANNER } from '../src/model/render.ts';
 import { RealLoop } from '../src/runtime/real-loop.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
@@ -407,7 +408,7 @@ test('合并：同一时间片里连着改同一个 server ⇒ 只起一个 turn
   assert.deepEqual(await rig.pendingTypes(), [], '这一轮认领完 ⇒ 队列清空');
   // 这一轮的**输入段**（帧尾的"本轮固定块"之前那一段）里只有那一条通报；
   // 帧尾之后是环境层与状态层，那里再出现同一条属于"本轮输入被重述一遍"的既有版式。
-  const inputPart = text.split('以下为框架提供的本轮固定块')[0] ?? '';
+  const inputPart = text.split(TURN_BLOCK_BANNER)[0] ?? '';
   // 输入段里按**逐字正文**去看，出现的通报只有两种：上一轮那条"加了 alpha"与本轮这条"改了 alpha"。
   // （同一条正文在输入段里出现两次是既有的版式：它在上下文里，同时又是这一轮的任务卡/输入镜像。
   //  所以这里数的是**有哪几种**，而不是**有几行**——"被合并掉的那一笔也在"才是要防的事。）

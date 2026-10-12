@@ -244,11 +244,11 @@ export function createRgSearchTool(env: FsEnv, gate: SearchEngineGate): ToolDefi
       type: 'object',
       properties: {
         pattern: { type: 'string', description: '正则表达式（默认）或字面量（fixed_strings=true）' },
-        path: { type: 'string', description: `搜索范围：目录（递归搜）或单个文件（只搜它），默认工作根。${PATH_BOUNDARY_HINT}` },
+        path: { type: 'string', description: '搜索范围：目录（递归搜）或单个文件（只搜它），默认工作根' },
         glob: { type: 'string', description: '文件名过滤，如 "*.ts" 或 "src/**/*.{ts,js}"；多个用逗号分隔' },
-        context: { type: 'integer', description: '每条命中前后各带多少行上下文，默认 0（只看命中行），上限 20' },
+        context: { type: 'integer', description: '每条命中前后各带几行上下文，默认 0，上限 20' },
         max_results: { type: 'integer', description: '最多返回多少条命中，默认 40' },
-        case_sensitive: { type: 'boolean', description: '区分大小写，默认 false（默认不区分，与 ripgrep 默认相反）' },
+        case_sensitive: { type: 'boolean', description: '区分大小写，默认 false（与 ripgrep 默认相反）' },
         fixed_strings: { type: 'boolean', description: '把 pattern 当字面量而不是正则，默认 false' },
         max_file_bytes: { type: 'integer', description: '跳过大于该字节数的文件，默认 8388608' },
       },
@@ -537,23 +537,36 @@ function esItemPath(item: EsCsvItem, root: string): string {
 export function createEsSearchTool(env: FsEnv, gate: SearchEngineGate): ToolDefinition {
   return {
     name: 'es_search',
+    // 压缩（v55，2026-10-13）：末句原本把 `max_results` 的默认值/上限/0 的语义又写了一遍——
+    // 那三件在同一件工具的**参数描述**里逐字都有（参数不进单件描述那份预算，而两处一起进清单）。
+    // 同一件事写两遍是纯常驻开销：删掉它，工具描述仍是"做什么 + 一句能力"，用法一个字没少。
     description:
-      '按文件名搜索（找内容用 rg_search）：Everything 索引秒回，支持 * ? 通配符、正则、全词、'
-      + '只找文件或目录、按大小时间排序；detail=full 连大小与修改时间一起给。',
+      '按文件名/路径搜 Everything 索引（秒回；找文件内容用 rg_search）：支持 * ? 通配符、正则、'
+      + '全词、只找文件或目录、按大小时间排序；detail=full 连大小与修改时间一起给。',
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '文件名模式，支持 * 与 ?，如 "*.test.ts"；也给字面量子串如 "config"；regex=true 时按正则解释' },
-        path: { type: 'string', description: `限定搜索目录（相对工作根），默认工作根。${PATH_BOUNDARY_HINT}` },
-        max_results: { type: 'integer', description: '最多返回多少个条目，默认 100；传 0 表示只报数量、不列条目' },
-        match_path: { type: 'boolean', description: 'true 时对整个路径匹配而不是只匹配名字，默认 false；此时路径分隔符要写 \\（实测 fs/index 命中 0，fs\\index 命中 1）' },
+        // ── es_search 参数面压缩（v55，2026-10-13）：只删重复与废话，取值/默认值/边界一个没删 ──
+        // 逐条账见 `_research/_tmp-v55-params-account.mts`。三条口径：
+        //   ① 同一件事在同一件工具里不写两遍（`max_results` 的默认/上限/0 语义只在它自己那一格说）；
+        //   ② 括号里的举例能用更短的写法说清就换短的（`match_path` 那对命中示例保留——它是判据本身）；
+        //   ③ **不删能力、不删取值、不删边界**：`sort_by` 的 8 个取值仍在 `enum` 里，`detail` 的两档、
+        //      `file_type` 的三档、`regex`/`whole_word`/`ignore_case` 的默认值全部原样保留。
+        pattern: { type: 'string', description: '文件名模式，支持 * ?，如 "*.test.ts"；也吃字面子串如 "config"；regex=true 时按正则解释' },
+        path: { type: 'string', description: '限定目录（相对工作根），默认工作根；只吃目录，传文件走 rg_search' },
+        max_results: { type: 'integer', description: '最多几条，默认 100，上限 2000；0 只报数量不列条目' },
+        // `match_path`（v55）：删掉的是"而不是只匹配名字"这句**重复**——同一句的前半句已经说了
+        // "匹配整条路径"，默认值与那对命中示例（判据本身）一字未动。
+        match_path: { type: 'boolean', description: 'true = 匹配整条路径，默认 false；此时分隔符要写 \\（fs/index 命中 0，fs\\index 命中 1）' },
         ignore_case: { type: 'boolean', description: '忽略大小写，默认 true' },
-        regex: { type: 'boolean', description: 'pattern 按正则解释（es.exe -r），默认 false' },
-        whole_word: { type: 'boolean', description: '全词匹配（es.exe -w），默认 false' },
-        file_type: { type: 'string', enum: [...ES_FILE_TYPES], description: '条目类型：all（默认，文件与目录都要）/ file（只要文件）/ folder（只要目录）' },
+        regex: { type: 'boolean', description: 'pattern 按正则解释，默认 false' },
+        whole_word: { type: 'boolean', description: '全词匹配，默认 false' },
+        file_type: { type: 'string', enum: [...ES_FILE_TYPES], description: '条目类型：all（默认）/ file（只要文件）/ folder（只要目录）' },
         ext: { type: 'string', description: '扩展名过滤，如 "ts"；只在 regex=false 时生效，默认不过滤' },
-        sort_by: { type: 'string', enum: [...ES_SORT_KEYS], description: '排序键（默认由引擎决定）：name / path / size / ext / date_created / date_modified / date_accessed / run_count' },
-        detail: { type: 'string', enum: [...ES_DETAILS], description: 'paths（默认）只列路径、省上下文；full 每条再给大小与修改时间，并在头部给总大小' },
+        // `sort_by` 的取值就在同一格的 `enum` 里逐条列着 ⇒ 描述只留"它是什么"，不再重复"默认由引擎决定"
+        // （那句已由 `enum` 与实参拼装那一段的注释承担）；取值一个没少。
+        sort_by: { type: 'string', enum: [...ES_SORT_KEYS], description: '排序键' },
+        detail: { type: 'string', enum: [...ES_DETAILS], description: 'paths（默认）只列路径、省上下文；full 再给大小与时间，头部给总大小' },
       },
       required: ['pattern'],
       additionalProperties: false,

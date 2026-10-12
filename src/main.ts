@@ -93,7 +93,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.8';
+export const AGENT_VERSION = '0.1.0-beta.9';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -911,6 +911,30 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       applyOne(recovery.projection, event);
       finalizePressure(recovery.projection, event.ts);
     };
+
+    /**
+     * 定时器表的变动出口（`timer/set` / `timer/cancelled`）——**这一格原先空着**。
+     *
+     * `TimerStore` 只把表写进 `data/timers.json`，一个事件都不写；而真相源是日志
+     * （那个模块自己的文件头就写着这句）。后果是 `state/fold.ts` 的 `case 'timer/set'`
+     * 从未被执行过 ⇒ `projection.timers` 恒为 `[]` ⇒ 首页「定时器」卡片永远空态、
+     * `web/server.ts` 的 `timer-cancel` 永远 `notFound`（撤销按钮永远失败），
+     * 而盘上明明躺着活着的定时器、`timer/fired` 也照常落。
+     *
+     * 为什么接线点是这里而不是各调用点：改这张表的有**四条路**（`timer` 工具的
+     * set/cancel/wait、real-loop 的每日整理布防、web 侧的 `timer-cancel`），
+     * 逐处补写必然漂移——判据收在 `TimerStore` 那一处（`emitSet`/`emitCancelled`），
+     * 这里只给它一个出口。
+     *
+     * 复用与工具同一个 `emit`（先落库、再 `applyOne` 折投影）：布防/撤销的回执发出去时，
+     * 日志与投影**都**已经认了这件事——界面下一次轮询就看得见，不必等下一拍、更不必重启。
+     * 可见性交给 `resolveEventVisibility` 那一处判据（`timer/*` 不在表里 ⇒ `internal`：
+     * 它是簿记，不是给她的输入；唤醒她的是紧随其后的 `wake/timer`）。
+     */
+    timers.setEventSink({
+      set: (entry) => { emit('timer/set', entry, 'internal'); },
+      cancelled: (timerId) => { emit('timer/cancelled', { timerId }, 'internal'); },
+    });
     const workspaceRoot = join(dataDir, 'workspace');
     mkdirSync(workspaceRoot, { recursive: true });
 

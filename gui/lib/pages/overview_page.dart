@@ -1831,13 +1831,33 @@ class _TimerLine extends StatelessWidget {
   }
 }
 
-/// 唤醒内容的一行摘要：字符串直接用，别的形状走 `toString()`，过长截断。
+/// 唤醒内容的一行摘要：字符串直接用，对象先取 `note`、再取 `why`，别的形状走 `toString()`，过长截断。
 /// **不做 JSON 美化**：这里只要"她当时写了什么"的一眼，完整内容在日志里查得到。
+///
+/// 为什么要先取那两格（2026-10-13，timer `payload` 三格约定那一批）：`payload` 从此刻起有了
+/// **约定形状** `{why, note, sid}`（见 `src/model/self-brief.ts` 的 `PAYLOAD_SHAPE_TEXT` 与
+/// `src/tools/admin.ts` 的 `timer.payload` 说明）——而原来对**对象**型 payload 会打出整串 JSON
+/// （`{kind: wait, note: …, sid: …}`），人看到的是字段名而不是"她写了什么"。
+/// `note` 是她写给"到点做什么"的那一格（`render.ts` 渲染 `[定时器触发]` 时读的也是它），
+/// `why` 是"为什么排它"（界面看"为什么"的唯一入口）；两格都没有 ⇒ 退回原来的表现（`toString()`），
+/// **旧形状照旧可读**（缺格不是错误）。
 String _timerPayloadText(Object? payload) {
   if (payload == null) return '';
-  final text = payload is String ? payload : '$payload';
+  final text = payload is String ? payload : _timerPayloadSummary(payload);
   final flat = text.replaceAll(RegExp(r'\s+'), ' ').trim();
   return flat.length <= 80 ? flat : '${flat.substring(0, 79)}…';
+}
+
+/// 对象型 payload 的取词次序：`note` → `why` → `toString()`（都不在才退回）。
+/// 单独一个纯函数：取词次序本身就是这一批的判据，用例直接钉它。
+String _timerPayloadSummary(Object payload) {
+  if (payload is Map) {
+    for (final key in const ['note', 'why']) {
+      final value = payload[key];
+      if (value is String && value.trim().isNotEmpty) return value;
+    }
+  }
+  return '$payload';
 }
 
 /// 时刻：今天只给 HH:mm，隔天补上 MM-DD。

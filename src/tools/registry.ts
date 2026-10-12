@@ -128,6 +128,18 @@ export class ToolRegistry {
   /** 用户在设置里关掉的工具（config.tools.disabled）；只在内存，重启后由配置重新装载 */
   private readonly disabled = new Set<string>();
 
+  /**
+   * **代码级**不进模型清单的工具（`HIDDEN_FROM_MODEL`，见 `catalog.ts`）。
+   *
+   * 与 `disabled` 刻意分成两份（2026-10-12，用户裁决"`ask_human` 不再进工具数组、
+   * 但项目内代码保留"）：`disabled` 是**设置界面的开关**，它的每一次写入都是**整份替换**
+   * （`setDisabled` 先 clear），而 `main.ts:1183` 在装配之后还会用
+   * `config.tools.disabled` 覆盖一次——两者共用一份存储的话，"代码里隐藏"会被那一次覆盖
+   * 悄悄撤销（`ask_human` 又回到她的工具数组里，而没有任何地方会因此报错）。
+   * 所以：**代码级隐藏是粘的**，`setDisabled` 碰不到它；要开回来就改 `catalog.ts` 那一行常量。
+   */
+  private readonly hidden = new Set<string>();
+
   get size(): number {
     return this.defs.size;
   }
@@ -170,11 +182,11 @@ export class ToolRegistry {
     return this.defs.get(name)?.executionMode ?? 'exclusive';
   }
 
-  /** 进模型清单的工具（按注册顺序）。destructive 默认不列，配置显式开启才进；被关闭的不列 */
+  /** 进模型清单的工具（按注册顺序）。destructive 默认不列，配置显式开启才进；被关闭/被隐藏的不列 */
   listForModel(options: ListForModelOptions = {}): ToolModelSpec[] {
     const specs: ToolModelSpec[] = [];
     for (const def of this.defs.values()) {
-      if (this.disabled.has(def.name)) continue;
+      if (this.disabled.has(def.name) || this.hidden.has(def.name)) continue;
       if (!isVisible(def, options)) continue;
       const spec: ToolModelSpec = {
         name: def.name,
@@ -211,6 +223,34 @@ export class ToolRegistry {
   /** 当前被关闭的工具名单（按注册顺序，供界面与诊断回显） */
   disabledNames(): string[] {
     return this.names().filter(name => this.disabled.has(name));
+  }
+
+  /**
+   * **代码级**隐藏一批工具：从模型清单里拿掉，但注册表照旧留着定义（`get()` / `names()` 都拿得到，
+   * 执行到半路时回执仍是"这件工具已关闭"而不是"未知工具"）。
+   *
+   * 与 `setDisabled` 的区别只有一条，但很要紧：**`setDisabled` 覆盖不掉它**（两份存储，
+   * 见 `hidden` 那一格的注释）。缺省名单来自 `catalog.ts` 的 `HIDDEN_FROM_MODEL`——
+   * 调用点只有 `buildCatalogRegistry` 与 `buildOfflineCatalogRegistry` 两处（同一条路），
+   * 所以"测试说的"与"线上跑的"在这件事上不会再分叉。
+   *
+   * 名单外的名字直接忽略（与 `setDisabled` 同一条纪律：不存在的名字不该让装配报错）。
+   */
+  setHidden(names: readonly string[]): void {
+    this.hidden.clear();
+    for (const name of names) {
+      if (this.defs.has(name)) this.hidden.add(name);
+    }
+  }
+
+  /** 这件工具是否被**代码**隐藏（与 `isDisabled` 分开：界面上的"关闭"不该显示成"隐藏"） */
+  isHidden(name: string): boolean {
+    return this.hidden.has(name);
+  }
+
+  /** 当前被代码隐藏的工具名单（按注册顺序，供诊断与启动日志回显） */
+  hiddenNames(): string[] {
+    return this.names().filter(name => this.hidden.has(name));
   }
 
   /**

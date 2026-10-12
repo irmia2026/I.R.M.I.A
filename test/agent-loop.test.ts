@@ -26,7 +26,7 @@ import type {
 } from '../src/log/types.ts';
 import { defaultVisibility } from '../src/log/types.ts';
 import { DsClientError, type DsClient, type DsRequest, type DsStreamResult } from '../src/model/ds-client.ts';
-import { RENDER_VERSION } from '../src/model/render.ts';
+import { NOW_LAYER_BANNER, RENDER_VERSION, TURN_BLOCK_BANNER } from '../src/model/render.ts';
 import { planTodoWrite } from '../src/persona/todo-state.ts';
 import { deriveRequest, runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
@@ -526,7 +526,7 @@ test('v31 回归：todo 工具写进 STATE 的清单，在同轮后续 step 的�
   const nowLayerOf = (n: number): string => {
     const items = (model.requests[n]!.input ?? []) as Array<Record<string, unknown>>;
     const hit = items.find(item =>
-      typeof item['content'] === 'string' && String(item['content']).includes('以下为框架提供的此刻层'));
+      typeof item['content'] === 'string' && String(item['content']).includes(NOW_LAYER_BANNER));
     assert.ok(hit !== undefined, `第 ${n + 1} 步的请求里必须有此刻层`);
     return String(hit!['content']);
   };
@@ -534,7 +534,7 @@ test('v31 回归：todo 工具写进 STATE 的清单，在同轮后续 step 的�
   const blockCountOf = (n: number): number => {
     const items = (model.requests[n]!.input ?? []) as Array<Record<string, unknown>>;
     return items.filter(item =>
-      typeof item['content'] === 'string' && String(item['content']).includes('以下为框架提供的本轮固定块')).length;
+      typeof item['content'] === 'string' && String(item['content']).includes(TURN_BLOCK_BANNER)).length;
   };
 
   // ① 第 1 步：清单还没写（它写在这一步里），此刻层里当然没有未完成项

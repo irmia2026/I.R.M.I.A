@@ -848,6 +848,54 @@ export const TIMER_WAIT_REASON_MAX = 200;
  */
 export const TIMER_WAIT_PAYLOAD_KIND = 'wait';
 
+/** 她自报"这是我的内部事"的那一格：`payload.scope === 'self'` ⇒ 不上日程页的周历（v59 约定） */
+export const TIMER_SELF_SCOPE = 'self';
+
+/**
+ * **框架自己的内务** kind（与"她自己的事"一样**不上日程页的周历**）。
+ *
+ * 只收"框架替她排的、与人无关的"那一种：
+ *   · `memory-maintain` —— 每日记忆整理（常量在 `src/persona/memory-maintain.ts`，
+ *     由 `src/runtime/real-loop.ts` 排成每天一次的 cron）。
+ *
+ * ⚠ **`wait` 不在这里**（`TIMER_WAIT_PAYLOAD_KIND`）：那是"过一会儿叫我"的定时唤醒，内容多半是
+ * 替用户记的事（提醒他、约好的事）⇒ 按缺省算**用户向**，照旧上周历。
+ * ⚠ 这里的字面量与 `memory-maintain.ts` 的常量**由用例锁住**（`test/timer-payload.test.ts`
+ * 断言两者相等），`admin.ts` 不 import persona 那一层——为一个字符串引一条跨层依赖不划算。
+ */
+export const TIMER_FRAMEWORK_CHORE_KINDS: readonly string[] = ['memory-maintain'];
+
+/**
+ * 这一条定时器**是不是给用户看的**（日程页的周历只画用户向的；清单里两类都留、用户向在前）。
+ *
+ * 判据**黑名单式**（缺省用户向——默认可见比默认隐藏安全），按顺序、先命中先定：
+ *   ① `payload.by === 'human'` ⇒ **用户向**（人自己建的，一律算用户向，这条最优先）；
+ *   ② `payload.scope === 'self'` ⇒ **她自己的事**；
+ *   ③ `payload.kind` 命中 [TIMER_FRAMEWORK_CHORE_KINDS] ⇒ **她自己的事**；
+ *   ④ 其余 ⇒ **用户向**（`wait`/`set` 那些多半是"到点提醒用户"的事，没有信号时不该被藏起来）。
+ *
+ * ⚠ **不看 `payload.action`**：那是"到点做什么动作"（自主工作/提醒/存草稿），与"给谁看"正交——
+ * 拿它当判据会把用户的"每周复盘""整理周计划"一起挡在周历外。
+ * ⚠ 旧形状（`payload` 是字符串或 null）⇒ 按用户向（缺省口径）。
+ * ⚠ GUI 侧有一份**等价实现**（`gui/lib/pages/schedule_page.dart` 的 `_isOwnerFacing`）：界面读的是
+ * 同一份投影，但跨语言不能共享代码 ⇒ **两份必须同步改**（各自的用例各钉一遍，判据逐条对齐）。
+ */
+export function isOwnerFacingTimer(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return true;
+  const record = payload as Record<string, unknown>;
+  if (record['by'] === 'human') return true;
+  if (record['scope'] === TIMER_SELF_SCOPE) return false;
+  const kind = record['kind'];
+  if (typeof kind === 'string' && TIMER_FRAMEWORK_CHORE_KINDS.includes(kind)) return false;
+  return true;
+}
+
+/** `payload` 里的一格字符串（读不到给空串）——回执自检与上面那条判据共用 */
+function payloadStringField(payload: unknown, key: string): string {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return '';
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
 export interface TimerWaitPayload {
   kind: typeof TIMER_WAIT_PAYLOAD_KIND;
   /** 到点叫她的理由（没有理由时空串） */
@@ -2126,10 +2174,22 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     const entry = timers.get(result.id);
     const due = entry === null ? '（表项缺失）' : entry.at;
     const kind = cron === undefined || at !== undefined ? '一次性' : `周期（${cron}）`;
-    return okResult(
-      `定时器已布防：id=${result.id}，${kind}，下次到期 ${due}。`
-      + '撤销用同一条工具的 action=cancel 加这个 id。',
-    );
+    // 回执自检（v59，用户「set 的回执要能自检」）：排完把**她会写错的那几格**照实回显——
+    // 标题 / 时刻（周期）/ 分类 / 是否上日程页。缺格不报错（旧形状照旧），只是把缺省口径说白。
+    const stored = entry === null ? undefined : entry.payload;
+    const title = payloadStringField(stored, 'title');
+    const cat = payloadStringField(stored, 'cat');
+    const ownerFacing = isOwnerFacingTimer(stored);
+    return okResult([
+      `定时器已布防：id=${result.id}，${kind}，下次到期 ${due}。`,
+      `自检——标题：${title === '' ? '（没写，日程页用"到点做什么"的第一句）' : title}`
+      + ` · 时刻：${due}（${kind}）`
+      + ` · 分类：${cat === '' ? '（没写，日程页不涂色）' : cat}`
+      + ` · ${ownerFacing
+        ? '上日程页的周历（替用户记的那一类）'
+        : '不上日程页的周历（你自己的内部事）'}`,
+      '撤销用同一条工具的 action=cancel 加这个 id。',
+    ].join('\n'));
   };
 
   /** action=cancel：按 id 撤销。id 不在表里不算错（可能已触发/已取消），但要给出下一步 */
@@ -2157,7 +2217,21 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         + '只想"过一会儿叫我"就用 action=wait（seconds/minutes + reason）。',
       );
     }
-    return okResult(`定时器 ${entries.length} 个（按到期先后）：\n${entries.map(describeTimer).join('\n')}`);
+    // 回执分两类、用户向的在前（v59，用户「list 的回执要能分辨两类」——她的判断依赖它：
+    // 日程页的周历只画用户向的，所以"哪些是给用户的"必须在 list 里一眼看得出，不改任何参数）
+    const ownerFacing = entries.filter((entry) => isOwnerFacingTimer(entry.payload));
+    const mine = entries.filter((entry) => !isOwnerFacingTimer(entry.payload));
+    const blocks = [
+      `定时器 ${entries.length} 个（用户向 ${ownerFacing.length} 个在前，你自己的 ${mine.length} 个在后）：`,
+    ];
+    if (ownerFacing.length > 0) {
+      blocks.push(`【给用户的】（日程页的周历会画它们）\n${ownerFacing.map(describeTimer).join('\n')}`);
+    }
+    if (mine.length > 0) {
+      blocks.push(`【你自己的事】（不上日程页的周历）\n${mine.map(describeTimer).join('\n')}`);
+    }
+    blocks.push('撤销用 action=cancel 加那一行的 id。');
+    return okResult(blocks.join('\n'));
   };
 
   const timer: ToolDefinition = {
@@ -2184,7 +2258,27 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         at: { type: 'string', description: 'set：带时区的 ISO 8601 绝对时刻，例 2026-09-30T14:00:00+08:00' },
         cron: { type: 'string', description: 'set：五段 cron（分 时 日 月 周），例 "0 9 * * 1-5"' },
         payload: {
-          description: 'set：到期时回注给未来的你的任意 JSON 值。'
+          // 三格约定（v55，2026-10-13）：`set` 的 payload 今天**没有形状**，而 render / list / GUI
+          // 三处只读 `note` 一格 ⇒ "为什么排它"与"到点跟谁说"都没有约定。这一句把三格点明，
+          // **不加字段、不加参数、不改四个动作的语义**（判据与逐字见 self-brief.ts 的
+          // `PAYLOAD_SHAPE_TEXT`，它进的是 `instructions`，与这里**同批**上线）。
+          // 再补四格（v57，2026-10-12）：日程页要画"周历的块 / 清单的分类与状态 / 计数卡"，
+          // 而投影里只有 `at`/`cron` + 上面那三格 ⇒ 缺的几样**只能由约定补**。同样**只改描述**：
+          // 四格都是 `payload` 这个自由 JSON 里的键——不改事件形状、不加参数、不改四个动作的语义。
+          // 缺省口径（GUI 侧照它退化，写在这里是为了让她与人看到同一份约定）：
+          // `title` 缺 ⇒ 用 `note` 第一句；`cat` 缺 ⇒ 不涂色、不摆分类；`dur` 缺 ⇒ 30 分钟；
+          // `action` 缺 ⇒ 不当"自主工作"计。
+          // 第五格 `scope`（v59，2026-10-12 用户的裁决「GUI 是给人看的，agent 自己的行动不该占主位」）：
+          // 日程页的**周历只画用户向的条目**，所以这一句要教她"什么时候算给用户的"——判据一句话
+          // 写在末尾（`isOwnerFacingTimer` 就是照它实现的，两边同批）。**仍然只改描述**。
+          // ⚠ 长度纪律：`tools` 段是常驻前缀，**硬门是 `registry.catalogTokens` 那条线**（上界 5500，
+          // `test/tool-catalog.test.ts`）；这一句用中文短语，不写"到期时回注……"这类说明书句。
+          description: 'set：why（为什么排它）、note（到点做什么）、sid（到哪儿说）、title（一行标题）、'
+            + 'cat（工作学习/陪伴交流/生活习惯/周期）、dur（分钟）、action（自主工作/提醒/存草稿）；'
+            + '替用户记的（提醒他/约好的事）不写 scope；你自己要做的（记忆整理、复盘、自检）写 '
+            // ⚠ 引号形状与提示词那条线**同形**（`scope:'self'`，单引号）：同一个键在两边写成两种引号，
+            // 她读起来会以为是两个不同的键（用户 2026-10-12 的统一；只改这一处引号，别的一个字不动）
+            + "scope:'self' 就不上日程页的周历。判据：这条是替用户记的，还是我自己要做的。"
             + 'wait：写一句"到点叫你的理由"（字符串）',
         },
         seconds: { type: 'number', description: 'wait：时长，单位秒（与 minutes 二选一）' },
@@ -2243,9 +2337,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           type: 'string',
           description:
             '要说的内容，**一句话**（会被自动断成几条，不必自己拆）。'
-            + '**这是聊天消息，不是正式发言**：短、口语，允许句子残缺、倒装、省略、表达奇怪'
-            + '——按你平时随口回一句的样子写就行，不必先组织成完整句。'
-            + `超过 ${SPEAK_TEXT_MAX} 字会被**直接退回**（不截断、也不照发）：改成更短的一句、`
+            + '**这是聊天消息，不是正式发言**：短、口语，允许残缺、倒装、省略、表达奇怪'
+            + '——按你平时随口回一句的样子写就行。'
+            + `超过 ${SPEAK_TEXT_MAX} 字会被**直接退回**（不截断、也不照发）：`
             + '拆成几次调用，或内容本来就长时改用 report。',
         },
         to: {
@@ -2257,8 +2351,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           //   ② 发不出去时**回执本来就会如实说清原因**，不需要她在动手之前先背一套平台政策。
           // 改这里要连带看 `send_media` 的描述与 self-brief 第 ④ 段（同一件事的三处落点）。
           description:
-            '发给哪个会话（sid 就在上下文的外部会话清单里）；省略 = 回到本轮叫你说话的那个会话。'
-            + '发不出去时回执会说清原因，照它就事论事就行。',
+            '发给哪个会话（sid 见外部会话清单）；省略 = 回到本轮叫你说话的那个会话。'
+            + '发不出去时回执会说清原因。',
         },
         level: {
           type: 'string',
@@ -4126,7 +4220,9 @@ function describeTimer(entry: StoredTimerEntry): string {
   const payload = entry.payload === null || entry.payload === undefined
     ? '（无 payload）'
     : `payload=${safeJson(entry.payload)}`;
-  return `- ${entry.timerId} | ${kind} | 下次 ${entry.at}${skipped} | ${payload}`;
+  // 每行自己带"是不是给用户的"（v59）：她扫一眼就知道日程页的周历会画哪几行
+  const mark = isOwnerFacingTimer(entry.payload) ? '[用户向]' : '[你自己的·不上周历]';
+  return `- ${mark} ${entry.timerId} | ${kind} | 下次 ${entry.at}${skipped} | ${payload}`;
 }
 
 function describeTodo(item: TodoItem): string {

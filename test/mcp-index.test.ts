@@ -41,7 +41,7 @@ import { DEFAULT_DATA_DIR_NAME, defaultConfig } from '../src/config/config.ts';
 import type { AppConfig } from '../src/config/config.ts';
 import type { AppEvent } from '../src/log/types.ts';
 import { MCP_TOOLS_CACHE_DIR, MCP_TOOLS_CACHE_VERSION } from '../src/mcp/client.ts';
-import { RENDER_VERSION, mcpIndexOf } from '../src/model/render.ts';
+import { LAYER_RULES, NOW_LAYER_BANNER, RENDER_VERSION, TURN_BLOCK_BANNER, mcpIndexOf } from '../src/model/render.ts';
 import { MCP_INDEX_HEADER, MCP_INDEX_DESC_CLAUSE_VERSION, mcpIndexView } from '../src/persona/assets.ts';
 import { locateStep, rebuildRenderedRequest } from '../src/runtime/replay.ts';
 import { allEventsOf } from '../src/state/event-snapshot.ts';
@@ -188,7 +188,7 @@ function stableHeadOf(input: unknown): string {
     const text = typeof (item as { content?: unknown }).content === 'string'
       ? (item as { content: string }).content
       : '';
-    return !text.includes('以下为框架提供的本轮固定块') && !text.includes('以下为框架提供的此刻层');
+    return !text.includes(TURN_BLOCK_BANNER) && !text.includes(NOW_LAYER_BANNER);
   }));
 }
 
@@ -212,8 +212,8 @@ test('① 有 server 时：索引段进长期记忆层（与技能 catalog 同�
   assert.equal(rig.requests.length, 1, '这一拍必须恰好发一次请求');
   const layer = memoryLayerOf(rig.requests[0]!.request);
   assert.ok(
-    layer.startsWith(MCP_INDEX_HEADER),
-    `索引段进的是长期记忆层（input[0]）；实际开头：${layer.slice(0, 60)}`,
+    layer.startsWith(`${LAYER_RULES.memory}\n\n${MCP_INDEX_HEADER}`),
+    `索引段进的是长期记忆层（input[0]，v56 起它以那条分割线开头）；实际开头：${layer.slice(0, 80)}`,
   );
 
   // ── 逐字样本（有 server 时）：改措辞就必须改这一条，不许悄悄漂 ──

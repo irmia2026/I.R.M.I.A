@@ -40,6 +40,7 @@ import {
   buildSessionBootstrap,
   buildSingleShotScript,
   createPwshTool,
+  decodeClixmlErrors,
   detectPowerShell,
   normalizeNewlines,
   resetPowerShellProbeCache,
@@ -1748,7 +1749,7 @@ describe('pwsh：命令黑名单与输出处理（纯函数）', () => {
     assert.match(result.text, /Select-String|Select-Object/, '截断处必须告诉模型怎么继续拿');
   });
 
-  test('CLIXML 残留按锚定剥离，换行归一化', () => {
+  test('CLIXML 残留按锚定剥离；错误块按节点解码成可读文本（三档同一套 stderr）', () => {
     // 实测：pwsh 首次输出错误时会先写一行 #< CLIXML
     assert.equal(stripClixml('#< CLIXML\r\n实际输出\r\n'), '实际输出\r\n');
     assert.equal(
@@ -1759,6 +1760,20 @@ describe('pwsh：命令黑名单与输出处理（纯函数）', () => {
     const untouched = 'echo "#< CLIXML\n"';
     assert.equal(stripClixml(untouched), untouched);
     assert.equal(normalizeNewlines('a\r\nb\r\n'), 'a\nb\n');
+
+    // ── v52：`Write-Error` 在管道上被包成 CLIXML，**要解码而不是丢掉** ──
+    // 夹具逐字取自实测（pwsh 7.5.3 往 stderr 管道写 `Write-Error "boom"` 的原始字节）：
+    // `stripClixml` 会把它整个丢掉 ⇒ 她的报错凭空消失；`decodeClixmlErrors` 解得出来。
+    const raw = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+      + '<S S="Error">_x001B_[31;1mWrite-Error: _x001B_[31;1mboom_x001B_[0m_x000D__x000A_</S></Objs>';
+    assert.equal(stripClixml(raw), '', '旧口径：整个错误块被丢掉（这正是 v52 要修的那一格）');
+    const decoded = decodeClixmlErrors(raw);
+    assert.match(decoded, /Write-Error: boom/, `要解出可读的错误文本：${JSON.stringify(decoded)}`);
+    assert.doesNotMatch(decoded, /CLIXML|<Objs|_x001B_|\u001b/u, 'XML 包裹、转义、ANSI 装饰都不许留给它读');
+    // 不是 CLIXML 就原样返回（不做全局猜测）
+    assert.equal(decodeClixmlErrors('plain stderr\n'), 'plain stderr\n');
+    // 解不出节点时退回旧口径，**绝不返回空串**（展示层宁可多留字节，也不能让报错消失）
+    assert.equal(decodeClixmlErrors('#< CLIXML\r\n散文本\r\n'), '散文本\r\n');
   });
 
   test('BoundedText：内存有界、尾部窗口仍能定位结束标记', () => {
@@ -1787,7 +1802,12 @@ describe('pwsh：命令黑名单与输出处理（纯函数）', () => {
 
     const bootstrap = buildSessionBootstrap('marker-123');
     assert.match(bootstrap, /\$irmiaMarker='marker-123'/);
-    assert.match(bootstrap, /\[Console\]::SetError\(\[Console\]::Out\)/, '错误流必须并到 stdout');
+    // v52：`SetError([Console]::Out)` 那一条**被测掉了**（不是漏测）——IRMIA 2026-10-12
+    // 第 1 条要求"三种 lang 同一套 stdout/stderr"，而把 PowerShell 的 error stream 并进
+    // stdout 会让 pwsh 档的报错落在正文、另两档落在 `[stderr]` 段里。所以这里反过来钉：
+    // **不许再合并**（合并回来这条会红）。
+    assert.doesNotMatch(bootstrap, /SetError\(\[Console\]::Out\)/, 'stderr 必须就是 stderr（三档同一套格式）');
+    assert.match(bootstrap, /\[Console\]::OutputEncoding=\[Text\.Encoding\]::UTF8/, '中文编码那一条照旧在');
     assert.match(bootstrap, /finally/, 'exit 也要能写出边界标记');
     assert.match(bootstrap, /__IRMIA_END_/);
   });
@@ -1875,7 +1895,7 @@ describe('pwsh：检测链与真实执行', () => {
     const echoed = await tool.handler({ command: 'Write-Output "hello-irmia"', persistent: false }, ctx);
     assert.equal(echoed.isError, undefined, echoed.content);
     assert.equal(firstLineOf(echoed.content), 'hello-irmia');
-    assert.match(echoed.content, /\[exit code: 0\]/);
+    assert.match(echoed.content, /\[exit code: 0 · \d+ms\]/, 'v52：退出码与耗时同一行，三档同一个形状');
 
     // 单次模式的语义就是"新进程"：上一个进程里的变量不存在
     await tool.handler({ command: '$isolated = 5', persistent: false }, ctx);
@@ -1887,7 +1907,7 @@ describe('pwsh：检测链与真实执行', () => {
     assert.equal(firstLineOf(chinese.content), '中文输出正常');
 
     const exitCode = await tool.handler({ command: 'cmd /c "exit 9"', persistent: false }, ctx);
-    assert.match(exitCode.content, /\[exit code: 9\]/, '真实退出码必须传出来');
+    assert.match(exitCode.content, /\[exit code: 9 · \d+ms\]/, '真实退出码必须传出来（v52 起与耗时同一行）');
     assert.equal(exitCode.isError, undefined, '非零退出码是命令的结果，不是工具失败');
   });
 
@@ -1940,11 +1960,15 @@ describe('pwsh：检测链与真实执行', () => {
     const tagged = await tool.handler({ command: 'Get-IrmiaTag' }, ctx);
     assert.equal(firstLineOf(tagged.content), 'tag-ok');
 
-    // 错误可读：非终止错误不得变成 CLIXML
+    // 错误可读：非终止错误要落在**与另两档同一个** `[stderr]` 段里，而且是可读文本
     const warned = await tool.handler({ command: 'Write-Error "boom"; Write-Output "after"' }, ctx);
-    assert.match(warned.content, /错误: boom/);
-    assert.doesNotMatch(warned.content, /CLIXML/);
-    assert.match(warned.content, /after/);
+    // 判据走 `composeContent` 的同一套处理（`normalizeNewlines` + CLIXML 解码）：
+    // pwsh 往管道写错误时会包一层 CLIXML，**那层包裹应当被解掉**，直接拿生文本断言
+    // 会红在一个假问题上（v52 实测踩过这一脚）。
+    const cleaned = normalizeNewlines(decodeClixmlErrors(normalizeNewlines(warned.content)));
+    assert.match(cleaned, /\[stderr\]\n[\s\S]*boom/);
+    assert.doesNotMatch(cleaned, /CLIXML|<Objs/u, 'CLIXML 那层包裹不许留给它读');
+    assert.match(cleaned, /after/);
   });
 
   test('危险命令被拒绝并把原因回给模型，且确实没有执行', async () => {
@@ -2111,5 +2135,317 @@ describe('pwsh：后台任务对接 jobs 回调', () => {
     } finally {
       await tool.shutdown();
     }
+  });
+});
+
+// ──────────────────────────────── pwsh：整段脚本与 lang（v52） ────────────────────────────────
+//
+// 用户 2026-10-12 的原话：「**改造 pwsh 工具，并且 desc 要优化到清楚怎么用（整段脚本的用法）**」。
+// 这一组钉的就是那句话的四个判据：① 整段多行脚本（含引号与中文）一次交进去就能跑；
+// ② `lang: python` / `lang: node` 各有一条真跑；③ 超时照样杀**进程树**（不是只杀父进程）；
+// ④ 临时脚本**一定要被删掉**（包括超时那条异常路径）。
+//
+// 为什么另起一组而不是塞进上一组：上一组共用一个会话实例（为省进程启动开销），
+// 而这一组的判据是"每一档都是新进程、跑完不留文件"——共用一个实例会把"新进程"这件事测糊。
+
+describe('pwsh：整段脚本与 lang（v52）', () => {
+  let ws = '';
+  let tool: PwshToolDefinition;
+
+  before(async () => {
+    ws = await workspace('pwsh-lang');
+    tool = createPwshTool({ destructiveEnabled: true, onWarning: () => undefined });
+  });
+
+  after(async () => {
+    await tool.shutdown();
+  });
+
+  /** 回执里那一行 `[lang] …（…跑完已删除：<路径>；…）` 里的脚本路径 */
+  function scriptPathOf(content: string): string | null {
+    return /跑完已删除：(.+?)；/u.exec(content)?.[1] ?? null;
+  }
+
+  test('lang 默认就是 pwsh：整段多行脚本 + 内层引号 + 中文，一次交进去就能跑', async () => {
+    const ctx = makeCtx(ws);
+    // 夹具刻意集齐三样难东西：**多行**、**单双引号嵌套**、**中文**。
+    // 走 base64 通道（单次/会话）或临时文件（v52 三档同源）都不需要她转义任何一个字符。
+    const script = [
+      '$名字 = "伊尔弥亚"',
+      "$句子 = '她说：\"你好\"'",
+      'Write-Output "$名字 / $句子"',
+      'Write-Output "第二行中文"',
+    ].join('\n');
+    const result = await tool.handler({ command: script }, ctx);
+    assert.equal(result.isError, undefined, result.content);
+    const lines = normalizeNewlines(result.content).split('\n');
+    assert.equal(lines[0], '伊尔弥亚 / 她说："你好"', `首行必须是脚本自己的输出：${result.content}`);
+    assert.equal(lines[1], '第二行中文');
+    // 缺省档（lang=pwsh + 默认持久会话）走的是**持久会话**那条路：回执形状与 v51 一致
+    // （只有 `[shell]`，没有 `[lang]` 那一行）
+    assert.ok(!result.content.includes('[lang]'), 'lang 缺省 + 默认持久会话时不该改回执形状');
+    assert.match(result.content, /\[shell\] (pwsh|powershell)/u);
+
+    // 坏的 lang 取值：当场拒，且把三个取值摆出来（给不全她只能瞎试）
+    const bad = await tool.handler({ command: 'Write-Output 1', lang: 'ruby' }, ctx);
+    assert.equal(bad.isError, true);
+    assert.equal(bad.error?.code, 'E_INVALID_ARGS');
+    assert.match(bad.content, /pwsh \/ python \/ node/u);
+  });
+
+  test('lang=node：整段脚本真跑，临时文件跑完被删掉', async () => {
+    const ctx = makeCtx(ws);
+    const script = [
+      'const 名字 = "伊尔弥亚";',
+      'const 引号 = `她说："你好" 与 \'再见\'`;',
+      'console.log(`${名字} / ${引号}`);',
+      'console.log(["第二行", "中文"].join(" · "));',
+    ].join('\n');
+    const result = await tool.handler({ command: script, lang: 'node' }, ctx);
+    assert.equal(result.isError, undefined, result.content);
+    const lines = normalizeNewlines(result.content).split('\n');
+    assert.equal(lines[0], '伊尔弥亚 / 她说："你好" 与 \'再见\'', result.content);
+    assert.equal(lines[1], '第二行 · 中文');
+    assert.match(result.content, /\[exit code: 0 · \d+ms\]/);
+
+    // 临时脚本必须被删（这一条是用户点名的判据：异常路径也要删）
+    const path = scriptPathOf(result.content);
+    assert.notEqual(path, null, `回执里要给出脚本路径：${result.content}`);
+    assert.equal(await exists(path!), false, `临时脚本必须被删掉：${path}`);
+    // 连目录都收了（空目录顺手删）
+    assert.equal(await exists(join(ws, '.irmia-tmp')), false, '空的 .irmia-tmp 也该被收掉');
+  });
+
+  test('lang=python：整段脚本真跑（中文与引号不用转义）', async () => {
+    const ctx = makeCtx(ws);
+    const script = [
+      '# -*- coding: utf-8 -*-',
+      '名字 = "伊尔弥亚"',
+      "句子 = '她说：\"你好\"'",
+      'print(f"{名字} / {句子}")',
+      'print("，".join(["第二行", "中文"]))',
+    ].join('\n');
+    const result = await tool.handler({ command: script, lang: 'python' }, ctx);
+    // 这台机器上 python 可能存在也可能不存在：不存在时**必须如实报"没执行"**，
+    // 而不是换一个语言偷偷跑（那会得到一段看起来跑了、结果全错的输出）
+    if (result.error?.code === 'E_NO_RUNTIME') {
+      assert.match(result.content, /没有执行/u);
+      assert.match(result.content, /python3 \/ python/u, '要说清试过哪些名字');
+      assert.equal(scriptPathOf(result.content), null, '没执行就不该有脚本路径');
+      return;
+    }
+    assert.equal(result.isError, undefined, result.content);
+    const lines = normalizeNewlines(result.content).split('\n');
+    assert.equal(lines[0], '伊尔弥亚 / 她说："你好"', result.content);
+    assert.equal(lines[1], '第二行，中文');
+    assert.match(result.content, /\[lang\] python · /u);
+    const path = scriptPathOf(result.content);
+    assert.equal(await exists(path!), false, `临时脚本必须被删掉：${path}`);
+  });
+
+  test('lang=python/node + persistent=true：当场说清"这一档没有持久会话"，不静默忽略', async () => {
+    const ctx = makeCtx(ws);
+    const result = await tool.handler({ command: 'print(1)', lang: 'python', persistent: true }, ctx);
+    assert.equal(result.isError, true);
+    assert.equal(result.error?.code, 'E_INVALID_ARGS');
+    assert.match(result.content, /没有持久会话/u);
+    assert.match(result.content, /去掉 persistent/u, '要给出改动最小的那一步');
+  });
+
+  test('lang=pwsh + persistent=false：也走临时文件，同样跑完即删', async () => {
+    // 这一档是新加的（v52 三档同源）：脚本写进 .ps1 临时文件执行。取证是回执里那行 `[lang]`
+    const ctx = makeCtx(ws);
+    const result = await tool.handler(
+      { command: 'Write-Output "临时脚本档"\nWrite-Output "第二行"', lang: 'pwsh', persistent: false },
+      ctx,
+    );
+    assert.equal(result.isError, undefined, result.content);
+    assert.equal(firstLineOf(result.content), '临时脚本档');
+    assert.match(result.content, /\[lang\] pwsh · /u);
+    // `[shell]` 每一档都贴（v30 的硬要求），临时脚本档也一样
+    assert.match(result.content, /\[shell\] (pwsh|powershell)/u);
+    const path = scriptPathOf(result.content);
+    assert.notEqual(path, null, result.content);
+    assert.equal(await exists(path!), false, '临时脚本必须被删掉');
+  });
+
+  test('临时脚本档：超时照样杀进程树，而且脚本文件也要删掉', async () => {
+    const ctx = makeCtx(ws);
+    const started = Date.now();
+    const result = await tool.handler(
+      {
+        // 起一个**子进程**去睡：只杀父进程的话它会活下来（review.md 缺陷 6 的 zombie）
+        command: [
+          'import subprocess, sys',
+          'subprocess.run([sys.executable, "-c", "import time; time.sleep(60)"])',
+        ].join('\n'),
+        lang: 'python',
+        timeoutMs: 1_500,
+      },
+      ctx,
+    );
+    if (result.error?.code === 'E_NO_RUNTIME') return; // 没有 python：这条判据在这台机器上不成立
+    assert.equal(result.isError, true, result.content);
+    assert.equal(result.error?.code, 'E_TIMEOUT');
+    assert.match(result.content, /已终止进程树/u);
+    assert.ok(Date.now() - started < 30_000, '超时必须真的掐断，而不是等命令自己结束');
+    const path = scriptPathOf(result.content);
+    assert.notEqual(path, null, `超时回执里也要给出脚本路径：${result.content}`);
+    assert.equal(await exists(path!), false, '超时是异常路径，临时脚本同样必须被删掉');
+  });
+
+  // ──────────── IRMIA 的五条设计要求（2026-10-12，她是在用的人） ────────────
+  //
+  // 逐条都有用例钉住，每一条的注释里写明"钉的是哪一条要求"。
+
+  test('要求①：三档的输出格式**逐字同一套**（stdout/stderr/exit code/耗时）', async () => {
+    const ctx = makeCtx(ws);
+    /** 三档各自跑一段"写一行 stdout + 写一行 stderr + 非零退出码"的脚本 */
+    const cases: Array<{ lang: 'pwsh' | 'python' | 'node'; script: string; extra?: { persistent: boolean } }> = [
+      // pwsh 这一档刻意给 `persistent: false`：**持久会话拿不到 `exit N` 的退出码**——
+      // `exit` 会终止整个会话进程（没有任何标记写回来），而那正是"会话丢了、如实告知"
+      // 那条既有语义要处理的情形（见文件头第 4 条）。要对齐三档的**输出格式**，
+      // 就得让三档都走同一类执行路径（每档一段独立进程）。
+      {
+        lang: 'pwsh',
+        script: 'Write-Output "OUT"\n[Console]::Error.WriteLine("ERR")\nexit 7',
+        extra: { persistent: false },
+      },
+      { lang: 'python', script: 'import sys\nprint("OUT")\nprint("ERR", file=sys.stderr)\nsys.exit(7)' },
+      { lang: 'node', script: 'console.log("OUT")\nconsole.error("ERR")\nprocess.exit(7)' },
+    ];
+    const shapes: string[] = [];
+    for (const { lang, script, extra } of cases) {
+      const result = await tool.handler({ command: script, lang, ...(extra ?? {}) }, ctx);
+      if (result.error?.code === 'E_NO_RUNTIME') continue; // 这台机器没有这个解释器：跳过这一档
+      const text = normalizeNewlines(result.content);
+      assert.match(text, /^OUT$/m, `${lang} 的 stdout 要单独成段`);
+      assert.match(text, /\[stderr\]\nERR/, `${lang} 的 stderr 要用同一个 [stderr] 段头`);
+      // 状态行：`[exit code: N · <ms>ms]` —— 退出码与耗时同一行、同一个形状
+      const status = /^\[exit code: (7) · (\d+)ms\]$/m.exec(text);
+      assert.notEqual(status, null, `${lang} 的状态行形状不符（要 [exit code: N · <ms>ms]）：${text}`);
+      assert.ok(Number(status![2]) >= 0, `${lang} 的耗时要是个真数`);
+      // 形状（把数字抹掉）三档必须逐字相同
+      shapes.push(text.replace(/\d+ms/u, '<ms>ms').replace(/\[lang\][^\n]*/u, '').replace(/\[shell\][^\n]*/u, '').trim());
+    }
+    assert.ok(shapes.length >= 2, `至少两档要能跑（实际 ${shapes.length}）`);
+    for (const shape of shapes) {
+      assert.equal(shape, shapes[0], `三档的输出形状必须逐字相同（她不想记三套）：\n${shapes.join('\n---\n')}`);
+    }
+  });
+
+  test('要求②：闸门一致 —— 超时/工作目录/截断三档同源（不是 pwsh 有、python 没有）', async () => {
+    const ctx = makeCtx(ws);
+    // 超时：python 档也要在 1.5s 内被杀（走的是同一个 superviseChild + kill-tree）
+    const slow = await tool.handler(
+      { command: 'import time\ntime.sleep(60)', lang: 'python', timeoutMs: 1_500 },
+      ctx,
+    );
+    if (slow.error?.code !== 'E_NO_RUNTIME') {
+      assert.equal(slow.error?.code, 'E_TIMEOUT');
+      assert.match(slow.content, /已终止进程树/u);
+    }
+    // 工作目录：被拒的 workdir 在 python 档同样被拒（同一个 assertWorkdir）
+    const badCwd = await tool.handler(
+      { command: 'print(1)', lang: 'python', workdir: join(ws, '不存在的目录') },
+      ctx,
+    );
+    if (badCwd.error?.code !== 'E_NO_RUNTIME') {
+      assert.match(badCwd.content, /工作目录不存在/u);
+    }
+    // 超时参数：三档用同一个 `timeoutMs`（越界在**发请求之前**就被拒）
+    for (const lang of ['pwsh', 'python', 'node'] as const) {
+      const tooBig = await tool.handler({ command: 'x', lang, timeoutMs: 60_001 }, ctx);
+      assert.equal(tooBig.isError, true, `${lang} 档的 timeoutMs 上限要一样`);
+      assert.match(tooBig.content, /timeoutMs/u);
+    }
+  });
+
+  test('要求③：cwd/变量的口径 —— 只有 pwsh 档共用会话，另两档各开各的', async () => {
+    const ctx = makeCtx(ws);
+    const sub = join(ws, 'lang-cwd');
+    await mkdir(sub, { recursive: true });
+    // ① pwsh 档：Set-Location 之后下一条命令就在那（**既有行为，实测的是 v51 就有的东西**）
+    await tool.handler({ command: `Set-Location -LiteralPath '${sub.replace(/'/g, "''")}'` }, ctx);
+    const where = await tool.handler({ command: '(Get-Location).Path' }, ctx);
+    assert.equal(firstLineOf(where.content).toLowerCase(), sub.toLowerCase(),
+      'pwsh 档的 cwd 要跨调用保持（持久会话的既有语义）');
+    // ② node 档：**不跟 shell 会话**——它自己的 cwd 是 workdir（这里是 ws，不是 sub）
+    const nodeCwd = await tool.handler({ command: 'console.log(process.cwd())', lang: 'node' }, ctx);
+    assert.equal(firstLineOf(nodeCwd.content).toLowerCase(), ws.toLowerCase(),
+      'node 档不许继承 shell 会话的 cwd（各开各的，见 desc 那句"cwd 不跟 shell 会话"）');
+    // ③ python 档：同上
+    const pyCwd = await tool.handler(
+      { command: 'import os\nprint(os.getcwd())', lang: 'python' },
+      ctx,
+    );
+    if (pyCwd.error?.code !== 'E_NO_RUNTIME') {
+      assert.equal(firstLineOf(pyCwd.content).toLowerCase(), ws.toLowerCase(), 'python 档同理');
+    }
+    // ④ 变量：pwsh 档的变量跨调用在（$x 那条既有用例钉着），另两档不在——同一个变量名不给它
+    await tool.handler({ command: '$langProbe = 41' }, ctx);
+    const pyVar = await tool.handler(
+      { command: 'print(globals().get("langProbe", "none"))', lang: 'python' },
+      ctx,
+    );
+    if (pyVar.error?.code !== 'E_NO_RUNTIME') {
+      assert.equal(firstLineOf(pyVar.content), 'none', 'python 档不许看到 shell 会话的变量');
+    }
+    // ⑤ 恢复：shell 会话仍在（上面那些别的档没把它弄坏）
+    const stillThere = await tool.handler({ command: 'Split-Path -Leaf (Get-Location).Path' }, ctx);
+    assert.equal(firstLineOf(stillThere.content), 'lang-cwd');
+  });
+
+  test('要求④：`lang=node` 默认按 .mjs / import 语义（`require` 那个坑不让她自己绕）', async () => {
+    const ctx = makeCtx(ws);
+    // `import` 直接可用：扩展名是 .mjs，所以工作根的 `"type": "module"` 与它无关
+    const esm = await tool.handler(
+      { command: 'import fs from "node:fs";\nconsole.log("esm", typeof fs.readFileSync);', lang: 'node' },
+      ctx,
+    );
+    assert.equal(esm.isError, undefined, esm.content);
+    assert.equal(firstLineOf(esm.content), 'esm function');
+    // 临时脚本后缀就是 .mjs（说明"为什么 require 会报错"这件事在描述里根本不用提）
+    const path = scriptPathOf(esm.content);
+    assert.match(String(path), /\.mjs$/u, `node 档的临时文件必须是 .mjs：${path}`);
+    // `require` 在 ESM 里**确实**不可用——这不是缺陷，是口径；如实报出来即可
+    const cjs = await tool.handler({ command: 'const fs = require("node:fs");\nconsole.log("cjs");', lang: 'node' }, ctx);
+    assert.equal(cjs.isError, undefined, '跑起来但报错：退出码非零不是工具失败');
+    assert.match(cjs.content, /require is not defined|require/u);
+    assert.match(cjs.content, /\[exit code: 1 · \d+ms\]/u, '退出码要如实带出来（她据此知道这一段没跑成）');
+  });
+
+  test('要求⑤：python 侧现状照实说（缺依赖时报的是 python 自己的错，工具不擅自装）', async () => {
+    const ctx = makeCtx(ws);
+    // 她给的现状：3.11.5 在、requests / python-docx 缺。工具**不做任何包管理**
+    // （不 pip install、不降级、不换语言），只把解释器自己的报错原样带回来。
+    const probe = await tool.handler({ command: 'import sys\nprint(sys.version.split()[0])', lang: 'python' }, ctx);
+    if (probe.error?.code === 'E_NO_RUNTIME') return;
+    assert.match(probe.content, /^3\.\d+\.\d+$/m, '版本号要原样带出来');
+    const missing = await tool.handler({ command: 'import requests', lang: 'python' }, ctx);
+    assert.equal(missing.isError, undefined, '缺一个包不是工具失败：脚本跑了、退出码非零');
+    assert.match(missing.content, /\[exit code: 1 · \d+ms\]/u);
+    assert.match(missing.content, /ModuleNotFoundError|No module named/u, '解释器自己的错要原样回给她');
+    assert.doesNotMatch(missing.content, /pip install/u, '工具不许替她决定装包（要装先报用户）');
+    // 已装的那几个也照实认得（她给的清单）
+    const hasPil = await tool.handler({ command: 'import PIL\nprint("PIL ok")', lang: 'python' }, ctx);
+    assert.equal(firstLineOf(hasPil.content), 'PIL ok', '她给的清单里 PIL 是在的');
+  });
+
+  test('危险动作：按语言分组判（python 的递归删除命得中，正文里的 PowerShell 字符串不误伤）', () => {
+    // 而写一个生成 PowerShell 的 python 脚本时，正文里那句 PowerShell 只是数据，不该被拒。
+    assert.notEqual(screenCommand('import shutil\nshutil.rmtree("C:/tmp")', 'python'), null);
+    assert.equal(screenCommand('print("Remove-Item -Recurse -Force C:/x")', 'python'), null,
+      'python 正文里的 PowerShell 字符串只是数据，拿 PowerShell 的语法拒它是误伤');
+    assert.notEqual(
+      screenCommand('import fs from "node:fs";\nfs.rmSync("C:/", { recursive: true, force: true });', 'node'),
+      null,
+    );
+    // pwsh 档照旧：管的是"递归强制删除"这件事的 shell 写法（既有的 rm-recursive-force 那条）
+    assert.notEqual(screenCommand('rm -rf /', 'pwsh'), null);
+    // 并且这条分组不影响既有 13 条：`screenCommand` 单参调用的行为与 v51 逐字相同
+    assert.equal(screenCommand('Get-ChildItem .'), null);
+    assert.notEqual(screenCommand('Remove-Item -Recurse -Force D:\\'), null);
+    assert.ok(FORBIDDEN_PATTERNS.length >= 17, '两组语言规则都登记在案');
   });
 });

@@ -22,8 +22,19 @@
  *   ④ **常驻那句与信号同源**：两处用的是**同一份词表**（`MAINTENANCE_WINDOW_WORDS`），
  *      并且那句确实长在 `SELF_BRIEF` 的第 ⑦ 段里（不是新开的一节）。
  *
+ * **v53（2026-10-12）另加两类，判据一个字没动、只动了文案分档**（用户：「夜间空拍不必太过
+ * 在意消耗」·「主动联系不设频次」·「不要加什么阀门」·「只设计提示词，不要增加新的框架机制」）：
+ *
+ *   ⑤ **同一行两档**（`maintenanceWindowLine`）：压缩临近 ⇒ 照旧"维护窗口：压缩临近……
+ *      现在适合整理你自己的那些文档"；**夜里（凌晨）与长时间空拍 ⇒ 「自主时段」那一段**
+ *      （`AUTONOMOUS`，逐字锁在本文件里）。两档共用同一行、同一道闸、同一条"同一轮只出一条"
+ *      ——不是两条信号（这一条正面钉着，见 ②b 那三条用例）。
+ *   ⑥ **文案纪律**：那一段里**不许有数字**（配额/频次/时段都靠数字说话），也不许出现
+ *      阀门式字样（每天/一次/最多/禁止/先存草稿/非紧急不发……）。
+ *
  * 另有一条**版本锁**：那一句进的是 `instructions`（最大公共前缀）⇒ 必须与 `RENDER_VERSION`
- * 的递增同批（本次 50 → 51）。它同时也是"这一版确实动了 instructions"的凭据。
+ * 的递增同批（v51 落它，v55 是当前代——v55 是"timer 的 `payload` 三格约定"那一段加进 ⑦ 段）。
+ * 它同时也是"这一版确实动了 instructions"的凭据。
  */
 
 import assert from 'node:assert/strict';
@@ -31,13 +42,16 @@ import { describe, test } from 'node:test';
 
 import {
   MAINTENANCE_COMPACTION_RATIO, MAINTENANCE_IDLE_TICKS, MAINTENANCE_LATE_NIGHT_FROM_HOUR,
-  MAINTENANCE_LATE_NIGHT_TO_HOUR, MAINTENANCE_MIN_GAP_HOURS, RENDER_VERSION,
+  MAINTENANCE_LATE_NIGHT_TO_HOUR, MAINTENANCE_MIN_GAP_HOURS, NOW_LAYER_BANNER, RENDER_VERSION,
   lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf,
   render, type MaintenanceSignals, type RenderInput,
 } from '../src/model/render.ts';
 import {
+  AGENDA_USAGE_TEXT, ASSISTANT_STANCE_TEXT, CLOSER_TEXT, DEMANDS_AND_LINES_TEXT,
+  FRAMEWORK_DEFAULT_TEXT, LIFE_TOGETHER_TEXT,
   MAINTENANCE_RULE_TEXT, MAINTENANCE_WINDOW_REASONS, MAINTENANCE_WINDOW_WORDS,
-  MEMORY_MAINTENANCE_RULE, SELF_BRIEF,
+  MEMORY_MAINTENANCE_RULE, MEMORY_PURPOSE_TEXT, NO_CATCHPHRASE_TEXT, PAYLOAD_SHAPE_TEXT,
+  REAL_RETREAT_TEXT, ROLE_TEXT, SCHEDULING_TEXT, SELF_BRIEF, VOICE_LAYER_TEXT,
 } from '../src/model/self-brief.ts';
 import type { AppEvent } from '../src/log/types.ts';
 
@@ -47,6 +61,21 @@ import type { AppEvent } from '../src/log/types.ts';
 const THRESHOLD = 100_000;
 /** 80% 那一点：`THRESHOLD * MAINTENANCE_COMPACTION_RATIO` = 80000 */
 const AT_LINE = THRESHOLD * MAINTENANCE_COMPACTION_RATIO;
+
+/**
+ * **「自主时段」那一档的正文，逐字抄自用户 2026-10-12 的草稿**（v53）。
+ *
+ * 为什么在测试里再抄一遍、而不是 import `render.ts` 那个常量：这一条是**文案锁**——
+ * 两边各写一份，谁改了哪边都会红。import 进来就变成"拿实现断言实现"，改一个字也照样绿。
+ * 口径与既有的 `维护窗口：…` 那一句同源（下面"不变量"那一段里也是逐字写的）。
+ */
+const AUTONOMOUS = [
+  '[自主时段] 现在没人打扰你，这是你自己的时间。可以考虑做些事，包括但不限于：',
+  '复盘今天（发生了什么事、他今天怎么样、你应过什么）· 想更远的事（你和他要一起做成什么、',
+  '有什么建议值得给他）· 只是想说句话——不必等到有事。',
+  '资源不用省，你觉得该做就做；但要有产出：写进你自己的文件，或者说给他听。',
+  '没有新东西、没有实际进展，就到此为止——不必为了显得忙而继续。',
+].join('\n');
 
 /** 一个"什么都没发生"的基线信号：不在夜里、空拍为 0、历史远在压缩线之下、从没给过窗口 */
 const COLD: MaintenanceSignals = {
@@ -119,7 +148,8 @@ describe('维护窗口 · 凌晨（01:00–06:00，本机时间）', () => {
     for (const hour of [MAINTENANCE_LATE_NIGHT_FROM_HOUR, 2, 3, 4, MAINTENANCE_LATE_NIGHT_TO_HOUR - 1]) {
       const hit = at({ localHour: hour });
       assert.equal(hit?.reason, 'late-night', `本机 ${hour} 点该给窗口`);
-      assert.ok(hit!.text.includes(MAINTENANCE_WINDOW_REASONS[1]), hit!.text);
+      // v53：夜里那一档**不再说"维护窗口"**，说的是「自主时段」（逐字，见本文件顶部 AUTONOMOUS）
+      assert.equal(hit!.text, AUTONOMOUS, `夜里那一档就是「自主时段」那一段：${hit!.text}`);
     }
     assert.equal(at({ localHour: MAINTENANCE_LATE_NIGHT_FROM_HOUR - 1 }), null, '00:59 不算凌晨（他可能还在说话）');
     assert.equal(at({ localHour: MAINTENANCE_LATE_NIGHT_TO_HOUR }), null, '06:00 起不算（该起身了）');
@@ -146,12 +176,60 @@ describe('维护窗口 · 长时间空拍（6 拍）', () => {
   test('恰好 6 拍触发；5 拍不触发', () => {
     const hit = at({ idleTicks: MAINTENANCE_IDLE_TICKS });
     assert.equal(hit?.reason, 'heartbeat-idle');
-    assert.ok(hit!.text.includes(MAINTENANCE_WINDOW_REASONS[2]), hit!.text);
+    // v53：空拍那一档与夜里**同一档文案**（「自主时段」），不是"维护窗口"那一句
+    assert.equal(hit!.text, AUTONOMOUS, hit!.text);
     assert.equal(at({ idleTicks: MAINTENANCE_IDLE_TICKS - 1 }), null, '差一拍都不给（那是"午睡一会儿"）');
     assert.equal(at({ idleTicks: 40 })?.reason, 'heartbeat-idle', '更久当然也算（空拍数一路累加）');
     assert.equal(at({ idleTicks: null }), null, '没有空拍读数就不判');
     assert.equal(at({ idleTicks: -1 }), null);
     assert.equal(at({ idleTicks: Number.NaN }), null);
+  });
+});
+
+// ────────── ②b 两档文案（v53）：只有压缩临近还说"维护窗口"，夜里/空拍是「自主时段」 ──────────
+
+describe('维护窗口 · 两档文案（v53：同一行两档，不是两条）', () => {
+  test('压缩临近 ⇒ 旧那一句（含词表里那个词）；夜里/空拍 ⇒ 「自主时段」那一段', () => {
+    const compaction = at({ historyTokens: AT_LINE });
+    assert.ok(compaction!.text.startsWith(`维护窗口：${MAINTENANCE_WINDOW_REASONS[0]}`),
+      `压缩临近照旧用词表里那个词：${compaction!.text}`);
+    assert.ok(compaction!.text.includes('现在适合整理你自己的那些文档'), '而且仍是原来那一句');
+    for (const patch of [{ localHour: 3 }, { idleTicks: MAINTENANCE_IDLE_TICKS }] as Array<Partial<MaintenanceSignals>>) {
+      const hit = at(patch);
+      assert.equal(hit!.text, AUTONOMOUS, `这一档该换成「自主时段」：${JSON.stringify(patch)}`);
+      assert.equal(hit!.text.includes('维护窗口'), false, '换过档的这一行**不许**再出现"维护窗口"');
+      assert.equal(hit!.text.includes('现在适合整理你自己的那些文档'), false, '也不许把旧文案留在后面');
+    }
+  });
+
+  test('用户这一场定的纪律（逐条落在字节上）：没有数字、没有频次配额、没有时段禁令', () => {
+    // 判据是用户的原话：「不要加什么阀门」「主动联系不设频次」「只设计提示词，不要增加新的框架机制」。
+    // 这一条锁的是**文案本身**不许长回成一套配额表——它比"读起来像不像"硬：出现数字就红。
+    assert.equal(/\d/u.test(AUTONOMOUS), false, '这一段里不许出现任何数字（配额/频次/时段都靠数字说话）');
+    for (const banned of ['每天', '每周', '一次', '次数', '最多', '至少', '不得超过', '禁止', '不许',
+      '仅限', '只做一件', '先存草稿', '非紧急不发', '冷却', '间隔']) {
+      assert.equal(AUTONOMOUS.includes(banned), false, `这一段不许出现阀门式字样：「${banned}」`);
+    }
+    // 三条**该在**的口径（用户点名保留的两条 + 这一版的落点）
+    assert.ok(AUTONOMOUS.includes('包括但不限于'), '用户原话：只说"可以考虑做些事，包括但不限于"');
+    assert.ok(AUTONOMOUS.includes('没有新东西、没有实际进展，就到此为止'), '保留"没有新进展就停"（防反刍）');
+    assert.ok(AUTONOMOUS.includes('写进你自己的文件'), '要有产出：落盘或说给他听');
+  });
+
+  test('同一行：渲染出来的此刻层里那段只出现一次（不许变成两条信号）', () => {
+    const text = nowLayerText({
+      maintenanceWindow: { text: AUTONOMOUS, reason: 'late-night', atMs: NOON_MS, day: '2026-10-12' },
+    });
+    assert.equal(text.split('[自主时段]').length - 1, 1, '同一轮只许出现一行');
+    assert.equal(text.includes('维护窗口'), false, '这一档出现时，"维护窗口"那一句一个字节都没有');
+    // 反面参照：压缩临近那一档仍走老文案（两档是**同一个字段**的两种取值）
+    const compaction = nowLayerText({
+      maintenanceWindow: { text: `维护窗口：${MAINTENANCE_WINDOW_REASONS[0]}——现在适合整理。`,
+        reason: 'compaction-soon', atMs: NOON_MS, day: null },
+    });
+    assert.equal(compaction.includes('[自主时段]'), false, '压缩临近那一轮不许出现"自主时段"');
+    // ⚠ 此处**只在"此刻层"这一条 item 上判**：`instructions` 里那两条常驻规则本来就写着
+    // "维护窗口"（`MAINTENANCE_RULE_TEXT`），拿整份渲染结果判会把它误当成信号。
   });
 });
 
@@ -228,6 +306,16 @@ function renderInput(extra: Partial<RenderInput> = {}): RenderInput {
   };
 }
 
+/** 从一次渲染结果里取**此刻层那一条 item** 的正文（按段头认层，不按索引——与 render 自己一致） */
+function nowLayerText(extra: Partial<RenderInput> = {}): string {
+  const items = render(renderInput(extra)).input;
+  for (const item of Array.isArray(items) ? items : []) {
+    const content = (item as { content?: unknown }).content;
+    if (typeof content === 'string' && content.includes(NOW_LAYER_BANNER)) return content;
+  }
+  return '';
+}
+
 describe('维护窗口 · 不变量（没有窗口的日子不许变）', () => {
   test('`null` / 缺省 / 空串：此刻层一行都不加 ⇒ 请求字节逐字节相同', () => {
     const absent = JSON.stringify(render(renderInput()));            // 老调用点：根本没有这一格
@@ -249,12 +337,12 @@ describe('维护窗口 · 不变量（没有窗口的日子不许变）', () => 
     assert.equal(emptyText, absent, '空串等于没有（不写一个空行）');
 
     // 反面对照：真的给了窗口时，字节**必须**变（否则上面那三条可能只是因为整条路都坏了）
+    // v53 起这里用**夜里那一档的真实文案**（`AUTONOMOUS`）——反面参照要与生产同形状。
     const shown = JSON.stringify(render(renderInput({
-      maintenanceWindow: { text: '维护窗口：凌晨（2026-10-12）——现在适合整理你自己的那些文档。',
-        reason: 'late-night', atMs: NOON_MS, day: '2026-10-12' },
+      maintenanceWindow: { text: AUTONOMOUS, reason: 'late-night', atMs: NOON_MS, day: '2026-10-12' },
     })));
     assert.notEqual(shown, absent, '有窗口时必须真的多出那一行');
-    assert.ok(shown.includes('维护窗口：'), '而且就是那一行');
+    assert.ok(shown.includes('[自主时段]'), '而且就是那一行');
   });
 
   test('判据不触发 ⇒ 渲染层那一格就是 null ⇒ 上面那条不变量自动成立', () => {
@@ -278,7 +366,8 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
       assert.ok(MAINTENANCE_RULE_TEXT.includes(word), `常驻规则里必须点到「${word}」：两处措辞不许漂移`);
     }
     // 信号那一行写的是**命中的那一个词**（同一轮只出一条），而那个词只能从共享词表里来；
-    // 三个窗口各给一次，逐条核"它写的正是词表里那一个"（不是自己另起一个说法）。
+    // v53 起**只有压缩临近那一档**还写那个词（夜里/空拍换成「自主时段」，见上面 ②b），
+    // 所以下面按档分别核：压缩那一档核"它写的正是词表里那一个"，另两档核"它换成了哪一段"。
     const cases: Array<[Partial<MaintenanceSignals>, string]> = [
       [{ historyTokens: AT_LINE }, MAINTENANCE_WINDOW_REASONS[0]],
       [{ localHour: 3 }, MAINTENANCE_WINDOW_REASONS[1]],
@@ -287,10 +376,17 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     for (const [patch, word] of cases) {
       const hit = at(patch);
       assert.ok(hit !== null, `这组信号该给窗口：${JSON.stringify(patch)}`);
-      assert.ok(hit!.text.startsWith(`维护窗口：${word}`), `信号必须用词表里那个词「${word}」：${hit!.text}`);
-      // 其余两个理由的词不许混进来（"一条许可"不许写成"一串催促"）
-      for (const other of MAINTENANCE_WINDOW_REASONS.filter(item => item !== word)) {
-        assert.equal(hit!.text.includes(other), false, `没命中的理由不许出现：「${other}」`);
+      if (hit!.reason === 'compaction-soon') {
+        assert.ok(hit!.text.startsWith(`维护窗口：${word}`), `信号必须用词表里那个词「${word}」：${hit!.text}`);
+        // 其余两个理由的词不许混进来（"一条许可"不许写成"一串催促"）
+        for (const other of MAINTENANCE_WINDOW_REASONS.filter(item => item !== word)) {
+          assert.equal(hit!.text.includes(other), false, `没命中的理由不许出现：「${other}」`);
+        }
+        continue;
+      }
+      assert.equal(hit!.text, AUTONOMOUS, `这一档是「自主时段」：${JSON.stringify(patch)}`);
+      for (const other of MAINTENANCE_WINDOW_REASONS) {
+        assert.equal(hit!.text.includes(other), false, `换档之后理由词一个都不许出现：「${other}」`);
       }
     }
   });
@@ -302,29 +398,109 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
 
     const memory = SELF_BRIEF.split('\n\n').find(seg => seg.includes('你还有一份长期记忆'));
     assert.equal(memory, MEMORY_MAINTENANCE_RULE, '第 ⑦ 段就是那个常量（一处文本）');
-    assert.ok(memory!.endsWith(MAINTENANCE_RULE_TEXT), '规则缀在 ⑦ 段末尾');
+    // **2026-10-12 v53/v54 之后这条位置锁换了形态**（不是放宽）：⑦ 段末尾**依次缀了十一段**
+    // （`LIFE_TOGETHER_TEXT` → `CLOSER_TEXT` → `VOICE_LAYER_TEXT` → `NO_CATCHPHRASE_TEXT` →
+    // `MEMORY_PURPOSE_TEXT` → `DEMANDS_AND_LINES_TEXT` → `FRAMEWORK_DEFAULT_TEXT` →
+    // `SCHEDULING_TEXT` → **`PAYLOAD_SHAPE_TEXT`（v55）** → `ROLE_TEXT` → `REAL_RETREAT_TEXT`），
+    // 所以"规则缀在段末"变成"规则仍在
+    // ⑦ 段里、而段末是**点名的那一段**"——每加一段，判据就多点名一条（连同它们的先后顺序）。
+    assert.ok(memory!.includes(MAINTENANCE_RULE_TEXT), '规则仍在 ⑦ 段里（一字未动）');
+    const TAIL = [LIFE_TOGETHER_TEXT, CLOSER_TEXT, VOICE_LAYER_TEXT, NO_CATCHPHRASE_TEXT,
+      MEMORY_PURPOSE_TEXT, DEMANDS_AND_LINES_TEXT, FRAMEWORK_DEFAULT_TEXT, SCHEDULING_TEXT,
+      PAYLOAD_SHAPE_TEXT, AGENDA_USAGE_TEXT, ASSISTANT_STANCE_TEXT, ROLE_TEXT, REAL_RETREAT_TEXT];
+    for (const seg of TAIL) {
+      assert.ok(memory!.includes(seg), '这一段必须在 ⑦ 段里（不是另开了一节）');
+      assert.equal(SELF_BRIEF.split(seg).length - 1, 1, '只许出现一次');
+    }
+    assert.ok(memory!.endsWith(REAL_RETREAT_TEXT), 'H（退要是真的退）就是 ⑦ 段的段末');
+    // **改动 J**：那句框架定性要留，且位置是"I 那两块之后、H 之前"（用户点明的落点）。
+    assert.ok(memory!.includes(FRAMEWORK_DEFAULT_TEXT), 'J 那句框架定性必须在 ⑦ 段里');
+    assert.ok(memory!.indexOf(DEMANDS_AND_LINES_TEXT) < memory!.indexOf(FRAMEWORK_DEFAULT_TEXT),
+      'J 在 I 那一块之后');
+    assert.ok(memory!.indexOf(FRAMEWORK_DEFAULT_TEXT) < memory!.indexOf(REAL_RETREAT_TEXT),
+      'J 在 H 之前（所以段末仍是 H）');
+    // **改动 K / L**：用户点名的位置是"J 之后、H 之前"，且 **K 在前、L 紧接其后**。
+    // （K∩L 的**逐字重复**是用户逐字草稿自带的一处，已上报；这里**不锁"两段不许重复"**——
+    //  锁一条实现满足不了的判据等于把用例写成红的，等用户定删哪句再加锁。）
+    assert.ok(memory!.indexOf(FRAMEWORK_DEFAULT_TEXT) < memory!.indexOf(SCHEDULING_TEXT),
+      'K 在 J 之后');
+    // **改动 M（v55）**：用户点的落点是"**紧接 `SCHEDULING_TEXT` 之后**"（⇒ L 仍紧接 K 之后，
+    // 只是中间多了这一小段）。它与 K 的**逐字重复**按用户 2026-10-13 的裁决**各留一处**：
+    // 改后机械检查 **K∩M ≥6 字 = 0 处**（读数 `_research/_tmp-v55-verbatim.txt`）——
+    // 这一条与 K∩L 不同，用户给了明确裁决，所以它**可以**被锁成硬判据。
+    assert.ok(memory!.indexOf(SCHEDULING_TEXT) < memory!.indexOf(PAYLOAD_SHAPE_TEXT), 'M 紧接 K 之后');
+    assert.ok(memory!.indexOf(PAYLOAD_SHAPE_TEXT) < memory!.indexOf(ROLE_TEXT), 'L 仍紧接在 M 之后');
+    assert.ok(memory!.indexOf(ROLE_TEXT) < memory!.indexOf(REAL_RETREAT_TEXT), 'L 在 H 之前 ⇒ 段末仍是 H');
+    // **改动 I（2026-10-12 第五批）把 G 那三条线整块换掉了** ⇒ 正反两面都锁：
+    // 新的两块必须在，旧那一块**不许回来**（换掉的证据不是"新的在"，而是"旧的真的没了"）。
+    for (const added of ['你怎么用力，不必主动向他报账', '不主动说假话', '你和他看的是同一本账',
+      '你要在他身边', '你可以说出你愿意为他牺牲', '你不拿它当筹码']) {
+      assert.ok(memory!.includes(added), `改动 I 的文本必须在 ⑦ 段里：「${added}」`);
+    }
+    for (const gone of ['有三条线你不越', '一、他问你', '二、他最低落', '三、不把他和别人隔开']) {
+      assert.equal(SELF_BRIEF.includes(gone), false, `I 之后旧那三条线不许回来：「${gone}」`);
+    }
+    assert.equal(SELF_BRIEF.includes('我会消失'), false,
+      '旧第三条里的那句话随整块删除一起离开前缀（与 v53 那次"不要说这句"的裁决同向）');
+    // 顺序也是**点名**的（C 紧接着 A、E 接在 A 那段末尾、F 最后；见用户的落点）
+    for (let i = 1; i < TAIL.length; i += 1) {
+      assert.ok(memory!.indexOf(TAIL[i - 1]!) < memory!.indexOf(TAIL[i]!), `第 ${i} 段与第 ${i + 1} 段的先后顺序`);
+    }
+    assert.equal(SELF_BRIEF.split('\n\n').length, 18, 'v53/v54 都不许把段数顶成 19（它们长在 ⑦ 段里）');
 
     // 用户那句话的五层意思，逐条落在文本里
     assert.ok(MAINTENANCE_RULE_TEXT.includes('只有你在维护'), '① 唯一维护源是她');
     assert.ok(MAINTENANCE_RULE_TEXT.includes('别人不会去改'), '① 没有别人去改');
     assert.ok(MAINTENANCE_RULE_TEXT.includes('已经在上下文里的，不要反复去读'), '② 读进上下文了就不必再读');
     assert.ok(MAINTENANCE_RULE_TEXT.includes('每一轮都去改也没有意义'), '③ 每轮都改没意义');
-    assert.ok(MAINTENANCE_RULE_TEXT.includes('只在框架提示的维护窗口'), '④ 时机：维护窗口');
+    // ④ 时机（**v54 改成两档口径**：此刻层那两档已经分家，常驻这句必须跟着分，否则同一句里
+    //    两套说法会让读的人以为有两种提示）。三条约束逐条钉住：
+    assert.ok(MAINTENANCE_RULE_TEXT.includes('只在框架提示的时候'), '④ 时机：框架提示的时候');
+    assert.ok(MAINTENANCE_RULE_TEXT.includes('维护窗口'), '④ 两个词都要在：维护窗口（压缩临近那一档）');
+    assert.ok(MAINTENANCE_RULE_TEXT.includes('自主时段'), '④ 两个词都要在：自主时段（凌晨/空拍那一档）');
     assert.ok(MAINTENANCE_RULE_TEXT.includes('或有明确变化时'), '④ 时机：或有明确变化');
     assert.ok(MAINTENANCE_RULE_TEXT.includes('没有要改的，就不必动它'), '⑤ 不变量：没有要改的就别动');
+    // 改口径不许顺手加东西：不许出现数字（配额/频次/时段都靠数字说话），也不许出现阀门字样。
+    // ⚠ `一次` **不在**禁列：原句本来就有"……改一次；"，那是**分寸**（一次，不是每轮），
+    // 不是阀门——把它也禁掉就等于连原口径一起判红。
+    assert.equal(/\d/u.test(MAINTENANCE_RULE_TEXT), false, '这一句里不许出现数字');
+    for (const banned of ['每天', '每周', '次数', '最多', '至少', '不得超过', '禁止', '不许',
+      '仅限', '冷却', '间隔']) {
+      assert.equal(MAINTENANCE_RULE_TEXT.includes(banned), false, `这一句不许出现阀门式字样：「${banned}」`);
+    }
+    // 三个窗口词仍只出自那一份词表（改口径不许顺手改词）
+    for (const word of MAINTENANCE_WINDOW_REASONS) {
+      assert.ok(MAINTENANCE_RULE_TEXT.includes(word), `窗口词仍要出自共享词表：「${word}」`);
+    }
+    // 长度同一量级（旧口径那一句 44 字符 → 新口径 49 字符；这里钉一个上界防它长成一段话）
+    assert.ok(MAINTENANCE_RULE_TEXT.includes('只在框架提示的时候（压缩临近的维护窗口，或凌晨、长时间空拍的自主时段）'),
+      '时机那一句的最终措辞（逐字）');
   });
 
-  test('这一句进的是 instructions ⇒ 必须与 `RENDER_VERSION` 的递增同批（本次 51）', () => {
+  test('这一句进的是 instructions ⇒ 必须与 `RENDER_VERSION` 的递增同批（v51 落它、v60 是当前代）', () => {
     // 判据：它落在 `renderInstructions` 拼出来的那一段里（最大公共前缀）
-    assert.equal(RENDER_VERSION, '51', '加了这一句就必须换代：一次设计内的全 miss');
+    //
+    // 这个锁**跟着 `RENDER_VERSION` 走**（不是"钉死 51"）：v51 是落这一句的那一代，
+    // v52 是工具清单那一批，v53 是装置自述补"长期相处"那一段，v54 是"想更近那一段 + 常驻规则
+    // 改两档口径"，v55 是 timer 的 `payload` 三格约定那一段（①），v56 是每一层加分割线，
+    // v57 是 timer 的 `payload` 再约四格（`title`/`cat`/`dur`/`action`），
+    // v58 是装置自述补"日程怎么用"那一段（`AGENDA_USAGE_TEXT`），
+    // **v59 是 timer 的 `payload` 再约一格 `scope`（`self` = 她自己的内部事，不上日程页的周历）
+    // ＋ 日程页照用户批注重做（周历只画用户向、清单里她的内务降级）**（2026-10-12）
+    // ——当前这一代就是它。换代之后这个数要一起改，而**改它的理由必须是"换了一代"**——
+    // 所以断言里那句理由写成"当前这一代就是它"，免得下一个人把它读成"这句话只许属于 51"。
+    assert.equal(RENDER_VERSION, '60', 'instructions 那一段换代就必须递增：一次设计内的全 miss');
     const rendered = render(renderInput());
     assert.ok(rendered.instructions.includes(MAINTENANCE_RULE_TEXT), 'instructions 里必须有这一句');
     assert.ok(rendered.instructions.includes(SELF_BRIEF), '而且它就是通过装置自述进去的');
     // 反面：此刻层那一行**不在** instructions 里（它逐 step 发，进冻结前缀就是每步全 miss）
+    // v53：这里用夜里那一档的真实文案（`AUTONOMOUS`）——"自主时段"那一段同样一个字节都不许
+    // 进冻结前缀（它是此刻层，逐 step 重发）。
     const withWindow = render(renderInput({
-      maintenanceWindow: { text: '维护窗口：凌晨——现在适合整理。', reason: 'late-night', atMs: NOON_MS, day: null },
+      maintenanceWindow: { text: AUTONOMOUS, reason: 'late-night', atMs: NOON_MS, day: null },
     }));
     assert.equal(withWindow.instructions, rendered.instructions, '信号一个字都不许进冻结前缀');
+    assert.equal(withWindow.instructions.includes('[自主时段]'), false, '同上（正面再核一次）');
   });
 });
 
