@@ -28,11 +28,11 @@
  *   • **不引入任何价格 / 货币 / 计费口径**（用户的明确要求）。
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { estimateTokens } from '../tools/registry.ts';
-import { MEMORY_DIR_NAME, parseEntryLine } from './memory-maintain.ts';
+import { EPISODE_DIR_NAME, MEMORY_DIR_NAME, parseEntryLine } from './memory-maintain.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -55,6 +55,11 @@ export const ENTRY_SUMMARY_MAX_CHARS = 40;
  * 它约束的是**常驻开销**——索引每轮都在请求里（这是"正文不进上下文"的必要代价，
  * 见 docs/memory-injection.md §7）。超出预算时先砍摘要长度、再按下面的优先级从低往高丢条目，
  * 并在尾部如实写明还有几条没展开。`!pinned` 条目**永不因为超预算被丢**：置顶的语义就是"永远在场"。
+ *
+ * ⚠ **它管的是白名单那一段（facts / jargon / style-notes / aliases）**（2026-10-15 起）：
+ * `episodes/` 那一段走**必留专档**（见 {@link applyIndexBudget}），不计入这个数——
+ * 理由是**盘上那份 `INDEX.md` 已经不进每轮注入**（注入层用的是全量那份、只印 top-6），
+ * 它的"预算"其实是**文件大小**而不是每轮成本。**两段加起来**才是盘上那个文件的实际大小。
  */
 export const INDEX_TOKEN_BUDGET = 900;
 
@@ -66,6 +71,25 @@ export const INDEX_TOKEN_BUDGET = 900;
  * 黑话（听不懂就会答错）、表达风格（答对了语气不对）、别名（认人）。
  */
 const INDEX_FILES = ['facts.md', 'jargon.md', 'style-notes.md', 'aliases.md'] as const;
+
+/**
+ * episode 文件名：`YYYY-MM-DD.md`（与整理任务的 `listDueEpisodes` 同一条判据）。
+ *
+ * 只有这一种名字的文件进索引——她自己在 `episodes/` 里起的别的名字（草稿、临时笔记）不进来，
+ * 理由是"候选集要可解释"：她看到编号 179–186 时应当能一口说出"那是 8 天的经历"。
+ */
+const EPISODE_FILE_RE = /^\d{4}-\d{2}-\d{2}\.md$/u;
+
+/**
+ * `assets.md` **不进索引**（2026-10-15 用户裁决，逐字）：
+ * > 「**assets.md 不进，episodes/** 应当进**。」
+ *
+ * 写在这里是因为这一条**最容易被后人当成"又一次漏配"**：`assets.md` 就在 `MEMORIES/` 下、
+ * 体积也不小（11 KB），看起来"没进索引"很像 bug。它不是——它是**明确的口径**。
+ * 判据（报告 §7 那一栏）：`assets.md` 记的是**数字资产清单**（skill / MCP / 路径），
+ * 属"装置自述"那一类，与"关于用户与世界的记忆"不是一回事；而它那 18 次读取也远少于 episodes。
+ * ⇒ 要动它，先要用户点头，**不要顺手加进 {@link INDEX_FILES}**。
+ */
 
 /**
  * facts.md 的分区优先级（与 `memory-maintain.ts` 的 SECTION_ORDER 同源，但**不含归档区**）。
@@ -130,20 +154,54 @@ export function memoryIndexPath(dataDir: string): string {
  * 读不到的单个文件按"没有"处理（她还没写过 jargon.md 是正常状态），不抛异常——
  * 索引是**尽力而为的目录**，不是校验器。
  */
-export function buildMemoryIndex(dataDir: string): MemoryIndex {
-  const memDir = join(dataDir, 'workspace', MEMORY_DIR_NAME);
-  const entries: MemoryIndexEntry[] = [];
-  for (const name of INDEX_FILES) {
-    const text = readTextIfPresent(join(memDir, name));
-    if (text === null) continue;
-    const path = `${MEMORY_DIR_NAME}/${name}`;
-    if (name === 'facts.md') entries.push(...factsEntries(text, path));
-    else entries.push(...looseEntries(text, path));
-  }
+export function buildMemoryIndex(
+  dataDir: string,
+  /**
+   * `full: true` = **不做预算丢弃**（阶段一，2026-10-15）。
+   *
+   * 为什么是同一个函数上的一个开关，而不是第二个函数：两处的"什么算一条、顺序如何"
+   * 必须**逐字节同一份判据**（`collectIndexEntries`），分成两个函数就有了漂的空间——
+   * 而这里漂开的后果是**编号错位**（她按编号取到的是另一条记忆），不是报错。
+   *
+   * ⚠ **谁要用 `full: true`**（改动前先读完这几条）：
+   *   · **编号**：给她的条目编号（`memory_read` 的 `index`、推荐段里那 6 条的序号）就是
+   *     **这一份**的下标 +1。**不许**拿默认那一份去算编号——它被 900 token 预算截断过
+   *     （实测 29/178），编号会随预算线漂，而"编号跟着索引重建变"只该由记忆文件真的变了引起。
+   *   · **推荐候选集**：挑 top-6 是在全量上挑（`persona/memory-select.ts`），否则她真读过的
+   *     那 61.8%（`episodes/**` 与别的不在指针表里的文件）永远进不了候选。
+   *   · 默认档（`full` 省略）= 老行为**逐字节不变**：预算丢弃照旧（盘上 `INDEX.md` 的形态、
+   *     `memory/selected.entries` 的规模口径都不动）。
+   */
+  options: { full?: boolean } = {},
+): MemoryIndex {
+  const entries = collectIndexEntries(dataDir);
+  if (options.full === true) return { entries, dropped: 0 };
+  return applyIndexBudget(entries);
+}
 
-  // 预算：先按优先级（pinned 在前、其余按原序）算总 token，超了就**从后往前**丢非 pinned 条目。
-  // 为什么从后往前：索引的顺序本身就是优先级（分区优先级 + 时间序），尾部是最不该先看的那些。
-  const kept = [...entries];
+/**
+ * 预算丢弃（**唯一的实现**，2026-10-15 抽出来）：
+ * 先按优先级（pinned 在前、其余按原序）算总 token，超了就**从后往前**丢非 pinned 条目。
+ *
+ * 为什么从后往前：索引的顺序本身就是优先级（分区优先级 + 时间序），尾部是最不该先看的那些。
+ *
+ * 为什么抽成导出的函数：`real-loop` 的 `memoryIndexPlan` 一次扫描要给出**两份**条目
+ * （全量那份给编号与推荐候选集，预算这份给盘上 `INDEX.md` 与老读者），
+ * 若那边自己再写一遍丢弃循环，两条预算线迟早漂开——而漂开的后果是**盘上索引与账目条数对不上**。
+ */
+export function applyIndexBudget(entries: readonly MemoryIndexEntry[]): MemoryIndex {
+  // **episodes 走"必留专档"**（2026-10-15 用户裁决②）：它们排在白名单之后，而丢弃是**从尾部往前**的
+  // ⇒ 不特殊处理的话它们**正好是第一批被丢的**（实测：加进去 8 条，一条都没进盘上 `INDEX.md`，
+  // 文件与编号因此**不同源**——她数出 178、工具说 186。那正是这个仓库最忌讳的静默不一致）。
+  // 所以先把它们摘出来、不参与丢弃循环，最后按原序接回去：
+  //   · **pinned 永不丢**（老口径不变）；
+  //   · **丢弃顺序仍是从尾部往前**，只是**遇到 episodes 专档就跳过**（= 专档先占位，
+  //     再从剩下的非 pinned 尾部丢）；
+  //   · 于是 `INDEX_TOKEN_BUDGET` 管的是**白名单那一段**，episodes 那一段是**另算的硬开销**
+  //     （实测 8 条约 231 token）——这也正是"盘上那份不进每轮注入"的如实代价：
+  //     它的预算是**文件大小**，不是每轮成本。
+  const episodes = entries.filter(isEpisodeEntry);
+  const kept = entries.filter((entry) => !isEpisodeEntry(entry));
   let dropped = 0;
   while (kept.length > 0 && estimateTokens(renderIndexEntries(kept, 0).text) > INDEX_TOKEN_BUDGET) {
     let victim = -1;
@@ -155,7 +213,105 @@ export function buildMemoryIndex(dataDir: string): MemoryIndex {
     kept.splice(victim, 1);
     dropped += 1;
   }
-  return { entries: kept, dropped };
+  // 专档接在最后（= 白名单之后），保持 `collectIndexEntries` 给出的那一段顺序（日期倒序）
+  return { entries: [...kept, ...episodes], dropped };
+}
+
+/**
+ * 这一条是不是 episode 专档（`MEMORIES/episodes/<日期>.md`）。
+ *
+ * 判据挂在**路径**上（而不是新增一个字段）：① `MemoryIndexEntry` 的形状会被序列化进
+ * `memory/selected` 事件与各界面的契约里，加字段要牵动一圈；② 生成它的只有 {@link episodeEntries}，
+ * 而它只生成这个形状；③ 两处（生成与识别）依赖的是**同一个目录约定**
+ * （`episodes/` 下只放 `YYYY-MM-DD.md`，判据由 {@link EPISODE_FILE_RE} 管着）⇒ 不会漂。
+ */
+function isEpisodeEntry(entry: MemoryIndexEntry): boolean {
+  return entry.path.startsWith(`${MEMORY_DIR_NAME}/${EPISODE_DIR_NAME}/`);
+}
+
+/**
+ * 扫盘收集条目（**唯一的收集实现**）：默认档（带预算）与 `full: true`（不带预算）都走它，
+ * 所以两处的"什么算一条、顺序如何"永远同一份判据。
+ *
+ * **顺序 = 索引的顺序 = 编号的来源**，两段：
+ *   ① {@link INDEX_FILES} 那 4 份（facts → jargon → style-notes → aliases，理由见那个常量）；
+ *   ② **`episodes/` 那一段**（`{@link episodeEntries}`）——**接在最后、日期倒序**（新的在前）。
+ *   ⚠ ② 是**追加**在①之后：现有 178 条的编号**一个都不变**（append-only）。若把它插在中间，
+ *   她按编号取到的就会是另一条记忆——而"编号错位"是静默的。
+ */
+function collectIndexEntries(dataDir: string): MemoryIndexEntry[] {
+  const memDir = join(dataDir, 'workspace', MEMORY_DIR_NAME);
+  const entries: MemoryIndexEntry[] = [];
+  for (const name of INDEX_FILES) {
+    const text = readTextIfPresent(join(memDir, name));
+    if (text === null) continue;
+    const path = `${MEMORY_DIR_NAME}/${name}`;
+    if (name === 'facts.md') entries.push(...factsEntries(text, path));
+    else entries.push(...looseEntries(text, path));
+  }
+  entries.push(...episodeEntries(memDir));
+  return entries;
+}
+
+/**
+ * **`episodes/**` 进索引**（2026-10-15 用户裁决：「**assets.md 不进，episodes/** 应当进**」）。
+ *
+ * 粒度 = **一份 episode 一条**（file-level），不是"一条 bullet 一条"。判据是**实测**：
+ *   · 一条 bullet 一条 ⇒ 8 份 live episode 共 **302** 条 ⇒ 每条约 17 token ⇒ **+约 5134 token**，
+ *     而索引总预算只有 {@link INDEX_TOKEN_BUDGET}（900）⇒ 302 条**几乎全部落进"折叠"**，
+ *     盘上 `INDEX.md` 涨到 30 KB 量级，而**注入那一层一个字都不会变多**（固定块只印 top-6）⇒ **纯亏**；
+ *   · 一份一条 ⇒ **+8 条 / +约 136 token**，盘上只多 8 行。
+ *   （"候选池变大 ≠ 每轮变贵"：注入层印的是 top-6 + pinned，与条目总数无关。）
+ *
+ * **摘要 = 该份的第一条 `- ` 条目**（经现成的 {@link summaryOf} 截到 40 字）：episode 的第 1 行是
+ * `# 2026-10-14` 标题、第 2 行常是说明性的 `>` 引用，真正的"那天发生了什么"从第一条 bullet 开始。
+ * 指针 = **第 1 行**（文件头）——那正是"这一天"的坐标，读下去就是那一整天。
+ *
+ * **三条边界**（每条都有它的理由）：
+ *   · **`archive/` 不进**：与 facts.md 的归档区**同一条判据**（"已失效/已过期"不注入——
+ *     指针指向一条作废的东西比不指更糟）。所以只数 `episodes/` **本级**的 `YYYY-MM-DD.md`，
+ *     不递归进子目录（那里面是归档）。
+ *   · **只认 `YYYY-MM-DD.md`**（与整理任务 `listDueEpisodes` 的判据同源）：别的名字（她自己起的
+ *     笔记、临时文件）不进来——索引的候选集要可解释。
+ *   · **日期倒序**（新的在前）：与 `INDEX_FILES` 那段的"优先级即顺序"同一个理——万一以后超预算
+ *     要从尾部丢，丢的是**更旧**的那一天。
+ */
+function episodeEntries(memDir: string): MemoryIndexEntry[] {
+  const dir = join(memDir, EPISODE_DIR_NAME);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    // 她还没写过任何经历：正常状态，不是错误（与 `readTextIfPresent` 同一条口径）
+    return [];
+  }
+  const out: MemoryIndexEntry[] = [];
+  for (const name of names) {
+    if (!EPISODE_FILE_RE.test(name)) continue;
+    const text = readTextIfPresent(join(dir, name));
+    if (text === null) continue;
+    const lines = text.split(/\r?\n/u);
+    // 摘要：**第一条 bullet 行**（`- ` 开头）。
+    // ⚠ 不能直接用 `looseEntryAt` 扫：那个判据只跳过 `#` 与括号开头的行，`>` 引用**不算说明行**
+    //   ⇒ 它会抓走 episode 开头那句"注：本日…记在 2026-10-13.md 末尾"——实测踩到。
+    //   这里的判据要比它**更窄**：只要 bullet（episode 的正文本来就是 bullet 组成的）。
+    let summary = '';
+    for (const line of lines) {
+      if (!/^-\s+/u.test(line)) continue;
+      summary = summaryOf(line.replace(/^-\s+/u, ''));
+      break;
+    }
+    if (summary === '') continue; // 一整份没有任何 bullet：不进索引（进去也只是个空钩子）
+    out.push({
+      path: `${MEMORY_DIR_NAME}/${EPISODE_DIR_NAME}/${name}`,
+      // 指针指向**文件第 1 行**（`# YYYY-MM-DD`）：`entryShapeAt` 对 episode 认这一种形状
+      line: 1,
+      summary,
+      pinned: false, // 经历永不置顶（`!pinned` 是 facts.md 的语义）
+    });
+  }
+  // 日期倒序：文件名就是 `YYYY-MM-DD.md`，字典序 = 日期序（倒过来即"新的在前"）
+  return out.sort((a, b) => (a.path < b.path ? 1 : a.path > b.path ? -1 : 0));
 }
 
 /**
@@ -188,7 +344,23 @@ export function emptyMemoryIndex(): MemoryIndex {
 export function entryShapeAt(pathOrName: string, line: string): MemoryEntryShape | null {
   const name = pathOrName.replace(/\\/gu, '/').split('/').pop() ?? '';
   if (name === 'facts.md') return factsEntryAt(line);
+  // episode：**文件头那一行**（`# YYYY-MM-DD`）就是一个条目（2026-10-15 起 episodes 进索引，
+  // 指针指的就是那一行，见 `episodeEntries`）。判据挂在**文件名**上而不是靠"内容长得像"：
+  // 别的文件里也可能有 `# 标题`，而只有 episode 把"文件头"当作那一天的坐标。
+  if (EPISODE_FILE_RE.test(name)) return episodeEntryAt(line, name);
   return looseEntryAt(line);
+}
+
+/**
+ * episode 的一行：**只有文件头那一行**算条目（`# 2026-10-14`，且日期要与文件名对上）。
+ *
+ * 为什么要求"与文件名对上"：`episodes/2026-10-14.md` 的第 1 行若被改成 `# 2026-10-13`（复制粘贴
+ * 那种手滑），指针仍然指在第 1 行、内容却已经不是那一天了——那正是 `memory_read` 要拦的"漂了"。
+ * 要求对上之后，它会如实报"指针漂了"，而不是把别的内容当结果给出去。
+ */
+function episodeEntryAt(line: string, fileName: string): MemoryEntryShape | null {
+  const date = fileName.replace(/\.md$/u, '');
+  return line.trim() === `# ${date}` ? { summary: date, pinned: false } : null;
 }
 
 /** facts.md 的一行：只在"`- ` 开头 + 摘得出正文"时算条目（与文档里的条目格式一致） */
@@ -267,6 +439,53 @@ function summaryOf(body: string): string {
   return withoutSource.length <= ENTRY_SUMMARY_MAX_CHARS
     ? withoutSource
     : `${withoutSource.slice(0, ENTRY_SUMMARY_MAX_CHARS)}…`;
+}
+
+/**
+ * 索引之外还有什么（阶段一·兜底行升级，2026-10-15 用户裁决②）——**宿主一轮数一次**。
+ *
+ * 为什么要有它：索引只覆盖 {@link INDEX_FILES} 那 4 份文件（实测 178 条），而她真实读取里
+ * **61.8% 落在索引指不到的地方**（`episodes/**` 与 `assets.md` 等，见 `_ops-bm25/REPORT.md` §7）。
+ * 兜底行原来只说清了"索引里还剩多少"，对那 61.8% 一个字都没说——这一格就是补那一句。
+ *
+ * **三条纪律**：
+ *   · **只数、不读内容**（`readdirSync`，不 readFile）：它每轮跑一次，读正文纯属浪费；
+ *   · **数不到就是 `null`**（目录不在 / 权限）⇒ 文案写"若干"，**绝不编一个数**；
+ *   · **它不改变索引**：`episodes/**` 一条都不进 `INDEX_FILES`（那是大改动，用户没有批）。
+ *
+ * `extras` 只列"索引覆盖不到、但确实存在"的**顶层**名字（如 `assets.md`、`diary`）——
+ * 它们是"她可以按路径去问"的清单，不是索引的候选。
+ */
+export function memoryIndexNeighbors(dataDir: string): {
+  episodes: number | null;
+  extras: string[];
+} {
+  const memDir = join(dataDir, 'workspace', MEMORY_DIR_NAME);
+  let names: string[];
+  try {
+    names = readdirSync(memDir);
+  } catch {
+    // 记忆目录还不在（她还没写过任何记忆）：不是错误，如实给"一个都没数到"
+    return { episodes: 0, extras: [] };
+  }
+  const covered = new Set<string>(INDEX_FILES);
+  const extras = names
+    .filter((name) => !covered.has(name) && name !== MEMORY_INDEX_FILE && !name.startsWith('.'))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    // `episodes` 已经在下面单独数过了，这里不再重复列它（它在兜底行里有自己的说法）
+    .filter((name) => name !== EPISODE_DIR_NAME);
+
+  // episodes：只认 `YYYY-MM-DD.md`（与整理任务 `listDueEpisodes` 的判据同源），
+  // 子目录（`episodes/archive/`）**不展开**——兜底行说的"按日期"指的就是那些日子文件。
+  let episodes: number | null = 0;
+  try {
+    episodes = readdirSync(join(memDir, EPISODE_DIR_NAME))
+      .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/u.test(name)).length;
+  } catch {
+    // 目录读不动 ⇒ `null`（文案写"若干"）。**与"0 份"是两件事**，不许混
+    episodes = null;
+  }
+  return { episodes, extras };
 }
 
 // ──────────────────────────────── 渲染索引 ────────────────────────────────

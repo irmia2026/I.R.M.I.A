@@ -25,6 +25,9 @@ import { memoryIndexPlan, memoryHostingEnabled } from '../src/runtime/real-loop.
 import {
   MEMORY_INDEX_FILE, ensureMemoryIndex, memoryIndexPath, readMemoryIndexTextReadOnly,
 } from '../src/persona/memory-injection.ts';
+import {
+  MEMORY_RECOMMEND_PREFIX, selectMemoryRecommendation,
+} from '../src/persona/memory-select.ts';
 import { openTodoItems } from '../src/persona/todo-state.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
@@ -119,15 +122,34 @@ test('开着时：照旧建索引、照旧有注入文本（同一份素材，�
   const dir = memoryDir(t);
   const on = configWith(true);
 
-  const plan = memoryIndexPlan(on, dir, (d) => {
-    ensureMemoryIndex(d);
-    // 真实那条路是 buildMemoryIndex：ensure 之后盘上就有 INDEX.md，读回来即注入文本
-    return { entries: [{ path: 'MEMORIES/facts.md', line: 5, summary: '备份目录在 D 盘根下。', pinned: false }], dropped: 0 };
-  });
+  // 阶段一（2026-10-15）之后"注入文本"= **推荐段**（不再由 `memoryIndexPlan` 自己渲染整张
+  // 指针表）：调用方把 `recommend` 传进来，它才产出那一段。所以这条用例按**生产那条路**接：
+  // 同一个 `selectMemoryRecommendation` + `renderMemoryRecommendation`（`real-loop` 也是这么接的）。
+  //
+  // ⚠ 语料要有**区分度**（2026-10-15 的 IDF 判据 `BM25_MAX_DF_RATIO`）：只有一篇文档时
+  // `df = 1 > N/2 = 0.5` ⇒ **它所有的词元都被丢掉** ⇒ 挑不出任何东西（那是对的：一篇文档里
+  // "哪个词都出现在每一篇里"）。所以这里给 3 条、只有一条谈备份——真语料的形状就是这样。
+  const entries = [
+    { path: 'MEMORIES/facts.md', line: 5, summary: '备份目录在 D 盘根下。', pinned: false },
+    { path: 'MEMORIES/facts.md', line: 7, summary: '周五下午通常有例会。', pinned: false },
+    { path: 'MEMORIES/facts.md', line: 9, summary: '她讨厌八股过渡。', pinned: false },
+  ];
+  const plan = memoryIndexPlan(
+    on,
+    dir,
+    (d) => {
+      ensureMemoryIndex(d);
+      // 真实那条路是 buildMemoryIndex：ensure 之后盘上就有 INDEX.md，条目由它给出
+      return { entries, dropped: 0 };
+    },
+    ({ entries: all }) => selectMemoryRecommendation(all, [{ seq: 1, text: '备份目录在哪儿' }]),
+  );
 
   assert.equal(existsSync(memoryIndexPath(dir)), true, '开着时索引照旧落盘');
-  assert.ok(plan.text.includes('记忆索引'), `注入文本非空：\n${plan.text}`);
-  assert.equal(plan.index.entries.length, 1);
+  assert.ok(plan.text.includes(MEMORY_RECOMMEND_PREFIX), `注入文本是推荐段：\n${plan.text}`);
+  assert.ok(plan.text.includes('备份目录在 D 盘根下'), '挑出来的那一条在段里（带摘要）');
+  assert.equal(plan.recommendation?.total, 3, '推荐段的基数 = 全量索引条数');
+  assert.equal(plan.index.entries.length, 3, '预算那一路的条目照旧给（盘上 INDEX.md 与账目用它）');
   assert.equal(MEMORY_INDEX_FILE, 'INDEX.md');
 });
 

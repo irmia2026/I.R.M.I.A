@@ -552,21 +552,21 @@ export function createEsSearchTool(env: FsEnv, gate: SearchEngineGate): ToolDefi
         //   ② 括号里的举例能用更短的写法说清就换短的（`match_path` 那对命中示例保留——它是判据本身）；
         //   ③ **不删能力、不删取值、不删边界**：`sort_by` 的 8 个取值仍在 `enum` 里，`detail` 的两档、
         //      `file_type` 的三档、`regex`/`whole_word`/`ignore_case` 的默认值全部原样保留。
-        pattern: { type: 'string', description: '文件名模式，支持 * ?，如 "*.test.ts"；也吃字面子串如 "config"；regex=true 时按正则解释' },
+        pattern: { type: 'string', description: '文件名模式，支持 * ?，如 "*.test.ts"；也吃字面子串 "config"；regex=true 按正则解释' },
         path: { type: 'string', description: '限定目录（相对工作根），默认工作根；只吃目录，传文件走 rg_search' },
-        max_results: { type: 'integer', description: '最多几条，默认 100，上限 2000；0 只报数量不列条目' },
+        max_results: { type: 'integer', description: '最多几条，默认 100，上限 2000；0 = 只报数量' },
         // `match_path`（v55）：删掉的是"而不是只匹配名字"这句**重复**——同一句的前半句已经说了
         // "匹配整条路径"，默认值与那对命中示例（判据本身）一字未动。
-        match_path: { type: 'boolean', description: 'true = 匹配整条路径，默认 false；此时分隔符要写 \\（fs/index 命中 0，fs\\index 命中 1）' },
+        match_path: { type: 'boolean', description: 'true = 匹配整条路径，默认 false；此时分隔符写 \\（fs/index 命中 0，fs\\index 命中 1）' },
         ignore_case: { type: 'boolean', description: '忽略大小写，默认 true' },
         regex: { type: 'boolean', description: 'pattern 按正则解释，默认 false' },
         whole_word: { type: 'boolean', description: '全词匹配，默认 false' },
-        file_type: { type: 'string', enum: [...ES_FILE_TYPES], description: '条目类型：all（默认）/ file（只要文件）/ folder（只要目录）' },
-        ext: { type: 'string', description: '扩展名过滤，如 "ts"；只在 regex=false 时生效，默认不过滤' },
+        file_type: { type: 'string', enum: [...ES_FILE_TYPES], description: '条目类型，默认 all（取值即 enum）' },
+        ext: { type: 'string', description: '扩展名过滤，如 "ts"；只在 regex=false 时生效' },
         // `sort_by` 的取值就在同一格的 `enum` 里逐条列着 ⇒ 描述只留"它是什么"，不再重复"默认由引擎决定"
         // （那句已由 `enum` 与实参拼装那一段的注释承担）；取值一个没少。
         sort_by: { type: 'string', enum: [...ES_SORT_KEYS], description: '排序键' },
-        detail: { type: 'string', enum: [...ES_DETAILS], description: 'paths（默认）只列路径、省上下文；full 再给大小与时间，头部给总大小' },
+        detail: { type: 'string', enum: [...ES_DETAILS], description: 'paths（默认）只列路径；full 加大小与时间' },
       },
       required: ['pattern'],
       additionalProperties: false,

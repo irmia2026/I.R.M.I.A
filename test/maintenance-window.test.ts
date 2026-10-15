@@ -391,13 +391,23 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     }
   });
 
-  test('常驻那句的四处口径都在（不重复、不新开一节、段数照旧 18）', () => {
-    assert.ok(SELF_BRIEF.includes(MAINTENANCE_RULE_TEXT), '它必须真的在装置自述里（不是只写了个常量）');
-    assert.equal(SELF_BRIEF.split(MAINTENANCE_RULE_TEXT).length - 1, 1, '只许出现一次');
-    assert.equal(SELF_BRIEF.split('\n\n').length, 18, '长在第 ⑦ 段里，不是新开的一节');
+  test('常驻那句的四处口径都在（v61：口径搬进新稿 §6；旧容器退场但常量仍自洽）', () => {
+    // ⚠ **v61（2026-10-12）**：用户手写稿**逐字置换**了 `SELF_BRIEF` ⇒ 旧的 ⑦ 段容器
+    // （`MEMORY_MAINTENANCE_RULE`）**不再进装置自述**，维护口径按新稿落进它的 **§6**。
+    // 这条锁**按新正文重锚**（不是放宽）：① 口径逐句核新稿；② 旧容器自身仍自洽（其它用例/审计
+    // 还引用它）；③ "旧句不许回到前缀里"也一并钉住。
+    assert.ok(SELF_BRIEF.includes('框架自身的文档'), '① 文档只有她在维护（新稿 §6 的原话）');
+    assert.ok(SELF_BRIEF.includes('已经在上下文里的不要反复读'), '② 读进上下文了就不必再读');
+    assert.ok(SELF_BRIEF.includes('只在框架提示的维护窗口'), '③ 时机：只在框架提示的维护窗口');
+    // v62：用户这一句改过——"没要改的就不动"与他加的"或有明确变化时"**都被他删掉了**，
+    // 换成了"实时变化都在当前上下文窗口内 / 每一轮都读写是浪费"。所以第 ④ 条按**新原文**锁：
+    assert.ok(SELF_BRIEF.includes('每一轮都进行读写和记录是没有意义且浪费的'), '④ 不变量：不必每轮读写');
+    assert.ok(SELF_BRIEF.includes('最近的实时变化都存在于你当前的上下文窗口内'), '④ 理由照原文');
+    assert.equal(SELF_BRIEF.includes(MAINTENANCE_RULE_TEXT), false,
+      'v61：旧常驻规则句随用户原文退场（要它回来得用户改稿——见 render.ts 的 v61 那一篇）');
+    assert.ok(MEMORY_MAINTENANCE_RULE.includes(MAINTENANCE_RULE_TEXT), '旧容器自身仍自洽');
 
-    const memory = SELF_BRIEF.split('\n\n').find(seg => seg.includes('你还有一份长期记忆'));
-    assert.equal(memory, MEMORY_MAINTENANCE_RULE, '第 ⑦ 段就是那个常量（一处文本）');
+    const memory = MEMORY_MAINTENANCE_RULE;
     // **2026-10-12 v53/v54 之后这条位置锁换了形态**（不是放宽）：⑦ 段末尾**依次缀了十一段**
     // （`LIFE_TOGETHER_TEXT` → `CLOSER_TEXT` → `VOICE_LAYER_TEXT` → `NO_CATCHPHRASE_TEXT` →
     // `MEMORY_PURPOSE_TEXT` → `DEMANDS_AND_LINES_TEXT` → `FRAMEWORK_DEFAULT_TEXT` →
@@ -409,9 +419,12 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
       MEMORY_PURPOSE_TEXT, DEMANDS_AND_LINES_TEXT, FRAMEWORK_DEFAULT_TEXT, SCHEDULING_TEXT,
       PAYLOAD_SHAPE_TEXT, AGENDA_USAGE_TEXT, ASSISTANT_STANCE_TEXT, ROLE_TEXT, REAL_RETREAT_TEXT];
     for (const seg of TAIL) {
-      assert.ok(memory!.includes(seg), '这一段必须在 ⑦ 段里（不是另开了一节）');
-      assert.equal(SELF_BRIEF.split(seg).length - 1, 1, '只许出现一次');
+      assert.ok(memory!.includes(seg), '这一段必须在旧容器里（不是另开了一节）');
     }
+    // v61：这些段**不再进 `SELF_BRIEF`**（用户新稿把它们并进了自己的 §§5/8）⇒ 旧口径的
+    // "在 SELF_BRIEF 里只出现一次"改为**容器自洽 + 新结构不变**两条：容器里各一次，
+    // 而装置自述本身仍是 11 节（结构锁在 `self-brief.test.ts`）。
+    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 11, 'v61：装置自述按 `##` 分节，仍是 11 节');
     assert.ok(memory!.endsWith(REAL_RETREAT_TEXT), 'H（退要是真的退）就是 ⑦ 段的段末');
     // **改动 J**：那句框架定性要留，且位置是"I 那两块之后、H 之前"（用户点明的落点）。
     assert.ok(memory!.includes(FRAMEWORK_DEFAULT_TEXT), 'J 那句框架定性必须在 ⑦ 段里');
@@ -446,7 +459,8 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     for (let i = 1; i < TAIL.length; i += 1) {
       assert.ok(memory!.indexOf(TAIL[i - 1]!) < memory!.indexOf(TAIL[i]!), `第 ${i} 段与第 ${i + 1} 段的先后顺序`);
     }
-    assert.equal(SELF_BRIEF.split('\n\n').length, 18, 'v53/v54 都不许把段数顶成 19（它们长在 ⑦ 段里）');
+    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 11,
+      'v61：装置自述换成按 `##` 分节（11 节）；旧"18 段"口径随用户新稿退场（见 render.ts v61 那一篇）');
 
     // 用户那句话的五层意思，逐条落在文本里
     assert.ok(MAINTENANCE_RULE_TEXT.includes('只有你在维护'), '① 唯一维护源是她');
@@ -477,7 +491,7 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
       '时机那一句的最终措辞（逐字）');
   });
 
-  test('这一句进的是 instructions ⇒ 必须与 `RENDER_VERSION` 的递增同批（v51 落它、v60 是当前代）', () => {
+  test('这一句进的是 instructions ⇒ 必须与 `RENDER_VERSION` 的递增同批（v51 落它、v63 是当前代）', () => {
     // 判据：它落在 `renderInstructions` 拼出来的那一段里（最大公共前缀）
     //
     // 这个锁**跟着 `RENDER_VERSION` 走**（不是"钉死 51"）：v51 是落这一句的那一代，
@@ -485,13 +499,18 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     // 改两档口径"，v55 是 timer 的 `payload` 三格约定那一段（①），v56 是每一层加分割线，
     // v57 是 timer 的 `payload` 再约四格（`title`/`cat`/`dur`/`action`），
     // v58 是装置自述补"日程怎么用"那一段（`AGENDA_USAGE_TEXT`），
-    // **v59 是 timer 的 `payload` 再约一格 `scope`（`self` = 她自己的内部事，不上日程页的周历）
-    // ＋ 日程页照用户批注重做（周历只画用户向、清单里她的内务降级）**（2026-10-12）
+    // v59 是 timer 的 `payload` 再约一格 `scope`（`self` = 她自己的内部事，不上日程页的周历）
+    // ＋ 日程页照用户批注重做（周历只画用户向、清单里她的内务降级），
+    // v60 是装置自述补"助理的站位 + 那页是给用户看的"那一段（`ASSISTANT_STANCE_TEXT`），
+    // **v61 是记忆那一批：固定块里换成"框架推荐 top-6"（省 644 token/轮）
+    // ＋ `memory_read` 扩三个入口 ＋ 腾挪 −37 ＋ `ask_human` 断装配**（2026-10-15）
     // ——当前这一代就是它。换代之后这个数要一起改，而**改它的理由必须是"换了一代"**——
     // 所以断言里那句理由写成"当前这一代就是它"，免得下一个人把它读成"这句话只许属于 51"。
-    assert.equal(RENDER_VERSION, '60', 'instructions 那一段换代就必须递增：一次设计内的全 miss');
+    assert.equal(RENDER_VERSION, '63', 'instructions 那一段换代就必须递增：一次设计内的全 miss');
     const rendered = render(renderInput());
-    assert.ok(rendered.instructions.includes(MAINTENANCE_RULE_TEXT), 'instructions 里必须有这一句');
+    // v61：装置自述**逐字置换**后，这一句的落点从旧的 ⑦ 段容器搬进新稿的 §6（口径不变、措辞是
+    // 用户的原文）⇒ 这条按新正文重锚，**不是放宽**：它照样要求"这一口径真的进 instructions"。
+    assert.ok(rendered.instructions.includes('只在框架提示的维护窗口'), 'instructions 里必须有这一口径');
     assert.ok(rendered.instructions.includes(SELF_BRIEF), '而且它就是通过装置自述进去的');
     // 反面：此刻层那一行**不在** instructions 里（它逐 step 发，进冻结前缀就是每步全 miss）
     // v53：这里用夜里那一档的真实文案（`AUTONOMOUS`）——"自主时段"那一段同样一个字节都不许

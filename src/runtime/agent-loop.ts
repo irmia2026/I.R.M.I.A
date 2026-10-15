@@ -453,6 +453,14 @@ export interface AgentLoopBudget {
   onStepOverflow?: (actual: number) => TurnEndReason;
 }
 
+/**
+ * **压缩预警的账**（2026-10-15）：`compaction/decision` 上新增的那一格。
+ *
+ * 取别名而不是另写一份接口：形状的**唯一出处**是 `log/types.ts` 里的 `CompactionDecision`
+ * （事件是契约，改了那里两处一起变）。这里只给它一个短名字，免得调用点写一长串下标类型。
+ */
+export type CompactionWarning = NonNullable<CompactionDecision['data']['warning']>;
+
 export interface AgentLoopDeps {
   /** 事件写入：本模块所有落库都经它（承诺类 sync: true） */
   log: EventLog;
@@ -637,6 +645,19 @@ export interface AgentLoopDeps {
    */
   maintenanceWindow?: MaintenanceWindowNote | null;
   /**
+   * **本轮那条压缩预警的账**（2026-10-15）：宿主在 prepare 段判完"这一拍该不该叫醒她整理"，
+   * 把结论（`{fired, why, historyTokens, thresholdTokens, ratio}`）搭在 `compaction/decision`
+   * 上落库。循环层**只转手**——判据要的事件快照与投影都在宿主手里。
+   *
+   * 与 `maintenanceWindow` 同一条纪律：**internal 观测**，不改请求字节、不动 `RENDER_VERSION`。
+   * 缺省 = 宿主没判（子代理、诊断）⇒ 那一格不写（不填一个 `fired:false` 冒充"判过了"）。
+   *
+   * ⚠ 它**不是一个算好的值，是一个判据函数**：本 turn 的可见历史估算刚刚算出来（就在
+   * `maybeCompact()` 的结论里），所以由循环层**在写那一行账之前**当场调它——判据与压缩判定
+   * 因此是**同一个数、同一刻**。它需要时可以自己发一条真唤醒（`wake/manual{via:'compact-soon'}`）。
+   */
+  compactionWarning?: ((historyTokens: number | null, reason: string, thresholdTokens: number) => CompactionWarning) | null;
+  /**
    * 本轮的**记忆索引注入账**（B2，docs/memory-injection.md §4）：给一个函数，循环层在**轮首**
    * 调它一次，把结论写成 `memory/selected` 事件（索引全文不落事件）。
    *
@@ -756,6 +777,10 @@ export type AgentLoopCompaction = HandoffOptions & { thresholdTokens: number };
  *
  * 2026-10-04 简化：不再"选哪几条 + 取正文"（用户定的口径是「只看索引，如果需要，heavy 自己去读」），
  * 所以这里只回**注入了没有**与**当时那份索引的指纹 / 条数**——索引全文不落事件。
+ *
+ * 2026-10-15（阶段一）：固定块里注入的那一段从"整张指针表"换成"按最近话题挑的 top-6"，
+ * 于是这里**多回三样**——`selected`（推给她的指针）/ `scores`（凭什么）/ `query`（按哪几条输入挑的）。
+ * 三者都是**可选**的（老调用点与老事件没有它们），全文照旧不落事件。
  */
 export type MemorySelector = (input: {
   /** 本轮的唤醒事件（判"是不是心跳轮"就看它） */
@@ -769,6 +794,28 @@ export type MemorySelector = (input: {
   indexHash: string;
   /** 注入的索引条数（规模；不是索引全文） */
   entries: number;
+  /**
+   * **当时注入的那一段文本本身**（阶段一，2026-10-15；可选）。
+   *
+   * 为什么要落原文（而不是只落指纹）：推荐段是 BM25 按"当时的记忆文件 + 当时那 5 次输入"
+   * 挑出来的，事后**算不回来**（盘上文件她会改）——而界面预览与 CLI 的重建要逐字节复原请求。
+   * 与 `assets` 那一格**同一条纪律**（那一格从 v34 起就存着"当时那一行渲染好的文本"）。
+   * 代价与完整判据写在 `log/types.ts` 的 `injected` 那一格。
+   *
+   * **缺省 = 老事件**（那时注入的是整张指针表，由盘上 `INDEX.md` + `indexHash` 复原）。
+   */
+  injected?: string;
+  /**
+   * 固定块里**实际推给她的**指针，按展示顺序（阶段一，2026-10-15；可选）。
+   *
+   * **缺省 = 老事件**（那时注入的是整张指针表，没有"挑出来的几条"这回事）——
+   * 读的人必须按"不在就是没有"处理，别补默认值。
+   */
+  selected?: string[];
+  /** 与 {@link selected} 逐位对应的 BM25 分数（pinned 保底收进来的记 0） */
+  scores?: number[];
+  /** 这一轮挑选用的查询指纹（不落查询原文：那几条输入本身就是日志里的事件） */
+  query?: { hash: string; seqs: number[]; texts: number; truncated: boolean };
   /**
    * 本任务相关资产那一行（v34；`MEMORIES/assets.md`，空串 = 这一轮没有）。
    *
@@ -1213,14 +1260,28 @@ export class TurnRunner {
     // 答案（那道 6 小时的闸就是从它读的，见 render.ts 的 `lastMaintenanceWindowAt`）。
     // 这一格**不进她的上下文**（本事件是 internal ⇒ 不改请求字节、不动 `RENDER_VERSION`）。
     const window = this.deps.maintenanceWindow ?? null;
-    this.write('compaction/decision', window === null ? decision : {
+    // **压缩预警那一条也搭在这张账上**（2026-10-15）：与维护窗口同一条理由——它一 turn 恰好
+    // 一条，而"这一拍为什么叫/没叫她整理"只有这一处答案。同样是 internal ⇒ 不动请求字节。
+    //
+    // ★ 判在**这一刻**（而不是每拍 prepare）：`decision.historyTokens` 就是本 turn 刚算出来的
+    //   那个数，交给判据就是"与压缩同一个量、同一刻"；判据需要时当场发那条真唤醒。
+    const warning = this.deps.compactionWarning?.(
+      decision.historyTokens ?? null,
+      decision.reason,
+      decision.thresholdTokens,
+    ) ?? null;
+    this.write('compaction/decision', {
       ...decision,
-      maintenanceWindow: {
-        reason: window.reason,
-        atMs: window.atMs,
-        // 当地自然日（观测用；算不出来就不写这一格——不编一个日子）
-        ...(window.day === null || window.day === '' ? {} : { day: window.day }),
-      },
+      ...(window === null ? {} : {
+        maintenanceWindow: {
+          reason: window.reason,
+          atMs: window.atMs,
+          // 当地自然日（观测用；算不出来就不写这一格——不编一个日子）
+          ...(window.day === null || window.day === '' ? {} : { day: window.day }),
+        },
+      }),
+      // 缺省 = 宿主没判 ⇒ 那一格不写（不填一个 `fired:false` 冒充"判过了"）
+      ...(warning === null ? {} : { warning }),
     }, { sync: false });
     // 收尾计时交给宿主（缺省不报）。**包 try**：观测不许反过来打断一轮——它连判据都不参与。
     try {
@@ -2136,6 +2197,18 @@ export class TurnRunner {
       injection: plan.injection,
       indexHash: plan.indexHash,
       entries: plan.entries,
+      // ── 阶段一（2026-10-15）：**"挑出来的 id 列表 + 查询指纹 + 命中分数"** ──────────
+      // 升级之前这条账只落 `indexHash` + `entries`，而实测报告 §6 记着那个后果：
+      // 事后**无法**逐轮重建"当时推到她眼前的是哪几条"。
+      //
+      // ⚠ **缺省 = 老事件**（2026-10-15 之前那些）：那时固定块里注入的是整张指针表，
+      // 没有"挑出来的几条"这回事。所以这三格是**可选**的，读的人必须按"不在就是没有"处理
+      // （别给它们补默认值：补成 `[]` 会让"老事件"与"这一轮一条都没挑出来"变成同一种读法）。
+      // 与 `assets` 那一格同一条纪律：不写空字段，老事件的形状因此逐字节不变。
+      ...(plan.injected === undefined ? {} : { injected: plan.injected }),
+      ...(plan.selected === undefined ? {} : { selected: plan.selected }),
+      ...(plan.scores === undefined ? {} : { scores: plan.scores }),
+      ...(plan.query === undefined ? {} : { query: plan.query }),
       // 空串 = 这一轮没有那一行：不写空字段（老事件的形状因此逐字节不变）
       ...(plan.assets === undefined || plan.assets === '' ? {} : { assets: plan.assets }),
     }, { sync: true });

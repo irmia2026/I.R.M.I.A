@@ -70,7 +70,7 @@ import type { PersonaAssets } from '../persona/loader.js';
 import { applyOne, finalizePressure, wakeSourceOf } from '../state/fold.ts';
 import { saveProjectionCache } from '../state/projection-cache.ts';
 import { writeSnapshot } from '../state/snapshot.ts';
-import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, mentionNoticeOf, contactWithWakeStamp, type AgentLoopBudget, type AgentLoopDeps, type TurnTiming } from './agent-loop.ts';
+import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, mentionNoticeOf, contactWithWakeStamp, type AgentLoopBudget, type AgentLoopDeps, type CompactionWarning, type TurnTiming } from './agent-loop.ts';
 // 回投能力的唯一判据在 tools/admin（speak 第三路用它）：这里读同一个函数，
 // 免得「提示词告诉她能发」与「实际能不能发」变成两套口径。
 import {
@@ -90,6 +90,7 @@ import {
 import { deliveredToSid, replyableWakeChannel } from '../tools/admin.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
 import type { MachineFacts, MaintenanceWindowNote, RenderChannelContext, RenderImageRef, TurnBlockFacts, UsageFacts } from '../model/render.ts';
+import { COMPACTION_WARNING_RATIO, compactionSoonNote, planCompactionWarning } from '../model/compaction-warning.ts';
 import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, wakeTitle } from '../model/render.ts';
 // 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
 // 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
@@ -128,9 +129,15 @@ import {
   MCP_INDEX_DESC_CLAUSE_VERSION, mcpIndexView, probeOnPath, type AssetFactSource,
 } from '../persona/assets.ts';
 import {
-  buildMemoryIndex, emptyMemoryIndex, ensureMemoryIndex, renderMemoryIndex,
-  type MemoryIndex,
+  buildMemoryIndex, emptyMemoryIndex, ensureMemoryIndex, applyIndexBudget, memoryIndexNeighbors,
+  type MemoryIndex, type MemoryIndexEntry,
 } from '../persona/memory-injection.ts';
+import { formatScore } from '../persona/bm25.ts';
+import {
+  MEMORY_QUERY_INPUT_COUNT, renderMemoryRecommendation, selectMemoryRecommendation,
+  type MemoryIndexNeighbors, type MemoryQueryFingerprint, type MemoryQueryInput,
+  type MemoryRecommendation,
+} from '../persona/memory-select.ts';
 import {
   applyTopUpEvent, emptyTopUps, foldTopUps, parseTopUpRequest, raiseLimits,
   TOPUP_FILE_PREFIX, TOPUP_WATCH_DIR_NAME, type TopUpTotals,
@@ -791,6 +798,16 @@ function fileMissing(path: string): boolean {
  * 一张图从到达、渲染到真正被认领通常只隔几十条事件；再往前翻既没必要，也白读盘。
  */
 const ATTACHMENT_SCAN_WINDOW = 200;
+
+/**
+ * 「最近 5 次用户输入」往回最多看多少条事件（阶段一，2026-10-15）。
+ *
+ * 为什么要有上界：这一步**每 turn 做一次**，而活动分片实测有 12 MB 量级 —— 无上界地往回翻
+ * 就等于每轮把日志读一遍。取 2000 的依据是"5 次输入之间的间隔"：她与用户的往来里，
+ * 两次开口之间通常隔着几十到几百条事件（工具调用与结果占大头），2000 条足以覆盖到第 5 次；
+ * 真不够时**少于是多少条就多少条**（聚合那侧本来就允许不足 5 条），绝不为此把整份日志翻掉。
+ */
+const RECENT_USER_INPUT_SCAN = 2000;
 /**
  * `read_channel` 一次读（一屏 / 一页）最多把几张"点名她"的图片带进上下文（2026-10-11 用户拍板）。
  *
@@ -871,11 +888,56 @@ export function memoryHostingEnabled(config: AppConfig): boolean {
 export function memoryIndexPlan(
   config: AppConfig,
   dataDir: string,
-  build: (dir: string) => MemoryIndex,
-): { index: MemoryIndex; text: string } {
-  if (!memoryHostingEnabled(config)) return { index: emptyMemoryIndex(), text: '' };
-  const index = build(dataDir);
-  return { index, text: renderMemoryIndex(index) };
+  /**
+   * 建索引那一步（调用方注入：生产是 `ensureMemoryIndexSafely`，它顺手保证盘上 `INDEX.md`
+   * 与记忆文件一致）。`{ full: true }` = **不做预算丢弃**那一档（阶段一要用全量算编号与候选）。
+   */
+  build: (dir: string, options?: { full?: boolean }) => MemoryIndex,
+  /**
+   * 推荐段（阶段一，2026-10-15）：查询 = 最近 5 次用户输入的聚合，挑 top-6（pinned 必留）。
+   *
+   * 入参是**两份条目**（都是同一份全量扫描的产物，见下面 `build(dataDir, { full: true })`）：
+   *   · `entries`：全量（编号与候选集都按它算）；
+   *   · `kept`：默认档那份（被 900 token 预算截断的，只有 `INDEX.md` 的老读者还用得上）。
+   * **缺省 = 不挑**（`text` 为空串）⇒ 注入的那一段整体不出现：老调用点（子代理、诊断、
+   * 只读重建）因此逐字节不变，不必各自去造一份"最近 5 次输入"。
+   */
+  recommend?: (input: {
+    entries: readonly MemoryIndexEntry[];
+    kept: readonly MemoryIndexEntry[];
+  }) => MemoryRecommendation | null,
+  /**
+   * **索引之外还有什么**（兜底行用，2026-10-15 用户裁决②）：宿主一轮数一次递进来
+   * （`memoryIndexNeighbors`，只 `readdirSync` 数份数，不读内容）。
+   *
+   * **渲染层不读盘**（缓存铁律 1）⇒ "目录里有几份 episodes"这件事只能在宿主数一次、经这里转手。
+   * 缺省 = 不接线（子代理、诊断、只读重建、老用例）⇒ 兜底行退回旧文案，
+   * 那些调用点的请求字节因此与接线之前**逐字相同**。
+   */
+  neighbors?: MemoryIndexNeighbors,
+): { index: MemoryIndex; text: string; recommendation: MemoryRecommendation | null } {
+  if (!memoryHostingEnabled(config)) {
+    return { index: emptyMemoryIndex(), text: '', recommendation: null };
+  }
+  // **一次扫描，两份条目**（`full: true` 跳过预算丢弃那一步，所以不必扫两遍盘）：
+  // 预算那份给"老读者"（盘上 INDEX.md 的形态、`memory/selected.entries` 的规模口径），
+  // 全量那份给编号与推荐候选集。两份顺序逐字节同源（同一个 `collectIndexEntries`）。
+  const built = build(dataDir, { full: true });
+  const entries = built.entries;
+  const budgeted = applyIndexBudget(entries);
+  const recommendation = recommend?.({ entries, kept: budgeted.entries }) ?? null;
+  // 兜底行要的那一格**挂上去**（不改挑法、不改条数）：`neighbors` 缺省时整格不出现，
+  // 于是 `renderMemoryRecommendation` 走旧文案那一支（见 `recommendationTail`）。
+  const withTail: MemoryRecommendation | null = recommendation === null
+    ? null
+    : (neighbors === undefined ? recommendation : { ...recommendation, neighbors });
+  if (withTail === null) {
+    // 没有推荐（老调用点）：退回旧口径那一份，`text` 为空 ⇒ 注入段整体不出现。
+    // ⚠ 这里**不是**"旧文本还在"：调用点不传 `recommend` 时本来就不该有那段（子代理/诊断）。
+    return { index: budgeted, text: '', recommendation: null };
+  }
+  // ⚠ v30 的"轮内不许重建"在这里也适用：`build(dataDir, …)` 一轮只调一次，推荐是纯函数那一步。
+  return { index: budgeted, text: renderMemoryRecommendation(withTail), recommendation: withTail };
 }
 
 /** 打断 speak 的唤醒类型：**人**开口的那三种。定时器、意图、后台任务、心跳都不算 */
@@ -2231,6 +2293,103 @@ export class RealLoop {
     this.write(`[压缩] 已发一次真唤醒（via=compact，turn ${key}，遮蔽至 seq ${covered}）`);
   }
 
+  // ──────────────────────────── 压缩**前**的预警（2026-10-15） ────────────────────────────
+
+  /**
+   * **可见历史越过压缩线的 80% ⇒ 叫醒她一次，让她先整理再继续**（用户 2026-10-15 的口径，
+   * 逐字见 `model/compaction-warning.ts` 的文件头；判据与文案都在那个纯模块里）。
+   *
+   * ## 为什么是"一条真唤醒"，不是"此刻层多一行"
+   *
+   * 用户原话：「到 **0.8 * 200k** 的时候就要有**条框架提醒把她唤醒**」——要的是她**被叫起来**
+   * 去整理（"避免压缩导致丢失信息"），而不是"她下一轮碰巧看见一行字"。此刻层那一行是**主动
+   * 撞上**（她当时正好在跑别的活），越线之后可能几小时没人叫她，那份提示就一直没机会被她读到。
+   *
+   * ## 走哪条路：与压缩后那条**逐字同形**，零新机制
+   *
+   * `appendSync('wake/manual', {note, via:'compact-soon'}, 'model')` → 折投影 → 主循环下一拍
+   * 认领 ⇒ 真起 turn、正文逐字进请求体（理由与三处"刻意不做"逐条写在 `handleCompactionWake`
+   * 的方法头里，本方法一字不差地沿用）。**没有新增唤醒类型**，`main.ts` 一行都不用改。
+   *
+   * ## 判在哪一刻：**本轮收尾、`compaction/decision` 落库之前**（本方法由
+   * `TurnRunner.run` 在那一行账写下去之前调，结论直接搭在账上）
+   *
+   * 两个理由：
+   *   • **同一个数**：判据要的 `historyTokens` 就是 `compactionDecision` 刚算出来的那个——
+   *     与压缩判定逐字同源（用户点名"用与压缩同一个量"，不许另算一份）；
+   *   • **不慢一轮**：在每拍 prepare 段判只能读上一轮落账的读数，而**第一拍必然没有读数**
+   *     （实测：那一支的结论永远是 `unknown`，等于这条预警在"刚起来"与"刚压过"之后各哑一拍）。
+   *
+   * ## 迟滞的实质（★ 判据全在 `planCompactionWarning` 里，这里只说为什么）
+   *
+   * **一次压缩只提醒一次**：复位只由"本轮刚压过"（`reason === 'wrote'`）完成，而"已经提醒过"
+   * 这件事**从日志里读**（`warnedSinceLastCompaction`，不是进程内存、也不是"队列里还有没有"）。
+   * 所以从越线到压缩之间她只会被叫一次——她整理或不整理都由她定，框架不催第二遍。
+   * 也正因如此它天然不刷屏、**不需要第二道时间闸**（与此刻层那道 6 小时的
+   * `MAINTENANCE_MIN_GAP_HOURS` 是两件事，本批不动那一条）。
+   *
+   * ★ **它什么时候真的响**（判据的性质，不是缺陷）：压缩线在 100%，预警线在 80%——
+   * 而"越线"与"能压"并不总是同时成立。**越了线但这一拍压不动**（收益闸门 `gate` / 折叠不
+   * 变小 `no-shrink` / 遮蔽点回退 `monotonic`）的那些拍，正是这条预警存在的意义：历史已经
+   * 贴近上限、而压缩这拍做不了，她该趁现在把要紧的东西收起来。反过来，**第一次越线通常
+   * 就伴随一次压缩**（80% 与 100% 之间那 20k 往往在同一轮里走完）⇒ 那一拍记 `just-compacted`、
+   * 不重复叫她（她本来就会被 `via:'compact'` 那条叫一次）。
+   *
+   * ⚠ 它发出去的那条唤醒仍然过 `admitWake()` 那道门（预算暂停 / 日额度 / 连续失败）：被拦下时
+   * 事件留在 pending，解禁后照常被认领——与其它唤醒同一条语义，不给自己开后门。
+   */
+  private handleCompactionSoonWarning(
+    historyTokens: number | null,
+    reason: string,
+    thresholdTokens: number,
+  ): CompactionWarning {
+    const warning = planCompactionWarning({
+      historyTokens,
+      thresholdTokens,
+      reason,
+      warnedSinceLastCompaction: this.warnedSinceLastCompaction(),
+    });
+    if (!warning.fired) return warning;
+
+    // 越过线 ⇒ 当场叫醒她一次（正文里带三个数：现在多少 / 阈值多少 / 百分比）
+    this.appendSync('wake/manual', {
+      note: compactionSoonNote({ historyTokens: historyTokens!, thresholdTokens }),
+      via: 'compact-soon',
+    }, 'model');
+    this.write(
+      `[压缩] 可见历史 ${historyTokens} / 阈值 ${thresholdTokens}`
+      + `（${Math.round((historyTokens! / thresholdTokens) * 100)}%）⇒ 已发一次真唤醒（via=compact-soon）`,
+    );
+    return warning;
+  }
+
+  /**
+   * **上一次压缩之后，是不是已经提醒过她**（判据全在日志里，不看进程内存）。
+   *
+   * 读法：沿事件快照走一遍，记住最后一条 `reason === 'wrote'` 的 `compaction/decision` 的位置；
+   * 那之后只要出现过一条 `wake/manual{via:'compact-soon'}`，就算"提醒过"。
+   *
+   * 三条刻意的选择：
+   *   • **不用"队列里有没有一条没被认领的"**：那条提醒被认领的那一刻就从队列里没了，而
+   *     "提醒过没有"必须比队列活得久——实测按队列判会让越线状态**每拍各发一条**（3 拍 3 条）；
+   *   • **不记进程内存**：重启之后"提醒过"必须照样成立，否则每次重启都补一条（同
+   *     `lastMaintenanceWindowAt` 那条闸的理由）；
+   *   • **压缩是唯一的复位**：`wrote` 之后旗子翻回来，下一次越线（通常是新长出来的那段历史
+   *     又把线推过）再提醒——这就是用户要的"**一次压缩一次提醒**"。
+   */
+  private warnedSinceLastCompaction(): boolean {
+    let wroteAt = -1;
+    for (const event of this.eventView) {
+      if (event.type === 'compaction/decision' && event.data.reason === 'wrote') wroteAt = event.seq;
+    }
+    for (const event of this.eventView) {
+      if (event.seq <= wroteAt) continue;
+      if (event.type !== 'wake/manual') continue;
+      if ((event.data as { via?: unknown }).via === 'compact-soon') return true;
+    }
+    return false;
+  }
+
   // ──────────────────────────────── 唤醒门 ────────────────────────────────
 
   /**
@@ -3454,7 +3613,26 @@ export class RealLoop {
     // 关掉框架代管记忆时**不建也不读**（v32，docs/persona.md §3.1）：`memoryIndexPlan` 给一份空索引，
     // 于是注入的那段自然为空、账目如实记成"0 条、空指纹"——两处仍然同源，不需要在两侧各加一个
     // if（那样才有"账上说注入了、请求里却没有"的空间）。判据与理由都收在那个函数里。
-    const { index, text: indexText } = memoryIndexPlan(d.config, d.dataDir, this.ensureMemoryIndexSafely);
+    //
+    // 阶段一（2026-10-15）：注入的那一段**不再是整张指针表**，而是"按最近话题挑的 top-6"
+    // （用户原话那一版）。查询 = **最近 5 次用户输入的聚合** —— 那 5 条在这里一次取好，
+    // 下面"注入"与"账目"两处**共用同一份**（两处各取一次就会漂成"挑的是一批、账上写的是另一批"）。
+    const recentInputs = this.collectRecentUserInputs(wakeEvents);
+    const { index, text: indexText, recommendation } = memoryIndexPlan(
+      d.config,
+      d.dataDir,
+      this.ensureMemoryIndexSafely,
+      ({ entries }) => selectMemoryRecommendation(entries, recentInputs),
+      // 兜底行那半句"索引之外还有什么"（2026-10-15 裁决②）：**宿主数一次**（只 readdirSync），
+      // 渲染层不读盘。数不到就是 null ⇒ 文案写"若干"，绝不编。
+      memoryIndexNeighbors(d.dataDir),
+    );
+    // 查询指纹：**一次算好**（下面注入账那一格与用例都要它）。空查询（最近 5 次都是空消息）
+    // 记空串——"没有查询"与"查询是空串"在这里同义，而空串比一个假哈希诚实。
+    const memoryQuery: MemoryQueryFingerprint = (() => {
+      const built = recommendation?.query ?? { text: '', seqs: [], texts: 0, truncated: false };
+      return { ...built, hash: built.text === '' ? '' : sha256Hex(built.text) };
+    })();
     // 心跳轮**不注入**（2026-10-04 用户的口径：只有用户输入时才注入）：索引那一段整段不出现。
     // 判据与注入账用的是同一个 `isHeartbeatTurn`——两处各写一个判据迟早会漂成
     // "账上说没注入、请求里却有"。
@@ -3614,10 +3792,24 @@ export class RealLoop {
       // 里、装配本方法之前算一次），整轮每个 step 原样转手。
       // 它是纯提示：不进判据、不改任何文件（用户的红线"框架只给信号"）。
       maintenanceWindow: this.maintenanceWindowNow,
-      // 记忆索引注入账（B2）：宿主给"注入了没有 + 当时那份索引的指纹与条数"，
-      // 循环层在轮首写 `memory/selected` 事件（索引全文不落事件，见那个事件的注释）。
+      // 压缩预警（2026-10-15）：**不是一个值，是一个判据函数**——`TurnRunner.run` 在写
+      // `compaction/decision` 之前调它，它当场判、需要时当场发那条真唤醒，并把结论交回来落账。
+      // 为什么不在 prepare 段算成一个值：判据用的那个数（可见历史估算）本来就每轮收尾算过一次
+      // ——在收尾判才能与压缩判定**同一个数、同一刻**；在 prepare 判只能读上一轮的读数，
+      // 既慢一轮、第一拍还必然是"没有读数"（判不出来）。
+      // 绑一下 `this`：这一格是**函数**（不是值），循环层会拿着它直接调——传方法引用会丢上下文
+      compactionWarning: (historyTokens, reason, thresholdTokens) =>
+        this.handleCompactionSoonWarning(historyTokens, reason, thresholdTokens),
+      // 记忆索引注入账（B2）：宿主给"注入了没有 + 当时注入那一段的指纹与条数 + 挑出来的是哪几条"，
+      // 循环层在轮首写 `memory/selected` 事件（那一段全文不落事件，见那个事件的注释）。
       // 心跳轮（只有 wake/heartbeat）记 injection:'heartbeat'——那一轮不注入（docs §5）。
-      memorySelector: ({ wakeEvents: turnWakes }) => this.planMemorySelection(index, turnWakes),
+      // 阶段一（2026-10-15）：`selected` / `scores` / `query` 三格与那一段**同源**——
+      // 它们都由上面同一个 `recommendation` 与同一份 `memoryQuery` 来，不在这里重算。
+      memorySelector: ({ wakeEvents: turnWakes }) => this.planMemorySelection(
+        { recommendation, text: indexText },
+        memoryQuery,
+        turnWakes,
+      ),
       // 联络方式（装置自述的状态层那一半）：配置事实 + 本轮唤醒来源
       contact: this.contactFacts(),
       // 本机与用度（此刻层 `本机：` / `用度：` 两份素材）：**只能在这里算**——os/fs 与投影都
@@ -3836,13 +4028,13 @@ export class RealLoop {
    * 于是"关掉框架代管记忆＝连扫都不扫"这件事可以在真实数据目录上被直接断言。本类的调用点
    * 传的都是 `this.deps.dataDir`，与原来逐字节等价。
    */
-  private ensureMemoryIndexSafely(dir: string = this.deps.dataDir): MemoryIndex {
+  private ensureMemoryIndexSafely(dir: string = this.deps.dataDir, options: { full?: boolean } = {}): MemoryIndex {
     try {
       ensureMemoryIndex(dir);
     } catch {
       // 写不进去：下面仍按盘上现有内容建索引
     }
-    return buildMemoryIndex(dir);
+    return buildMemoryIndex(dir, options);
   }
 
   /**
@@ -3857,22 +4049,112 @@ export class RealLoop {
    * 原来这里还要"选哪几条 + 取正文"（`selectMemory` / `readExcerpt` / `renderSelectedMemory`），
    * 用户 2026-10-04 定了口径「只看索引，如果需要，heavy 自己去读，随后跟随 tool call 留在上下文」，
    * 于是整条选材与正文装配都删了——固定块里只留索引。
+   *
+   * **阶段一（2026-10-15）改的是"注入哪一段"**：固定块里那一段从"整张指针表（29 条 / 890 token）"
+   * 换成"框架按最近话题挑的 6 条"（用户原话那一版）。这条账因此多三格：
+   * `selected`（实际推给她的指针）/ `scores`（凭什么） / `query`（按哪几条输入挑的）——
+   * 升级之前只落 `indexHash` + `entries`，报告 §6 记着那个后果：事后**无法**重建"当时推的是哪几条"。
+   * 心跳轮照旧整轮不注入（`injection: 'heartbeat'`），三格一个都不给。
    */
-  private planMemorySelection(index: MemoryIndex, wakeEvents: readonly AppEvent[]): {
+  private planMemorySelection(
+    plan: {
+      recommendation: MemoryRecommendation | null;
+      /** 当时注入的那一段文本（推荐段本身；空串 = 这一轮什么都没注入） */
+      text: string;
+    },
+    query: MemoryQueryFingerprint,
+    wakeEvents: readonly AppEvent[],
+  ): {
     injection: 'human' | 'heartbeat';
     indexHash: string;
     entries: number;
+    injected?: string;
+    selected?: string[];
+    scores?: number[];
+    query?: { hash: string; seqs: number[]; texts: number; truncated: boolean };
   } {
     const heartbeatTurn = isHeartbeatTurn(wakeEvents);
     // 心跳轮：什么都没注入，所以**没有"注进去的那一版"**——指纹留空串、条数留 0。
     // 此处刻意不算那份没被注入的索引的哈希：算了就等于账上写着一个"当时并不在请求里"的指纹，
     // 事后读日志的人会以为它注进去了（这个洞正是记账要防的那一类）。
     if (heartbeatTurn) return { injection: 'heartbeat', indexHash: '', entries: 0 };
+    const recommendation = plan.recommendation;
+    if (recommendation === null || plan.text === '') {
+      // 没有推荐段（她还没写过任何记忆 / 记忆托管关掉 / 老调用点）：这一轮没注入任何东西。
+      // **不许**退回"整张指针表"——那正是这一版要省掉的那 890 token。
+      // 条数记 0（不是"索引有 178 条"）：这一格的语义是**注入了多少**，见 `log/types.ts`。
+      //
+      // ⚠ `injected: ''` **必须写**（哪怕它是空串）：空串是**结论**——"这一轮注入的是没有"。
+      // 不写它，重建那两条路（`replay.ts` 的 `memoryIndexTextForRebuild`）就没法把这一轮
+      // 与"老格式事件"区分开，只能退回盘上读 `MEMORIES/INDEX.md`——而那份文件**已经不进请求了**，
+      // 于是预览会凭空多出整整一段旧索引（实测踩过一次）。老事件之所以还能退回盘上，
+      // 是因为它们那时注入的**就是**那份文件（"盘上文件 + 确定性渲染"的函数）。
+      return { injection: 'human', indexHash: '', entries: 0, injected: '' };
+    }
     return {
       injection: 'human',
-      indexHash: sha256Hex(renderMemoryIndex(index)),
-      entries: index.entries.length,
+      // 指纹 = **当时注入的那段文本**（就是推荐段本身）：账与请求里那一段永远同一版。
+      indexHash: sha256Hex(plan.text),
+      // ⚠ **那一段的原文也落库**（`injected`，阶段一）：推荐段是 BM25 按"当时的记忆文件 +
+      // 当时那 5 次输入"挑出来的，事后**算不回来**（盘上文件她会改）——而界面预览与 CLI 的重建
+      // 要逐字节复原请求。判据与代价逐条写在 `log/types.ts` 的 `injected` 那一格。
+      injected: plan.text,
+      // 条数 = 这一轮挑给她的条数（= 实现里 `selected.length`；两者用同一个来源，见 `agent-loop`）。
+      entries: recommendation.items.length,
+      selected: recommendation.items.map((item) => item.ref),
+      scores: recommendation.items.map((item) => Number(formatScore(item.score))),
+      query: {
+        hash: query.hash,
+        seqs: [...query.seqs],
+        texts: query.texts,
+        truncated: query.truncated,
+      },
     };
+  }
+
+  /**
+   * **最近 5 次用户输入**（阶段一：推荐段的查询来源）。
+   *
+   * 判据 = 用户原话那一版「BM25 挑选应取用户的最近 5 次输入聚合」。所以"用户输入"这三个字
+   * 必须钉在一个**唯一**的实现上：{@link userSpokeEventTextOf}——人开口的那三种唤醒
+   * （`wake/manual` 界面消息 / `wake/channel` 消息适配器 / `wake/webhook` 转发进来的话），
+   * 与"打断 speak"那条判据是**同一份**（`USER_SPOKE_TYPES`）。心跳、定时器、意图、后台任务
+   * 都不是"用户输入"，一个都不算。
+   *
+   * 取法两条路合并（都不新造判据）：
+   *   · **本批唤醒**：手上有现成的对象，也**保证不漏**——本拍刚到的输入在这一格里；
+   *   · **日志里往回看**：更早那几次输入（含上一轮之后没被认领的那些）。
+   * 两路按 seq 去重、按时间序（= seq 升序）。
+   *
+   * 边界都是**有界的常量**：往回最多看 {@link RECENT_USER_INPUT_SCAN} 条事件、
+   * 单条文本最多取 {@link RAW_INPUT_MAX_CHARS} 字（BM25 那侧还有 `MEMORY_QUERY_*` 两道上限）。
+   * 这一步每 turn 做一次，绝不会把 12MB 的活动日志翻一遍。
+   */
+  private collectRecentUserInputs(wakeEvents: readonly AppEvent[]): MemoryQueryInput[] {
+    const found = new Map<number, string>();
+    for (const event of wakeEvents) {
+      const text = userSpokeEventTextOf(event.type, event.data);
+      if (text !== null && text !== '') found.set(event.seq, text);
+    }
+    const latest = this.deps.projection.lastSeq;
+    // 已经凑够 5 条就不翻日志（绝大多数轮次：本批就有输入，而前几次也在本批之前不久）
+    const need = MEMORY_QUERY_INPUT_COUNT - found.size;
+    if (need > 0) {
+      const from = Math.max(1, latest - RECENT_USER_INPUT_SCAN + 1);
+      for (let seq = latest; seq >= from && found.size < MEMORY_QUERY_INPUT_COUNT; seq -= 1) {
+        if (found.has(seq)) continue;
+        const event = this.deps.log.get(seq);
+        if (event === null) continue; // 崩溃留下的空洞：跳过，不猜
+        const text = userSpokeEventTextOf(event.type, event.data);
+        if (text === null || text === '') continue;
+        found.set(seq, text);
+      }
+    }
+    return [...found.entries()]
+      .sort((a, b) => b[0] - a[0]) // 从新往旧取够 5 条
+      .slice(0, MEMORY_QUERY_INPUT_COUNT)
+      .map(([seq, text]) => ({ seq, text }))
+      .sort((a, b) => a.seq - b.seq); // 再按时间升序交给聚合（"按时间拼接"）
   }
 
   /**

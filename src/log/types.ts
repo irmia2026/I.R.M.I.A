@@ -238,7 +238,23 @@ export interface WakeManual extends EventEnvelope<'wake/manual', {
    * **它只在异常退出时出现**：正常重启（她自己请求的、或者拉起器干净换人的）**一个字都不发**，
    * 只留 `runtime/restart` 那条 internal 留痕——判据与理由见 `announceRestart` 的方法头。
    */
-  via?: 'dream' | 'mcp' | 'compact' | 'restart';
+  /**
+   * **`'compact-soon'`（2026-10-15 补）是第五种，形状与 `'compact'` 互为两面**：
+   * `'compact'` 是**压缩之后**告诉她"刚压过、接着做"；这一种是**压缩之前**告诉她
+   * "可见历史已到压缩线的 80%，先把还会再用的东西收起来"（用户 2026-10-15 的原话：
+   * 「框架的压缩预警，**得让 agent 看见**，知道上下文已过 80%，**考虑整理和记录**」）。
+   *
+   * 与其余四个值的关系：
+   *   • 与 `'compact'` 同：**没有人按下任何按钮**，正文是框架通报 + 带祈使句
+   *     （"考虑整理与记录" / "继续手头的工作"）；两处判据（`isSlashCommandEvent` 与
+   *     `noteUserSpoke` 的绕行）都靠 `via !== undefined` 一刀切，所以这一种自动沿用；
+   *   • 与 `'dream'` / `'mcp'` 同：这条 note **不是用户打的话**（界面该走框架卡片）。
+   *
+   * **它不受 `maintenanceWindowOf` 那道 6 小时闸约束**：那条闸管的是此刻层那一行提示，
+   * 而这一种是**独立的一条真唤醒**（判据与迟滞写在 `real-loop.ts` 的
+   * `handleCompactionSoonWarning` 方法头里——一句话：一次压缩只提醒一次）。
+   */
+  via?: 'dream' | 'mcp' | 'compact' | 'compact-soon' | 'restart';
 }> {}
 
 /**
@@ -1142,7 +1158,51 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
     /** 那一刻算出/给出的当地自然日（`YYYY-MM-DD`，配置时区）——观测用，缺了不影响判据 */
     day?: string;
   };
+  /**
+   * **压缩预警的账**（2026-10-15 加，生产上每轮都写）：这一轮"该不该叫醒她整理"。
+   *
+   * 形状的**唯一出处是这里**（事件是契约）；判据、比例与文案在
+   * `src/model/compaction-warning.ts`（那边 import 本类型，反向不成立——`log/` 不认识 `model/`）。
+   *
+   * 为什么必须有它（用户 2026-10-15 的口径：「**得让 agent 看见**」·「把'离 80% 线还有多少 /
+   * 这次为什么响或没响'写进 `compaction/decision`」）：那条预警是**一条真唤醒**
+   * （`wake/manual{via:'compact-soon'}`），而"没响"的那些轮次在日志里本来一个字都没有——
+   * 事后要回答"她这几天为什么没被提醒"就只能靠反推（实测踩过：把此刻层那道 6 小时闸的语义
+   * 与这条唤醒混成一件事）。这一格把**判据的三个数**与**结论**就地记下来。
+   *
+   * `why` 的五个取值就是判据的形状（`planCompactionWarning` 每个 return 各一个），
+   * 不是给人看的形容词：
+   *   · `fired`           —— 越线且该发 ⇒ 这一轮发了那条唤醒；
+   *   · `below-line`      —— 历史没到 80%（绝大多数轮次都是它）；
+   *   · `already-warned`  —— **上一次压缩之后已经提醒过**（不重复叫：她可能正在整理，也可能
+   *     判断"现在不值得整"，两种都该由她定，框架不该催第二遍）；
+   *   · `just-compacted`  —— 本轮压缩判定的结论是 `wrote` ⇒ 刚压过，那面"提醒过"的旗翻回来
+   *     （**这条就是"一次压缩只提醒一次"的迟滞**）；
+   *   · `unknown`         —— 本轮没算出可见历史（或读数不可用）⇒ 不判。
+   *
+   * **它是 internal 观测**（本事件整体不进她的上下文）⇒ 不改请求字节、不动 `RENDER_VERSION`。
+   */
+  warning?: {
+    /** 这一轮有没有真的发出那条唤醒 */
+    fired: boolean;
+    /** 结论（见上：每个取值对应判据里的一个出口） */
+    why: 'fired' | 'below-line' | 'already-warned' | 'just-compacted' | 'unknown';
+    /** 判据用的那个**可见历史估算**（与压缩判定同源；没算出来时为 null） */
+    historyTokens: number | null;
+    /** 当时生效的压缩阈值（配置值；读数不可用时为 null） */
+    thresholdTokens: number | null;
+    /** 比例（当前固定 0.8，见 `model/compaction-warning.ts` 的 `COMPACTION_WARNING_RATIO`） */
+    ratio: number;
+  };
 }> {}
+
+/**
+ * **压缩预警那一格的类型**（`CompactionDecision.data.warning`）：形状的唯一出处就是上面那个接口。
+ *
+ * 单独导出它是为了让**判据模块**（`src/model/compaction-warning.ts`）能拿到它的返回类型，
+ * 而不必把 `CompactionDecision` 整个拖进去——判据只需要"它得交回什么形状"这一件事。
+ */
+export type CompactionWarning = NonNullable<CompactionDecision['data']['warning']>;
 
 export interface PersonaUpdated extends EventEnvelope<'persona/updated', {
   file: string; diffHash: string; by: 'agent' | 'human';
@@ -1212,7 +1272,13 @@ export interface MemorySelected extends EventEnvelope<'memory/selected', {
   /** 本轮的注入理由：心跳轮不注入；有人跟她说话时注入 */
   injection: 'human' | 'heartbeat';
   /**
-   * 当时注入的那段索引文本的指纹（sha256 十六进制）。
+   * 当时注入的那段文本的指纹（sha256 十六进制）。
+   *
+   * **2026-10-15（阶段一）起，它哈希的是"推荐段"**（`【可能相关的记忆】…` 那一段，
+   * 见 `persona/memory-select.ts` 的 `renderMemoryRecommendation`）——因为固定块里注入的
+   * 就是那一段。在那之前哈希的是整张指针表（`renderMemoryIndex`）。两代事件靠
+   * {@link selected} 在不在来区分（老事件没有那一格），**别按"指纹对不上就是重建错了"读**：
+   * 指纹始终等于"当时注入的那段文本"的哈希，这一点两代都没变。
    *
    * 它是"注进去的是哪一版"的唯一凭据：索引文件会被重建，事后从盘上读到的是**现在**那份，
    * 与当时未必相同——有指纹才分得清"重建对不上"是因为索引变了还是因为重建错了。
@@ -1220,6 +1286,73 @@ export interface MemorySelected extends EventEnvelope<'memory/selected', {
   indexHash: string;
   /** 写这条账时注入的索引条数（规模；不是索引全文） */
   entries: number;
+  /**
+   * **当时注入的那一段文本本身**（阶段一，2026-10-15；可选）。
+   *
+   * ⚠ 这一格看起来像在违反上面那条"只记指纹与规模，不记内容"的口径——它不是，理由逐条写清：
+   *
+   *   · **旧口径为什么能只留指纹**：那时注入的是 `renderMemoryIndex(buildMemoryIndex(dir))`，
+   *     是**盘上文件 + 确定性渲染**的函数 ⇒ 重建那两条路（`replay.ts` / `web/server.ts` 的
+   *     `buildReplay`）只要 `readMemoryIndexTextReadOnly(dataDir)` 就能逐字节复原。
+   *   · **新口径为什么不成立**：注入的是**推荐段**（BM25 挑出来的 6 条 + 条数），它的输入是
+   *     **当时的记忆文件**。盘上文件会被她自己改（她天天在写），而 BM25 的语料是"路径 + 摘要"、
+   *     查询是**日志里那 5 次输入**——事后**没有任何办法**把当时那份推荐重算出来。
+   *     实测过一次：界面预览与运行期请求差了 **488 字节**（`test/channel-wire.test.ts:601` 那条用例
+   *     就是因为这个红的），而"预览"的全部价值就是给她（与用户）看她当时到底收到了什么。
+   *   · **所以记的是结论、不是素材**：与 {@link assets} 那一格**同一条纪律、同一个理由**
+   *     （v34 起 `memory/selected.assets` 就存着"当时那一行渲染好的文本"，因为盘上的
+   *     `assets.md` 是她随时会改的、重建算不出当时挑的是哪几条）。这里只是把同一条做法
+   *     用在"推荐段"这一行上。
+   *   · **代价是有界的、而且是可复算的**：实测 14–16 条的索引上推荐段 **约 190 token / 600 字符**
+   *     （真索引 178 条时约 220 token）——每轮一条，日志是 append-only 的。相对"预览会骗人"
+   *     这件事，这个价钱是值的（用户 2026-10-04 那条"只看索引"省的是**每轮请求**的开销，
+   *     与"账里多一列可再生文本"是两件事）。
+   *
+   * **缺省 = 老事件**（2026-10-15 之前写的那些）：那时注入的是整张指针表，由盘上 `INDEX.md` +
+   * {@link indexHash} 复原（上面第一条那个成立的前提）。读的人按"不在就是老事件"处理，
+   * **不许**给它补默认值（补成空串会让"老事件"与"这一轮什么都没注入"变成同一种读法）。
+   */
+  injected?: string;
+  /**
+   * 固定块里那一段**实际印出来的**指针（阶段一，2026-10-15；可选）。
+   *
+   * 形状是 `MEMORIES/facts.md:10` 这种指针，**按展示顺序**（pinned 保底的在前，其余按分数降序）。
+   * 它回答的问题是 `indexHash` 回答不了的那一个：**"当时推到她眼前的是哪几条"**。
+   * 升级之前这条账只落 `indexHash` + `entries`（条数），而报告 §6 记着那个后果——
+   * 事后**无法**逐轮重建"当时那 29 条到底是哪 29 条"（`D:\IrmiaAgent\_ops-bm25\REPORT.md` §6）。
+   *
+   * 只放指针、不放正文（与 `indexHash` 同一条纪律：账不是载体）。
+   * **缺省 = 老事件**（2026-10-15 之前写的那些）：那时注入的是整张指针表，全文可由
+   * `MEMORIES/INDEX.md` 的快照/审计路径 + `indexHash` 对回去 ⇒ 不需要也不许给这一格补默认值。
+   */
+  selected?: string[];
+  /**
+   * 与 {@link selected} **逐位对应**的 BM25 分数（两位小数；pinned 保底收进来的记 0）。
+   *
+   * 为什么要落分数：`selected` 说的是"挑了谁"，分数说的是"**为什么是它**"——
+   * 没有分数，事后只能说"框架当时觉得相关"，而这是不可核对的。
+   */
+  scores?: number[];
+  /**
+   * 这一轮挑选用的**查询指纹**（阶段一，2026-10-15；可选）。
+   *
+   * 查询 = 用户**最近 5 次输入的聚合**（用户原话那一版的判据）。这里**不落查询原文**：
+   * 那 5 条输入本身就是日志里的事件（`wake/manual` / `wake/channel` / `wake/webhook`），
+   * 再存一份就是重复存储。落 `seqs` 是为了让"按哪几条挑的"能**精确对回去**；
+   * `hash` 是聚合后那段文本的 sha256（判据改了、或那几条被截断了，指纹就对不上）。
+   *
+   * **缺省 = 老事件**，与 {@link selected} 同一条纪律。
+   */
+  query?: {
+    /** 聚合文本的 sha256（空查询 = 空串） */
+    hash: string;
+    /** 参与聚合的输入事件 seq（时间序；少于是多少条就多少条） */
+    seqs: number[];
+    /** 参与聚合的条数 */
+    texts: number;
+    /** 有没有因为字符上限被截断（如实记，不假装完整） */
+    truncated: boolean;
+  };
   /**
    * 本任务相关资产那一行（v34，可选；`MEMORIES/assets.md` 里挑出来的 ≤3 条，**已渲染好的文本**）。
    *

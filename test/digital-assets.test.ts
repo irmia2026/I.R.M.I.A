@@ -358,10 +358,12 @@ test('③e 端到端：技能目录里没有的那条技能，事实层如实说
 // ──────────────── ④ 常驻规则、种子、（不常驻） ────────────────
 
 test('④a 常驻规则只有一句：用资产先读说明、不许凭名字猜；而且**不再有**那句假承诺', () => {
-  assert.ok(SELF_BRIEF.includes('先读它的说明再用'), '规则在装置自述里（常驻、短、稳定）');
-  assert.ok(SELF_BRIEF.includes('不许凭名字猜怎么调'));
-  assert.ok(SELF_BRIEF.includes('skill、MCP、PATH 里的命令，都算你的数字资产'), '一个概念三个分类要说清');
-  assert.ok(SELF_BRIEF.includes('有哪些、在哪、就绪没有由框架给你'), '事实层不要求她手抄');
+  // v61（2026-10-12）：用户手写稿**逐字置换**装置自述 ⇒ 这几句换成用户新稿 §7 的原话
+  // （同一条常驻规则、同一个判据，只是措辞是他的）。**按新正文重锚，不是放宽。**
+  assert.ok(SELF_BRIEF.includes('再读那条资产的说明'), '规则在装置自述里（常驻、短、稳定）');
+  assert.ok(SELF_BRIEF.includes('不许凭名字猜参数或副作用'));
+  assert.ok(SELF_BRIEF.includes('skill、MCP、PATH 里的命令都算数字资产'), '一个概念三个分类要说清');
+  assert.ok(SELF_BRIEF.includes('框架提供资产位置、已配的 MCP 和 PATH 探测'), '事实层不要求她手抄');
   assert.ok(SELF_BRIEF.includes('`MEMORIES/assets.md`'), '清单在哪要说清（她自己去看的那份）');
 
   // **v45 的核心断言**：那句假承诺必须消失，且换成与新行为一致的说法
@@ -369,9 +371,9 @@ test('④a 常驻规则只有一句：用资产先读说明、不许凭名字猜
   assert.ok(!SELF_BRIEF.includes('放在你的任务旁边'),
     '不再许诺"框架会挑几条放在任务旁边"——机制取消了，那是假承诺（评审点名过）');
   assert.ok(!SELF_BRIEF.includes('我会从这份清单里挑'), '同上：不许留半句');
-  assert.ok(SELF_BRIEF.includes('这份清单**不进你的上下文**，也没有谁替你挑'),
-    '新说法要写明：不进上下文、也没人替她挑');
-  assert.ok(SELF_BRIEF.includes('做一件事之前，先照它看一眼手上有什么、再去读那条自己的说明'),
+  assert.ok(SELF_BRIEF.includes('清单里没记的东西也不等于没有'),
+    '新稿的说法：清单不是全集（不进上下文、也没人替她挑这层意思由 §7 那两句承担）');
+  assert.ok(SELF_BRIEF.includes('做事前先看资产清单，再读那条资产的说明'),
     '给她一条她自己能走的路（线索就在这里，不另加指路行）');
 });
 

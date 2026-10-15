@@ -280,7 +280,37 @@ const BEFORE_MANUAL_TYPES = [
 // v59（`payload` 再约一格 `scope` + 日程页重做）：**未动**（动的是 `tools` 段与 `gui/**`，这台子量不到）。
 // v60（**助理的站位那一段** `ASSISTANT_STANCE_TEXT`）：`02b65ec014c7f38d` → **`db22521dcd576fcb`**。
 //   同样只因为 `instructions`（189 字符 / +116 token 实测），`tools` 段零改动。
-const BEFORE_MANUAL_FINGERPRINT = 'db22521dcd576fcb';
+//
+// ──────────────────────── v61（2026-10-15，**记忆那一批**）：`db22521dcd576fcb` → `7d093cb974a9db68` ────────────────────────
+// **本次复量的判据（按用户裁决，口径一个字不放宽：仍是 16 位 sha256 精确比对）**：
+//   · **阶段一**（commit `3e87508`）改的是 **`input` 尾部**——本轮固定块里那一段从"整张指针表
+//     （29 条 / 890 token）"换成"框架推荐 top-6（246 token）"。**它不是冻结前缀改动**
+//     （`instructions` 与 `tools` 两段在那笔里一个字节没动），但请求体的**总字节**确实变了
+//     ——这个台子量的是**整份请求**（剥掉此刻层），所以它必然移动。这是**设计内**的位移，
+//     不是回归：判据（挑法 / 口径）没有一处放宽。
+//   · **阶段二**（同一批）改的是 **`tools` 段**：`memory_read` 扩三个入口（+64）、
+//     `es_search`/`safe_edit` 腾挪（−34）、`ask_human` 断装配（不在 `tools` 段里）。
+//     ⚠ 这个台子给的是**空 `ToolRegistry`**（请求体里 `tools` 恒为 `[]`）⇒ **`tools` 段的改动
+//     它量不到**（v52/v55/v57/v59 四篇都记过这条已知盲区）。所以本次位移**只来自阶段一那一处**。
+//   · **不给"等 v61 之后再复量"留口子**：工作树里留三条红比"基线提前动一次"坏得多
+//     （后人看到红会先去查是不是回归）⇒ **随本次复量**，`RENDER_VERSION 60 → 61` 同批落定。
+//     下一次改 `input` 尾部或冻结前缀时，照这条注释的格式再记一笔（**只记事实与判据**）。
+//   · **同批第二笔（本线）：装置自述逐字置换**（`SELF_BRIEF` = 用户手写稿，含内联的工作规范）——
+//     它进的是 **`instructions`**（冻结前缀）⇒ 两个常量必然再动一次：
+//     `7d093cb974a9db68` → **`34e89d331b14e1c2`**（非心跳）、`cf409e1c8aa71d10` → **`10b0abf9e69f5e26`**（混批）。
+//     位移**只来自 `instructions`**（+1,470 字符 / +882 token，实测 `_research/_tmp-v61-account.mts`）：
+//     `tools` 段这一笔不碰（台子也量不到），②③ 两处在本场景里不出现（没有窗口、没有心跳唤醒）。
+//     `RENDER_VERSION` **仍是 `61`**（与阶段一同批、两笔之间没有部署 ⇒ 只付一次缓存失忆）。
+//   · **v62（本线）：装置自述按用户改过的那一版稿子**再置换一次（7 处局部改动，见 `render.ts` v62 篇）
+//     ——同样只进 `instructions` ⇒ 两个常量再动一次：
+//     `34e89d331b14e1c2` → **`97137a15a6b94dd8`**（非心跳）、`10b0abf9e69f5e26` → **`697c0a8c34118f73`**（混批）。
+//     位移**只来自 `instructions`**（+241 字符 / +140 token，实测 `_research/_tmp-v62-account.mts`）；
+//     `tools` 段零改动（这台子也量不到），②③ 两处在本场景里不出现（没有窗口、没有心跳唤醒）。
+//   · **v63（本线）：装置自述 §6 补两段**（自动挑选记忆的可见性 + 何时检索；只加 3 行、一个字没删）
+//     ——同样只进 `instructions` ⇒ 两个常量再动一次：
+//     `97137a15a6b94dd8` → **`995eb71564fb53f8`**（非心跳）、`697c0a8c34118f73` → **`10c8511b8f3380c2`**（混批）。
+//     位移**只来自 `instructions`**（+198 字符 / +125 token，实测 `_research/_tmp-v63-account.mts`）。
+const BEFORE_MANUAL_FINGERPRINT = '995eb71564fb53f8';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
 const BEFORE_MIXED_TYPES = [
@@ -311,7 +341,16 @@ const BEFORE_MIXED_TYPES = [
 // v59（`payload` 的 `scope` 那一格 + 日程页）：**未动**（只改 `tools` 段与 `gui/**`）。
 // v60（**助理的站位那一段**）：`12ec93a65b0059b9` → **`43d650923c43aaf9`**——同样两处一起变
 //   （`instructions` 多了 `ASSISTANT_STANCE_TEXT`）。
-const BEFORE_MIXED_FINGERPRINT = '43d650923c43aaf9';
+// v61（2026-10-15 **记忆那一批**）：`43d650923c43aaf9` → **`cf409e1c8aa71d10`**——位移只来自
+//   **阶段一改的那一段 `input` 尾部**（固定块里的指针表 → 推荐段）；判据与那条已知盲区
+//   （`tools` 段这台子量不到）见上面 `BEFORE_MANUAL_FINGERPRINT` 那一段"本次复量"的注释。
+// v61 同批第二笔（**装置自述逐字置换**）：`cf409e1c8aa71d10` → **`10b0abf9e69f5e26`**——位移只来自
+//   `instructions`（+882 token），`tools` 段零改动；`RENDER_VERSION` 仍是 `61`（同批不重复递增）。
+// v62（**装置自述再置换：用户改过的那一版**）：`10b0abf9e69f5e26` → **`697c0a8c34118f73`**——同样只来自
+//   `instructions`（+140 token）；`RENDER_VERSION` 这时才 `61 → 62`（这一笔自己的一代）。
+// v63（**装置自述 §6 补两段**）：`697c0a8c34118f73` → **`10c8511b8f3380c2`**——同样只来自 `instructions`
+//   （+125 token）；`RENDER_VERSION` `62 → 63`。`tools` 段零改动。
+const BEFORE_MIXED_FINGERPRINT = '10c8511b8f3380c2';
 
 /** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [

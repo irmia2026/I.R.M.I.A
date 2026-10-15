@@ -101,12 +101,12 @@ export function createSafeEditTool(env: FsEnv): ToolDefinition {
             + '删 start_line..end_line、**含两端**。两者拼不出「替换第 N 行」'
             + '（删 2-2 再插 line:2，new 落到原第 3 行之后），替换请走 replace + old/new。',
         },
-        old: { type: 'string', description: 'replace 模式：要被替换的原文（行号前缀会被自动剥掉）' },
-        new: { type: 'string', description: 'replace 模式：新文本；insert_at_line 模式：要插入的文本' },
+        old: { type: 'string', description: 'replace 模式：被替换的原文（行号前缀自动剥掉）' },
+        new: { type: 'string', description: 'replace 模式：新文本；insert_at_line：插入的文本' },
         // 这两格（v55，2026-10-13）：删的是重复的"与 occurrence 互斥"与括注里的默认值——
         // `replace_all` 的 `false`、`occurrence` 的 `0` 都在这里逐字写着，再括注一遍是同一件事写两遍。
         // **互斥这条边界换一处说**：`occurrence` 那一格仍写着"与 replace_all 互斥"（边界没删）。
-        replace_all: { type: 'boolean', description: '替换全部匹配，默认 false（多匹配时必须显式消歧）' },
+        replace_all: { type: 'boolean', description: '替换全部匹配，默认 false（多匹配必须消歧）' },
         occurrence: { type: 'integer', description: '只替换第 N 处匹配（1-based）；0 = 未指定；与 replace_all 互斥' },
         // ── 两个行模式的语义必须各写一句，而且**不能互相推导**（2026-10-05 实测）──
         //
@@ -128,11 +128,11 @@ export function createSafeEditTool(env: FsEnv): ToolDefinition {
         // `mode` 那一格说清（"第几行之后"与"line:0=文件开头"），这里只留**边界**"越界报错"。
         line: {
           type: 'integer',
-          description: 'insert_at_line 模式：插到第几行**之后**（越界报错）',
+          description: 'insert_at_line：插到第几行**之后**（越界报错）',
         },
         // （v55）两格各留一句：`start_line` 说"起始行、含"，`end_line` 只说"结束行、含"——
         // 原来两格都把"delete_lines 模式"写了一遍，同一件事写两遍。**含两端这条边界一个字没删。**
-        start_line: { type: 'integer', description: 'delete_lines 模式：起始行（**含**，1-based）' },
+        start_line: { type: 'integer', description: 'delete_lines：起始行（**含**，1-based）' },
         end_line: { type: 'integer', description: '结束行（**含**，1-based）' },
       },
       required: ['path'],

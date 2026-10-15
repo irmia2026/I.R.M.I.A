@@ -533,7 +533,24 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
           recordSelfAction(receipt, options.emit);
         },
       })]),
-    ...adminKit.tools,
+    // `adminKit.tools` 里**剔除 `ask_human`**（断装配，2026-10-15 用户裁决第二版）。
+    //
+    // 用户原话（逐字）：
+    // > 「我让你移除的 ask_human 貌似没移除？（**移除入口，也不再进入任何请求**，相关内容
+    // > **只作为保留在仓库中的死代码**）」
+    //
+    // ⇒ 与 v52 那次"代码级隐藏"（`HIDDEN_FROM_MODEL`）的差别只有一句，但那一句是全部：
+    //   隐藏只是**不列进模型清单**——`registry.get('ask_human')` 仍然非 null，
+    //   于是执行期那条路（`executor` 只按名字查注册表，**不看 visibility**）**依然可达**：
+    //   实测直接调它的 handler 会照旧写下 `human/asked{source:'agent'}`。
+    //   现在从**装配**这一层就不放它进去 ⇒ 注册表里没有它 ⇒ 执行期不可达（`get` 返回 null）。
+    //
+    // **实现一个字没删**：`createAdminTools` 里那件仍原样保留（`ADMIN_TOOL_NAMES` 也照旧列着），
+    //   所以 `test/human-ask.test.ts` / `test/plan-askhuman.test.ts` 走 `admin.byName('ask_human')`
+    //   那条路**一条用例都不用改**——这正是"死代码保留"的可执行定义。
+    //   `human/asked` 事件、审批卡、申请单（`mcp-grant`）那条链路与它**共用同一套事件**，
+    //   一个字不动（那半边是活的）。
+    ...adminKit.tools.filter((tool) => tool.name !== 'ask_human'),
     ...buildShellTools(options),
   ];
 }
@@ -645,33 +662,23 @@ export interface CatalogRegistryResult {
 }
 
 /**
- * **代码级**不进模型清单的工具名单（2026-10-12 用户裁决）。
+ * **代码级**不进模型清单的工具名单。
  *
- * 用户的原话（逐字，唯一判据）：
- * > 「1. **ask_human 不再进入工具数组，但是项目内代码保留**。」
+ * ──────────────────────────── 2026-10-15：**名单已空，机制留着** ────────────────────────────
  *
- * ⇒ 所以做法刻意是**从这里排除**，不是删代码、也不是改 `config.json`：
- *   · **模块与用例一行不删**（`tools/admin.ts` 的 `createAdminTools`、`test/human-ask.test.ts`、
- *     `test/plan-askhuman.test.ts` 全都照旧）——`ask_human` 是 design §6.5 专门恢复过的语义
- *     （"错在等，不在问"），而且申请单那条链路与它**共用同一套 `human/asked` 事件**；
- *   · **随时一行改回来**：把这一行的 `'ask_human'` 删掉即可（改的是数组内容，不是任何开关）；
- *   · **不去动 `config.json`**：那是用户现场配置的东西，而且配置那条路（`tools.disabled`）
- *     会被 `main.ts:1183` 的 `setDisabled(config.tools.disabled)` **整份覆盖**——
- *     代码级隐藏必须粘得住那一次覆盖，所以走 `registry.setHidden()` 这条独立的路。
+ * 这里曾经是 `['ask_human']`（v52，用户裁决「不再进入工具数组，但是项目内代码保留」）。
+ * 2026-10-15 用户把口径推到底：
+ * > 「我让你移除的 ask_human 貌似没移除？（**移除入口，也不再进入任何请求**，相关内容
+ * > **只作为保留在仓库中的死代码**）」
+ * ⇒ 那件现在走的是**断装配**那条路（`buildToolCatalog` 里 `adminKit.tools.filter(...)`，
+ * 见那一处的注释）：注册表里根本没有它，`registry.get('ask_human')` 返回 null。
  *
- * 为什么省得下来：`ask_human` 整件 **134 token**（name 3 / desc 55 / params 76），
- * 而它全量 6800+ 次工具调用里**只被调过 3 次**（0.044%；其中至少 2 次还是用户让她"试一下"）。
- * 那一件的使用价值在**保留事件与链路**（审批卡、申请单走的是同一套 `human/asked`，
- * `source:'system'`），不在这一份常驻 schema——隐藏 schema 不碰链路。
- *
- * ⚠ 一处**知情的口径收窄**（写在这里防暗坑）：`settleHumanAsks()` 那条
- * `source === 'agent'` 的超时分支从此没有写入方（她再也调不到 `ask_human`）。代码保留、
- * 分支保留、用例保留——只是这条路上暂时不会再有新事件进来。
- *
- * 代价是一次性的：`tools` 段少一件 ⇒ 一次前缀全 miss（≈9.6 万 token）。
- * 所以它与本批其余四件**同批上线**、`RENDER_VERSION` 同批递增（`render.ts` 的 v52 那一篇）。
+ * **这份名单与那套机制一个字都没删**，理由是它治的病还在：`setHidden` 这条路**粘得住**
+ * `main.ts` 的 `setDisabled(config.tools.disabled)` 那次整份覆盖（两份存储，见 `registry.ts`
+ * 的 `hidden` 那一格）——下一个人要"临时把某件从她眼前拿掉、但保留可调用"时，就该用它。
+ * 名单为空 ⇒ `setHidden([])` 是空操作，生产行为与引入这份名单之前逐字节相同。
  */
-export const HIDDEN_FROM_MODEL: readonly string[] = ['ask_human'];
+export const HIDDEN_FROM_MODEL: readonly string[] = [];
 
 /**
  * 装配一个可用的注册表。

@@ -242,6 +242,11 @@ const compactWakes = (events: AppEvent[]): Array<AppEvent & { type: 'wake/manual
   events.filter((event): event is AppEvent & { type: 'wake/manual' } =>
     event.type === 'wake/manual' && (event.data as { via?: string }).via === 'compact');
 
+/** 压缩**前**那条预警（`via:'compact-soon'`，2026-10-15 加）——与本文件的 `via:'compact'` 是两件事 */
+const compactSoons = (events: AppEvent[]): Array<AppEvent & { type: 'wake/manual' }> =>
+  events.filter((event): event is AppEvent & { type: 'wake/manual' } =>
+    event.type === 'wake/manual' && (event.data as { via?: string }).via === 'compact-soon');
+
 const summaries = (events: AppEvent[]): Array<AppEvent & { type: 'compaction/summary' }> =>
   events.filter((event): event is AppEvent & { type: 'compaction/summary' } =>
     event.type === 'compaction/summary');
@@ -403,8 +408,13 @@ test('反向断言：没有压缩（reason=threshold）⇒ 不发唤醒、不起
   assert.equal(summaries(events).length, 0, '没压 ⇒ 没有摘要');
   assert.equal(compactWakes(events).length, 0, '没压 ⇒ **不发**压缩唤醒（别每拍都吵她）');
   assert.equal((await rig.ofType('turn/start')).length, 1, '没压 ⇒ 不起第二个 turn');
-  assert.equal((await rig.ofType('wake/manual')).length, 1,
-    '队列里只剩最初那条唤醒（没多出任何东西）');
+  // 压缩预警（`via:'compact-soon'`，2026-10-15 加）也是 `wake/manual`，但它是**另一件事**，
+  // 判据按 `via` 分。本用例的阈值抬到天上（1e7）⇒ 那条预警的判据落在"线下"、**不发**，
+  // 所以队列里只该有夹具最初那一条（没多出任何东西）。
+  assert.equal(compactSoons(events).length, 0, '这一支与压缩预警无关 ⇒ 不掺进它的断言');
+  const manual = await rig.ofType('wake/manual');
+  assert.deepEqual(manual.map((event) => (event.data as { via?: string }).via), [undefined],
+    '队列里只有最初那条唤醒（夹具写的，没有 via）——没多出任何东西');
 });
 
 // ──────────────────────── ⑥ 防抖：同一 turn 不重复发 + 链在闸门处终止 ────────────────────────

@@ -64,7 +64,9 @@ import { classifyConfigField, diffConfigFields } from '../config/watcher.ts';
 import { resolveRestartShell } from '../runtime/restart-shell.ts';
 import { chooseRestartPath, parseRestartPath, restartReasonText, restartTraceLine, backendEntry, BUNDLED_NODE_REL, RESTART_FAILURE_REASONS, type RestartPath } from '../runtime/restart-chain.ts';
 import { deriveRequest } from '../runtime/agent-loop.ts';
-import { contactFactsForReplay, turnBlockFactsForReplay, warnExemptJudgeOf } from '../runtime/replay.ts';
+import {
+  contactFactsForReplay, memoryIndexTextForRebuild, turnBlockFactsForReplay, warnExemptJudgeOf,
+} from '../runtime/replay.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 import { WarnExemptBook } from '../channel/warn-exempt.ts';
 import { installSnowLuma } from '../services/install-snowluma.ts';
@@ -95,7 +97,6 @@ import type {
 import { aliasNoteOf, collectSessions, normalizeSid, parseAliases, parseMemberAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
 import { readEndpointFromConfig, resolveServiceDir, maskCredential } from '../services/snowluma.ts';
 import { loadPersona } from '../persona/loader.ts';
-import { readMemoryIndexTextReadOnly } from '../persona/memory-injection.ts';
 import {
   DIARY_DIR_NAME,
   EPISODE_ARCHIVE_DIR_NAME,
@@ -2681,6 +2682,18 @@ export function buildReplay(input: {
     return found;
   };
 
+  /**
+   * 该 turn 注入的那一段**文本**（阶段一，2026-10-15）——判据只有一处：
+   * `replay.ts` 的 `memoryIndexTextForRebuild`（CLI 的重建走同一个函数）。
+   *
+   * 为什么预览也必须问它：新事件里存着"当时注入的那段原文"（推荐段算不回来），
+   * 而**空串是一个结论**（"这一轮什么都没注入"）——那时退回盘上读 `INDEX.md` 会把一段
+   * 当时根本没注入的字节塞进预览里（实测过一次，比真实请求多整整一段旧索引）。
+   * 与上面 `assetsLineAt` 同一条纪律：只读事件、不改写历史。
+   */
+  const injectedIndexTextAt = (events: readonly AppEvent[], turn: number): string =>
+    memoryIndexTextForRebuild(events, turn, replayDataDir);
+
   const persona = loadPersona(dirname(resolve(input.personaRoot)));
   const replayDataDir = dirname(resolve(input.personaRoot));
   // **工具清单恒定**（2026-10-04 用户定稿）：与运行期同一条口径——不再按当轮信任级增减。
@@ -2796,7 +2809,7 @@ export function buildReplay(input: {
     // 框架不再重建、也不再注入，"预览里还有索引"正是这一行要消掉的那种假象。
     memoryIndex: input.config.persona.memoryEnabled === false
       ? null
-      : readMemoryIndexTextReadOnly(replayDataDir),
+      : injectedIndexTextAt(eventsBefore, input.turn),
     // **本轮固定块**（2026-10-04 补）：原来这条预览路径整个漏了它——预览比真实请求少整整一条
     // （`[当前状态]` + 关系档案 + 上面的索引）。装配走与 CLI **同一个函数**，
     // 不在这里另写一份，理由见 turnBlockFactsForReplay 的注释。
@@ -8224,7 +8237,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.9' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.10' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

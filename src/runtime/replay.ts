@@ -175,6 +175,69 @@ function assetsFromEvents(events: readonly AppEvent[], turn: number): string {
   return found;
 }
 
+/**
+ * 该 turn 注入的那一段**文本**（阶段一，2026-10-15）——三态，别把它当成"有就用、没有就退回盘上"：
+ *
+ *   · `{ kind: 'injected', text }`：**新事件**（有 `injected` 那一格，可能是**空串**）。
+ *     空串是一个**结论**："这一轮什么都没注入"（她还没写过任何记忆 / 推荐为空）。
+ *     ⚠ 这时**绝不许**退回盘上读 `MEMORIES/INDEX.md`——那份文件由 `ensureMemoryIndex` **照旧**在维护
+ *     （盘上的指针表有它自己的读者），但**它已经不进请求了**。退回盘上就会把一段
+ *     "当时根本没注入"的字节塞进重建结果里：实测过一次，界面预览因此比真实请求**多**
+ *     整整一段旧索引（`test/channel-wire.test.ts:601` 那条用例红的）。
+ *   · `{ kind: 'legacy' }`：**老事件**（2026-10-15 之前写的，没有那一格）——那时注入的是
+ *     `renderMemoryIndex(buildMemoryIndex(dir))`，"盘上文件 + 确定性渲染"的函数 ⇒
+ *     由调用方从盘上读回，能逐字节复原当时那一段。
+ *   · 一轮**一条账都没有**（心跳轮、老日志、子代理）：也走 `legacy`——按盘上那份复原是当时的口径。
+ *
+ * 与 {@link assetsFromEvents} 同一条纪律：**只读事件、不改写历史**。
+ */
+export type InjectedIndexLookup =
+  | { kind: 'injected'; text: string }
+  | { kind: 'legacy' };
+
+/**
+ * 这条账是**新格式**吗（阶段一起写的那种）？
+ *
+ * 判据 = 带不带那三格里的**任意一格**（`injected` / `selected` / `query`）。
+ * 为什么不只认 `injected`：**"这一轮什么都没注入"是新格式里一个合法的结论，而它不写空字段**
+ * （与 `assets` 同一条纪律：不写空字段，老事件的形状因此逐字节不变）——
+ * 只认 `injected` 会把"新的、空的"误判成老事件，于是退回盘上读 `INDEX.md`，
+ * 把一段**当时根本没注入**的字节塞进重建结果（实测过一次：界面预览比真实请求多整整一段旧索引）。
+ */
+function isNewFormatSelection(data: Record<string, unknown>): boolean {
+  return 'injected' in data || 'selected' in data || 'query' in data;
+}
+
+export function injectedIndexFromEvents(events: readonly AppEvent[], turn: number): InjectedIndexLookup {
+  let found: InjectedIndexLookup | null = null;
+  for (const event of events) {
+    if (event.type !== 'memory/selected' || event.data.turn !== turn) continue;
+    const data = event.data as unknown as Record<string, unknown>;
+    // 取"最后一条"与运行期口径一致（崩溃后重投同一个 turn 时会再写一条）
+    const injected = data['injected'];
+    if (typeof injected === 'string') {
+      found = { kind: 'injected', text: injected };
+    } else if (isNewFormatSelection(data)) {
+      // 新格式、但这一轮**什么都没注入**：空串是一个**结论**，不许退回盘上（见类型注释）
+      found = { kind: 'injected', text: '' };
+    }
+  }
+  return found ?? { kind: 'legacy' };
+}
+
+/**
+ * 重建时"记忆那一段"该给什么文本——**两个入口共用这一处判据**（CLI 的 `buildReplayReport`
+ * 与界面的 `buildReplay`），免得两条重建路径各判一次、迟早漂成"预览与重放不一样"。
+ */
+export function memoryIndexTextForRebuild(
+  events: readonly AppEvent[],
+  turn: number,
+  dataDir: string,
+): string {
+  const lookup = injectedIndexFromEvents(events, turn);
+  return lookup.kind === 'injected' ? lookup.text : readMemoryIndexTextReadOnly(dataDir);
+}
+
 /** timerId → 最近一条 timer/set 的 payload（与 render 内部同口径：wake/timer 自身不带 payload） */
 function timerPayloadsOf(events: readonly AppEvent[]): Map<string, unknown> {
   const map = new Map<string, unknown>();
@@ -355,6 +418,10 @@ export interface RebuildOptions {
   /**
    * 记忆索引文本（长期记忆层那一段）。与人格资产同一条限制：它是**文件**，
    * 重建时读到的是现在这份。不给 = 那一段不出现。
+   *
+   * ⚠ 阶段一（2026-10-15）起，**当轮事件里有 `memory/selected.injected` 时它优先**——
+   * 那一格存的是"当时注入的那段文本本身"（推荐段算不回来，判据见 `injectedIndexFromEvents`）。
+   * 这一格留给老日志（2026-10-15 之前：整张指针表可由盘上 `INDEX.md` 复原）与其它调用点。
    */
   memoryIndex?: string | null;
   /**
@@ -771,10 +838,10 @@ export async function buildReplayReport(
     located,
     {
       persona, tools, timezone,
-      // v29/B2：固定块里的记忆索引从盘上读回（只读，不建文件）。`dataDir` 仍要传：
-      // 重建联系人/别名那条路要用它（见 rebuildContact），不是为记忆正文。
+      // v29/B2：固定块里的记忆那一段——**优先取当轮事件里那份原文**（阶段一：推荐段算不回来），
+      // 老事件才从盘上读回（只读，不建文件）。`dataDir` 仍要传：重建联系人/别名那条路要用它。
       dataDir,
-      memoryIndex: readMemoryIndexTextReadOnly(dataDir),
+      memoryIndex: memoryIndexTextForRebuild(located.eventsBefore, located.turn, dataDir),
       // v32：框架代管记忆的总开关与 STATE 字节预算，都照**盘上那份配置**判（上面读一次）。
       // 与运行期同一个字段、同一条口径：关掉时重建出来的固定块里没有索引——那才是她当时看到的。
       memoryEnabled,
@@ -791,7 +858,7 @@ export async function buildReplayReport(
       persona, tools, timezone,
       now: options.compareNow ?? new Date().toISOString(),
       dataDir,
-      memoryIndex: readMemoryIndexTextReadOnly(dataDir),
+      memoryIndex: memoryIndexTextForRebuild(located.eventsBefore, located.turn, dataDir),
       memoryEnabled,
       ...(stateBudgetBytes === undefined ? {} : { stateBudgetBytes }),
       warnExempt: warnExemptJudgeOf(dataDir),

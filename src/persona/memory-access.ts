@@ -111,12 +111,28 @@ export type MemoryReadResult = MemoryReadOk | MemoryReadProblem;
  * 又造了一个 `safe_read`（连同它的整篇读能力），而"反复把全文读入"正是它要治的病。
  * 索引里的指针长这样：`MEMORIES/facts.md:9`。
  */
+/**
+ * 记忆文件的**唯一**入参写法：相对工作根的 posix 路径，且必须落在 `MEMORIES/` 之内。
+ *
+ * 为什么卡这么死：这件工具的存在理由是"按索引指针读**那一条**"。放开到任意路径就等于
+ * 又造了一个 `safe_read`（连同它的整篇读能力），而"反复把全文读入"正是它要治的病。
+ * 索引里的指针长这样：`MEMORIES/facts.md:9`。
+ *
+ * **允许 `MEMORIES/` 下的子目录**（2026-10-15：episodes 进索引之后必须有这一条）：
+ * 指针现在也会长成 `MEMORIES/episodes/2026-10-14.md:1`——那是"那一天"的坐标，
+ * 而它是 `MEMORIES/` 的**一级子目录**。把判据从"恰好两段"放宽成"≥2 段"是**必要**的，
+ * 但仍然**只放行 `MEMORIES/` 之内**（下面三条否定判据一条没松）：
+ *   · 绝对路径 / 盘符开头 ⇒ 拒（`join` 会把它们接到根后面）；
+ *   · 任何一段是 `..` ⇒ 拒（穿越）；
+ *   · 首段不是 `MEMORIES` ⇒ 拒。
+ * 剩下的"拼出来落在哪"由 `memory-tools.ts` 的 `resolveMemoryPath` 再判一次（两道都要）。
+ */
 export function isMemoryPath(path: string): boolean {
   const normalized = path.replace(/\\/gu, '/');
   if (normalized.startsWith('/') || /^[A-Za-z]:/u.test(normalized)) return false;
   const parts = normalized.split('/').filter((p) => p !== '' && p !== '.');
   if (parts.includes('..')) return false;
-  return parts.length === 2 && parts[0] === MEMORY_DIR_NAME;
+  return parts.length >= 2 && parts[0] === MEMORY_DIR_NAME;
 }
 
 function splitLines(text: string): string[] {
