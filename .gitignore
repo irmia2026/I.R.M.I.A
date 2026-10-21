@@ -1,0 +1,24 @@
+node_modules/
+dist/
+data/
+# 工具的工作根（agent-loop 的 workspaceRoot 默认取 cwd）：她下载与写出的文件都落在这里，
+# 属于运行时产物。注意它与 data/workspace/（记忆与人格资产）不是一个目录。
+workspace/
+.bench-tmp/
+*.log
+# 本机配置：含 owner 名、联系人表与机器路径，只进版本库之外的 config.json；
+# 仓库里给的是 config.example.json。密钥另在 data/.keys.json（data/ 已忽略）。
+config.json
+# Flutter/Dart 构建产物
+gui/build/
+gui/.dart_tool/
+gui/.flutter-plugins-dependencies
+gui/windows/flutter/ephemeral/
+# 外部素材与抓取缓存（不属于代码本体）
+_research/
+_research/maidkit/
+_shots/
+astrbot-src/
+qqbot-cache/
+# 品牌资产的拟合中间产物（.npy、比对截图、参考位图），只留几何源与导出物
+brand/_analysis/

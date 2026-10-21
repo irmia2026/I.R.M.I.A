@@ -1,0 +1,4669 @@
+// 本页文案**已经全部**落在 lib/i18n/app_strings.dart（`settings*` 那一族）：页面里不再有
+// 中文字面量，`gui/test/copy_coverage_test.dart` 的闸门盯着这件事。加一句话 = 往文案表加一条
+// （中英各一处），页面里只许 `_s.xxx`。
+// 迁移口径在 lib/i18n/app_strings.dart：往 AppStrings 里加 getter（ZhStrings / EnStrings 各实现一次），
+// 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
+// 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+
+import '../app.dart';
+// 开外链只有一条实现（系统默认浏览器）：下载页、打开面板与引导页的推荐链接都走它
+import '../external_link.dart';
+import '../i18n/app_strings.dart';
+import '../i18n/strings_scope.dart';
+import '../theme.dart';
+import '../theme/design_tokens.dart';
+import '../ui_kit.dart';
+// 更新检查（2026-10-22）：「关于」卡里那一块（当前状态 + 手动检查按钮），独立文件
+import '../update_check.dart';
+// 「关窗时收进托盘」是界面自己的偏好（closeToTray / setCloseToTray），不进服务端配置
+import '../ui_state.dart';
+// 「改密码」那张表单（三个框）在 account_security.dart 里：它是这一页的一个分区动作，
+// 但表单本身是一段自包含的东西（本地校验 + confirm + 就地换凭据）
+import 'account_security.dart';
+import 'page_chrome.dart';
+// 「文案覆盖」那一格（i18n 覆盖层的设置入口）：独立文件，本页只放一行调用
+import 'settings_strings_section.dart';
+// 「webhook 凭据只显示这一次」那张框：明文只在生成响应里出现一次，本页不留它
+import 'webhook_secret.dart';
+
+// 设置页 —— 锚点 + 分区卡片（docs/astrbot-ux-interaction.md「改造后适用」第一条）：
+//   · 左侧 180px 分区锚点（模型 / 界面 / 发言 / 外部依赖 / 协议端 / 外部回调 / 记忆 / 系统 / 账号与安全 / 关于），
+//     点击滚动到右侧对应分区；
+//   · 右侧每组一张卡片（surface + outlineVariant 描边 + radiusCard），卡头 = 组名 + 一句说明；
+//   · 模型组字段两列排布，窄窗降一列；
+//   · 保存按钮未改动即禁用，脏时给出「有未保存的更改」；保存成功走 toast。
+// 与 web/pages/settings.js 同构：字段路径、只读纪律与文案口径都对齐，两处不漂移。
+//
+// 写通道只有两条：
+//   · 配置字段（模型 / 发言节奏 / 系统参数）→ POST /api/commands/config-update
+//     （写 config.json，X-Confirm: config-update，进程重启后接管）
+//     **例外**：有两个字段在服务端 `DANGEROUS_FIELDS` 里登记了**字段短语**，改它们时
+//     `X-Confirm` 要在 `config-update` 之后追加那半截——`trust.mode` → 见 [kTrustConfirm]，
+//     `tools.destructiveEnabled` → `enable-destructive`（那一处就地写着）。其余字段不许跟着加。
+//   · API 密钥 → POST /api/commands/set-key（写 data/.keys.json，X-Confirm: set-key）
+// 密钥只写不读：GET /api/keys 只返回 {configured, mask}，完整值不经过本页面。
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key, required this.state});
+
+  final AppState state;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+/// GUI 版本号：与 gui/pubspec.yaml 的 version 同步维护（pubspec 那份是 `0.1.0+1`）。
+/// Flutter 没有运行时读取 pubspec 的内置途径，零依赖前提下写成常量。
+///
+/// 为什么带 `v` 与 `-beta` 而 pubspec 里没有：pubspec 的 version 要喂给 Windows 资源
+/// 版本号（windows/runner/Runner.rc 的 FILEVERSION 是 4 个整数）与安装器，容不下预发布
+/// 标记——beta 只体现在这里与包名/说明里；后端那边对同一版号的口径是 `AGENT_VERSION`
+/// （不带 v，见 src/main.ts）。
+/// ⚠️ 别把具体版号抄进注释：出包脚本只改这一行的字面量、不改注释，抄一处就留一处对不上。
+const guiVersion = 'v0.1.0-beta.12';
+
+/// 锚点侧栏宽度（AstrBot 的左侧 section 导航）
+const _railWidth = 180.0;
+
+/// 锚点转顶部横条、字段由两列降一列的断点
+const _railBreakpoint = 900.0;
+const _twoColBreakpoint = 620.0;
+
+/// 锚点判定带宽：分区顶边进入这条线以内即算「当前分区」
+const _activeBand = 24.0;
+
+/// 两条模型 lane（与 src/config/config.ts 的 ModelsConfig.heavy/light 同名）
+const _laneIds = ['heavy', 'light'];
+/// 两条 lane 的名字（id 是布局判据、永不翻译，名字走文案表）
+String _laneLabel(AppStrings s, String lane) =>
+    lane == 'heavy' ? s.settingsLaneHeavyLabel : s.settingsLaneLightLabel;
+
+/// 两条 lane 的说明
+String _laneNote(AppStrings s, String lane) =>
+    lane == 'heavy' ? s.settingsLaneHeavyNote : s.settingsLaneLightNote;
+
+/// 三条 lane 各写进 `models.<lane>.protocol` 的三档（协议回退 C-3，2026-10-21 加）。
+///
+/// **取值必须与服务端逐字一致**：`src/model/transport/types.ts` 的 `ModelProtocolPreference`
+/// 与 `src/config/config.ts` 的 `pickProtocol` 只认这三个字面量，写错值后端**当场报错**
+/// （不静默回落 auto）。所以界面这一层也不许"猜第三档"：配置里是别的值就落在第一档。
+const _protocolIds = ['auto', 'chat-completions', 'responses'];
+
+/// 三档各自的**代价说明**（选它意味着什么，逐字来自文案表；页面里一个中文字面量都不许有）
+String _protocolNote(AppStrings s, String id) => switch (id) {
+      'chat-completions' => s.settingsModelProtocolChat,
+      'responses' => s.settingsModelProtocolResponses,
+      _ => s.settingsModelProtocolAuto,
+    };
+
+/// 分区锚点：id 与下方 _sectionBlock 的分区 key 一一对应
+///
+/// 只留 id 与 icon：名字一律走 [settingsNavLabel]（i18n），**不在常量里留第二份中文**——
+/// 两处各写一份就是两条迟早会漂的真相（`test/i18n_test.dart` 那条"逐字相同"钉的就是它）。
+typedef _Anchor = ({String id, IconData icon});
+
+/// 分区 id → 当前语言的标签。**id 是布局判据、永不翻译**；只有名字跟着语言走。
+String settingsNavLabel(AppStrings s, String id) => switch (id) {
+      'model' => s.settingsNavModel,
+      'ui' => s.settingsNavUi,
+      'speak' => s.settingsNavSpeak,
+      'deps' => s.settingsNavDeps,
+      'protocol' => s.settingsNavProtocol,
+      'webhook' => s.settingsNavWebhook,
+      'memory' => s.settingsNavMemory,
+      'trust' => s.settingsNavTrust,
+      'system' => s.settingsNavSystem,
+      'account' => s.settingsNavAccount,
+      _ => s.settingsNavAbout,
+    };
+
+const _anchors = <_Anchor>[
+  (id: 'model', icon: Icons.tune_rounded),
+  (id: 'ui', icon: Icons.palette_outlined),
+  (id: 'speak', icon: Icons.record_voice_over_outlined),
+  // 外部依赖（v30；2026-10-16 加第 4 件 Python）：由框架管的这几件外部程序，
+  // 这里只做"看得见 + 一键装"。
+  // 位置放在「发言」之后、「系统」之前：它是**可写的运维动作**（安装），
+  // 不该混进只读的「系统」快照里，而"她能用什么工具"排在"她怎么说话"之后正合适。
+  (id: 'deps', icon: Icons.extension_outlined),
+  // 内置协议端（v34）：紧跟「外部依赖」之后——它与那张卡是同一类东西（框架管的外部程序），
+  // 但**可选**：不开的人照旧用官方通道，开了才多一双"看得见群"的眼睛。
+  (id: 'protocol', icon: Icons.hub_outlined),
+  // 外部回调（B9）：`POST /webhook/*` 的专用凭据（生成 / 轮换）。紧跟在「协议端」之后——
+  // 它与那两张卡是同一类东西（框架管的外部程序 / 外部系统怎么接进来），
+  // 而它是一次**可写的运维动作**（生成），不该混进只读的「系统」快照里。
+  (id: 'webhook', icon: Icons.webhook_rounded),
+  // 记忆（2026-10-04 加）：**框架代管记忆**的总开关（`persona.memoryEnabled`）。
+  // 为什么单独一个分区、而不是塞进「系统」快照里：它是"她怎么活"的一条开关（框架替不替她
+  // 管长期记忆），与监听地址/预算那种**整台实例的启动参数**不是一类东西；而它也不是人格资产
+  // 本身——人格资产页编的是文件内容，这条决定那些文件由谁维护。紧邻「系统」之前：
+  // 两者都是"这台实例这一层"的话，但这条更靠近她。
+  (id: 'memory', icon: Icons.psychology_outlined),
+  // 信任范围（`trust.mode`）：**她的活动边界有多宽**——整台电脑，还是只有一个工作目录。
+  // 为什么紧挨在「系统」之前、而不是塞进「系统」那张表里：系统卡是"这台实例怎么启动"
+  // （监听地址、预算、数据目录），而这一条是"她这个人能碰多远"——它和「记忆」属于同一族
+  // （她的行为边界），只是这一条更硬：越过它就是拒绝，不是提醒。
+  (id: 'trust', icon: Icons.shield_outlined),
+  (id: 'system', icon: Icons.dns_outlined),
+  // 账号与安全（B10）：改密码与登出。排在这里而不是塞进「模型」卡里：它改的是**进来的方式**
+  // （凭据），与"她怎么说话、用哪个模型"毫无关系；而它与「系统」同属"整台实例这一层"，
+  // 所以紧跟在系统之后、「关于」之前。
+  (id: 'account', icon: Icons.lock_outline_rounded),
+  (id: 'about', icon: Icons.info_outline_rounded),
+];
+
+/// 协议端官方 Releases（**手动那条路的出路**：一键安装失败、或平台不是 Windows 时人自己去下）。
+///
+/// 许可那件事照实说：SnowLuma 是"源码可见非商业许可"，自用可以、随框架分发不行。
+/// 框架现在做的是**从官方 Releases 代下载**（替他点一下下载那三步），不随框架分发、不改它一个字节；
+/// 所以这个地址仍然要摆在界面上——代下载失败时，它就是唯一还走得通的那条路。
+const protocolDownloadUrl = 'https://github.com/SnowLuma/SnowLuma/releases';
+
+/// 依赖探测结果的界面形状（与 GET /api/deps 的 entries 一一对应）。
+///
+/// 为什么不直接拿 Map 用：这张卡片有十来处取值（徽章、路径、影响说明、动作按钮），
+/// 散着写 `entry['field']` 的话，字段改名会静默变成 null 而不是编译错误——
+/// 那正是"界面上少了一句话而没人发现"的典型成因。
+class _DepEntry {
+  const _DepEntry({
+    required this.name,
+    required this.label,
+    required this.status,
+    required this.path,
+    required this.version,
+    required this.source,
+    required this.reason,
+    required this.purpose,
+    required this.impact,
+    required this.installable,
+    required this.downloadPage,
+    required this.manualHint,
+    required this.managedDir,
+    required this.pipVersion,
+    required this.pipReason,
+  });
+
+  final String name;
+  final String label;
+
+  /// ready / version-mismatch / missing（未知值按 missing 处理：宁可说"没装"也别假装就绪）
+  final String status;
+  final String path;
+  final String version;
+
+  /// 命中来源（`config` / `managed` / `path` / 空串 = 服务端没给）。
+  ///
+  /// **界面靠它把"已就绪"分成两句话**（用户 2026-10-17 的口径：「Python 和 pip 不应该是默认
+  /// 要求装的，而是有就用 PATH 里的」）：`path` / `config` = 机器上本来就有的那份，
+  /// `managed` = 框架托管那一份（兜底）。判据只在 [readyIsSystem] / [readyIsManaged] 两处。
+  final String source;
+  final String reason;
+  final String purpose;
+  final String impact;
+  final bool installable;
+  final String? downloadPage;
+  final String? manualHint;
+  final String managedDir;
+
+  /// 只有 python 有这一格：`python -m pip --version` 探到的 pip 版本（`26.2.1`）。
+  /// `null` = 服务端没给这一格（别的依赖就是这样，它们没有"自带的包管理器"这回事）；
+  /// 空串 = 服务端给了但没探到 pip ⇒ 界面上**要明确标出来**，不许静默。
+  final String? pipVersion;
+
+  /// pip 不可用时的那句人话（成功或这一件不是 python 时为空串）
+  final String pipReason;
+
+  bool get ready => status == 'ready';
+  bool get mismatch => status == 'version-mismatch';
+
+  /// 已就绪、而且用的是**机器上本来就有的那份**（PATH 或人自己指的路径）。
+  /// 这一类**不是**框架要求装的——界面上要说清，别让"框架建议安装"的印象落在它头上。
+  bool get readyIsSystem => ready && source != 'managed';
+
+  /// 已就绪、用的是**框架托管那一份**（`<数据目录>/tools/<名字>/` 下那个，兜底那份）
+  bool get readyIsManaged => ready && source == 'managed';
+
+  /// 就绪时那句来源说明（`config` 与 `path` 都是"机器上本来就有的那份"，说法沿用用户那句"系统 PATH"）
+  String readyOrigin(AppStrings s) =>
+      readyIsManaged ? s.settingsDepSourceManaged : s.settingsDepSourceSystemPath;
+
+  /// 就绪时那一行：**来源 + 版本 + 路径**三件事都在（用户 2026-10-17：探到的路径与版本要显示出来）
+  String readyLine(AppStrings s) {
+    final versionText = version.isEmpty ? s.settingsDepVersionUnknown : version;
+    final pathText = path.isEmpty ? s.settingsDepPathUnknown : path;
+    return '${readyOrigin(s)} · $versionText · $pathText';
+  }
+
+  static _DepEntry from(Object? raw) {
+    final map = raw is Map ? raw.cast<String, dynamic>() : const <String, dynamic>{};
+    String text(String key) {
+      final value = map[key];
+      return value == null ? '' : value.toString();
+    }
+
+    return _DepEntry(
+      name: text('name'),
+      label: text('label').isEmpty ? text('name') : text('label'),
+      status: text('status').isEmpty ? 'missing' : text('status'),
+      path: text('path'),
+      version: text('version'),
+      source: text('source'),
+      reason: text('reason'),
+      purpose: text('purpose'),
+      impact: text('impact'),
+      installable: map['installable'] == true,
+      downloadPage: text('downloadPage').isEmpty ? null : text('downloadPage'),
+      manualHint: text('manualHint').isEmpty ? null : text('manualHint'),
+      managedDir: text('managedDir'),
+      // 键在不在，是两种意思："没有这一格"（null，别的依赖）与"这一格是空的"（没探到 pip）
+      pipVersion: map.containsKey('pipVersion') && map['pipVersion'] != null
+          ? map['pipVersion'].toString()
+          : null,
+      pipReason: text('pipReason'),
+    );
+  }
+}
+
+/// 这一次「一键安装」的结果（v35）。
+///
+/// 为什么这份东西留在**页面里**而不是从服务端读回来：它是**这一次点击**的产物——
+/// `log`（卡在哪一步）只在这条回执里，服务端压根没有"最近一次安装"这个概念，
+/// 凭空造一个服务端的"上次安装"就是多一份迟早会漂移的真相。
+/// 代价是刷新页面后引导消失；那时状态行、`restartRequired` 徽章与「需重启」提示条还在说同一件事，
+/// 不至于把人晾在半路。
+class _ProtocolInstall {
+  const _ProtocolInstall({
+    required this.ok,
+    required this.dir,
+    required this.version,
+    required this.detail,
+    required this.log,
+    this.writeError = '',
+  });
+
+  /// 失败：只带服务端那句人话与过程记录（没有目录、没有版本可谈）
+  const _ProtocolInstall.failed(this.detail, {this.log = const <String>[]})
+      : ok = false,
+        dir = '',
+        version = '',
+        writeError = '';
+
+  /// 装成了没有
+  final bool ok;
+  /// 装到哪（服务端定的那个固定的家；ok 为 true 时非空）
+  final String dir;
+  /// 装的是哪个版本（取自官方 release tag）
+  final String version;
+  /// 服务端那句人话：成功="已装好 vX"，失败="卡在哪一步、为什么"
+  final String detail;
+  /// 过程记录，逐行给人看（"正在下载…"这类）
+  final List<String> log;
+  /// **装成了但紧接着那次写配置失败了**的原因：与"压根没装成"是两件事，分开记
+  final String writeError;
+
+  /// 装好并且配好了——"重启一下就能用"这句话只在这种状态下才成立
+  bool get configured => ok && writeError.isEmpty;
+}
+
+/// 一条 lane 的输入态：控制器、原始值快照与保存中标志都属于本页，不写进全局状态。
+/// 原始值快照用于「未改动即禁用」：控制器内容与快照逐字段比对得出脏状态。
+class _LaneForm {
+  _LaneForm({required this.onChanged}) {
+    modelCtl.addListener(onChanged);
+    baseCtl.addListener(onChanged);
+    keyCtl.addListener(onChanged);
+  }
+
+  final VoidCallback onChanged;
+  final modelCtl = TextEditingController();
+  final baseCtl = TextEditingController();
+  final keyCtl = TextEditingController();
+  bool saving = false;
+
+  /// 生效配置里的原始值（首次加载与保存成功后各回填一次）
+  String baseModel = '';
+  String baseBaseUrl = '';
+
+  /// 协议三档（`models.<lane>.protocol`，协议回退 C-3）：与两个文本控制器不同，它是**枚举**，
+  /// 没有"改到一半"的中间态；但仍与模型名/端点同一枚「保存」——三者同属 restart 级，
+  /// 分开存会出现"存了一半"（而界面又喊重启，人不知道哪几格生效了）。
+  String protocol = 'auto';
+  String baseProtocol = 'auto';
+
+  /// 待保存的模型字段改动
+  bool get modelDirty => modelCtl.text.trim() != baseModel || baseCtl.text.trim() != baseBaseUrl;
+
+  /// 协议那一格改了没有（与 modelDirty 同一条"改回原值就不算改"的分寸）
+  bool get protocolDirty => protocol != baseProtocol;
+
+  /// 待写入的密钥：密钥只写不读，非空即为待保存内容
+  bool get keyDirty => keyCtl.text.trim().isNotEmpty;
+
+  bool get dirty => modelDirty || protocolDirty || keyDirty;
+
+  /// 选中一档协议。**未知值一律拒绝**（服务端的 `pickProtocol` 会报错，界面不该先把它写出去）；
+  /// 选中的还是当前这一档就什么都不做（避免无谓重建）。
+  void pickProtocol(String next) {
+    if (!_protocolIds.contains(next) || next == protocol) return;
+    protocol = next;
+    onChanged();
+  }
+
+  void seed({required String model, required String baseUrl, required String protocol}) {
+    baseModel = model.trim();
+    baseBaseUrl = baseUrl.trim();
+    modelCtl.text = model;
+    baseCtl.text = baseUrl;
+    // 缺省 / 认不出的值都落在第一档 `auto`：不崩、不猜第三档（与设计 §8.8.4 同一条口径）
+    final picked = _protocolIds.contains(protocol.trim()) ? protocol.trim() : _protocolIds.first;
+    this.protocol = picked;
+    baseProtocol = picked;
+  }
+
+  void dispose() {
+    modelCtl.removeListener(onChanged);
+    baseCtl.removeListener(onChanged);
+    keyCtl.removeListener(onChanged);
+    modelCtl.dispose();
+    baseCtl.dispose();
+    keyCtl.dispose();
+  }
+}
+
+/// 系统卡可编辑字段的取值形状。
+///
+/// 这四种形状是**照 `src/config/config.ts` 的解析器抄的**，不是照界面的手感挑的：
+/// 解析器只收整数（`pickInt`，下限 1；端口另有 65535 的上限）、(0,1] 的小数（`pickRatio`）
+/// 与非空字符串（`pickNonEmptyString`）。界面只要放宽一格，那次保存就注定被服务端回滚
+/// ——而回滚发生在写盘之后，人看到的是一句"保存失败"，不是"这个值不对"。
+enum _SysKind {
+  /// 主机地址。解析器（`pickString`）收空串，但空串会一路走到 `server.listen(port, '')`，
+  /// 而 Node 把空 host 当"未指定"绑到 `::`——观测台就此对局域网开门。所以这里按危险处理。
+  host,
+
+  /// 监听端口：`pickInt(..., 1, 65535)`
+  port,
+
+  /// 非空文本（时区还要过 IANA 名，那一条只有服务端的 `Intl.DateTimeFormat` 判得了）
+  text,
+
+  /// 整数且 ≥ 1：六条预算里除 softRatio 之外的五条
+  count,
+
+  /// (0,1] 的小数：`pickRatio` 专门拒绝"写成 8 而不是 0.8"这种真实错误
+  ratio,
+
+  /// **闭区间内的整数**：区间由字段自己带（[min] / [max]）。
+  ///
+  /// 与 [count] 分开，是因为"这一段数里才有意义"与"至少是 1"是两种判据，硬塞进 [count]
+  /// 会让那五条预算的提示文案跟着变形。当前唯一的一个是心跳平均间隔
+  /// （`wake.heartbeatTargetMeanMin`，6~59，见 [_sysHeartbeatMean]）。
+  range,
+}
+
+/// 系统卡里的一个可编辑字段：点路径 + 标签 + 形状 + 旁注。
+///
+/// 为什么规格摆成数据而不是十段长得一样的 build 代码：脏判定、保存、回填、渲染四处
+/// 都按这一份清单走；抄九遍的下场是某一格"改了却存不进去"或"存了却不显脏"，
+/// 而这两种 bug 都不会报错，只会静静地少写一个字段。
+class _SysField {
+  const _SysField(this.path, this.kind, {this.hint, this.min, this.max, this.live = false});
+
+  /// 写进 config.json 的点路径：既是输入框的 key（测试按它定位），也是提交时的字段名
+  final String path;
+  final _SysKind kind;
+
+  /// 框里的示例（只在框空着时显示）
+  final String? hint;
+
+  /// [kind] 为 range 时的**闭区间**（含两端）。其余形状用不到（它们的边界写死在
+  /// [problem] 里：pickInt 的下限 1、端口的上限 65535、比例的开区间 0~(0,1]）。
+  ///
+  /// **常量默认值不是这里的常客**（2026-10-11 收口）：闭区间有服务端真源的那几格
+  /// （当前只有压缩线）**不在常量里写一遍**——启动时由 [problem] 的 `bounds` 参数
+  /// 从 `GET /api/config` 的 `bounds` 注入。写死在这里就等于把同一条边界抄成两份。
+  final int? min;
+  final int? max;
+
+  /// **改完立刻生效**的那一格（当前只有压缩线 `persona.compactionThresholdTokens`）。
+  ///
+  /// 它与这张卡上其余格的差别有三处，三处都只是这一页的显示/提交口径：
+  ///   · **值读"生效那份"**（`GET /api/config`，不带 `source=saved`）：这一格问的是"现在按什么跑"
+  ///     ——压缩判定与 80% 那道预警读的都是进程内存里那个数（`persona.` 属于
+  ///     `RESTART_REQUIRED_FIELDS`：手改 config.json 是不会当拍接管的）；
+  ///   · **保存走它自己的端点**（`POST /api/commands/set-compaction-threshold`）：服务端在
+  ///     `configFileLock` 的同一个临界区里把内存那份也改掉，所以写完这一拍就按新线算，
+  ///     而通用那条 `config-update` 只写盘、回执写死"要重启"；
+  ///   · 徽章说「立刻生效」而不是「需重启」。
+  ///
+  /// 判据只此一处：另写一份"哪些格是热更的"名单，就会与服务端 `config/watcher.ts` 的
+  /// `RESTART_REQUIRED_FIELDS` 分岔——那种分岔正是"预警按 A 算、压缩按 B 算"的开头。
+  final bool live;
+
+  /// 数字字段用等宽（docs/copy-guide.md §6）：20000000 与 500000 要能一眼比出量级
+  bool get numeric =>
+      kind == _SysKind.port || kind == _SysKind.count || kind == _SysKind.ratio || kind == _SysKind.range;
+
+  /// 生效值 → 输入框文本。**原样呈现**：20000000 就是 `20000000`，不做 k/M 换算、
+  /// 不补百分号——框里必须是 config.json 里那个值本身（用户 ⑪）。
+  /// 紧凑写法（20M）与百分比（80%）只允许出现在旁注里，否则人会以为能照那样填。
+  String seed(Map<String, dynamic>? cfg) {
+    final value = _at(cfg, path);
+    if (value == null) return '';
+    return switch (kind) {
+      _SysKind.host || _SysKind.text => value is String ? value : value.toString(),
+      _SysKind.ratio => value is num ? _plainDouble(value.toDouble()) : '',
+      _SysKind.port || _SysKind.count || _SysKind.range => value is num ? value.toInt().toString() : '',
+    };
+  }
+
+  /// 输入框文本 → 提交值（调用前必先过 [problem]）
+  Object decode(String text) => switch (kind) {
+        _SysKind.host || _SysKind.text => text,
+        _SysKind.ratio => double.parse(text),
+        _SysKind.port || _SysKind.count || _SysKind.range => int.parse(text),
+      };
+
+  /// 不合规返回那句话（保存前拦下，一个字节都不写盘）；合规返回 null
+  ///
+  /// [bounds] 是**服务端给的**边界（`GET /api/config` 的 `bounds`，键 = 点路径）：闭区间
+  /// 只从这个参数取，不从字段自身的 `min`/`max` 取——那两个常量字段只留给"边界就写死在
+  /// 界面上"的形状（当前一个都没有）。服务端没给 ⇒ 这一格不预拦，交给服务端如实拒绝。
+  String? problem(String text, AppStrings s, {Map<String, ({int min, int max})> bounds = const {}}) {
+    final label = settingsSysLabel(s, path);
+    switch (kind) {
+      case _SysKind.host:
+        return text.isEmpty ? s.settingsSysHostEmptyError : null;
+      case _SysKind.text:
+        return text.isEmpty ? s.settingsSysEmptyError(label) : null;
+      case _SysKind.port:
+        final value = int.tryParse(text);
+        if (value == null) return s.settingsSysIntRequired(label);
+        return (value < 1 || value > 65535) ? s.settingsSysPortRange(label) : null;
+      case _SysKind.count:
+        final value = int.tryParse(text);
+        if (value == null) return s.settingsSysIntRequired(label);
+        return value < 1 ? s.settingsSysMinOne(label) : null;
+      case _SysKind.ratio:
+        final value = double.tryParse(text);
+        if (value == null) return s.settingsSysRatioRequired(label);
+        return (value <= 0 || value > 1) ? s.settingsSysRatioRange(label) : null;
+      case _SysKind.range:
+        final value = int.tryParse(text);
+        if (value == null) return s.settingsSysIntRequired(label);
+        // 服务端那份优先（同一格两处写 ⇒ 迟早一边改了另一边没改）；没有才退回字段上的常量
+        final server = bounds[path];
+        final lo = server?.min ?? min;
+        final hi = server?.max ?? max;
+        if (lo != null && value < lo) return s.settingsSysMin(label, lo);
+        if (hi != null && value > hi) return s.settingsSysMax(label, hi);
+        return null;
+    }
+  }
+}
+
+/// 系统卡的两条地址字段：分开摆是因为解析器把它们当两个字段，合成 `127.0.0.1:7788`
+/// 只是显示上的方便——而"显示方便"换个方向就是"改不了其中一半"。
+const _sysHost = _SysField('web.host', _SysKind.host);
+const _sysPort = _SysField('web.port', _SysKind.port, hint: '7788');
+const _sysTimezone = _SysField('timezone', _SysKind.text, hint: 'Asia/Shanghai');
+
+/// 六条预算（与 `BudgetConfig` 同名同序）。标签沿用原来那张表上的写法，少一处漂移。
+const _sysStepTools = _SysField('budget.stepTools', _SysKind.count, hint: '20');
+const _sysTurnSteps = _SysField('budget.turnSteps', _SysKind.count, hint: '30');
+const _sysTaskTokens = _SysField('budget.taskTokens', _SysKind.count, hint: '500000');
+/// 提示值 = **出厂默认值**（`src/config/config.ts` 的 `buildDefaults`：`dailyTokens: 100_000_000`）。
+/// 2026-10-04 与出厂值对齐：出厂从 2M 改成 100M 之后，这里还写着 2000000 就是在教人填一个
+/// 会被心跳自己吃穿的值（心跳是真实唤醒，2M 撑不住一天）。只改提示，校验逻辑一个字都没动。
+const _sysDailyTokens = _SysField('budget.dailyTokens', _SysKind.count, hint: '100000000');
+const _sysSoftRatio = _SysField('budget.softRatio', _SysKind.ratio, hint: '0.8');
+const _sysFailStreak = _SysField('budget.failStreakMax', _SysKind.count, hint: '5');
+
+/// 心跳的平均间隔（`wake.heartbeatTargetMeanMin`）——**用户 2026-10-05 要的那个「我能不能控制心跳频率」**。
+///
+/// 落在这一组里的理由：它管的确实是"她多久醒一次"，但它同时也是一条**花销旋钮**
+/// （每醒一次就真跑一个 turn、真花 token），与上面六条预算在使用上是同一类东西——
+/// 想省 token 的人来这一组找，找得到。
+///
+/// 取值 6~59 是**按后端契约的前端提示**（后端才是最终判据；写错了启动就报配置错，
+/// 不会静默夹一个值——见 config.example.json 的 `wake.$comment` 与 docs/operations.md §1.3）：
+/// 那边要求目标均值**严格**落在 `heartbeatFloorMin` 与 `heartbeatCeilMin` 之间，且整体落在 5~60。
+/// 出厂那组边界是 floor 5 / ceil 60，于是当下可填的整数区间正好是 6~59：
+///   · 6  = 比下限 5 大 1：平均值贴着下限不是"平均"，是"每一拍都在最早那一刻"；
+///   · 59 = 比上限 60 小 1：平均值贴着上限同理（每一拍都是最后一拍）。
+/// 用户若把 floor / ceil 改成别的值，这个前端提示会显得保守一格——**这是有意的**：
+/// 界面只拦"明显不可能"的两端，真正判合不合规的是后端，而把 floor/ceil 读进界面来算区间
+/// 会让同一件事有第二份判据（改了配置却不重启时，界面算出来的区间是错的，比保守更糟）。
+///
+/// hint 15 = 出厂默认值（= 实测均值，real-loop 与 docs/design.md §4.12 都写着 15 分钟）。
+///
+/// 旁注**刻意不报具体数字**：那两个边界将来会被用户按自己的 config.json 改（他改了这里也不会跟着变），
+/// 而写了数字的旁注一旦落后就成了假话——所以这里只说"两端各由一条上下限兜住"，数字让人去看 config.json。
+const _sysHeartbeatMean = _SysField(
+  'wake.heartbeatTargetMeanMin',
+  _SysKind.range,
+  min: 6,
+  max: 59,
+  hint: '15',
+);
+
+/// 压缩线的可改区间：**不在这里存**（2026-10-11 收口）。
+///
+/// 这两个数原先在这里另存了一份 `kCompactionThresholdMin/Max`（与 `src/web/server.ts` 的
+/// `COMPACTION_THRESHOLD_MIN/MAX` 同值），靠"改一处必须改另一边"的注释维系——那正是错的形状：
+/// 改一边不改另一边，症状是"界面放过去、服务端拒掉"（或反过来），而两边都不报错。
+///
+/// 现在**唯一真源在服务端**，界面从 `GET /api/config` 的 `bounds.compactionThreshold` 读
+/// （见下面 [_applyServerBounds]）。这一层只做**保存前**的人话拦截——人正在框上，越界的数
+/// 不该先打一趟服务端再弹一句"保存失败"；**最终判据永远是服务端那一条**。
+/// 拿不到 bounds（老服务端 / 读失败）时这一格不预拦，交给服务端如实拒绝——不是静默放行，
+/// 是"拦不住的就不假装拦得住"。
+
+/// **压缩线**（`persona.compactionThresholdTokens`）——用户 2026-10-12 点名要暴露到界面的那一格：
+/// 「与之配合的，框架也得有 compact 80% 预警。然后**预算 compact 线（history 大小），
+///  默认从 100k 提升到 200k**，然后**暴露在 GUI**。」
+///
+/// 它管的是一件很具体的事：**她的可见历史攒到多大就被折成一篇交接笔记**（只遮蔽、不删除）。
+/// 摆在系统卡预算那一组的末尾（紧挨心跳那一行）：它们在使用上是同一类旋钮——都决定"她花多少
+/// token"，想省 token 的人来这一组找，找得到。
+///
+/// 三个口径都写在这一格的字段与旁注上，界面不自己另算一份：
+///   · **单位是估算器读数**（不是供方计数）：估算比供方偏低约 1.65~1.66 倍——旁注里说清，
+///     免得有人拿它直接去跟上下文上限比余量；
+///   · **改完立刻生效**（[live]，服务端在配置锁的同一个临界区里改内存那份）⇒ 徽章说「立刻生效」；
+///   · **80% 预警与压缩读的是同一个键**：那行预警说的"已达 80%"就是这个数的 80%
+///     （`src/model/render.ts` 的 `MAINTENANCE_COMPACTION_RATIO`），界面上不出现第二个阈值。
+///
+/// hint = 出厂默认值（`src/config/config.ts` 的 `buildDefaults`：`compactionThresholdTokens: 200_000`）。
+const _sysCompaction = _SysField(
+  'persona.compactionThresholdTokens',
+  _SysKind.range,
+  // ⚠️ **边界不在这里写**（2026-10-11 收口）：这一格的闭区间由服务端给
+  //（`GET /api/config` 的 `bounds.compactionThreshold`，见 `_applyServerBounds`）。
+  // 这里原先写的是 `kCompactionThresholdMin/Max`——那一对常量已经删了，理由见上面那段注释。
+  hint: '200000',
+  live: true,
+);
+
+/// 系统卡的全部可编辑字段（回填、脏判定与销毁都遍历它）
+const _sysFields = <_SysField>[
+  _sysHost,
+  _sysPort,
+  _sysTimezone,
+  _sysStepTools,
+  _sysTurnSteps,
+  _sysTaskTokens,
+  _sysDailyTokens,
+  _sysSoftRatio,
+  _sysFailStreak,
+  _sysHeartbeatMean,
+  _sysCompaction,
+];
+
+/// 信任范围的两档（`trust.mode`）——**取值与字面量与 `src/config/config.ts` 的
+/// `TrustMode` 逐字对齐**（那边只认这两个字面量，拼错即报错），界面不许自己造第三档、
+/// 也不许把标签当成写入值（标签是给人看的，写进去的永远是这两个 id 之一）。
+const kTrustFull = 'full';
+const kTrustWorkspace = 'workspace';
+
+/// 改 `trust.mode` 时 `X-Confirm` 要带的**命令短语 + 字段短语**。
+///
+/// 为什么是这一串、以及为什么"收紧"也要带：服务端 `DANGEROUS_FIELDS`
+/// （`src/web/server.ts` 的 `'trust.mode': 'trust-full-access'`）**刻意不做方向区分**——
+/// 只给"放宽"加门就得先读盘上现值再判方向，那会变成同一件事的第二处判据，
+/// 而"改这个字段一律要短语"是一句话能核对完的规则。短语值按 `;` 拆、只看包含，多带无害。
+///
+/// 为什么拎成常量：引导卡第五步（`onboarding.dart` 的 `_settleTrust`）写的是**同一个字段**，
+/// 两处各写一份字面量的下场与本文件顶部 `kTrustFull` 那条注释说的一样——服务端换短语时
+/// 只会改一处，另一处静默地吃 400。**这两处必须同时改**，所以它们读同一个名字。
+const kTrustConfirm = 'config-update; trust-full-access';
+
+/// 二选一的**后果话术**（两处共用：设置页与首次引导页）。
+///
+/// 为什么把文案抽出来：这两句话是这一档的全部意义所在——用户要的是"两种选择各一句后果
+/// 说明"，而且**两处必须一模一样**。各写一份的下场是引导页说"只能在某个目录里"、
+/// 设置页说成别的，人根本判断不了自己选了什么。
+///
+/// 「只限工作目录」那句里带上 [root]（= `trust.workspaceRoot`，由服务端解析器算出来），
+/// 因为"被关在一个目录里"这件事不说清是哪个目录就等于没说——被拦下的那一刻他才知道，
+/// 那就太晚了。
+String trustModeConsequence(AppStrings s, String mode, String root) {
+  if (mode == kTrustWorkspace) {
+    return root.isEmpty
+        ? s.settingsTrustConsequenceWorkspaceUnknown
+        : s.settingsTrustConsequenceWorkspace(root);
+  }
+  return s.settingsTrustConsequenceFull;
+}
+
+/// 二选一那一行的**标题**（同样两处共用）
+String trustModeLabel(AppStrings s, String mode) =>
+    mode == kTrustWorkspace ? s.settingsTrustLabelWorkspace : s.settingsTrustLabelFull;
+
+/// 二选一的一个可点选项（**设置页与首次引导页共用同一份实现**）。
+///
+/// 为什么两处共用而不是各画一张：这两处的选择是同一件事（`trust.mode`），版式一分为二
+/// 之后就会出现"引导页强调的那档与设置页高亮的那档不一样"这种没人会发现的漂移。
+///
+/// 形状是**成对的选择行**：左边一枚 Radio、右边标题 + 一句后果。为什么不用 SegmentedButton
+/// （「界面」卡里那个）：它一行只放得下一个短标签，装不下"她能读写整台电脑上的文件"这句话
+/// ——而把后果压成"选中之后才显示"的一行，就等于把另一半蒙起来让人选。
+///
+/// 选中态有三处冗余的提示（Radio 的点、描边加粗、底色），这不是装饰：这一行决定的是
+/// **边界**，选错的那一档不该靠"对比两行颜色的深浅"才看得出来。
+class TrustModeChoice extends StatelessWidget {
+  const TrustModeChoice({
+    super.key,
+    required this.mode,
+    required this.selected,
+    required this.consequence,
+    this.enabled = true,
+    required this.onPick,
+  });
+
+  /// 这一行代表哪一档（取值就是写进 config.json 的那两个字面量）
+  final String mode;
+
+  /// 是不是当前选中的那档
+  final bool selected;
+
+  /// 选它之后会发生什么（一句话，两处共用 [trustModeConsequence]）
+  final String consequence;
+
+  /// 写入中：整行按下（避免连点两次打两个请求）
+  final bool enabled;
+
+  /// 人点了它——**点已选中的那一行同样会回调**：要不要写一次盘由调用方判
+  /// （"与盘上那份一样就不写"的判据在页面手里，这一行只负责报"他点了"）
+  final ValueChanged<String> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected ? scheme.primary.withValues(alpha: 0.06) : scheme.surface,
+      borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      child: InkWell(
+        key: ValueKey('trust-mode-$mode'),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        onTap: enabled ? () => onPick(mode) : null,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(6, 8, 12, 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+            border: Border.all(
+              color: selected ? scheme.primary.withValues(alpha: 0.55) : scheme.outlineVariant,
+              // 选中那一行描边加粗一档：灰度截图或色弱时"深浅"不一定分得出来，"粗细"分得出
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 每一行自己是一个 RadioGroup（成员只有它那一枚 Radio，取值恒为 true）——
+              // 而不是两行共用一个：共用的那个"组值"必须来自两行之外的某个地方，而这两行
+              // 本来就分属两个 widget，组值会变成第二份"当前选中的是哪档"的真相。
+              // 分组只为了**不踩 deprecation**（3.35 起 Radio.groupValue/onChanged 已废弃，
+              // 替代品正是 RadioGroup 这个祖先），选中状态仍由上面的 [selected] 一个来源决定。
+              // `toggleable` 不开：二选一必有一档生效，"两档都不选"不是一个状态。
+              RadioGroup<bool>(
+                groupValue: true,
+                // 写入中给一个不做事的回调（RadioGroup.onChanged 是必填）：加上下面
+                // Radio 的 enabled=false，键盘与鼠标两条路都点不动
+                onChanged: enabled ? (_) => onPick(mode) : (_) {},
+                child: Radio<bool>(
+                  value: true,
+                  enabled: enabled,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      trustModeLabel(IrmiaStrings.of(context), mode),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                        color: scheme.onSurface,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      consequence,
+                      style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 系统卡的**行**（交互单位）：行 id → 这一行管的字段。
+///
+/// 为什么行与字段要分成两个概念：监听地址那一行是**两个字段**（`web.host` + `web.port`，
+/// 解析器也当两个字段看），而"点编辑 / 点保存 / 点取消"这个动作是按**行**发生的。
+/// 行 id 同时是编辑态的键与测试定位的键（`sys-edit-<id>` / `sys-value-<id>` …）。
+const _sysRowFields = <String, List<_SysField>>{
+  'web': [_sysHost, _sysPort],
+  'timezone': [_sysTimezone],
+  'budget.dailyTokens': [_sysDailyTokens],
+  'budget.stepTools': [_sysStepTools],
+  'budget.turnSteps': [_sysTurnSteps],
+  'budget.taskTokens': [_sysTaskTokens],
+  'budget.softRatio': [_sysSoftRatio],
+  'budget.failStreakMax': [_sysFailStreak],
+  // 心跳平均间隔（用户 2026-10-05）：行 id 与字段路径**同名**——这一行只有一个字段，
+  // 没必要为它另起一个名字（监听地址那种"两字段一行"才需要）。
+  'wake.heartbeatTargetMeanMin': [_sysHeartbeatMean],
+  // 压缩线（用户 2026-10-12）：同上，一个字段一行，行 id = 点路径
+  'persona.compactionThresholdTokens': [_sysCompaction],
+};
+
+class _SettingsPageState extends State<SettingsPage> {
+  /// 本页文案（当前语言）。**只在 build 路径里读**：`IrmiaStrings.of` 会登记依赖，
+  /// 语言一换本页就跟着重建；回执/toast 那些在 build 之外取的句子走 `IrmiaStrings.read`。
+  AppStrings get _s => IrmiaStrings.of(context);
+
+  Map<String, dynamic>? cfg;
+  String? cfgError;
+  bool loading = true;
+
+  /// **盘上已改、进程还没接管**的字段（服务端 `$pending.restartRequired` 给的点路径）。
+  ///
+  /// 判据只有这一处：本页不另算一份"哪些要重启"（同一件事存两处，迟早有两种说法）。
+  /// 它的用处是把「需重启」那枚徽章说准——那一行现在**真的**和生效值不一样时，
+  /// 徽章换成「尚未生效」；只是"这一类字段改完要重启"时，仍旧是「需重启」。
+  Set<String> pendingRestart = const <String>{};
+
+  /// 这一份配置是从哪儿读来的：`saved` = 盘上那份；`memory` = 盘读不出来、回落成生效配置。
+  /// 空串表示服务端没给这个字段（老服务端）。
+  String savedSource = '';
+
+  /// **服务端给的数值边界**（`GET /api/config` 的 `bounds`；键 = 点路径）。
+  ///
+  /// 为什么由服务端给、而不是界面存一份常量（2026-10-11 收口）：同一条边界在两处各写一遍，
+  /// 改一边不改另一边的症状是"界面放过去、服务端拒掉"，而两边都不报错。
+  /// 界面这一层只做**保存前**的人话拦截；最终判据永远在服务端。
+  ///
+  /// 空表（老服务端 / 这一条读失败）⇒ 那一格不预拦，照旧打一趟服务端由它如实拒绝。
+  Map<String, ({int min, int max})> valueBounds = const {};
+
+  /// **生效那份**配置（`GET /api/config` 不带 `source=saved`）。
+  ///
+  /// 两个读者，各问"现在按什么跑"：
+  ///   · 模型卡的**常驻读数**「现在跑的是 …」（[runningLine]，2026-10-21 起）——这是判据的
+  ///     唯一来源：端点/模型名只能从"进程启动那一刻的那份"里取，盘上那份在"改完还没重启"
+  ///     时本来就不一样；
+  ///   · 压缩线那一格（"改完立刻生效"）：压缩判定与 80% 预警读的都是进程内存里那个数，
+  ///     显示盘上那份就是显示一个**没在生效**的数。
+  ///
+  /// 读不到时为 null：压缩线那一格回落到盘上那份（显示旧值好过显示空白，下一次回填会补上），
+  /// 而读数那行**照实说读不到**（[cfgLiveFailed]），不拿上一次的读数冒充此刻的事实。
+  Map<String, dynamic>? cfgLive;
+
+  /// 最近一次"读生效配置"是不是失败了。
+  ///
+  /// 为什么要单独一格、而不是看 `cfgLive == null`：`cfgLive` 是**保留上一次**的（见上），
+  /// 所以"读过一次、后来读失败"与"从来没有过"在数据上分不开。读数那行只认这一格：
+  /// 失败的这一拍它说"状态读取失败"，而不是把一分钟前的读数摆成"现在跑的是 …"。
+  bool cfgLiveFailed = false;
+
+  Map<String, dynamic>? keys;
+  String? keysError;
+  bool keysLoading = true;
+
+  Map<String, dynamic>? proj;
+  String? projError;
+
+  /// 外部依赖（GET /api/deps）：各件依赖的探测结果 + 建议动作 + 自装目录
+  List<_DepEntry>? deps;
+  String? depsError;
+  bool depsLoading = true;
+  /// 正在安装哪一件（按名字）：装的时候按钮转圈并禁用，避免连点两次装两遍
+  String? depsInstalling;
+
+  /// 内置协议端（GET /api/protocol-side）：配置 + 运行状态 + 装没装，一份自包含的视图。
+  /// **刻意不阻塞首屏**（与 /api/deps 同一条理由）：它要读盘、探端口，卡片自己有三态。
+  Map<String, dynamic>? protocolSide;
+  String? protocolError;
+  bool protocolLoading = true;
+  /// 写入中（开关 / 目录 / 启停共用）：这期间把控件禁用，避免连点两次打两个请求
+  bool protocolSaving = false;
+  /// 启停中：与写入分开，因为它的回执是一句话（note），要单独弹给人看
+  bool protocolBusy = false;
+  /// 一键安装中（v35）：**这条端点是同步请求**，几秒到几十秒，期间按钮转忙并
+  /// 连同这张卡上其它写动作一起按下去（详见 _protocolCardBusy 的说明）
+  bool protocolInstalling = false;
+  /// 这一次安装的结果（含过程记录与"装好之后"的引导；失败也留在卡上，不塞进 toast）
+  _ProtocolInstall? protocolInstall;
+  final _protocolDirCtl = TextEditingController();
+  /// 目录的已存值快照（「保存」未改动即禁用）
+  String protocolDirBase = '';
+
+  /// 外部回调（B9）：`GET /api/webhook-secret` 的状态视图。
+  ///
+  /// **这里面没有明文**（也不该有）：服务端只报"配没配 + 那个非密钥的 id + 时刻"，
+  /// 明文只在生成那一次的响应里出现，直接进 [showWebhookTokenDialog] 那张框，
+  /// **一个字节都不落到本页的字段上**（不写 ui-state.json、不做"再看一眼"）。
+  Map<String, dynamic>? webhookSecret;
+  String? webhookError;
+  bool webhookLoading = true;
+  /// 生成/轮换中：按钮转忙并禁用（这条命令是写盘 + 落事件的，连点两次会连换两把钥匙）
+  bool webhookRotating = false;
+  /// 轮换之后留在卡上的那句话（**只放"上一份已失效"这类非密钥信息**，不含明文）
+  String webhookRotatedNote = '';
+
+  /// 发言节奏的速度输入（字/分钟）。开关是即时生效的，速度要按保存键——
+  /// 数字框边打字边写盘会把 90 打成 9、再打成 900，那种"逐字符生效"没人想要。
+  final _speakSpeedCtl = TextEditingController();
+  bool _speakSaving = false;
+
+  /// 系统卡的输入框：**key 就是 config.json 的点路径**，一张表管十格。
+  /// 为什么数据驱动而不是十个具名 controller：脏判定、保存、回填三处都遍历同一张表，
+  /// 少写一处就是"改了存不进去"或"存了却不显脏"。
+  late final Map<String, TextEditingController> _sysCtls = {
+    for (final field in _sysFields) field.path: TextEditingController(),
+  };
+
+  /// 生效值快照（文本形态）：与框里的文本逐字符比对——改回原值同样算不脏
+  final Map<String, String> _sysBase = {};
+
+  /// 正开着编辑态的行（行 id）。为什么是集合而不是一个"当前编辑行"：⑭ 起每一行**自包自足**
+  /// ——点开一行不牵动别的行，取消也只丢这一行的草稿。若只留一个槽位，点开第二行时第一行的
+  /// 草稿就得被无声丢掉，那是最难查的一类"我明明打了字"。
+  final Set<String> _sysEditing = {};
+
+  /// 系统卡写入中：这期间整张卡的写控件一起按下去（与发言卡同一条分寸）。
+  /// 一个进程只有一条配置写通道，两条请求同时在飞没有好处。
+  bool _sysSaving = false;
+
+  late final Map<String, _LaneForm> _forms = {
+    for (final id in _laneIds) id: _LaneForm(onChanged: _onFormChanged),
+  };
+
+  /// 右侧滚动区：锚点跳转与滚动联动都挂在它上面
+  final _scroll = ScrollController();
+
+  /// 内容根：分区顶边的相对坐标以它为基准
+  final _contentKey = GlobalKey();
+
+  /// 每个分区的定位 key（点击锚点即滚到这里）
+  final Map<String, GlobalKey> _sectionKeys = {
+    for (final anchor in _anchors) anchor.id: GlobalKey(),
+  };
+
+  /// 当前分区（只驱动锚点高亮，避免滚动时整页重建）
+  final _active = ValueNotifier<String>(_anchors.first.id);
+
+  /// 帧后合并：滚动通知每帧可能来多次，锚点高亮一帧只算一次
+  bool _activePending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.state.addListener(_onStateChange);
+    _scroll.addListener(_onScroll);
+    _speakSpeedCtl.addListener(_onFormChanged);
+    _protocolDirCtl.addListener(_onFormChanged);
+    for (final ctl in _sysCtls.values) {
+      ctl.addListener(_onFormChanged);
+    }
+    unawaited(load());
+  }
+
+  @override
+  void dispose() {
+    widget.state.removeListener(_onStateChange);
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    _active.dispose();
+    _speakSpeedCtl.removeListener(_onFormChanged);
+    _speakSpeedCtl.dispose();
+    _protocolDirCtl.removeListener(_onFormChanged);
+    _protocolDirCtl.dispose();
+    for (final ctl in _sysCtls.values) {
+      ctl.removeListener(_onFormChanged);
+      ctl.dispose();
+    }
+    for (final form in _forms.values) {
+      form.dispose();
+    }
+    super.dispose();
+  }
+
+  void _onStateChange() {
+    if (widget.state.online && cfgError != null) unawaited(load());
+  }
+
+  void _onFormChanged() {
+    if (mounted) setState(() {});
+  }
+
+  // ── 取数 ──
+
+  Future<void> load() async {
+    await Future.wait([
+      _loadConfig(seed: true), _loadKeys(), _loadProjection(), _loadDeps(), _loadProtocolSide(),
+      _loadWebhookSecret(),
+    ]);
+    if (mounted) setState(() => loading = false);
+  }
+
+  /// webhook 专用凭据的状态（GET /api/webhook-secret）。与依赖/协议端同一条纪律：
+  /// **不阻塞首屏**、读失败只影响这张卡（卡片自己有三态），不把整页变成错误页。
+  Future<void> _loadWebhookSecret() async {
+    setState(() => webhookLoading = true);
+    try {
+      final data = await widget.state.api.get('/api/webhook-secret');
+      if (!mounted) return;
+      setState(() {
+        webhookSecret = data is Map ? data.cast<String, dynamic>() : null;
+        webhookError = data is Map ? null : _s.settingsWebhookStateNotObject;
+        webhookLoading = false;
+      });
+    } catch (err) {
+      if (mounted) {
+        setState(() {
+          webhookError = '$err';
+          webhookLoading = false;
+        });
+      }
+    }
+  }
+
+  /// 协议端状态（GET /api/protocol-side）。与依赖报告一样**不阻塞首屏**：
+  /// 没配它的机器上这条端点也要读盘、可能还要探端口，让"模型/密钥"等它没道理。
+  ///
+  /// 读失败**只影响这张卡**（protocolError 单独持有）：整页照常可用——
+  /// 一张附加信息的卡读不到，不该把设置页变成错误页（v33 的框架提示卡同一条纪律）。
+  Future<void> _loadProtocolSide() async {
+    setState(() => protocolLoading = true);
+    try {
+      final data = await widget.state.api.get('/api/protocol-side');
+      if (!mounted) return;
+      final map = data is Map ? data.cast<String, dynamic>() : null;
+      setState(() {
+        protocolSide = map;
+        protocolError = map == null ? _s.settingsProtocolStateNotObject : null;
+        protocolLoading = false;
+      });
+      if (map != null) _seedProtocolDir(_protocolField('dir'));
+    } catch (err) {
+      if (mounted) {
+        setState(() {
+          protocolError = '$err';
+          protocolLoading = false;
+        });
+      }
+    }
+  }
+
+  /// 目录输入框回填：**只在没有未保存改动时**覆盖——否则一次后台刷新会把人正在敲的路径冲掉
+  void _seedProtocolDir(String dir) {
+    if (!mounted) return;
+    if (_protocolDirCtl.text.trim() != protocolDirBase.trim()) return;
+    setState(() {
+      protocolDirBase = dir;
+      _protocolDirCtl.text = dir;
+    });
+  }
+
+  /// 外部依赖报告。刻意**不阻塞**首屏：它要跑一次探测（没装的依赖要试几个候选），
+  /// 让"模型/密钥"这些常用项等它没道理；卡片自己有三态。
+  Future<void> _loadDeps() async {
+    setState(() => depsLoading = true);
+    try {
+      final data = await widget.state.api.get('/api/deps');
+      if (!mounted) return;
+      final map = data is Map ? data.cast<String, dynamic>() : null;
+      final rawList = map?['entries'];
+      setState(() {
+        deps = rawList is List ? [for (final item in rawList) _DepEntry.from(item)] : null;
+        depsError = map == null
+            ? _s.settingsDepsReadFailed
+            : (map['available'] == false ? map['reason']?.toString() : null);
+        depsLoading = false;
+      });
+    } catch (err) {
+      if (mounted) {
+        setState(() {
+          depsError = '$err';
+          depsLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadConfig({bool seed = false}) async {
+    try {
+      // **读盘上那份**（`?source=saved`，2026-10-04 修）：设置页编辑的是"我保存下来的值"。
+      // 默认那条 `/api/config` 给的是**进程启动时的生效配置**——保存成功后本页会立刻回读它
+      // 并回填输入框，于是刚写下去的值当场被冲掉（用户报的「编辑后点保存，前端又会弹回
+      // 默认的 url」，系统卡的「编辑」也一样）。盘上那份还多带一个 `$pending`：
+      // 哪些字段与生效值不同（= 还没生效），本页据此把「需重启」说准。
+      // 两条读**并发**发出去：它们互不依赖，串行只是白等一个往返（而这一页的每一次回读
+      // 都会走这里——保存之后、连接恢复之后）。两条的失败语义也不同：
+      //   · 盘上那份（`?source=saved`）失败 = 这一页走 error 态（下面那个 catch）；
+      //   · 生效那份（不带 source）失败**不算错**：模型卡的「现在跑的是 …」据它画，
+      //     读不到就照实说读不到（见 [runningLine]），压缩线那一格回落到盘上那份。
+      //
+      // ⚠️ **生效那份从 2026-10-21 起每次都读**（原先只在有 live 字段时才读）：
+      // 模型卡的常驻读数要的就是它——"屏幕上写的"与"正在跑的"必须是两个并列的读数，
+      // 而不是一份看起来像真的盘上值。见 [runningLine] 与 [cfgLive]。
+      final savedFetch = widget.state.api.get('/api/config?source=saved');
+      final liveFetch = _fetchLiveConfig();
+      final data = await savedFetch;
+      final live = await liveFetch;
+      if (!mounted) return;
+      final raw = data is Map ? data.cast<String, dynamic>() : null;
+      final pending = raw == null ? null : raw[r'$pending'];
+      // `$pending` 是给这一页看的元信息，不是配置项：取出来之后就从文档里摘掉，
+      // 免得它跟着 `_text('…')` 一类的点路径查找走（配置本体里没有以 `$` 开头的可读项）。
+      final next = raw == null ? null : (Map<String, dynamic>.from(raw)..remove(r'$pending'));
+      setState(() {
+        cfg = next;
+        // 服务端给的边界（`bounds`）：**跟着配置一起读**，不是我们自己存一份常量
+        valueBounds = _serverBoundsOf(raw);
+        // 生效那份读不到（null）时**保持上一次那份**：它只会让热更那一格显示一个稍旧的生效值，
+        // 而清成 null 会让它当场退回盘上那份——那在"刚写完还没回读"的瞬间是一个假读数。
+        // 「现在跑的是 …」那行另有一个"这次读失败"的标志（[cfgLiveFailed]）：
+        // 它宁可说"读不到"，也不把上一次的读数当成此刻的事实。
+        if (live != null) cfgLive = live;
+        cfgLiveFailed = live == null;
+        // 两条都带 bounds（服务端那侧同一个出口）；生效那份给得出就用它刷新一份
+        if (live != null) {
+          final fromLive = _serverBoundsOf(live);
+          if (fromLive.isNotEmpty) valueBounds = fromLive;
+        }
+        pendingRestart = pending is Map && pending['restartRequired'] is List
+            ? (pending['restartRequired'] as List).whereType<String>().toSet()
+            : const <String>{};
+        savedSource = pending is Map ? '${pending['source']}' : '';
+        cfgError = null; // 非对象走 empty 态（配置不可用），异常才走 error 态
+      });
+      if (seed && next != null) _seedInputs();
+    } catch (err) {
+      if (mounted) setState(() => cfgError = '$err');
+    }
+  }
+
+  /// 从一条配置响应里读**服务端给的边界**（`bounds`）。
+  ///
+  /// 形状（`src/web/server.ts` 的 `/api/config`）：
+  /// ```json
+  /// { "bounds": { "compactionThreshold": { "min": 10000, "max": 2000000 } } }
+  /// ```
+  /// 映射成 `{ 'persona.compactionThresholdTokens': (min: …, max: …) }`——**点路径是这一层
+  /// 与 `_SysField` 之间的键**（输入框的 key 就是它），所以这里做那一次翻译，`_SysField`
+  /// 不必知道 `bounds` 的 JSON 形状。
+  ///
+  /// 缺字段/形状不对一律**跳过**（不猜一个边界出来）：那一格退回"不预拦"，由服务端判。
+  static Map<String, ({int min, int max})> _serverBoundsOf(Map<String, dynamic>? doc) {
+    final bounds = doc?['bounds'];
+    if (bounds is! Map) return const {};
+    final entry = bounds['compactionThreshold'];
+    if (entry is! Map) return const {};
+    final min = entry['min'];
+    final max = entry['max'];
+    if (min is! num || max is! num || min >= max) return const {};
+    return {'persona.compactionThresholdTokens': (min: min.toInt(), max: max.toInt())};
+  }
+
+  /// 读一次**生效那份**配置（`GET /api/config` 不带 `source=saved`）。读不到返回 null。
+  ///
+  /// 模型卡的「现在跑的是 …」与压缩线那一格都用它（见 [cfgLive]）：它们问的是同一件事
+  /// ——"**现在**按什么跑"，而答案只在服务端那一份里（判据只此一处，本页不另算）。
+  Future<Map<String, dynamic>?> _fetchLiveConfig() async {
+    try {
+      final data = await widget.state.api.get('/api/config');
+      return data is Map ? data.cast<String, dynamic>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 密钥状态单独一条：保存密钥后只刷它（掩码以服务端为准，本页不自己算一份）
+  Future<void> _loadKeys() async {
+    setState(() => keysLoading = true);
+    try {
+      final data = await widget.state.api.get('/api/keys');
+      if (!mounted) return;
+      setState(() {
+        keys = data is Map ? data.cast<String, dynamic>() : null;
+        keysError = data is Map ? null : _s.settingsKeysReadFailed;
+        keysLoading = false;
+      });
+    } catch (err) {
+      if (mounted) {
+        setState(() {
+          keysError = '$err';
+          keysLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadProjection() async {
+    try {
+      final data = await widget.state.api.get('/api/projection');
+      if (!mounted) return;
+      setState(() {
+        proj = data is Map ? data.cast<String, dynamic>() : null;
+        projError = data is Map ? null : _s.settingsProjectionReadFailed;
+      });
+    } catch (err) {
+      if (mounted) setState(() => projError = '$err');
+    }
+  }
+
+  /// 用生效配置回填输入框并重记原始值（首次加载与保存成功后各一次；输入态不做双份状态）
+  void _seedInputs() {
+    for (final id in _laneIds) {
+      _forms[id]!.seed(
+        model: _text('models.$id.model'),
+        baseUrl: _text('models.$id.baseUrl'),
+        protocol: _text('models.$id.protocol'),
+      );
+    }
+    final speed = _amount('speak.charsPerMinute');
+    if (speed != '—') _speakSpeedCtl.text = speed;
+    // 系统卡各格一起回填：seed 为真就是"盘上那份才算数"（与两条 lane 同一纪律）。
+    // 唯一的例外是**正开着编辑态的那一行**：这次回填可能是别处触发的（另一行保存成功、
+    // 连接恢复后重读配置），把人正在打的字冲掉属于最没道理的那种"正确"。那一行的草稿留着，
+    // 只有它自己按下「保存」或「取消」才结束。
+    for (final field in _sysFields) {
+      final text = field.seed(_docFor(field));
+      _sysBase[field.path] = text;
+      if (_sysEditingPaths.contains(field.path)) continue;
+      _sysCtls[field.path]!.text = text;
+    }
+  }
+
+  /// 这一格该显示哪一份配置：**改完立刻生效**的那一格看生效那份（"现在按什么跑"），
+  /// 其余看盘上那份（设置页编辑的是"我保存下来的值"，见 `_loadConfig` 那段注释）。
+  Map<String, dynamic>? _docFor(_SysField field) => field.live ? (cfgLive ?? cfg) : cfg;
+
+  /// 正开着编辑态的那几格（点路径）：回填时跳过它们，草稿才留得住
+  Set<String> get _sysEditingPaths =>
+      {for (final id in _sysEditing) for (final field in _sysRowFields[id]!) field.path};
+
+  /// 某一行有没有未保存的改动（逐格与盘上那份比：改回原值同样不算改）。
+  /// 它是这一行「保存」键的开关——"未改动即禁用"是这一页的既有分寸，灰着本身就是一句话：
+  /// 盘上就是这个值。
+  bool _sysRowDirty(List<_SysField> fields) =>
+      fields.any((field) => _sysText(field) != (_sysBase[field.path] ?? ''));
+
+  /// 这一行的字段里，有没有"盘上已改、进程还没接管"的（判据来自服务端，本页不另算）
+  bool _rowPending(List<_SysField> fields) =>
+      fields.any((field) => pendingRestart.contains(field.path));
+
+  /// 把某一行的框还原成盘上那份（「取消」与保存成功都走它）
+  void _resetSysDraft(List<_SysField> fields) {
+    for (final field in fields) {
+      _sysCtls[field.path]!.text = _sysBase[field.path] ?? '';
+    }
+  }
+
+  /// 某一格当前的文本（统一 trim：尾部空格是手滑，不是值）
+  String _sysText(_SysField field) => _sysCtls[field.path]!.text.trim();
+
+  // ── 写：模型名 / Base URL / 密钥 ──
+
+  /// 保存本卡片的所有改动：模型字段走 config-update，密钥非空走 set-key。
+  ///
+  /// 密钥那一格**不必自己去写第二张卡**（2026-10-20）：服务端按 `apiKeyEnv` 判断该落到哪几格
+  /// ——同名环境变量只可能有一个值，所以在这里存 heavy 的 key，light 那一格会被一起写上
+  /// （不传 `modelRoutes`：设置页是按格保存，名字不同的格各写各的，见 `planModelKeyWrite`）。
+  Future<void> _save(String lane) async {
+    final form = _forms[lane]!;
+    final model = form.modelCtl.text.trim();
+    final baseUrl = form.baseCtl.text.trim();
+    final key = form.keyCtl.text.trim();
+
+    final fields = <String, dynamic>{};
+    if (form.modelDirty) {
+      if (model.isEmpty) {
+        _toast(_s.settingsModelNameRequired, kind: ToastKind.warn);
+        return;
+      }
+      if (baseUrl.isEmpty) {
+        _toast(_s.settingsBaseUrlRequired, kind: ToastKind.warn);
+        return;
+      }
+      if (model != form.baseModel) fields['models.$lane.model'] = model;
+      if (baseUrl != form.baseBaseUrl) fields['models.$lane.baseUrl'] = baseUrl;
+    }
+    // 协议是独立一格：只改它也要能存（它不在上面的 modelDirty 校验里——那两条是"非空"校验，
+    // 与协议无关）。**未改动时不带这一格**：与 modelDirty 同一条分寸。
+    if (form.protocolDirty) fields['models.$lane.protocol'] = form.protocol;
+    if (fields.isEmpty && key.isEmpty) {
+      _toast(_s.settingsNoChanges);
+      return;
+    }
+
+    setState(() => form.saving = true);
+    final written = <String>[];
+    try {
+      if (fields.isNotEmpty) {
+        await widget.state.api
+            .post('/api/commands/config-update', {'fields': fields}, confirm: 'config-update');
+        written.add(_s.settingsWrittenModelSettings);
+      }
+      if (key.isNotEmpty) {
+        await widget.state.api
+            .post('/api/commands/set-key', {'name': lane, 'value': key}, confirm: 'set-key');
+        written.add(_s.settingsWrittenKey);
+      }
+      if (!mounted) return;
+      form.keyCtl.clear();
+      if (fields.isNotEmpty) await _loadConfig(seed: true);
+      if (key.isNotEmpty) await _loadKeys();
+      if (!mounted) return;
+      // 只有配置项需要重启接管；密钥写盘即刻可用，不跟着喊重启
+      final restart = fields.isNotEmpty ? _s.settingsRestartSuffix : '';
+      _toast(_s.settingsSaved(written.join(_s.settingsListAnd), restart),
+        kind: ToastKind.success);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => form.saving = false);
+    }
+  }
+
+  /// 清除密钥：同一个 set-key 通道，空值 = 删除该键；环境变量里的值不受影响。
+  ///
+  /// 服务端会把**共用同一个 `apiKeyEnv` 的那几格一起清掉**（同名就只能同值）：只清一格会留下
+  /// "盘上一半有、一半没有"的状态，而下一次启动的补齐又会把它填回去——清了又活过来最没道理。
+  /// 确认框里那句话（`settingsClearKeyBody`）因此也把这一条说了出来。
+  Future<void> _clearKey(String lane) async {
+    // 危险操作统一走 ui_kit 的确认框：灰取消 / 红确认
+    final confirmed = await confirm(
+      context,
+      title: _s.settingsClearKeyTitle(_laneLabel(_s, lane)),
+      body: _s.settingsClearKeyBody,
+      confirmLabel: _s.settingsClear,
+      danger: true,
+    );
+    if (!confirmed || !mounted) return;
+
+    final form = _forms[lane]!;
+    setState(() => form.saving = true);
+    try {
+      await widget.state.api
+          .post('/api/commands/set-key', {'name': lane, 'value': ''}, confirm: 'set-key');
+      if (!mounted) return;
+      _toast(_s.settingsKeyCleared, kind: ToastKind.success);
+      await _loadKeys();
+    } catch (err) {
+      if (mounted) _toast(_s.settingsClearFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => form.saving = false);
+    }
+  }
+
+  /// 提示条统一走 ui_kit 的全局单例 toast（docs/astrbot-ux-interaction.md §8 收口项）：
+  /// 同一时刻只有一条，页面里不再自己 showSnackBar。
+  void _toast(String text, {ToastKind kind = ToastKind.info}) {
+    if (!mounted) return;
+    IrmiaToast.show(context, text, kind: kind);
+  }
+
+  // ── 锚点定位 ──
+
+  /// 当前滚动位（切宽窄布局时可能短暂挂载多个 position，取第一个）
+  ScrollPosition? get _scrollPosition {
+    if (!_scroll.hasClients || _scroll.positions.isEmpty) return null;
+    return _scroll.positions.first;
+  }
+
+  /// 分区顶边在内容坐标系里的位置
+  double? _sectionOffset(String id) {
+    final target = _sectionKeys[id]?.currentContext;
+    final origin = _contentKey.currentContext;
+    if (target == null || origin == null) return null;
+    final box = target.findRenderObject();
+    final root = origin.findRenderObject();
+    if (box is! RenderBox || root is! RenderBox) return null;
+    return box.localToGlobal(Offset.zero, ancestor: root).dy;
+  }
+
+  /// 点锚点：把对应分区滚到滚动区顶部
+  void _goTo(String id) {
+    final position = _scrollPosition;
+    final offset = _sectionOffset(id);
+    if (position == null || offset == null) return;
+    final target = offset.clamp(0.0, position.maxScrollExtent);
+    if (_active.value != id) _active.value = id;
+    _scroll.animateTo(target.toDouble(), duration: IrmiaTheme.durPage, curve: Curves.easeOutCubic);
+  }
+
+  void _onScroll() {
+    if (_activePending) return;
+    _activePending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _activePending = false;
+      if (mounted) _refreshActiveAnchor();
+    });
+  }
+
+  /// 滚动联动高亮：取最后一个顶边越过判定带的分区；到底则钉住最后一个
+  ///
+  /// `_sectionOffset` 给的是**内容坐标**（相对滚动内容根），所以判定线要换算到同一个坐标系：
+  /// `position.pixels + _activeBand`。原来这里直接拿 `top` 与 `_activeBand` 比，
+  /// 于是只有第一个分区（top ≈ 0）恒满足，高亮永远钉在「模型」上——用户 ⑩ 的那个现象。
+  void _refreshActiveAnchor() {
+    final position = _scrollPosition;
+    if (position == null) return;
+    var current = _anchors.first.id;
+    final last = _anchors.last;
+    if (position.maxScrollExtent > 0 && position.pixels >= position.maxScrollExtent - 1) {
+      current = last.id;
+    } else {
+      final line = position.pixels + _activeBand;
+      for (final anchor in _anchors) {
+        final top = _sectionOffset(anchor.id);
+        if (top != null && top <= line) current = anchor.id;
+      }
+    }
+    if (_active.value != current) _active.value = current;
+  }
+
+  // ── 骨架 ──
+
+  @override
+  Widget build(BuildContext context) {
+    final s = IrmiaStrings.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        PageHeader(title: s.settingsTitle, subtitle: s.settingsSubtitle),
+        Expanded(child: _pane()),
+      ],
+    );
+  }
+
+  /// 四态：loading（首次拉取）/ error（读取失败）/ empty（没返回配置本体）/ data。
+  /// 前三态没有可跳转的分区，锚点栏随之隐藏，只留一条滚动区承载提示与重试。
+  Widget _pane() {
+    final s = IrmiaStrings.of(context);
+    if (loading && cfg == null) {
+      return _scrolling([StateBlock.loading(hint: s.settingsLoadingConfig)], left: 0);
+    }
+    if (cfgError != null && cfg == null) {
+      return _scrolling([
+        StateBlock.error(
+          message: s.configReadFailed('$cfgError'),
+          hint: _s.settingsConfigErrorHint,
+          retryLabel: s.retry,
+          onRetry: () => unawaited(load()),
+        ),
+      ], left: 0);
+    }
+    if (cfg == null) {
+      return _scrolling([
+        StateBlock.empty(
+          icon: Icons.settings_suggest_outlined,
+          message: _s.settingsConfigUnavailable,
+          hint: _s.settingsConfigUnavailableHint,
+          action: StateBlock.cta(s.retry, () => unawaited(load())),
+        ),
+      ], left: 0);
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < _railBreakpoint) {
+          // 窄窗：锚点降级为顶部横条，不占正文宽度
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(26, 2, 26, 8),
+                child: _anchorStrip(),
+              ),
+              Expanded(child: _scrolling(_sections())),
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(width: 26),
+            Padding(padding: const EdgeInsets.only(top: 16), child: _anchorRail()),
+            const SizedBox(width: 18),
+            Expanded(child: _scrolling(_sections(), left: 0)),
+          ],
+        );
+      },
+    );
+  }
+
+  List<Widget> _sections() {
+    return [
+      _sectionBlock('model', [
+        _laneCard('heavy'),
+        const SizedBox(height: 12),
+        _laneCard('light'),
+        const SizedBox(height: 10),
+        if (keysError != null)
+          _footnote(_s.settingsKeysReadFailedHint('$keysError')),
+        if (savedSource == 'memory')
+          _footnote(_s.settingsConfigFallbackNote),
+        if (pendingRestart.any((path) => path.startsWith('models.')))
+          _footnote(_s.settingsModelRestartNote),
+        _footnote(_s.settingsKeysNote),
+      ]),
+      const SizedBox(height: 18),
+      _sectionBlock('ui', [_uiCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('speak', [_speakCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('deps', [_depsCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('protocol', [_protocolCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('webhook', [_webhookCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('memory', [_memoryCard()]),
+      const SizedBox(height: 18),
+      // 信任范围紧挨在「系统」之前：她是"这个人能碰多远"，系统是"这个进程怎么起来"
+      _sectionBlock('trust', [_trustCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('system', [_systemCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('account', [_accountCard()]),
+      const SizedBox(height: 18),
+      _sectionBlock('about', [_aboutCard()]),
+    ];
+  }
+
+  /// 分区块：定位 key 挂在这里，锚点跳转与滚动联动都以它为准
+  Widget _sectionBlock(String id, List<Widget> children) {
+    return Column(
+      key: _sectionKeys[id],
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _scrolling(List<Widget> children, {double left = 26}) {
+    return RefreshIndicator(
+      onRefresh: load,
+      child: SingleChildScrollView(
+        controller: _scroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: EdgeInsets.fromLTRB(left, 16, 26, 30),
+        child: Column(
+          key: _contentKey,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: children,
+        ),
+      ),
+    );
+  }
+
+  // ── 锚点栏 ──
+
+  Widget _anchorRail() {
+    return SizedBox(
+      width: _railWidth,
+      child: ValueListenableBuilder<String>(
+        valueListenable: _active,
+        builder: (context, active, _) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(left: 12, bottom: 8),
+              child: _AnchorCaption(),
+            ),
+            for (final anchor in _anchors) _anchorTile(anchor, active == anchor.id),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 窄窗：同一批锚点摊成一行，横向可滚
+  Widget _anchorStrip() {
+    return ValueListenableBuilder<String>(
+      valueListenable: _active,
+      builder: (context, active, _) => SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final anchor in _anchors) ...[
+              if (anchor != _anchors.first) const SizedBox(width: 6),
+              _anchorChip(anchor, active == anchor.id),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _anchorTile(_Anchor anchor, bool active) {
+    final scheme = Theme.of(context).colorScheme;
+    // 标签走 i18n；id 与 icon 是布局判据，**不随语言变**
+    final label = settingsNavLabel(IrmiaStrings.of(context), anchor.id);
+    final tone = active ? scheme.primary : scheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        color: active ? scheme.primary.withValues(alpha: 0.08) : Colors.transparent,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        child: InkWell(
+          onTap: () => _goTo(anchor.id),
+          borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Icon(anchor.icon, size: 17, color: tone),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                      color: tone,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _anchorChip(_Anchor anchor, bool active) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = active ? scheme.primary : scheme.onSurfaceVariant;
+    return Material(
+      color: active ? scheme.primary.withValues(alpha: 0.08) : Colors.transparent,
+      borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      child: InkWell(
+        onTap: () => _goTo(anchor.id),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(anchor.icon, size: 16, color: tone),
+              const SizedBox(width: 8),
+              Text(
+                settingsNavLabel(IrmiaStrings.of(context), anchor.id),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                  color: tone,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── 分区一：模型（可写） ──
+
+  Widget _laneCard(String lane) {
+    final scheme = Theme.of(context).colorScheme;
+    final form = _forms[lane]!;
+    final envName = _text('models.$lane.apiKeyEnv');
+    final keyState = _keyState(lane);
+    final keyLook = secretLook(
+      context,
+      configured: keyState.configured,
+      hintFontSize: 13,
+      base: InputDecoration(hintText: keyState.configured ? _s.settingsKeyConfiguredHint : _s.settingsKeySampleHint),
+    );
+
+    return _SectionCard(
+      title: _laneLabel(_s, lane),
+      note: _laneNote(_s, lane),
+      // 卡头右侧：点路径 + **「尚未生效」**（只在这一条 lane 真有字段与生效值不同时出现）。
+      // 判据来自服务端 `$pending.restartRequired`（见 [pendingRestart]），本页不另算——
+      // 它一直挂到"进程重启成功、盘上那份变成生效那份"为止（那之后 diff 为空、徽章自己消失）。
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('models.$lane', style: _mono(11.5, scheme.onSurfaceVariant)),
+          if (_lanePending(lane)) ...[
+            const SizedBox(width: 8),
+            _badge(_s.settingsNotInEffect, IrmiaTheme.warn),
+          ],
+        ],
+      ),
+      children: [
+        // **常驻读数**：它此刻真的在用的 model + baseUrl（排在输入框之前——先看事实，再改）。
+        _runningLine(lane),
+        const SizedBox(height: 12),
+        _FieldPair(
+          cells: [
+            _FieldCell(
+              label: _s.settingsModelName,
+              field: TextField(
+                controller: form.modelCtl,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: const TextStyle(fontSize: 13),
+                decoration: const InputDecoration(hintText: 'deepseek-chat'),
+              ),
+            ),
+            _FieldCell(
+              label: 'Base URL',
+              field: TextField(
+                controller: form.baseCtl,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: const TextStyle(fontSize: 13),
+                decoration: const InputDecoration(hintText: 'https://api.deepseek.com'),
+              ),
+              note: _s.settingsBaseUrlNote,
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _FieldCell(
+          label: 'API Key',
+          field: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: form.keyCtl,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  style: const TextStyle(fontSize: 13),
+                  // 已配置时的样子（蓝、居中）与渠道页的密钥格共用一份：ui_kit 的 secretLook
+                  textAlign: keyLook.textAlign,
+                  decoration: keyLook.decoration,
+                ),
+              ),
+              const SizedBox(width: 10),
+              _keyBadge(keyState),
+            ],
+          ),
+          note: _s.settingsKeyEnvNote(envName),
+        ),
+        const SizedBox(height: 12),
+        // 协议三档（`models.<lane>.protocol`，restart 级）：写进配置的就是服务端 `pickProtocol`
+        // 认的那三个字面量，改完由既有的「待重启」提示接管（服务端回 requiresRestart）。
+        _FieldCell(
+          label: _s.settingsModelProtocol,
+          field: _protocolPicker(form),
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            if (keyState.configured)
+              TextButton(
+                onPressed: form.saving ? null : () => unawaited(_clearKey(lane)),
+                style: TextButton.styleFrom(
+                  foregroundColor: IrmiaTheme.danger,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  minimumSize: const Size(0, 36),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(_s.settingsClearKey),
+              ),
+            const Spacer(),
+            // 未改动即禁用（ProviderPage.vue:78-90）；脏时紧挨按钮给一句状态
+            if (form.dirty) ...[
+              const DirtyPill(),
+              const SizedBox(width: 10),
+            ],
+            FilledButton(
+              onPressed: (form.dirty && !form.saving) ? () => unawaited(_save(lane)) : null,
+              style: _btnStyle(context),
+              child: form.saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(_s.save),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// **常驻读数**：「现在跑的是 `<lane>=<model> @ <baseUrl>`」（2026-10-21）。
+  ///
+  /// 为什么必须有这一行：这一页另外两个模型控件（模型名 / Base URL 输入框）显示的是**盘上那份**
+  /// ——"我保存下来的值"。而请求实际打到哪里只由**进程启动那一刻**的配置决定（`models.*` 是
+  /// restart 级）。两者在"改完还没重启"时必然不同，过去屏幕上只有前者，于是"我在 light 卡里换了
+  /// 端点、界面显示新值、请求仍旧打 heavy 的端点"是一种**看不见**的状态。
+  ///
+  /// 三条分寸：
+  ///   · 值只来自 [cfgLive]（`GET /api/config` **不带** `source=saved` = 服务端 `deps.config`），
+  ///     本页不在这里另算"哪个是生效值"；
+  ///   · 读不到就**说读不到**（[cfgLiveFailed] → `settingsStateReadFailed`），绝不回落成盘上那份：
+  ///     那会把"我以为的"摆成"它在用的"，正是这一行要消灭的那种谎；
+  ///   · 它是**只读**的（`SelectableText` 都不需要）：要改走下面的输入框 + 保存 + 重启。
+  Widget _runningLine(String lane) {
+    final scheme = Theme.of(context).colorScheme;
+    final models = cfgLive?['models'];
+    final laneDoc = models is Map ? models[lane] : null;
+    final model = laneDoc is Map ? laneDoc['model'] : null;
+    final baseUrl = laneDoc is Map ? laneDoc['baseUrl'] : null;
+    final known = !cfgLiveFailed && model is String && baseUrl is String
+        && model.isNotEmpty && baseUrl.isNotEmpty;
+    final text = known ? _s.settingsModelRunningNow(lane, model, baseUrl) : _s.settingsStateReadFailed;
+    return Container(
+      key: ValueKey('models-runtime-$lane'),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Text(
+        text,
+        style: _mono(11.5, known ? scheme.onSurfaceVariant : IrmiaTheme.warn),
+      ),
+    );
+  }
+
+  /// 这一条 lane 有没有"盘上已改、进程还没接管"的字段。
+  ///
+  /// 判据仍然只有一处：服务端算出来的 `$pending.restartRequired`（[pendingRestart]）。
+  /// 这里只做**按 lane 收窄**：`models.light.model` 只该点亮 light 那张卡。
+  bool _lanePending(String lane) => pendingRestart.any(
+        (path) => path == 'models.$lane' || path.startsWith('models.$lane.'),
+      );
+
+  /// 协议三档的单选组（协议回退 C-3，`models.<lane>.protocol`）。
+  ///
+  /// **一个 `RadioGroup`、一个真相**：选中的是哪一档只由 `form.protocol` 决定（不另存一份
+  /// "当前选中"）；三行之间是同一组的兄弟，键鼠两条路都走 `onChanged`。
+  /// 三句说明**本身就是选项标签**（不另起短名）：少一份"短名 → 说明"的映射，就少一处会漂的
+  /// 第二份真相；而这三句正是"选它意味着什么"，逐字来自文案表。
+  Widget _protocolPicker(_LaneForm form) {
+    final enabled = !form.saving;
+    return RadioGroup<String>(
+      groupValue: form.protocol,
+      // 写入中给一个不做事的回调（RadioGroup.onChanged 必填）：配合下面 Radio 的
+      // enabled=false，键盘与鼠标两条路都点不动（与信任范围那组同一分寸）
+      onChanged: enabled
+          ? (picked) {
+              if (picked != null) form.pickProtocol(picked);
+            }
+          : (_) {},
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final id in _protocolIds) _protocolRow(id, form, enabled),
+        ],
+      ),
+    );
+  }
+
+  /// 协议三档里的一行：圆点 + 那句代价说明（点行或点圆点都选中这一档）
+  Widget _protocolRow(String id, _LaneForm form, bool enabled) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = form.protocol == id;
+    return InkWell(
+      onTap: enabled ? () => form.pickProtocol(id) : null,
+      borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 1),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Radio<String>(
+              value: id,
+              enabled: enabled,
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Padding(
+                // 与圆点顶边对齐：圆点自带的内边距比正文大一点
+                padding: const EdgeInsets.only(top: 9),
+                child: Text(
+                  _protocolNote(_s, id),
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.5,
+                    color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 某个受管键的状态（形状严格照 GET /api/keys 的契约：{configured, mask}）
+  ({bool configured, String? mask}) _keyState(String lane) {
+    final raw = keys?[lane];
+    if (raw is! Map) return (configured: false, mask: null);
+    final mask = raw['mask'];
+    return (configured: raw['configured'] == true, mask: mask is String ? mask : null);
+  }
+
+  /// 密钥徽章：只有掩码，没有完整值
+  Widget _keyBadge(({bool configured, String? mask}) state) {
+    if (keysLoading && keys == null) {
+      return Text(
+        _s.settingsReading,
+        style: TextStyle(fontSize: 11.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
+      );
+    }
+    if (keysError != null && keys == null) return _badge(_s.settingsStateReadFailed, IrmiaTheme.warn);
+    if (!state.configured) return _badge(_s.settingsNotConfigured, Theme.of(context).colorScheme.onSurfaceVariant);
+    return _badge(_s.settingsKeyConfiguredMask(state.mask ?? '…'), IrmiaTheme.ok);
+  }
+
+  // ── 分区二：界面（可写） ──
+
+  /// 「界面」卡：主题偏好 + **语言** + **关窗行为**。
+  ///
+  /// 2026-10-04 加的「关窗时收进托盘」是**界面自己的偏好**（键 `close-to-tray`，
+  /// 落在 `%APPDATA%/Irmia/ui-state.json`，与主题一样**不写服务端配置**）：
+  /// 关不关窗是窗口的事，与服务端那份 config.json 无关。**出厂默认开**（2026-10-21
+  /// 用户裁决）——理由与那两道保险写在 ui_state.dart 的 [kCloseToTrayFlag] /
+  /// [kCloseToTrayDefault] 上（她是独立进程，关窗不影响她运行；托盘没装成时不会隐藏）。
+  ///
+  /// 2026-10-17 加的「语言」同理：键 `language`（见 `i18n/strings_scope.dart` 的
+  /// [kLanguageFlag]），取值 `system`/`zh`/`en`。**切换后不重启**：改的是
+  /// `effectiveLanguage` 那个 notifier，根的 `ValueListenableBuilder` 重建 MaterialApp。
+  ///
+  /// 这里**不摆"需重启"**：开关本身立刻写盘，下次启动由 main.dart 读；
+  /// 而且它在同一次运行里也已经生效（窗口关闭回调读的是内存镜像，见 ui_state 的 [closeToTray]；
+  /// 语言读的是 `effectiveLanguage` 的内存值）。
+  Widget _uiCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final s = IrmiaStrings.of(context);
+    final mode = widget.state.themeMode;
+    return _SectionCard(
+      title: s.settingsSectionUi,
+      note: s.settingsUiNote,
+      trailing: Text(s.instantApply, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+      children: [
+        _FieldCell(
+          label: s.settingsThemeMode,
+          field: Align(
+            alignment: Alignment.centerLeft,
+            child: SegmentedButton<ThemeMode>(
+              segments: [
+                ButtonSegment(value: ThemeMode.light, label: Text(s.themeLight)),
+                ButtonSegment(value: ThemeMode.dark, label: Text(s.themeDark)),
+              ],
+              selected: {mode},
+              showSelectedIcon: false,
+              style: SegmentedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onSelectionChanged: (picked) {
+                final next = picked.first;
+                if (widget.state.themeMode != next) widget.state.toggleTheme();
+              },
+            ),
+          ),
+          note: s.settingsThemeNote,
+        ),
+        const SizedBox(height: Space.x3),
+        // 语言：三选一（跟随系统 / 中文 / English）。**即时生效**，与主题那颗同一档口径。
+        // 取 `View.of(context).platformDispatcher.locale` 而不是 Localizations 里的 locale：
+        // 后者是"我们给界面设的那个语言"，拿它去解析"跟随系统"会永远是它自己。
+        _FieldCell(
+          label: s.settingsLanguage,
+          field: Align(
+            alignment: Alignment.centerLeft,
+            child: ValueListenableBuilder<AppLanguage>(
+              valueListenable: languagePreference,
+              builder: (context, preference, _) => SegmentedButton<AppLanguage>(
+                key: const ValueKey('language-switch'),
+                segments: [
+                  ButtonSegment(value: AppLanguage.system, label: Text(s.languageFollowSystem)),
+                  // 两条语言名各自用自己的语言写：切到英文之后还看得见"中文"，才切得回来
+                  ButtonSegment(value: AppLanguage.zh, label: Text(AppLanguage.zh.endonym)),
+                  ButtonSegment(value: AppLanguage.en, label: Text(AppLanguage.en.endonym)),
+                ],
+                selected: {preference},
+                showSelectedIcon: false,
+                style: SegmentedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onSelectionChanged: (picked) => unawaited(
+                  setLanguage(picked.first, systemLocale: View.of(context).platformDispatcher.locale),
+                ),
+              ),
+            ),
+          ),
+          note: s.settingsLanguageNote,
+        ),
+        const SizedBox(height: Space.x3),
+        // 文案覆盖（2026-10-21）：与语言同一族——都是"界面上的字"这件事，所以紧跟选择器。
+        // 那一格整块在 lib/pages/settings_strings_section.dart（独立文件，本页只有这一行）。
+        const StringsOverrideSection(),
+        const SizedBox(height: Space.x3),
+        _FieldCell(
+          label: s.settingsCloseToTray,
+          field: Align(
+            alignment: Alignment.centerLeft,
+            child: ValueListenableBuilder<bool>(
+              valueListenable: closeToTray,
+              builder: (context, enabled, _) => Switch(
+                key: const ValueKey('close-to-tray'),
+                value: enabled,
+                onChanged: (next) => unawaited(setCloseToTray(next)),
+              ),
+            ),
+          ),
+          // 后果要写清：托盘图标在 Windows 11 上默认被收进"隐藏的图标"面板，
+          // 那时"关窗"就等于"界面不见了"——这正是用户踩过两次的那个坑。
+          note: s.settingsCloseToTrayNote,
+        ),
+        const SizedBox(height: Space.x3),
+        _readOnlyRow(
+          s.settingsCurrentTheme,
+          mode == ThemeMode.dark ? s.themeDark : s.themeLight,
+          restart: false,
+        ),
+      ],
+    );
+  }
+
+  // ── 分区三：发言（可写） ──
+  /// 发言节奏：她说话时拆成几条、每条之间隔多久。
+  ///
+  /// 写的是 `config.speak`（typingEffect / charsPerMinute），两者都要重启才接管——
+  /// 它们是**工具装配参数**（admin 工具在启动时构造），不是每拍现读的运行期开关。
+  Widget _speakCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final typing = _at(cfg, 'speak.typingEffect') == true;
+    final saved = _amount('speak.charsPerMinute');
+    final dirty = saved != '—' && _speakSpeedCtl.text.trim() != saved;
+    return _SectionCard(
+      title: _s.settingsNavSpeak,
+      note: _s.settingsSpeakNote,
+      trailing: dirty ? const DirtyPill() : null,
+      children: [
+        _FieldCell(
+          label: _s.settingsSpeakTyping,
+          field: Switch(
+            value: typing,
+            onChanged: _speakSaving ? null : (next) => unawaited(_saveSpeakTyping(next)),
+          ),
+          note: _s.settingsSpeakTypingNote,
+        ),
+        const SizedBox(height: 12),
+        _FieldCell(
+          label: _s.settingsSpeakSpeed,
+          field: Row(
+            children: [
+              SizedBox(
+                width: 92,
+                child: TextField(
+                  controller: _speakSpeedCtl,
+                  enabled: !_speakSaving,
+                  keyboardType: TextInputType.number,
+                  // 不给 border：原来这里写了一句 `border: OutlineInputBorder()`，而它默认半径 4——
+                  // 与主题的 8 不是一个数（实际生效的是主题的 enabledBorder，那句是死的）。
+                  // 控件圆角统一由主题给（用户 ⑧），这里不再自报一个数。
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(_s.settingsSpeakSpeedUnit, style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant)),
+              const SizedBox(width: 12),
+              FilledButton(
+                onPressed: dirty && !_speakSaving ? () => unawaited(_saveSpeakSpeed()) : null,
+                child: Text(_s.save),
+              ),
+            ],
+          ),
+          note: _s.settingsSpeakSpeedNote,
+        ),
+        const SizedBox(height: 12),
+        _readOnlyRow(
+          _s.settingsCurrentlyActive,
+          saved == '—' ? '—' : (typing ? _s.settingsSpeakTypingOn(saved) : _s.settingsSpeakTypingOff(saved)),
+          restart: true,
+        ),
+      ],
+    );
+  }
+
+  Future<void> _saveSpeakTyping(bool value) async {
+    setState(() => _speakSaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {
+          'fields': {'speak.typingEffect': value},
+        },
+        confirm: 'config-update',
+      );
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      _toast(value ? _s.settingsSpeakTypingEnabled : _s.settingsSpeakTypingDisabled);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.warn);
+    } finally {
+      if (mounted) setState(() => _speakSaving = false);
+    }
+  }
+
+  Future<void> _saveSpeakSpeed() async {
+    final value = int.tryParse(_speakSpeedCtl.text.trim());
+    if (value == null || value < 30 || value > 600) {
+      _toast(_s.settingsSpeakSpeedRange, kind: ToastKind.warn);
+      return;
+    }
+    setState(() => _speakSaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {
+          'fields': {'speak.charsPerMinute': value},
+        },
+        confirm: 'config-update',
+      );
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      _toast(_s.settingsSavedRestartNote);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.warn);
+    } finally {
+      if (mounted) setState(() => _speakSaving = false);
+    }
+  }
+
+  /// 保存**这一行**：一条请求，body 里只有这一行的字段（用户 ⑭："只写这一行"）。
+  ///
+  /// 与 ⑪ 那版的差别只在粒度：那次是"一条请求带上整张卡改过的字段"，理由是服务端一条
+  /// `config-update` 内部是"读→改→写→复核"的临界区，怕半新半旧的配置落盘。逐行之后
+  /// 这个理由仍然成立而且更硬了——一行就是一次完整、自洽的改动（监听地址那行的两半一起写，
+  /// 它们本来就是同一个 listen 调用的两个参数），**不存在"半行"这种可写状态**。
+  ///
+  /// 校验**先于请求**，与 ⑪ 一字不差（同一批 `problem()` 文案）：非法值当场拦下、一个字节
+  /// 都不写，并且**留在编辑态**——人就在那个框上，改完再按一次就行。
+  Future<void> _saveSysRow(String id, List<_SysField> fields) async {
+    final changed = <String, dynamic>{};
+    for (final field in fields) {
+      final text = _sysText(field);
+      if (text == (_sysBase[field.path] ?? '')) continue; // 没变的字段不写
+      final problem = field.problem(text, _s, bounds: valueBounds);
+      if (problem != null) {
+        _toast(problem, kind: ToastKind.warn);
+        return;
+      }
+      changed[field.path] = field.decode(text);
+    }
+    if (changed.isEmpty) return; // 保存键本来就是灰的，这里只是兜底
+
+    // 「改完立刻生效」的那一格走**它自己的端点**：服务端在 `configFileLock` 的同一个临界区里
+    // 把内存那份也改掉 ⇒ 这一拍就按新线算。通用那条 `config-update` 只写盘、回执写死
+    // "要重启"——用它就等于让界面说一句假话（"已保存"而压缩仍按旧线跑）。
+    // 端点形状与校验规则见 `src/web/server.ts` 的 `set-compaction-threshold`（它认 `tokens`）。
+    final live = fields.where((field) => field.live).toList();
+    if (live.isNotEmpty) {
+      final value = changed[live.first.path];
+      setState(() => _sysSaving = true);
+      try {
+        await widget.state.api.post(
+          '/api/commands/set-compaction-threshold',
+          {'tokens': value},
+        );
+        // 回读：生效那份与盘上那份都变了，所以**两份一起**刷（下一拍判据用的就是生效那份）
+        await _loadConfig(seed: true);
+        if (!mounted) return;
+        setState(() {
+          _resetSysDraft(fields);
+          _sysEditing.remove(id);
+        });
+        _toast(_s.settingsSavedLive, kind: ToastKind.success);
+      } catch (err) {
+        if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.error);
+      } finally {
+        if (mounted) setState(() => _sysSaving = false);
+      }
+      return;
+    }
+
+    setState(() => _sysSaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {'fields': changed},
+        confirm: 'config-update',
+      );
+      // 保存成功后回读生效配置（服务端可能归一化过值），这一行退出编辑态、按盘上那份回填。
+      // 别的行若正开着，草稿留着（见 _seedInputs 与 _sysEditing 的说明）。
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      setState(() {
+        _resetSysDraft(fields);
+        _sysEditing.remove(id);
+      });
+      _toast(_s.settingsSavedRestart, kind: ToastKind.success);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => _sysSaving = false);
+    }
+  }
+
+  // ── 分区四：外部依赖（可写：一键安装） ──
+
+  /// 外部依赖卡片（v30）。用户点名的两件事都在这张卡上：
+  ///   ① **显式告知建议安装**——未安装时不止说"没装"，还要说清"没有它会怎样"（impact 那一行）；
+  ///   ② **框架里自动安装配置**——能一键装的给「安装」，只能人去装的给「打开下载页」。
+  ///
+  /// 状态徽章三态与后端 status 一一对应（已就绪 / 未安装 / 版本不符）：
+  /// "版本不符"必须与"未安装"分开——前者该升级、后者该安装，合成一句话会让人去装一个已经装了的东西。
+  Widget _depsCard() {
+    final entries = deps;
+    final missing = entries?.where((entry) => !entry.ready).toList() ?? const <_DepEntry>[];
+    // 卡头汇总：**建议安装**是用户点名要显式说出来的那句话，所以它不只是颜色，还带数字。
+    // 读不到报告时**不给任何汇总**——"全部就绪"这种乐观结论在没有数据的时候就是撒谎。
+    final summary = depsError != null
+        ? null
+        : (entries == null
+            ? (depsLoading ? _s.settingsReading : null)
+            : (missing.isEmpty ? _s.settingsDepsAllReady : _s.settingsDepsSuggested(missing.length)));
+    return _SectionCard(
+      title: _s.settingsNavDeps,
+      // 用户 ⑨ 指定的新副标题
+      note: _s.settingsDepsNote,
+      trailing: summary == null
+          ? null
+          : _badge(summary, missing.isEmpty ? IrmiaTheme.ok : IrmiaTheme.warn),
+      children: [
+        if (depsError != null)
+          _footnote(_s.settingsDepsReadFailedHint('$depsError')),
+        if (entries == null && depsError == null)
+          _footnote(_s.settingsDepsProbing),
+        for (final entry in entries ?? const <_DepEntry>[]) ...[
+          _depRow(entry),
+          const SizedBox(height: 10),
+        ],
+        if (entries != null && entries.isNotEmpty)
+          // 用户 ⑨：删掉"（报告里的 managedDir 就是它）"——那是给实现者看的对应关系
+          _footnote(_s.settingsDepsInstallLocation),
+      ],
+    );
+  }
+
+  /// 一件依赖一行：名字 + 状态徽章 + 动作按钮；下面两行灰字是"它是干什么的 / 没有它会怎样"。
+  Widget _depRow(_DepEntry entry) {
+    final scheme = Theme.of(context).colorScheme;
+    final busy = depsInstalling == entry.name;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(entry.label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+              ),
+              _depBadge(entry),
+              const SizedBox(width: 10),
+              ..._depActions(entry, busy: busy),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // 就绪时给"**用的是哪一份** + 探测到的版本与路径"；没就绪时给"试过哪几处"——
+          // 前者是事实（用户 2026-10-17：探到的路径与版本要显示出来），后者是下一步
+          Text(
+            entry.ready ? entry.readyLine(_s) : (entry.manualHint ?? entry.reason),
+            style: _mono(11.5, scheme.onSurfaceVariant),
+          ),
+          // Python 专属：**pip 的状态要单独看得见**（用户 2026-10-16：「pip 必须要，
+          // 方便后续 agent 自行拓展能力」）。三态各有各的话，**没有 pip 绝不静默**：
+          //   · 有 pip ⇒ 版本号（她能自己 `python -m pip install <包>`）；
+          //   · 没有 pip ⇒ 明说"不可用"+ 原因（那时她的扩展能力是缺的，要让人看见）——
+          //     ⚠ 但那**不是**"未就绪"：python 可用就是可用，徽章照旧是"已就绪"，
+          //     pip 是它自己这一行的事（用户 2026-10-17 点名的那条）；
+          //   · 这一件不是 python（`pipVersion == null`）⇒ 一行都不加。
+          if (entry.pipVersion != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              entry.pipVersion!.isEmpty
+                  ? _s.settingsDepPipUnavailable(entry.pipReason.isEmpty ? null : entry.pipReason)
+                  : _s.settingsDepPipReady(entry.pipVersion!),
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.5,
+                color: entry.pipVersion!.isEmpty ? IrmiaTheme.warn : scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          const SizedBox(height: 4),
+          Text(
+            entry.ready ? entry.purpose : _s.settingsDepPurposeImpact(entry.purpose, entry.impact),
+            style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 状态徽章：三态三色。字面口径与后端一致（"版本不符"不是"未安装"）。
+  ///
+  /// 「已就绪」**分两种说法**（用户 2026-10-17）：用机器上本来就有的那份时写
+  /// 「已就绪·系统」——它是"有就用 PATH 里的"那句话的落地，不是"框架要求你装的那个"；
+  /// 用框架托管那份（兜底）时写「已就绪·托管」。两句话不能混：前者不该让人以为要去装点什么。
+  Widget _depBadge(_DepEntry entry) {
+    if (entry.ready) {
+      return _badge(entry.readyIsManaged ? _s.settingsDepReadyManaged : _s.settingsDepReadySystem, IrmiaTheme.ok);
+    }
+    if (entry.mismatch) return _badge(_s.settingsDepMismatch, IrmiaTheme.danger);
+    return _badge(_s.settingsDepMissing, IrmiaTheme.warn);
+  }
+
+  /// 行尾动作：可一键装的给「安装」，只能人去装的给「打开下载页」。
+  /// 已就绪的行**什么都不给**——一枚按下去只会重复劳动的按钮比不摆更糟。
+  List<Widget> _depActions(_DepEntry entry, {required bool busy}) {
+    if (entry.ready) {
+      return [
+        Text(_s.settingsDepNoAction, style: TextStyle(fontSize: 11.5, color: IrmiaTheme.ok)),
+      ];
+    }
+    if (busy) {
+      return [
+        SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+        SizedBox(width: 8),
+        Text(_s.settingsDepInstalling, style: TextStyle(fontSize: 12)),
+      ];
+    }
+    final installing = depsInstalling != null;
+    if (entry.installable) {
+      return [
+        FilledButton(
+          onPressed: installing ? null : () => unawaited(_installDep(entry)),
+          style: _btnStyle(context),
+          child: Text(_s.settingsInstall),
+        ),
+        if (entry.downloadPage != null) ...[
+          const SizedBox(width: 6),
+          TextButton(
+            onPressed: installing ? null : () => unawaited(_openDownloadPage(entry)),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              minimumSize: const Size(0, 36),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text(_s.settingsDownloadPage),
+          ),
+        ],
+      ];
+    }
+    return [
+      FilledButton.tonal(
+        onPressed: installing ? null : () => unawaited(_openDownloadPage(entry)),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          minimumSize: const Size(0, 36),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(_s.settingsOpenDownloadPage),
+      ),
+    ];
+  }
+
+  /// 一键安装：**先确认再动手**。
+  ///
+  /// 为什么要确认：这一步会从网上下一个可执行文件放进数据目录，之后 agent 会真的调用它——
+  /// 它比"改一个配置项"更接近能力边界（服务端也按危险操作登记了 X-Confirm: dep-install）。
+  /// 确认框里写清三件事：装什么、从哪来、装到哪。
+  Future<void> _installDep(_DepEntry entry) async {
+    final confirmed = await confirm(
+      context,
+      title: _s.settingsInstallTitle(entry.label),
+      body: _s.settingsInstallConfirmBody(entry.managedDir),
+      confirmLabel: _s.settingsDownloadAndInstall,
+    );
+    if (!confirmed || !mounted) return;
+
+    setState(() => depsInstalling = entry.name);
+    try {
+      final data = await widget.state.api.post(
+        '/api/commands/dep-install',
+        {'name': entry.name},
+        confirm: 'dep-install',
+      );
+      final map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
+      if (!mounted) return;
+      if (map['ok'] == true) {
+        _toast(_s.settingsDepReadyToast(entry.label, '${map['version'] ?? ''}'),
+            kind: ToastKind.success);
+      } else {
+        // 三种失败分开说：下载 / 解压 / 复检各有各的下一步，合成一句"安装失败"等于没说
+        _toast(
+            _s.settingsStepErrorToast(
+                _stepLabel(map['step']), map['error']?.toString() ?? _s.settingsUnknownReason),
+            kind: ToastKind.error);
+      }
+    } catch (err) {
+      if (mounted) _toast(_s.settingsInstallRequestFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) {
+        setState(() => depsInstalling = null);
+        await _loadDeps();
+      }
+    }
+  }
+
+  /// 安装失败的阶段名（服务端的 step 字段）。三条路的处置完全不同：
+  /// 网络问题重试、包不对换源、复检不过看杀毒软件。
+  String _stepLabel(Object? step) {
+    switch (step?.toString()) {
+      case 'download':
+        return _s.settingsStepDownloadFailed;
+      case 'extract':
+        return _s.settingsStepExtractFailed;
+      case 'verify':
+        return _s.settingsStepVerifyFailed;
+      default:
+        return _s.settingsStepInstallFailed;
+    }
+  }
+
+  /// 打开官方下载页（pwsh 这条路只能人工装：MSI/winget 要提权，无人值守进程里弹 UAC 只会卡住）。
+  ///
+  /// 真正开浏览器那一步在 `lib/external_link.dart`：引导页第 2、3 步的推荐链接也走它——
+  /// 全仓只有那一条 `Process.run`，不引 url_launcher（零第三方依赖的桌面壳，见 pubspec.yaml）。
+  Future<void> _openDownloadPage(_DepEntry entry) async {
+    final url = entry.downloadPage;
+    if (url == null) {
+      _toast(_s.settingsNoDownloadPage(entry.manualHint ?? _s.settingsSeeOfficialDocs),
+          kind: ToastKind.warn);
+      return;
+    }
+    await _openUrl(url, hint: entry.manualHint);
+  }
+
+  /// 用系统默认浏览器打开一个外链。打不开就**把地址说出来**——那是唯一不靠外部程序
+  /// 也能让人拿到它的方式（协议端的下载页与登录界面都走这里）。
+  Future<void> _openUrl(String url, {String? hint}) async {
+    final opened = await openExternalUrl(url);
+    if (!mounted) return;
+    if (opened) {
+      _toast(_s.settingsOpenedUrl(url));
+    } else {
+      _toast(_s.settingsOpenUrlFailed(url, hint), kind: ToastKind.warn);
+    }
+  }
+
+  // ── 分区六：协议端（可选开启的内置服务，v34） ──
+
+  /// 内置协议端卡片：**第二条独立的入站通道**（OneBot，背后是一个真实 QQ 号）。
+  ///
+  /// 它与官方 Bot 各是一个独立的消息适配器，**互不依赖**（2026-10-02 用户澄清）：
+  /// 官方那条在平台上开了「接收所有消息」之后，群里谁说话也推得到（同一个订阅位，
+  /// 见 docs/review.md 的「已了结」一节）；这条的长处是走客户端协议、背后有一个真实 QQ 号
+  /// 的社交圈，不受开放平台的沙箱与审核限制。装不装都不影响另一条。
+  ///
+  /// 但它**可选**，三条形态纪律都是为这件事服务的：
+  ///   · **读不到只灰这张卡**：`StateBlock.error` + 重试，其余分区照常；
+  ///   · **"没配置"不是错误**：那是这台机器还没决定要不要开它——空态旁边**必须留着控件**，
+  ///     否则人就没有地方可填（空态最忌讳的就是把出路一起藏起来）；
+  ///   · **读失败时不给写入控件**：开关、目录、以及 v35 的「一键安装」都以"当前值"为前提，
+  ///     读不到就在盲写——宁可让人先点重试，也不要替他猜一个 `enabled` 出来。
+  ///
+  /// 开关与目录都写 `config.json`，而协议端实例是**启动时**按那份配置建的，
+  /// 所以卡上要显式摆出「需重启」——服务端回的 `restartRequired` 直接显示，本页不另算一份。
+  ///
+  /// v35 把主路径压成一句话：**点「一键安装」→ 框架装好并顺手把配置写好 → 重启 → 扫码**。
+  /// 前两步框架能做（代下载 + 写一次配置），后两步做不了（重启是危险动作、扫码要人拿手机），
+  /// 所以卡上给的是"做完前两步之后的引导"，而不是替人做后两步。
+  Widget _protocolCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final data = protocolSide;
+    final restartRequired = data?['restartRequired'] == true;
+    final state = _protocolField('state');
+    final stateText = _protocolField('stateText');
+    final configured = data?['configured'] == true;
+    final install = protocolInstall;
+
+    // 卡头汇总：读不到就**什么都不说**（没有数据时的"已就绪"就是撒谎，v30 同一条纪律）。
+    // 状态徽章只在这里摆一枚——状态行里再摆一枚就是同一句话说两遍（与「外部依赖」卡同构：
+    // 汇总在卡头，明细在行里）。
+    final Widget? trailing = (protocolError != null || data == null)
+        ? null
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (configured) ...[
+                _badge(stateText.isEmpty ? _s.settingsUnknown : stateText, _protocolTone(state)),
+                if (restartRequired) const SizedBox(width: 6),
+              ],
+              if (restartRequired)
+                _badge(_s.settingsRestartRequired, IrmiaTheme.warn)
+              else if (!configured)
+                _badge(_s.settingsNotConfigured, scheme.onSurfaceVariant),
+            ],
+          );
+
+    return _SectionCard(
+      title: _s.settingsProtocolTitle,
+      // 2026-10-02 用户澄清：官 bot 开了「接收所有消息」之后，群聊场景它自己就能覆盖，
+      // 所以这里**不再把 SnowLuma 说成"群聊场景的建议"**——两条通道各是一个独立的消息适配器
+      note: _s.settingsProtocolNote,
+      trailing: trailing,
+      children: [
+        if (protocolError != null)
+          StateBlock.error(
+            message: _s.settingsProtocolError('$protocolError'),
+            hint: _s.settingsProtocolErrorHint,
+            onRetry: () => unawaited(_loadProtocolSide()),
+          )
+        else if (data == null)
+          StateBlock.loading(hint: _s.settingsProtocolLoading)
+        else ...[
+          if (!configured)
+            StateBlock.empty(
+              icon: Icons.hub_outlined,
+              message: _s.settingsProtocolEmpty,
+              // 原来的后半句是"要收群里的全量消息，点下面的「一键安装」"——那建立在"官 bot 收不到
+              // 群消息"的错判上（见 docs/review.md 的「已了结」）。现在这句只讲这条路自己。
+              hint: _s.settingsProtocolEmptyHint,
+            )
+          else
+            _protocolStatusRow(state),
+          const SizedBox(height: 14),
+          // 主路径（v35）：装 + 配一次点完。手填目录那条路留在它下面——它是备选，不是主路
+          _protocolInstallBlock(install),
+          const SizedBox(height: 14),
+          _FieldCell(
+            label: _s.settingsProtocolEnabled,
+            field: Switch(
+              // key 是给测试与无障碍用的：本页不止一个开关（「发言」那张卡也有），
+              // 按类型取会拿到"页面上的第几个"这种一改布局就失效的定位
+              key: const ValueKey('protocol-side-enabled'),
+              value: data['enabled'] == true,
+              onChanged: _protocolCardBusy ? null : (next) => unawaited(_saveProtocolEnabled(next)),
+            ),
+            // 用户 ⑨ 指定的新副标题
+            note: _s.settingsProtocolEnabledNote,
+          ),
+          const SizedBox(height: 14),
+          _FieldCell(
+            label: _s.settingsInstallDir,
+            field: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey('protocol-side-dir'),
+                    controller: _protocolDirCtl,
+                    enabled: !_protocolCardBusy,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    style: _mono(12.5, scheme.onSurface),
+                    decoration: InputDecoration(hintText: _s.settingsInstallDirHint),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // 备选路径，所以是 tonal 而不是主色：主路径是上面那个「一键安装」——
+                // 同一种填充色摆在两处，人分不出哪个才是该点的那个（v35 的分寸之一）
+                FilledButton.tonal(
+                  onPressed:
+                      _protocolDirDirty && !_protocolCardBusy ? () => unawaited(_saveProtocolDir()) : null,
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(_s.settingsSaveDir),
+                ),
+              ],
+            ),
+            // 用户 ⑨：这段原来口语化（"以后的人就得先猜它相对谁""我自己下载解压"），
+            // 改成技术说明——只留填这一格真正要知道的两件事：填哪一层、谁来填
+            note: _s.settingsInstallDirNote,
+          ),
+          const SizedBox(height: 10),
+          _protocolDownloadGuide(),
+          if (restartRequired) ...[
+            const SizedBox(height: 10),
+            _restartNote(),
+          ],
+        ],
+      ],
+    );
+  }
+
+  /// 这张卡上"有写在飞"的总闸：保存 / 启停 / 一键安装三者任一在跑，其余写动作一律按下。
+  ///
+  /// 为什么安装要连启停一起按：安装会把 `<数据目录>/services/snowluma` **整段清空重写**
+  /// （解压器先清目标目录，那是有意的：升级该是一次干净落地）。这期间去启停一个正从那个目录
+  /// 跑着的实例，两件事都能弄坏——而坏的样子（文件半新半旧、进程握着被换掉的文件）极难查。
+  bool get _protocolCardBusy => protocolSaving || protocolBusy || protocolInstalling;
+
+  /// 「一键安装」那一块：主按钮 + 它到底做了什么 + 这一次的结果。
+  ///
+  /// 它是这张卡上**唯一的主色填充按钮**（「保存目录」与「打开下载页」都降成 tonal 备选样式）：
+  /// 用户要的是"引导客户安装、尽量少让对方配置"，所以主路必须一眼看到、不给第二眼犹豫的机会——
+  /// 两处都用主色填充的话，人就分不出哪个才是该点的那个。
+  Widget _protocolInstallBlock(_ProtocolInstall? install) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 用户 ⑨ 删掉了按钮旁边那句"装好自动填好目录与开关，你一个字段都不用填"（与卡头重复）。
+        // 但他随后指着留下的空位问："一整行只放了一个按钮？"——删是对的，**没把腾出来的位置用上**
+        // 是错的。现在把下面那段说明挪上来与它同行：动作和它的代价摆在一处，也省掉一整行。
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            FilledButton(
+              // key 同上：这张卡上按钮不止一个，按文字取会拿到"第几个"这种一改布局就失效的定位
+              key: const ValueKey('protocol-side-install'),
+              // 安装中**不接受第二次点击**：这条端点是同步的，点两下就是下两份、解压两遍，
+              // 而第二遍会先清空第一遍刚写好的目录（自己踩自己）
+              onPressed: protocolInstalling ? null : () => unawaited(_installProtocolSide()),
+              style: _btnStyle(context),
+              child: protocolInstalling
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(_s.settingsOneClickInstall),
+            ),
+            const SizedBox(width: 12),
+            // 用户 ⑨ 指定的四句（原文照抄，只补了中英文之间的空格与断句）
+            Expanded(
+              child: Text(
+                _s.settingsOneClickInstallNote,
+                style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        // 用户 ⑨ 指定的前提句，单独一行留警告色：这是唯一一步框架替不了他的
+        Text(
+          _s.settingsOneClickPrerequisite,
+          style: TextStyle(fontSize: 11.5, height: 1.7, color: IrmiaTheme.warn),
+        ),
+        if (protocolInstalling) ...[
+          const SizedBox(height: 10),
+          _protocolInstallRunning(),
+        ] else if (install != null) ...[
+          const SizedBox(height: 10),
+          _protocolInstallOutcome(install),
+          // 引导只在**装好之后**出现：装之前摆一长串"下一步"是噪音，
+          // 而此刻它是这张卡上最该被看到的一句话
+          if (install.ok) ...[
+            const SizedBox(height: 10),
+            _protocolNextSteps(),
+          ],
+        ],
+      ],
+    );
+  }
+
+  /// 安装中：只给"在做什么 + 还要多久"，**不摆假进度**。
+  ///
+  /// 两件事写在这里是有依据的，不是客套话：
+  ///   · **一两分钟**：实测真装一次约 104 秒（4.6 MB 的包，本机约 45 KB/s）。说"几秒就好"会让人
+  ///     以为卡死了，然后去点第二次。
+  ///   · **记录一次性回来**：这条端点是同步请求，不是流——中间的进度行拿不到，
+  ///     所以"进度感"只能由按钮状态与这段文案提供（为此加 SSE 不划算）。
+  Widget _protocolInstallRunning() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Text(
+        _s.settingsInstallRunningNote,
+        style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+      ),
+    );
+  }
+
+  /// 这一次安装的结果。**成功与失败都摆在这里**（失败尤其不能只弹一句 toast 就完了）：
+  ///   · 成功 = 一句"装好并配好了" + 下一步引导；
+  ///   · 失败 = 服务端那句 `detail` **原文**（它就是给人看的原因与出路）+ 逐行过程记录。
+  /// 过程记录是这次失败唯一能回答"卡在哪一步"的东西，所以它跟着结果一起留在卡上。
+  Widget _protocolInstallOutcome(_ProtocolInstall install) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = install.ok ? (install.configured ? IrmiaTheme.ok : IrmiaTheme.warn) : IrmiaTheme.danger;
+    // 版本号缺了就别硬凑一句话（服务端没给版本时说明它自己也没解析出 tag）
+    final head = _s.settingsInstallHead(
+      install.ok,
+      install.version.isEmpty ? null : install.version,
+      install.configured,
+    );
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        border: Border.all(color: tone.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                install.ok ? Icons.check_circle_outline : Icons.error_outline_rounded,
+                size: 15,
+                color: tone,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  head,
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: scheme.onSurface),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // detail 原样显示、不截断、不改写：失败时它就是"卡在哪一步、为什么"那句人话
+          Text(install.detail, style: TextStyle(fontSize: 12, height: 1.7, color: scheme.onSurface)),
+          if (install.writeError.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              _s.settingsWriteErrorNote(install.writeError),
+              style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+            ),
+          ],
+          if (!install.ok) ...[
+            const SizedBox(height: 4),
+            Text(
+              _s.settingsInstallManualRoute(protocolDownloadUrl),
+              style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            install.log.isEmpty ? _s.settingsInstallLogEmpty : _s.settingsInstallLog,
+            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: scheme.onSurfaceVariant),
+          ),
+          // 逐行摆出来，一行不加不减：这几行是"到底卡在哪儿"的全部证据
+          for (final line in install.log)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(line, style: _mono(11.5, scheme.onSurfaceVariant)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 装好之后的引导：把散在卡片各处的两件事（重启、扫码）串成一条看得见的线。
+  ///
+  /// 为什么必须显式说"先重启"：运行中的协议端实例是按**启动时**那份配置建的，
+  /// 刚写好的配置此刻还没有任何东西去执行它——不说明白，人会以为"我装好了但它没动，是不是坏了"。
+  /// 为什么说"扫码是接入 QQ 客户端"：那是唯一一步框架给不了的，得让人知道去哪儿把它接上。
+  ///
+  /// 重启这件事**没有端点可调**，也不该有：让一个常驻进程"重启自己"是危险动作
+  /// （拉不起来就什么都不剩），框架只引导、不代劳。
+  Widget _protocolNextSteps() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _s.settingsInstalledNextTitle,
+            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: scheme.onSurface),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _s.settingsInstalledNextBody,
+            style: TextStyle(fontSize: 11.5, height: 1.8, color: scheme.onSurface),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 状态行：装到哪了 + detail **全文** + 三档 + 三个动作（状态徽章在卡头，这里不重复第二枚）。
+  ///
+  /// `detail` 原样显示、不截断：它就是给人看的那句话（失败时带着原因与下一步），
+  /// 截断等于把唯一的线索切掉一半。
+  ///
+  /// v36 起这句 detail **不再是唯一的那句话**：它上面多了一块三档明细
+  /// （进程 / OneBot 配置 / 适配器），各带自己的判据与证据。理由是实测出来的：
+  /// 一句话的 `state` 只能报"启动失败"，而现场的事实是"进程活着、配置缺失"——
+  /// 那句话和事实相反，人照着它去查日志会白查半天。三档明细就是"到底断在哪一环"的答案。
+  Widget _protocolStatusRow(String state) {
+    final scheme = Theme.of(context).colorScheme;
+    final dir = _protocolField('dir');
+    final endpoint = protocolSide?['endpoint'];
+    final wsUrl = endpoint is Map ? (endpoint['wsUrl']?.toString() ?? '') : '';
+    final webuiUrl = _protocolField('webuiUrl');
+    // 三态要留住：`installed` 可能是 true / false / null（见服务端的说明），
+    // 用 `== true` 会把 null 与 false 糊成同一个"没有入口"，那句判断很可能是错的
+    final installed = protocolSide?['installed'];
+    final attached = protocolSide?['attached'] == true;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.folder_outlined, size: 15, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  dir.isEmpty ? _s.settingsInstallDirEmpty : dir,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _mono(11.5, scheme.onSurface),
+                ),
+              ),
+              // installed 是三态：true / false / null（配置刚改过、重启后才核对得出）。
+              // null 时**不许**说成"目录里没有入口"——那是另一个意思，而且很可能是错的
+              if (installed == true)
+                Text(_s.settingsEntryFound, style: TextStyle(fontSize: 11.5, color: IrmiaTheme.ok))
+              else if (installed == false)
+                Text(_s.settingsEntryMissing, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant))
+              else
+                Text(_s.settingsEntryPendingRestart, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _protocolField('detail'),
+            style: TextStyle(fontSize: 12, height: 1.6, color: scheme.onSurface),
+          ),
+          if (wsUrl.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(_s.settingsEndpointPoint(wsUrl), style: _mono(11.5, scheme.onSurfaceVariant)),
+          ],
+          // 三档明细：证书那一行下面是"链条"，这里是"链条断在哪一环"
+          _protocolChainBlock(),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              FilledButton(
+                // 「启动」在"已经在跑"时应当按不动：那种情况下点它只会得到一句
+                // "它已经在跑了"，而按钮亮着就是在暗示"点一下会好"
+                onPressed: (_protocolCardBusy || _protocolProcessRunning == true)
+                    ? null
+                    : () => unawaited(_protocolAction('start')),
+                style: _btnStyle(context),
+                child: protocolBusy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(_s.settingsStart),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonal(
+                // 同理：没在跑就不给「停止」（它只会回一句"它本来就没在跑"）
+                onPressed: (_protocolCardBusy || _protocolProcessRunning != true)
+                    ? null
+                    : () => unawaited(_protocolAction('stop')),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  minimumSize: const Size(0, 36),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(_s.settingsStop),
+              ),
+              const Spacer(),
+              // 扫码登录是在**它的 WebUI** 里做的，框架不代管 QQ 登录态；
+              // 没在跑时不给这个按钮——那个页面此刻打不开，摆一个点不出东西的按钮比不摆更糟
+              if (webuiUrl.isNotEmpty)
+                FilledButton.tonal(
+                  onPressed: _protocolCardBusy ? null : () => unawaited(_openUrl(webuiUrl)),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(_s.settingsOpenPanel),
+                ),
+            ],
+          ),
+          if (webuiUrl.isNotEmpty) _protocolLoginBlock(webuiUrl),
+          if (!attached) ...[
+            const SizedBox(height: 2),
+            Text(
+              _s.settingsProtocolNotAttachedNote,
+              style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 第一档：进程在不在。三态——在跑 / 没在跑 / **本进程没在看**（没有实例时不许说"没在跑"）。
+  bool? get _protocolProcessRunning {
+    final process = protocolSide?['process'];
+    if (process is! Map) return null;
+    final running = process['running'];
+    return running is bool ? running : null;
+  }
+
+  /// 三档链条：一行一档，左边是档名，中间是判据，右边是证据。
+  ///
+  /// 为什么把"证据"（pid / 启动时刻 / 监听地址 / 配置路径 / 重连次数）也摆出来：
+  /// 这一版要治的就是"笼统报一句启动失败"。判据本身也要能被核对——不然换个人来看，
+  /// 他还是只能选择信不信那句话。证据摆出来，他自己就能判。
+  Widget _protocolChainBlock() {
+    final scheme = Theme.of(context).colorScheme;
+    if (protocolSide == null) return const SizedBox.shrink();
+
+    final process = protocolSide!['process'];
+    final config = protocolSide!['onebotConfig'];
+    final adapter = protocolSide!['adapter'];
+    final rows = <Widget>[
+      _protocolChainRow(
+        _s.settingsChainProcess,
+        _protocolChainText(process, (map) {
+          if (map['known'] != true) return (_s.settingsChainUnobserved, _s.settingsChainNoInstance);
+          if (map['running'] != true) return (_s.settingsChainNotRunning, _s.settingsChainNoPort);
+          final pid = map['pid'];
+          final started = map['startedAt']?.toString() ?? '';
+          final url = map['webuiUrl']?.toString() ?? '';
+          final how = map['managed'] == 'spawned'
+              ? _s.settingsChainSpawned
+              : map['managed'] == 'discovered' ? _s.settingsChainDiscovered : _s.settingsChainPortOnly;
+          return (
+            _s.settingsChainRunning,
+            [
+              if (pid != null) 'pid $pid',
+              if (started.isNotEmpty) _s.settingsChainSince(_shortTime(started)),
+              if (url.isNotEmpty) _s.settingsChainListening(url),
+              how,
+            ].join(' · '),
+          );
+        }),
+        ok: process is Map && process['running'] == true,
+        unknown: process is Map && process['known'] != true,
+      ),
+      _protocolChainRow(
+        _s.settingsChainOneBotConfig,
+        _protocolChainText(config, (map) {
+          if (map['present'] == true) {
+            final ws = map['wsUrl']?.toString() ?? '';
+            final token = map['hasToken'] == true ? _s.settingsChainWithToken : _s.settingsChainNoToken;
+            return (_s.settingsChainPresent, [if (ws.isNotEmpty) _s.settingsChainEndpoint(ws), token].join(' · '));
+          }
+          if (map['unreadable'] == true) {
+            return (
+            _s.settingsChainUnreadable,
+            _s.settingsChainUnreadableDetail('${map['path'] ?? '?'}'),
+          );
+          }
+          return (_s.settingsChainMissing, _s.settingsChainMissingDetail);
+        }),
+        ok: config is Map && config['present'] == true,
+        warn: config is Map && config['unreadable'] == true,
+        unknown: config == null,
+      ),
+      _protocolChainRow(
+        _s.settingsChainAdapter,
+        _protocolChainText(adapter, (map) {
+          final state = map['state']?.toString() ?? '';
+          final target = map['target']?.toString() ?? '';
+          final attempts = map['reconnectAttempts'];
+          final delivered = map['delivered'];
+          switch (state) {
+            case 'connected':
+              return (
+                _s.settingsChainConnected,
+                [
+                  if (target.isNotEmpty) target,
+                  if (map['selfId'] != null && '${map['selfId']}'.isNotEmpty) 'QQ ${map['selfId']}',
+                  _s.settingsChainDelivered('$delivered'),
+                ].join(' · '),
+              );
+            case 'reconnecting':
+              return (
+                _s.settingsChainReconnecting,
+                [if (target.isNotEmpty) target, _s.settingsChainBackoff('$attempts')].join(' · '),
+              );
+            case 'no-endpoint':
+              return (_s.settingsChainNoEndpoint, _s.settingsChainNoEndpointDetail);
+            case 'disabled':
+              return (_s.settingsChainDisabled, 'config.channels.onebot.enabled=false');
+            default:
+              return (_s.settingsChainNotAssembled, _s.settingsChainNotAssembledDetail);
+          }
+        }),
+        ok: adapter is Map && adapter['state'] == 'connected',
+        warn: adapter is Map && adapter['state'] == 'reconnecting',
+        unknown: adapter == null || adapter['state'] == 'not-assembled',
+      ),
+    ];
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: rows),
+    );
+  }
+
+  /// 三档里的一行；`unknown` 是"没人在看"（既不是好也不是坏，用中性色）
+  Widget _protocolChainRow(
+    String label,
+    (String, String) verdict, {
+    bool ok = false,
+    bool warn = false,
+    bool unknown = false,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = unknown
+        ? scheme.onSurfaceVariant
+        : ok
+            ? IrmiaTheme.ok
+            : warn
+                ? IrmiaTheme.warn
+                : IrmiaTheme.danger;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(label, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+          ),
+          SizedBox(
+            width: 78,
+            child: Text(
+              verdict.$1,
+              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: tone),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              verdict.$2,
+              style: TextStyle(fontSize: 11.5, height: 1.5, color: scheme.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 从一档的 map 里取结论；map 缺失或形状不对时由调用方给"未观测"
+  (String, String) _protocolChainText(
+    Object? value,
+    (String, String) Function(Map<String, dynamic> map) read,
+  ) {
+    if (value is! Map) return (_s.settingsChainUnobserved, _s.settingsChainNoData);
+    return read(value.cast<String, dynamic>());
+  }
+
+  /// ISO 时刻 → `10-07 01:26`（本地时间；只用于显示，判据仍是原文那个 ISO）
+  String _shortTime(String iso) {
+    final parsed = DateTime.tryParse(iso);
+    if (parsed == null) return iso;
+    final local = parsed.toLocal();
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}';
+  }
+
+  /// 面板入口那一块：凭据 + 两个门 + 接下来该做什么。
+  ///
+  /// 口令**来自服务端**（`.password`），而这里显示的是打码形态 `.passwordMasked`
+  /// ——"留头尾各两位"是为了让人能和自己手里那条核对（全遮之后两个不同的口令长得一样）。
+  /// 真要复制原文，走「复制凭据」那个按钮：它把明文放剪贴板，不在屏幕上停留。
+  Widget _protocolLoginBlock(String webuiUrl) {
+    final scheme = Theme.of(context).colorScheme;
+    final login = protocolSide?['webuiLogin'];
+    final map = login is Map ? login.cast<String, dynamic>() : const <String, dynamic>{};
+    final credential = map['credential'];
+    final cred = credential is Map ? credential.cast<String, dynamic>() : const <String, dynamic>{};
+    final source = cred['source']?.toString() ?? 'none';
+    final user = cred['user']?.toString() ?? '';
+    final masked = cred['passwordMasked']?.toString() ?? '';
+    final password = cred['password']?.toString() ?? '';
+    final consentRecorded = map['consentRecorded'] == true;
+    final mustChange = map['mustChangePassword'] == true;
+
+    final lines = <String>[
+      if (source == 'stdout')
+        _s.settingsCredentialCaptured(user, masked)
+      else if (source == 'console-log')
+        _s.settingsCredentialFromLog(user, masked)
+      else
+        _s.settingsCredentialLost,
+      if (!consentRecorded) _s.settingsConsentPending,
+      if (mustChange) _s.settingsPasswordUnchanged,
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _s.settingsQrLoginAt(webuiUrl),
+            style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+          ),
+          for (final line in lines)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                line,
+                style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+              ),
+            ),
+          if (password.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonal(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: '$user $password'.trim()));
+                    if (mounted) _toast(_s.settingsCredentialCopied, kind: ToastKind.success);
+                  },
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(_s.settingsCopyCredential),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 下载引导：**手动那条路的出路**（一键安装之外的第二条路，不是唯一的路）。
+  ///
+  /// 许可口径照实说：包从官方 Releases 代下载、一个字节不改、**不随框架分发**它——
+  /// 所以地址永远摆在界面上：一键安装那份是"替他点几下"，这条路是"他自己来"，
+  /// 两条路落到盘上的东西是一样的（与「外部依赖」卡里 pwsh 那条同一个姿势）。
+  Widget _protocolDownloadGuide() {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          _s.settingsManualDownloadGuide(protocolDownloadUrl),
+          style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 6),
+        FilledButton.tonal(
+          onPressed: _protocolCardBusy ? null : () => unawaited(_openUrl(protocolDownloadUrl)),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            minimumSize: const Size(0, 36),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: Text(_s.settingsOpenDownloadPage),
+        ),
+      ],
+    );
+  }
+
+  /// 「需重启」提示条：改了配置之后**必须**看得见的一句话。
+  ///
+  /// 为什么这么显眼：运行中的协议端实例是按**启动时**的配置建的，点完保存界面上的状态
+  /// 一点都不会变——不说明白，人会以为"我开了它却没生效，是不是坏了"。
+  Widget _restartNote() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: IrmiaTheme.warn.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        border: Border.all(color: IrmiaTheme.warn.withValues(alpha: 0.28)),
+      ),
+      child: Text(
+        _s.settingsProtocolRestartNote,
+        style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+      ),
+    );
+  }
+
+  /// 状态徽章的颜色：失败要红、要动手的黄、正常的绿、其余保持中性
+  Color _protocolTone(String state) {
+    switch (state) {
+      case 'ready':
+        return IrmiaTheme.ok;
+      case 'failed':
+        return IrmiaTheme.danger;
+      case 'not-installed':
+      case 'starting':
+        return IrmiaTheme.warn;
+      default:
+        return Theme.of(context).colorScheme.onSurfaceVariant;
+    }
+  }
+
+  /// 取协议端视图里的一个字符串字段（缺字段一律空串：界面上显示"—"而不是 "null"）
+  String _protocolField(String key) {
+    final value = protocolSide?[key];
+    return value == null ? '' : value.toString();
+  }
+
+  bool get _protocolDirDirty => _protocolDirCtl.text.trim() != protocolDirBase.trim();
+
+  /// 写 `channels.onebot.enabled`（开关是即时生效的那种控件：二值项没有"改到一半"的中间态，
+  /// 不该逼人多按一次保存——与「发言」卡的打字节奏开关同一条口径）。
+  Future<void> _saveProtocolEnabled(bool value) async {
+    setState(() => protocolSaving = true);
+    try {
+      final data = await widget.state.api.put('/api/protocol-side/config', {'enabled': value});
+      final map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
+      await _loadProtocolSide();
+      if (!mounted) return;
+      _toast(_s.settingsProtocolToggled(value, map['restartRequired'] == true),
+          kind: ToastKind.success);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => protocolSaving = false);
+    }
+  }
+
+  /// 写 `channels.onebot.managed.dir`（归一化与校验都在服务端，这里只做"非空"这一层的当场拦）
+  Future<void> _saveProtocolDir() async {
+    final dir = _protocolDirCtl.text.trim();
+    if (dir.isEmpty) {
+      _toast(_s.settingsInstallDirRequired, kind: ToastKind.warn);
+      return;
+    }
+    setState(() => protocolSaving = true);
+    try {
+      final data = await widget.state.api.put('/api/protocol-side/config', {'dir': dir});
+      final map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
+      // 落盘的是**归一化之后**的那个路径：把它回填进输入框并重记原始值，
+      // 否则"保存成功但按钮还是亮的"（脏判定比的是旧快照，人会以为没存上）
+      final saved = map['dir']?.toString() ?? dir;
+      if (mounted) {
+        setState(() {
+          protocolDirBase = saved;
+          _protocolDirCtl.text = saved;
+        });
+      }
+      await _loadProtocolSide();
+      if (!mounted) return;
+      _toast(_s.settingsInstallDirSaved(saved, map['restartRequired'] == true),
+          kind: ToastKind.success);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => protocolSaving = false);
+    }
+  }
+
+  /// 启停。回执里的 `note` 是服务端写给人看的一句话，**原样弹出来**：
+  /// "点了但什么都没发生"（已经在跑 / 本来就没跑 / 没有实例）必须说出来，不能弹个绿 toast 了事。
+  Future<void> _protocolAction(String action) async {
+    setState(() => protocolBusy = true);
+    try {
+      final data = await widget.state.api.post('/api/protocol-side/$action', const {});
+      final map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
+      await _loadProtocolSide();
+      if (!mounted) return;
+      final note = map['note']?.toString() ?? '';
+      final changed = map['changed'] == true;
+      final state = map['state']?.toString() ?? '';
+      final kind = !changed
+          ? ToastKind.info
+          : (state == 'ready' ? ToastKind.success : ToastKind.warn);
+      _toast(note.isEmpty ? (action == 'start' ? _s.settingsStartRequested : _s.settingsStopRequested) : note, kind: kind);
+    } catch (err) {
+      if (mounted) {
+        _toast(_s.settingsProtocolActionFailed(action == 'start', '$err'),
+            kind: ToastKind.error);
+      }
+    } finally {
+      if (mounted) setState(() => protocolBusy = false);
+    }
+  }
+
+  /// 一键安装：**装，然后立刻配好**——这是"尽量少让对方配置"的落点。
+  ///
+  /// 两步的顺序是有意的：
+  ///   ① `POST /api/protocol-side/install`：框架从官方 Releases 代下载 lite 包并解压到固定的家
+  ///      （`<数据目录>/services/snowluma`，**不需要人选路径**），装完就地复检入口；
+  ///   ② 装成功才 `PUT /api/protocol-side/config`，body `{dir, enabled:true, autoStart:true}`：
+  ///      目录、开关、自动拉起**一次写好**，用户不用再去填任何一个字段。
+  ///
+  /// ②为什么由界面调、而不是让安装端点顺手写：一个端点做两件有副作用的事，出错时说不清是哪一件坏的
+  /// （服务端也刻意没这么干）。两次调用各自的成败在这里分开记：**装了但没配上**与**压根没装成**
+  /// 是两件事——说成一句，人会对着已经装好的机器再下一遍包。
+  ///
+  /// 失败**不塞进 toast 就完了**：`detail`（它就是那句人话）与 `log`（卡在哪一步）都摆回卡上，
+  /// 人得能看见"下到哪一步断的"，才知道该重试、该换网络、还是该自己下。
+  Future<void> _installProtocolSide() async {
+    // 上一次的结果先清掉：新旧两份过程记录混在一起，人就分不清哪一行属于哪一次
+    setState(() {
+      protocolInstalling = true;
+      protocolInstall = null;
+    });
+
+    Map<String, dynamic> map = const <String, dynamic>{};
+    try {
+      // 无 body：装到哪由服务端定（固定位置），所以这里没有"选路径"这一步——那正是要压掉的操作。
+      // 这条端点是**同步**的、要跑一两分钟（实测约 104 秒），回执里带着完整的 log。
+      //
+      // **这条请求不能加客户端总超时**：IrmiaApi 的 connectionTimeout 只覆盖"建连"那一下
+      // （dart:_http 里它只包在 Socket.startConnect 外面），所以它天然等得住一次两分钟的安装。
+      // 反过来，给它套一个 `Future.timeout` 会造出最难查的那种故障——超时只是把回执丢掉，
+      // 服务端的下载照跑：界面上写着"失败"，盘上东西其实装好了；人再点一次又下一遍。
+      final data = await widget.state.api.post('/api/protocol-side/install', const {});
+      map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        protocolInstalling = false;
+        protocolInstall = _ProtocolInstall.failed(_s.settingsInstallRequestFailedHint('$err'));
+      });
+      _toast(_s.settingsOneClickFailed, kind: ToastKind.error);
+      return;
+    }
+
+    final detail = map['detail']?.toString() ?? '';
+    final log = <String>[
+      for (final line in (map['log'] is List ? map['log'] as List : const <Object>[])) line.toString(),
+    ];
+
+    // 失败也是 200（只有鉴权/方法不对才非 200）：所以判据是 ok，不是 HTTP 状态
+    if (map['ok'] != true) {
+      if (!mounted) return;
+      setState(() {
+        protocolInstalling = false;
+        protocolInstall = _ProtocolInstall.failed(
+          detail.isEmpty ? _s.settingsInstallNoReason : detail,
+          log: log,
+        );
+      });
+      _toast(_s.settingsOneClickFailed, kind: ToastKind.error);
+      return;
+    }
+
+    final dir = map['dir']?.toString() ?? '';
+    final version = map['version']?.toString() ?? '';
+
+    // ② 紧接着把配置一次写好。这一步失败**不代表装失败**，所以分开记、分开说
+    var saved = dir;
+    var writeError = '';
+    try {
+      final reply = await widget.state.api.put('/api/protocol-side/config', {
+        'dir': dir,
+        'enabled': true,
+        'autoStart': true,
+      });
+      // 落盘的是服务端**归一化之后**那个路径（相对路径按数据目录解成绝对路径）。
+      // 回填它而不是回填我们传进去的那个：以后真正被用到的是盘上那份
+      if (reply is Map && reply['dir'] != null) saved = reply['dir'].toString();
+    } catch (err) {
+      writeError = '$err';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      protocolInstalling = false;
+      protocolInstall = _ProtocolInstall(
+        ok: true,
+        dir: saved,
+        version: version,
+        detail: detail.isEmpty ? _s.settingsInstalledOk : detail,
+        log: log,
+        writeError: writeError,
+      );
+      // 配上时：与「保存目录」成功时同一条口径——用服务端存下来的那个路径重记快照再回填，
+      // 否则输入框、快照、盘上三份状态对不上，按钮会一直亮着而人以为没存上
+      _protocolDirCtl.text = saved;
+      if (writeError.isEmpty) protocolDirBase = saved;
+    });
+
+    // 只看配置那一步的结论决定提示，不看安装那一步（它已经成功了）
+    await _loadProtocolSide();
+    if (!mounted) return;
+    _toast(
+      writeError.isEmpty ? _s.settingsInstalledConfigured : _s.settingsInstalledNotConfigured,
+      kind: writeError.isEmpty ? ToastKind.success : ToastKind.warn,
+    );
+  }
+
+  // ── 分区七：外部回调（B9：webhook 专用凭据） ──
+
+  /// 「外部回调」卡：`POST /webhook/*` 的专用凭据——现在这份的状态 + **生成 / 轮换**。
+  ///
+  /// 为什么这条通道要一份**单独的**凭据（而不是让人拿界面会话凭据去配外部脚本）：
+  /// 会话凭据会随「改密码 / 登出 / 换机器」失效，而失效的现场在**另一台机器**上——
+  /// 半夜开始收 401，人在这边看不出为什么。专用凭据只够投递、读不到 `/api/*` 上的任何东西，
+  /// 也不随界面那扇门开关（完整取舍见 `src/web/webhook-secret.ts` 的文件头）。
+  ///
+  /// 状态来自只读端点 `GET /api/webhook-secret`：它只报"配没配 + 那个非密钥的 id + 时刻"，
+  /// **绝不吐明文或哈希**。明文只在生成那一次的响应里出现，直接进
+  /// [showWebhookTokenDialog] 那张"只显示这一次"的框，本页一个字节都不留。
+  Widget _webhookCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final configured = webhookSecret?['configured'] == true;
+    final secretId = _secretText('secretId');
+    final createdAt = _stamp(_secretText('createdAt'));
+    final rotatedRaw = _secretText('rotatedAt');
+    final by = _secretText('by');
+    final summary = webhookError != null
+        ? null
+        : (webhookSecret == null
+            ? (webhookLoading ? _s.settingsReading : null)
+            : (configured ? _s.settingsGenerated : _s.settingsNotGenerated));
+    return _SectionCard(
+      title: _s.settingsNavWebhook,
+      note: _s.settingsWebhookNote,
+      trailing: summary == null ? null : _badge(summary, configured ? IrmiaTheme.ok : IrmiaTheme.warn),
+      children: [
+        if (webhookError != null) ...[
+          _footnote(_s.settingsWebhookErrorHint('$webhookError')),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const ValueKey('webhook-retry'),
+              onPressed: () => unawaited(_loadWebhookSecret()),
+              child: Text(_s.retry),
+            ),
+          ),
+        ],
+        if (webhookSecret == null && webhookError == null)
+          _footnote(_s.settingsWebhookLoading),
+        if (webhookSecret != null) ...[
+          _readOnlyRow(
+            _s.settingsWebhookCurrent,
+            configured ? _s.settingsWebhookCurrentValue(secretId, createdAt) : _s.settingsNotGenerated,
+            restart: false,
+            note: configured
+                ? null
+                : _s.settingsWebhookNotConfiguredNote,
+          ),
+          if (configured)
+            _readOnlyRow(
+              _s.settingsWebhookRotated,
+              rotatedRaw.isEmpty ? _s.settingsWebhookNever : _stamp(rotatedRaw),
+              restart: false,
+              note: by.isEmpty ? null : _s.settingsWebhookBy(by),
+            ),
+          if (webhookRotatedNote.isNotEmpty) _footnote(webhookRotatedNote),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              FilledButton(
+                key: const ValueKey('webhook-rotate'),
+                onPressed: webhookRotating ? null : () => unawaited(_rotateWebhookSecret(configured: configured)),
+                style: _btnStyle(context),
+                child: webhookRotating
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(configured ? _s.settingsRegenerate : _s.settingsGenerateWebhook),
+              ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 10),
+        // 这条例子是**给外部系统抄的**：host:port 取这一页能看到的生效配置，不写死端口
+        Container(
+          margin: const EdgeInsets.only(top: 4),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainer,
+            borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          ),
+          child: SelectableText(_webhookCurl(), style: _mono(11.5, scheme.onSurface)),
+        ),
+        _footnote(_s.settingsWebhookCredentialNote),
+        _footnote(_s.settingsWebhookFileNote(_secretText('file').isEmpty
+          ? 'data/.webhook-secret.json'
+          : _secretText('file'))),
+      ],
+    );
+  }
+
+  /// webhook 状态视图里的一个字符串字段（null / 缺失 → 空串）
+  String _secretText(String key) {
+    final value = webhookSecret?[key];
+    return value == null ? '' : value.toString();
+  }
+
+  /// 给外部系统抄的那条 curl（路径与 body 形状照 docs/operations.md §4.2）
+  String _webhookCurl() {
+    final host = _text('web.host').isEmpty ? '127.0.0.1' : _text('web.host');
+    final port = _amount('web.port') == '—' ? '7788' : _amount('web.port');
+    return 'curl -X POST http://$host:$port/webhook/alert \\\n'
+        '     -H "Authorization: Bearer ${_s.settingsWebhookCurlTokenPlaceholder}" \\\n'
+        '     -H "Content-Type: application/json" \\\n'
+        '     -d \'{"level":"warn","text":"${_s.settingsWebhookCurlSampleText}"}\'';
+  }
+
+  /// 生成 / 轮换 webhook 专用凭据（`POST /api/commands/regenerate-webhook-token`）。
+  ///
+  /// 「重新生成」是**危险操作**：这个通道永远只有一把钥匙，再生成一次就是把旧的那把当场作废——
+  /// 还在用它投递的外部脚本会开始收 401，而故障现场在另一台机器上。所以只在这一档问一次
+  /// （confirm：灰取消 / 红确认）；第一次生成不会让任何东西失效，不必多问一遍。
+  ///
+  /// 明文（响应里的 `token`）**只进那张对话框**：它是这个方法里的一个局部变量，
+  /// 这一页不留它（不写状态文件、不做"再看一眼"）。服务端那句 `note` 照原样摆进框里。
+  Future<void> _rotateWebhookSecret({required bool configured}) async {
+    if (configured) {
+      final go = await confirm(
+        context,
+        title: _s.settingsRegenerateTitle,
+        body: _s.settingsRegenerateBody,
+        confirmLabel: _s.settingsRegenerate,
+        danger: true,
+      );
+      if (!go || !mounted) return;
+    }
+    setState(() => webhookRotating = true);
+    try {
+      final reply = await widget.state.api.post(
+        '/api/commands/regenerate-webhook-token',
+        {'by': 'gui'},
+        confirm: 'regenerate-webhook-token',
+      );
+      if (!mounted) return;
+      final map = reply is Map ? reply.cast<String, dynamic>() : const <String, dynamic>{};
+      final token = map['token']?.toString() ?? '';
+      final action = map['action']?.toString() ?? (configured ? 'rotate' : 'generate');
+      final note = map['note']?.toString() ?? '';
+      // 先刷新状态（卡上的 id 与时刻换成新那份），再弹那张"只显示这一次"的框
+      await _loadWebhookSecret();
+      if (!mounted) return;
+      if (token.isEmpty) {
+        // 服务端没给明文：那就没有"抄走"这回事，如实说（不猜、也不假装成功）
+        _toast(_s.settingsNoTokenReturned, kind: ToastKind.error);
+        return;
+      }
+      setState(() {
+        webhookRotatedNote =
+            action == 'rotate' ? _s.settingsWebhookRotatedNote : '';
+      });
+      await showWebhookTokenDialog(
+        context,
+        token: token,
+        note: note,
+        action: action,
+        previousSecretId: map['previousSecretId']?.toString(),
+      );
+    } catch (err) {
+      if (mounted) _toast(_s.settingsGenerateFailed('$err'), kind: ToastKind.error);
+    } finally {
+      if (mounted) setState(() => webhookRotating = false);
+    }
+  }
+
+  // ── 分区八：记忆（框架代管记忆的总开关） ──
+
+  /// 「记忆」卡：一个开关 —— `persona.memoryEnabled`。
+  ///
+  /// **为什么放在设置页而不是人格配置页**：人格配置页编的是 `MEMORIES/` 里那些文件的**内容**
+  /// （她的资产），这一条决定的是**那些文件由谁维护**——框架替她管，还是她自知有这些文件、
+  /// 自己去读去写去整理。它改的是运行行为，不是资产，所以归设置页。
+  ///
+  /// 文案口径（用户要求）：**说清后果**，不是"启用记忆系统"四个字。
+  /// 开 = 框架生成 `MEMORIES/INDEX.md`、每轮把索引注入固定块、每日整理一次、
+  /// 并维护 `!pinned` 与条目 TTL；关 = 框架不生成索引、不注入任何记忆、不跑整理，
+  /// 她只从装置自述知道 `MEMORIES/`（facts.md / episodes/ / jargon.md / style-notes.md /
+  /// aliases.md）与 `diary/` 存在，读写维护全归她自己。
+  ///
+  /// 关掉时旁边**必须**摆出那句代价（这里做成只在关掉时出现的一行警示）：
+  /// 她可能忘了整理、`facts.md` 会一直长下去、索引不再更新。理由很直白——
+  /// 关掉这个开关不会有任何报错、也不会有任何东西变红，代价是**几天后才显形**的那种；
+  /// 不在按下去的那一刻说清，人只会以为"界面变安静了"。
+  ///
+  /// 不受它影响的两条路也写在卡头里（`aliases.md` 参与会话认人属于通道侧；
+  /// `STATE.md` 是独立的一层）：免得下一个人以为关掉就全没了。
+  Widget _memoryCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final enabled = _at(cfg, 'persona.memoryEnabled') != false;
+    final pending = pendingRestart.contains('persona.memoryEnabled');
+    return _SectionCard(
+      title: _s.settingsNavMemory,
+      note: _s.settingsMemoryNote,
+      trailing: pending ? _badge(_s.settingsNotInEffect, IrmiaTheme.warn) : null,
+      children: [
+        _FieldCell(
+          label: _s.settingsMemoryEnableLabel,
+          field: Align(
+            alignment: Alignment.centerLeft,
+            child: Switch(
+              key: const ValueKey('memory-enabled'),
+              value: enabled,
+              onChanged: _memorySaving ? null : (next) => unawaited(_saveMemoryEnabled(next)),
+            ),
+          ),
+          note: _s.settingsMemoryEnableNote,
+        ),
+        // 关掉时才出现的代价行：与卡头的说明分开，是因为它只在关掉这一种状态下成立
+        if (!enabled) ...[
+          const SizedBox(height: 12),
+          _memoryCostNote(),
+        ],
+        const SizedBox(height: 12),
+        _readOnlyRow(
+          _s.settingsCurrentlyActive,
+          enabled ? _s.settingsMemoryOn : _s.settingsMemoryOff,
+          restart: true,
+        ),
+        _footnote(_s.settingsMemoryUnaffectedNote),
+        _footnote(_s.settingsMemoryRestartNote),
+        DetailFold(
+          child: Text(
+            _s.settingsMemoryDetail,
+            style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 关掉记忆托管时的那句代价（只在关掉时出现）。
+  ///
+  /// 用警示色而不是灰字：它是这一页上唯一"按下去什么都不会报错、代价却要过几天才显形"的开关。
+  Widget _memoryCostNote() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: IrmiaTheme.warn.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        border: Border.all(color: IrmiaTheme.warn.withValues(alpha: 0.28)),
+      ),
+      child: Text(
+        _s.settingsMemoryCost,
+        style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+      ),
+    );
+  }
+
+  bool _memorySaving = false;
+
+  /// 落盘（走既有的 config-update 通道，与发言卡的打字节奏开关同一条路）。
+  ///
+  /// **需重启才生效**，判据不是我在这里猜的：服务端按"盘上那份 vs 本进程启动时那份"算
+  /// `$pending.restartRequired`，`persona.` 前缀本来就在 RESTART_REQUIRED_FIELDS 里
+  /// （而 HOT_RELOAD_FIELDS 目前是空名单——全部字段都要重启），所以保存后回读会把这一条
+  /// 报回来，卡头那枚「尚未生效」徽章与这行只读的「需重启」都是直接显示服务端结论。
+  /// 说得准的理由还有一层：她这一轮的上下文与索引注入方式是在 turn 装配时定下的，
+  /// 半新半旧地接管会让"这一轮到底注入了没有"变成没人说得清的事。
+  Future<void> _saveMemoryEnabled(bool value) async {
+    setState(() => _memorySaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {
+          'fields': {'persona.memoryEnabled': value},
+        },
+        confirm: 'config-update',
+      );
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      _toast(value ? _s.settingsMemoryOnSaved : _s.settingsMemoryOffSaved);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.warn);
+    } finally {
+      if (mounted) setState(() => _memorySaving = false);
+    }
+  }
+
+  // ── 分区九：信任范围（`trust.mode`：完全信任 / 只限工作目录） ──
+
+  /// 「信任范围」卡：**她的活动边界有多宽**——整台电脑，还是只有一个工作目录。
+  ///
+  /// 为什么是一条独立的卡、而不是系统卡里的一行：系统卡那些字段问的是"这个进程怎么启动"
+  /// （监听地址、预算、数据目录），这一条问的是"她这个人能碰多远"。后者是**边界**：
+  /// 越过它就是拒绝（越界的读写与命令直接被拦），不是提醒、不是降级、也不是"下次注意"。
+  ///
+  /// 三处口径刻意不自己造：
+  ///   · **当前值读盘上那份**（`/api/config?source=saved`，与这一页其余字段同一来源）——
+  ///     读生效配置的话，保存成功后回读会把刚选的那档冲回去；
+  ///   · **需不需要重启**只认服务端算出来的 `$pending.restartRequired`（判据见下方
+  ///     [_trustPending]），本页不另算一份；
+  ///   · **「只限工作目录」的路径**取 `trust.workspaceRoot`（解析器算出来的那份）。
+  ///     它与执行器真正拦的路径是**同一个来源**——界面显示 A 而拦在 B 是最难查的一类故障。
+  ///
+  /// 写入走这一页既有的通道（`POST /api/commands/config-update`，`X-Confirm: config-update`），
+  /// 与「记忆」卡的开关同一条路：点一下即写、写前问一次（放宽边界那一档要多问一句后果）。
+  /// 选中的那一档会**马上**从盘上回读，所以界面显示的永远是"盘上那份"而不是"我以为写下去的"。
+  Widget _trustCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final mode = _trustMode();
+    final root = _text('trust.workspaceRoot');
+    final pending = _trustPending;
+    return _SectionCard(
+      title: _s.settingsNavTrust,
+      note: _s.settingsTrustNote,
+      trailing: pending ? _badge(_s.settingsNotInEffect, IrmiaTheme.warn) : null,
+      children: [
+        _FieldCell(
+          label: _s.settingsTrustReachLabel,
+          field: Column(
+            children: [
+              TrustModeChoice(
+                mode: kTrustFull,
+                selected: mode == kTrustFull,
+                consequence: trustModeConsequence(_s, kTrustFull, root),
+                enabled: !_trustSaving,
+                onPick: (picked) => unawaited(_saveTrustMode(picked)),
+              ),
+              const SizedBox(height: 8),
+              TrustModeChoice(
+                mode: kTrustWorkspace,
+                selected: mode == kTrustWorkspace,
+                consequence: trustModeConsequence(_s, kTrustWorkspace, root),
+                enabled: !_trustSaving,
+                onPick: (picked) => unawaited(_saveTrustMode(picked)),
+              ),
+            ],
+          ),
+          note: _s.settingsTrustReachNote,
+        ),
+        const SizedBox(height: 12),
+        // 只读的「当前生效」行：与「记忆」卡同形（服务端说了要重启就摆"需重启"，
+        // 盘上那份与生效那份真的不一样时另有一行提示——见下面那条 footnote）
+        _readOnlyRow(
+          _s.settingsCurrentlyActive,
+          mode == kTrustWorkspace
+              ? (root.isEmpty ? _s.settingsTrustWorkspaceUnknownPath : _s.settingsTrustWorkspaceValue(root))
+              : _s.settingsTrustFullValue,
+          restart: true,
+        ),
+        if (pending)
+          _footnote(_s.settingsTrustPendingNote),
+        _footnote(_s.settingsTrustRootNote),
+        _footnote(_s.settingsTrustBoundaryNote),
+        DetailFold(
+          // 定位件：设置页上「详情」不止一处，用例要的是"信任范围卡里这一处"
+          key: const ValueKey('trust-rules-fold'),
+          child: Text(
+            _s.settingsTrustRulesDetail,
+            style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 盘上那份的 `trust.mode`。**缺字段当 `'full'`**（与 `src/config/config.ts` 的
+  /// `buildDefaults` 同源：那边默认就是完全信任）——绝不因为"界面没读到"就显示成受限那一档：
+  /// 界面说到底该显示的是"她实际按哪一档跑"，猜一个更安全的答案同样是撒谎。
+  String _trustMode() {
+    final raw = _text('trust.mode');
+    return raw == kTrustWorkspace ? kTrustWorkspace : kTrustFull;
+  }
+
+  /// 这一档**要不要重启**——判据只有服务端那一份（`$pending.restartRequired`，它是
+  /// "盘上那份 vs 本进程启动时那份"的逐字段差异）。
+  ///
+  /// 为什么不去自己找一套口径：`src/config/watcher.ts` 的字段归类里，
+  /// `HOT_RELOAD_FIELDS` 是**空名单**（全部字段都要重启才生效，`trust.mode` 自然也在其中），
+  /// 而 `trust.` 并不在 `RESTART_REQUIRED_FIELDS` 那几个前缀里——那两处只决定"事件里怎么记、
+  /// 日志里怎么喊"。界面要答的问题更简单也更硬：**盘上这份与生效那份是否一致**。
+  /// 那正是 `$pending.restartRequired` 的答案，所以这里只读它、只显示它。
+  bool get _trustPending => pendingRestart.contains('trust.mode');
+
+  bool _trustSaving = false;
+
+  /// 落盘一档边界（`trust.mode`）。
+  ///
+  /// 两条分寸：
+  ///   · **改到放宽的那一档（完全信任）要多问一句**：确认框里写的就是那句后果，而不是
+  ///     "确定吗"——按错一次就等于撤掉一条边界；
+  ///   · **与盘上那份相同就什么都不做**：点已经选中的那一行不该产生一次写入（那会让
+  ///     "$pending 里凭空多一条 trust.mode"，界面上突然冒出"尚未生效"，而人什么都没改）。
+  Future<void> _saveTrustMode(String mode) async {
+    if (mode != kTrustFull && mode != kTrustWorkspace) return; // 不认识的值一个字节都不写
+    if (mode == _trustMode()) return;
+
+    if (mode == kTrustFull) {
+      final ok = await confirm(
+        context,
+        title: _s.settingsTrustFullTitle,
+        body: _s.settingsTrustFullBody(
+                trustModeConsequence(_s, kTrustFull, _text('trust.workspaceRoot'))) +
+            _s.settingsTrustFullConfirmTail,
+        confirmLabel: _s.settingsTrustFullTitle,
+        danger: true,
+      );
+      if (ok != true || !mounted) return;
+    }
+
+    setState(() => _trustSaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {
+          'fields': {'trust.mode': mode},
+        },
+        // 字段级危险短语（服务端 DANGEROUS_FIELDS）：**两档都要**，不是只给"放宽"那一档。
+        // 少了它这次写入会被服务端挡成 400 confirm-required。
+        confirm: kTrustConfirm,
+      );
+      // 写完立刻按**盘上那份**回读（本页其余字段同一条纪律）：服务端可能拒了、也可能归一化过，
+      // "我以为写下去的"不作数
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      _toast(
+        mode == kTrustWorkspace
+            ? _s.settingsTrustWorkspaceSaved
+            : _s.settingsTrustFullSaved,
+      );
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.warn);
+    } finally {
+      if (mounted) setState(() => _trustSaving = false);
+    }
+  }
+
+  // ── 分区十：系统（逐行就地编辑：监听地址 / 时区 / 六条预算 / 心跳平均间隔） ──
+
+  /// 系统卡（用户 ⑪ 起可改，⑭ 起改成**逐行**就地编辑）。
+  ///
+  /// 为什么回到"紧凑表 + 每行一枚胶囊"：⑪ 第二版把整张表摊成常驻输入框，用户看了说
+  /// "就像原来这样，后面有个胶囊按钮，点击就可以编辑对应行行不行吗"——**表是读的地方，
+  /// 改是偶发动作**。常驻十个框，把"扫一眼参数"变成了"面对一张表单"。
+  ///
+  /// 为什么仍然要一个「保存」而不是像开关那样点一下就写：数字框边打字边落盘会把
+  /// 20000000 打成 2（与发言卡的速度框同一条理由），而这九行都是**进程启动参数**
+  /// （`HOT_RELOAD_FIELDS` 是空的：没有哪个字段能热更，包括心跳）
+  /// ——它们的共同点恰恰是"改到一半的状态谁都不该用"。现在这个"保存"是**行内**的，
+  /// 所以卡头不再有「有未保存的更改」，也不再有卡片底部的总保存键：
+  /// 逐行自包自足，没有"整张卡脏了"这个概念了。
+  ///
+  /// 两条**刻意留只读**（理由写在各自那一行里，不是忘了做）：
+  ///   · dataDir —— 它决定她的全部身家落在哪，而且是进程启动时定下的路径；
+  ///   · tools.destructiveEnabled —— "她能碰什么"的危险开关，只在带确认短语的那一处改。
+  Widget _systemCard() {
+    return _SectionCard(
+      title: _s.settingsNavSystem,
+      // 卡头原来挂「只读」，脚注写着"修改请编辑 config.json"——⑪ 之后这两句都会变成假话。
+      //
+      // 这句话**同时也是这一页测试的定位锚**（`inSystemCard` 按它找卡——`find.textContaining`
+      // 只取第一个 Container 祖先，所以这句必须**只出现一次**）。2026-10-05 加"心跳"两个字时
+      // 顺手把它写成了"监听地址、时区、六条预算与心跳的平均间隔"——那正好把「监听地址」那一行的
+      // 标签也变成了候选，锚点于是指到了行上，五条系统卡用例一起红。**别再往这句里塞行标签**。
+      note: _s.settingsSystemNote,
+      children: [
+        // 默认露前 4 行（最常看/最常调的先摆），其余 7 行收在「查看全部」后面
+        // （用户 ⑭："平时可能只暴露几项，可以全部展开"）。展开/收起由 CappedChildren 自带。
+        CappedChildren(
+          cap: 4,
+          children: [
+            _sysEditRow('web', value: _sysListenValue()),
+            _sysEditRow('timezone'),
+            _sysEditRow('budget.dailyTokens'),
+            // 两条只读行与可编辑行**同族同壳**，只是不给胶囊、也不挂「需重启」（改不了的行
+            // 喊重启没意义）；"为什么改不了"就写在它们自己那一行的灰字里。
+            _readOnlyRow(
+              _s.settingsDataDir,
+              _text('dataDir'),
+              restart: false,
+              note: _s.settingsDataDirNote,
+            ),
+            _sysEditRow('budget.stepTools'),
+            _sysEditRow('budget.turnSteps'),
+            _sysEditRow('budget.taskTokens'),
+            _sysEditRow('budget.softRatio'),
+            _sysEditRow('budget.failStreakMax'),
+            // 心跳平均间隔（用户 2026-10-05："心跳频率我没有地方可以控制吗？"）：
+            // 摆在预算那一组的**末尾**——它与上面几条是同一类旋钮（都决定"她花多少 token"），
+            // 而它是这一组里唯一"直接决定她多久醒一次"的一条。放在 destructive 那行之前，
+            // 因为 destructive 管的是"能碰什么"，不是"跑多勤"。
+            _sysEditRow('wake.heartbeatTargetMeanMin'),
+            // 压缩线（用户 2026-10-12："预算 compact 线（history 大小）…然后暴露在 GUI"）：
+            // 摆在预算/心跳那一组的**末尾**——它与上面几条是同一类旋钮（都决定"她花多少 token"），
+            // 而它决定的是"她能一眼看见多长的一段历史"。与它们唯一的差别是**改完立刻生效**
+            // （那一行自己挂「立刻生效」徽章，理由见 [_sysCompaction] 与 [_SysField.live]）。
+            _sysEditRow('persona.compactionThresholdTokens'),
+            _destructiveRow(),
+          ],
+        ),
+        _footnote(_s.settingsSystemFootnote),
+      ],
+    );
+  }
+
+  /// 一行可编辑项：读态摆「左标签 → 当前值 → 需重启徽章 → 编辑胶囊」，点「编辑」就地变成
+  /// 「输入框 → 保存 / 取消」——**只有这一行变**，别行照旧。
+  ///
+  /// [id] 是编辑态的键（也是测试定位的键，见 [_sysRowFields]）；[value] 留给"两个字段拼一个
+  /// 读数"的那种行（监听地址）。行的外壳与 [_readOnlyRow] 同族：同样的底色、圆角、
+  /// 上下间距与内边距——两处行摆在一条竖线上要看着是一张表，不是两种控件。
+  Widget _sysEditRow(String id, {String? value}) {
+    final scheme = Theme.of(context).colorScheme;
+    final fields = _sysRowFields[id]!;
+    final editing = _sysEditing.contains(id);
+    final shown = value ?? _sysValue(fields.first);
+    final note = settingsSysNote(_s, fields.first.path);
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              // 标签列宽度与只读行一模一样（200）：两种行才对得齐
+              SizedBox(
+                width: 200,
+                child: Text(settingsSysLabel(_s, fields.first.path),
+                    style: const TextStyle(fontSize: 12.5)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: editing
+                    ? _sysBoxes(fields)
+                    : Text(
+                        shown.isEmpty ? '—' : shown,
+                        key: ValueKey('sys-value-$id'),
+                        textAlign: TextAlign.right,
+                        style: _mono(12.5, scheme.onSurface),
+                      ),
+              ),
+              const SizedBox(width: 10),
+              // 徽章三选一（2026-10-12 加第三档）：
+              //   · 「立刻生效」= 这一格写完当拍就接管（服务端在配置锁里同时改了内存那份，
+              //     判据见 [_SysField.live]）——它不该挂"需重启"，那会叫人去做一件不必做的事；
+              //   · 「尚未生效」= 盘上这份与生效那份**真的不一样**（服务端比对出来的），
+              //     改完还没重启时才有——它把「需重启」的意思也包含在内，所以同时挂两枚会很吵；
+              //   · 「需重启」  = 这一类字段是启动参数，改完要重启进程才接管（常态说明）。
+              // 两条只读行不挂（⑭ 的原话：改不了的行喊重启没意义）。
+              if (fields.any((field) => field.live))
+                _badge(_s.settingsLiveNow, scheme.primary)
+              else if (_rowPending(fields))
+                _badge(_s.settingsNotInEffect, IrmiaTheme.warn)
+              else
+                _badge(_s.settingsRestartRequired, IrmiaTheme.warn),
+              const SizedBox(width: 10),
+              if (editing) ..._sysRowActions(id, fields) else _sysEditPill(id),
+            ],
+          ),
+          // 旁注**只在编辑态出现**：读态要的是"一眼扫完的参数表"（⑪ 版式返工的教训），
+          // 而"填原值，20M 这类简写不接受""0.8 就是 80%"要说的正是"你正要往框里打字"。
+          if (editing && note != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(note,
+                  style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 编辑态的输入区。单字段行就是一个框；监听地址那一行是两个（host + 端口）——
+  /// 它们本来就是同一行的两半，右边端口定宽 108：端口就四五位数，给它半张卡是浪费，
+  /// 也让人以为那里能填别的。
+  Widget _sysBoxes(List<_SysField> fields) {
+    if (fields.length == 1) return _sysBox(fields.single);
+    return Row(
+      children: [
+        Expanded(child: _sysBox(fields.first)),
+        const SizedBox(width: 10),
+        SizedBox(width: 108, child: _sysBox(fields.last)),
+      ],
+    );
+  }
+
+  /// 行尾那枚「编辑」胶囊。
+  ///
+  /// 形状在这里自报一个 StadiumBorder：⑧ 把按钮家族的圆角统一到了 radiusCtl（8），
+  /// 而用户这一条点名要的是**胶囊**。只覆盖 shape——字号与字体栈仍走主题的 buttonText
+  /// （⑨ 那条锁：页面里不写 textStyle）。
+  Widget _sysEditPill(String id) {
+    return FilledButton.tonal(
+      key: ValueKey('sys-edit-$id'),
+      onPressed: _sysSaving ? null : () => setState(() => _sysEditing.add(id)),
+      style: FilledButton.styleFrom(
+        shape: const StadiumBorder(),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: Text(_s.settingsEdit),
+    );
+  }
+
+  /// 编辑态那两枚：保存（主按钮）+ 取消（文字按钮）。保存只有真的改了才可点——
+  /// "未改动即禁用"是这一页的既有分寸，灰着本身就是一句话：盘上就是这个值。
+  List<Widget> _sysRowActions(String id, List<_SysField> fields) {
+    return [
+      FilledButton(
+        key: ValueKey('sys-save-$id'),
+        onPressed: _sysRowDirty(fields) && !_sysSaving ? () => unawaited(_saveSysRow(id, fields)) : null,
+        style: _sysRowBtnStyle(),
+        child: _sysSaving
+            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+            : Text(_s.save),
+      ),
+      const SizedBox(width: 4),
+      TextButton(
+        key: ValueKey('sys-cancel-$id'),
+        onPressed: _sysSaving
+            ? null
+            : () => setState(() {
+                  _resetSysDraft(fields);
+                  _sysEditing.remove(id);
+                }),
+        style: _sysRowBtnStyle(),
+        child: Text(_s.cancel),
+      ),
+    ];
+  }
+
+  /// 行内按钮的紧凑尺寸：一行里要塞下两枚，用页面级那套（36 高、左右 16）会把这行撑起来。
+  /// **只给尺寸**：圆角仍归主题（⑧），字号仍归主题（⑨）。
+  ButtonStyle _sysRowBtnStyle() => const ButtonStyle(
+        padding: WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14)),
+        minimumSize: WidgetStatePropertyAll(Size(0, 28)),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      );
+
+  /// 行右侧那个"当前值"：与点开「编辑」后框里看到的字符串**一模一样**（都走 [_SysField.seed]）。
+  ///
+  /// 为什么不恢复旧表那套紧凑写法（2M / 80%）：⑪ 定的规矩是"框里摆的就是 config.json 里的值"，
+  /// 读数与编辑态各写各的，点一下「编辑」值就自己变了——那是把人当没看见。想要 20M / 80%
+  /// 那种读法，旁注里"0.8 就是 80%"就是它的位置。
+  String _sysValue(_SysField field) => field.seed(_docFor(field));
+
+  /// 监听地址那一行的读数：`host:port`。host 为空时**不补 127.0.0.1**——那正是 ⑪ 修掉的
+  /// 一句假话（空 host 等于监听所有网卡，不是本机）；两半各自如实留白，缺就是缺。
+  String _sysListenValue() {
+    final host = _sysHost.seed(cfg);
+    final port = _sysPort.seed(cfg);
+    return '${host.isEmpty ? '—' : host}:${port.isEmpty ? '—' : port}';
+  }
+
+  /// 字段输入框。**key 就是点路径**：测试按它精准定位，也不必去数"页面上第几个框"
+  /// （这一页的框已经多到按序号取必然出错）。
+  TextField _sysBox(_SysField field) {
+    return TextField(
+      key: ValueKey('sys-field-${field.path}'),
+      controller: _sysCtls[field.path],
+      enabled: !_sysSaving,
+      autocorrect: false,
+      enableSuggestions: false,
+      keyboardType: field.numeric ? TextInputType.number : TextInputType.text,
+      // 等宽只给数字：host 与 IANA 时区名里没有需要对齐的数位
+      style: field.numeric
+          ? _mono(13, Theme.of(context).colorScheme.onSurface)
+          : const TextStyle(fontSize: 13),
+      decoration: InputDecoration(hintText: field.hint),
+    );
+  }
+
+  // ── 分区十一：账号与安全（B10） ──
+
+  /// 「账号与安全」卡：**改密码** 与 **登出**。
+  ///
+  /// 为什么这两件事在这张卡上、而不是塞进模型卡：它们改的是**进来的方式**（凭据），
+  /// 与"她怎么说话、用哪个模型"毫无关系。这一页的分区是按"改的是什么"分的
+  /// （模型 / 界面 / 发言 / 依赖 / 协议端 / 系统 / 账号），凭据是独立的一类。
+  ///
+  /// 两件事各用自己合适的形状：改密码是**三个框一起填**的表单 → 走页面自己的对话框
+  /// （`account_security.dart`，与 ui_kit 上"要填字段的表单用 showDialog"那条分寸一致）；
+  /// 登出不需要填任何东西 → 卡上一颗按钮 + 项目既有的 `confirm`（灰取消 / 红确认）。
+  Widget _accountCard() {
+    final state = widget.state;
+    // 半升级态：这一份是老的共享 token（这台实例还没设过密码）。它开不出"会话"，
+    // 改密码与登出在服务端都做不成——如实写在按钮上面，并把出路（设置密码）一起摆出来。
+    final legacy = state.onLegacyToken;
+    return _SectionCard(
+      title: _s.settingsNavAccount,
+      note: _s.settingsAccountNote,
+      trailing: _badge(
+        legacy ? _s.settingsAccountLegacyBadge : _s.settingsAccountSessionBadge,
+        legacy ? IrmiaTheme.warn : IrmiaTheme.ok,
+      ),
+      children: [
+        _readOnlyRow(
+          _s.settingsAccountInstance,
+          state.instance ?? '',
+          restart: false,
+          note: _s.settingsAccountInstanceNote,
+        ),
+        if (legacy)
+          _footnote(_s.settingsAccountLegacyNote),
+        const SizedBox(height: 14),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            FilledButton(
+              key: const ValueKey('account-change-open'),
+              // 半升级态下这颗按钮是**灰的**：灰着本身就是一句话（"这条路上改不了"），
+              // 而理由就写在它上面一行
+              onPressed: legacy ? null : () => unawaited(_openChangePassword()),
+              style: _btnStyle(context),
+              child: Text(_s.settingsChangePassword),
+            ),
+            OutlinedButton(
+              key: const ValueKey('account-logout'),
+              onPressed: () => unawaited(_logoutAccount()),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: IrmiaTheme.danger,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                minimumSize: const Size(0, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(_s.settingsLogout),
+            ),
+            if (legacy)
+              TextButton(
+                key: const ValueKey('account-setup-password'),
+                onPressed: () => state.openPasswordSetup(),
+                child: Text(_s.settingsSetPasswordFirst),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// 打开「改密码」；改成了就在这一页上留一句提示（对话框那一刻已经收起来了）
+  Future<void> _openChangePassword() async {
+    final changed = await showChangePasswordDialog(context, widget.state);
+    if (changed && mounted) _toast(_s.settingsPasswordChanged, kind: ToastKind.success);
+  }
+
+  /// 登出：危险操作，走项目既有的 confirm（灰取消 / 红确认）。
+  ///
+  /// 这里**不需要**再收界面：`AppState.logout()` 把 `ready` 置假，整个壳连同这一页一起换成门
+  /// （app.dart 里那个三元）——页面上再写一遍"清状态"就是第二份真相。
+  Future<void> _logoutAccount() async {
+    final go = await confirm(
+      context,
+      title: _s.settingsLogout,
+      body: _s.settingsLogoutBody,
+      confirmLabel: _s.settingsLogout,
+      danger: true,
+    );
+    if (!go || !mounted) return;
+    await widget.state.logout();
+  }
+
+  // ── 分区十二：关于 ──
+
+  Widget _aboutCard() {
+    final scheme = Theme.of(context).colorScheme;
+    return _SectionCard(
+      title: _s.settingsNavAbout,
+      note: _s.settingsAboutNote,
+      trailing: Text(_s.settingsAboutBadge, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+      children: [
+        _readOnlyRow(_s.settingsVersionLabel, guiVersion, restart: false),
+        const SizedBox(height: 12),
+        // 更新检查（2026-10-22）：关于卡里最该被看见的两件事之一（另一件是版本号）。
+        // 手动可立即查（POST /api/update/check，服务端无视 12h 节流）；状态与时间都来自
+        // 同一个 GET /api/update，界面不另算"有没有新版"。
+        UpdateCheckSection(
+          info: widget.state.updateInfo,
+          busy: widget.state.updateChecking,
+          switching: widget.state.updateSwitching,
+          error: widget.state.updateError,
+          onCheck: () => unawaited(widget.state.checkUpdateNow()),
+          onChannel: (channel) => unawaited(_switchUpdateChannel(channel)),
+          onDownload: _openUpdateDownload,
+        ),
+        // 守护天数与事件水位属运行期技术字段：默认收在「详情」里（§3.4）
+        DetailFold(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DetailRow(label: _s.settingsGuardedDays, value: _guardedDays()),
+              DetailRow(label: _s.settingsWatermark, value: _watermark()),
+              const SizedBox(height: 10),
+              if (projError != null)
+                _footnote(_s.settingsProjectionReadFailedHint('$projError'))
+              else
+                _footnote(_s.settingsProjectionFootnote),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 打开 **GUI 的下载页**：平台分流（GitHub 外链 / 待上传灰掉）+ 网盘分流
+  /// （未就绪 disabled「即将开放」）+ 官方发布页。**不自动下载、不静默安装。**
+  void _openUpdateDownload() {
+    final info = widget.state.updateInfo;
+    if (info == null || !info.hasUpdate) return;
+    unawaited(showUpdateReleaseDialog(context, info));
+  }
+
+  /// 切通道：服务端写 `config.json` 的 `update.channel`（只这一格）+ 清节流 + 立刻查一次。
+  /// 回执人话在这一层说（`AppState` 只留状态与错误原话）。
+  Future<void> _switchUpdateChannel(String channel) async {
+    final ok = await widget.state.switchUpdateChannel(channel);
+    if (!mounted) return;
+    if (ok) {
+      _toast(_s.updateSwitched(channel), kind: ToastKind.success);
+    } else {
+      _toast(_s.updateSwitchFailed(widget.state.updateError), kind: ToastKind.error);
+    }
+  }
+
+  /// 守护天数：首条事件到今天（与 Web 端 daysSince 同一口径）
+  String _guardedDays() {
+    final first = proj?['firstEventAt']?.toString();
+    final days = _daysSince(first);
+    if (days == null) return '—';
+    final stamp = _stamp(first);
+    return stamp == '—' ? _s.settingsDaysCount('$days') : _s.settingsDaysSince('$days', stamp);
+  }
+
+  /// 事件水位：watermark 缺失时退回 lastSeq（与 Web 端同口径）
+  String _watermark() {
+    final value = _at(proj, 'watermark') ?? _at(proj, 'lastSeq');
+    return value is num ? value.toInt().toString() : '—';
+  }
+
+  // ── 取值与格式化 ──
+
+  /// 按点路径取生效配置里的字符串
+  String _text(String path) {
+    final value = _at(cfg, path);
+    if (value == null) return '';
+    return value is String ? value : value.toString();
+  }
+
+  String _amount(String path) {
+    final value = _at(cfg, path);
+    return value is num ? value.toInt().toString() : '—';
+  }
+
+
+  /// **destructive 工具策略**（全关 / 全开 / 按名单）——这里才是它的家。
+  ///
+  /// 2026-10-04 用户定调：正式产品是 GUI（2026-10 网页观测台整个删除之后更是**唯一**的产品），
+  /// 所以这个开关必须能在界面里改，不能把用户往外推。写通道与服务端一致：它是**字段级危险操作**，
+  /// X-Confirm 要带 `update-config; enable-destructive`（服务端 DANGEROUS_FIELDS 登记的就是这一条）。
+  Widget _destructiveRow() {
+    final value = _at(cfg, 'tools.destructiveEnabled');
+    final label = _policy();  // 与 Web 端同一口径的三态文案，复用不另写一份
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          const SizedBox(width: 2),
+          Text(_s.settingsDestructivePolicy, style: const TextStyle(fontSize: 12.5)),
+          const SizedBox(width: 10),
+          Text(label, style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          const Spacer(),
+          if (_destrSaving)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: SizedBox(width: 13, height: 13, child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
+          TextButton(onPressed: _destrSaving ? null : () => unawaited(_pickDestructivePolicy(value)), child: Text(_s.settingsModify)),
+        ],
+      ),
+    );
+  }
+
+  bool _destrSaving = false;
+
+  /// 选策略：三档。按名单要挑工具，所以那一步走一个带勾选框的弹层。
+  Future<void> _pickDestructivePolicy(Object? current) async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(_s.settingsDestructivePolicy),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'none'),
+            child: Text(_s.settingsPolicyNoneOption),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'all'),
+            child: Text(_s.settingsPolicyAllOption),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, 'list'),
+            child: Text(_s.settingsPolicyListOption),
+          ),
+        ],
+      ),
+    );
+    if (choice == null || !mounted) return;
+    if (choice == 'none') return _saveDestructive(false);
+    if (choice == 'all') return _saveDestructive(true);
+    final tools = await _loadDestructiveTools();
+    if (!mounted) return;
+    final picked = await _pickToolList(current, tools);
+    if (picked == null) return;
+    return _saveDestructive(picked);
+  }
+
+  /// 弹层里勾工具（按名单模式）
+  Future<List<String>?> _pickToolList(Object? current, List<String> tools) async {
+    final selected = <String>{
+      if (current is List) ...[for (final item in current) if (item is String) item],
+    };
+    return showDialog<List<String>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setInner) => AlertDialog(
+          title: Text(_s.settingsPolicyListTitle),
+          content: SizedBox(
+            width: 420,
+            height: 380,
+            child: tools.isEmpty
+                ? Text(_s.settingsPolicyNoTools,
+                    style: TextStyle(fontSize: 12.5))
+                : ListView(
+                    children: [
+                      for (final name in tools)
+                        CheckboxListTile(
+                          dense: true,
+                          value: selected.contains(name),
+                          title: Text(name, style: const TextStyle(fontSize: 13)),
+                          onChanged: (on) => setInner(() {
+                            if (on == true) {
+                              selected.add(name);
+                            } else {
+                              selected.remove(name);
+                            }
+                          }),
+                        ),
+                    ],
+                  ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: Text(_s.cancel)),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, selected.toList()),
+              child: Text(_s.settingsPolicySave(selected.length)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// destructive 工具名（按名单模式要列出来勾）：从 /api/tools 的 sideEffect 过滤
+  Future<List<String>> _loadDestructiveTools() async {
+    try {
+      final data = await widget.state.api.get('/api/tools');
+      final list = data is Map ? data['tools'] : null;
+      if (list is! List) return const [];
+      return [
+        for (final item in list.whereType<Map>())
+          if ('${item['sideEffect']}' == 'destructive') '${item['name']}',
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 落盘。**改这个字段要额外一段确认短语**（服务端的字段级危险操作）——
+  /// 与「全开」这种放宽动作相称；顺带把后果写在确认框里，别让人手滑。
+  Future<void> _saveDestructive(Object value) async {
+    final relaxed = value == true || (value is List && value.isNotEmpty);
+    final ok = await confirm(
+      context,
+      title: _s.settingsDestructiveTitle,
+      body: relaxed
+          ? _s.settingsDestructiveRelaxedBody
+          : _s.settingsDestructiveRestrictedBody,
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _destrSaving = true);
+    try {
+      await widget.state.api.post(
+        '/api/commands/config-update',
+        {'fields': {'tools.destructiveEnabled': value}},
+        confirm: 'update-config; enable-destructive',
+      );
+      await _loadConfig(seed: true);
+      if (!mounted) return;
+      _toast(_s.settingsSavedRestartNote);
+    } catch (err) {
+      if (mounted) _toast(_s.settingsSaveFailed('$err'), kind: ToastKind.warn);
+    } finally {
+      if (mounted) setState(() => _destrSaving = false);
+    }
+  }
+
+  /// destructive 工具策略三态（与 Web 端 policyLabel 同一口径）
+  String _policy() {
+    final value = _at(cfg, 'tools.destructiveEnabled');
+    if (value == true) return _s.settingsPolicyAll;
+    if (value is List) {
+      return value.isEmpty
+          ? _s.settingsPolicyListEmpty
+          : _s.settingsPolicyListCount(value.length);
+    }
+    return _s.settingsPolicyNone;
+  }
+
+  // ── 基础小组件（与 channels_page 同一套卡片语言） ──
+
+  /// 只读行：标签左、值右（等宽），最右是「需重启」标注。
+  /// [note] 是行内的一句灰字——⑪ 起用它说清"这一行为什么不给人改"（不要长篇，一行）。
+  Widget _readOnlyRow(String label, String value, {bool restart = true, String? note}) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              SizedBox(width: 200, child: Text(label, style: const TextStyle(fontSize: 12.5))),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  value.isEmpty ? '—' : value,
+                  textAlign: TextAlign.right,
+                  style: _mono(12.5, scheme.onSurface),
+                ),
+              ),
+              if (restart) ...[
+                const SizedBox(width: 10),
+                _badge(_s.settingsRestartRequired, IrmiaTheme.warn),
+              ],
+            ],
+          ),
+          if (note != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                note,
+                style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _badge(String text, Color tone) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: tone)),
+    );
+  }
+
+  Widget _footnote(String text) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Text(text, style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurfaceVariant)),
+    );
+  }
+
+  ButtonStyle _btnStyle(BuildContext context) {
+    return FilledButton.styleFrom(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      minimumSize: const Size(0, 36),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+}
+
+/// 分组卡片：一张卡一组（surface + outlineVariant 描边 + radiusCard），卡头 = 组名 + 一句说明。
+/// 参照 AstrBotConfigV4 的分组卡：描述与 hint 在卡头，字段在卡内。
+class _SectionCard extends StatelessWidget {
+  const _SectionCard({required this.title, required this.note, required this.children, this.trailing});
+
+  final String title;
+  final String note;
+  final List<Widget> children;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: IrmiaTheme.hairline,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+              if (trailing != null) trailing!,
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(note, style: TextStyle(fontSize: 12.5, height: 1.5, color: scheme.onSurfaceVariant)),
+          ),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+/// 字段单元：标签在上、控件在下（两列并排时左右两格顶边对齐，不因标签长度而错位）
+class _FieldCell extends StatelessWidget {
+  const _FieldCell({required this.label, required this.field, this.note});
+
+  final String label;
+  final Widget field;
+  final String? note;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 6),
+        field,
+        if (note != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(note!, style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant)),
+          ),
+      ],
+    );
+  }
+}
+
+/// 字段两列：够宽就并排，窄窗降一列（AstrBotConfigV4.vue:282-317 的 :sm="6"）
+class _FieldPair extends StatelessWidget {
+  const _FieldPair({required this.cells});
+
+  final List<Widget> cells;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < _twoColBreakpoint) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final cell in cells) ...[
+                if (cell != cells.first) const SizedBox(height: 12),
+                cell,
+              ],
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final cell in cells) ...[
+              if (cell != cells.first) const SizedBox(width: 16),
+              Expanded(child: cell),
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// 系统卡一格的**标签**（点路径 → 文案）。点路径是布局判据，永不翻译。
+String settingsSysLabel(AppStrings s, String path) => switch (path) {
+      'web.host' => s.settingsSysHostLabel,
+      'web.port' => s.settingsSysPortLabel,
+      'timezone' => s.settingsSysTimezoneLabel,
+      'budget.stepTools' => s.settingsSysStepToolsLabel,
+      'budget.turnSteps' => s.settingsSysTurnStepsLabel,
+      'budget.taskTokens' => s.settingsSysTaskTokensLabel,
+      'budget.dailyTokens' => s.settingsSysDailyTokensLabel,
+      'budget.softRatio' => s.settingsSysSoftRatioLabel,
+      'budget.failStreakMax' => s.settingsSysFailStreakLabel,
+      'wake.heartbeatTargetMeanMin' => s.settingsSysHeartbeatLabel,
+      'persona.compactionThresholdTokens' => s.settingsSysCompactionLabel,
+      _ => path,
+    };
+
+/// 系统卡一格的**旁注**（没有旁注的格子返回 null）。
+String? settingsSysNote(AppStrings s, String path) => switch (path) {
+      'web.host' => s.settingsSysHostNote,
+      'timezone' => s.settingsSysTimezoneNote,
+      'budget.stepTools' => s.settingsSysStepToolsNote,
+      'budget.turnSteps' => s.settingsSysTurnStepsNote,
+      'budget.taskTokens' => s.settingsSysTaskTokensNote,
+      'budget.dailyTokens' => s.settingsSysDailyTokensNote,
+      'budget.softRatio' => s.settingsSysSoftRatioNote,
+      'budget.failStreakMax' => s.settingsSysFailStreakNote,
+      'wake.heartbeatTargetMeanMin' => s.settingsSysHeartbeatNote,
+      'persona.compactionThresholdTokens' => s.settingsSysCompactionNote,
+      _ => null,
+    };
+
+/// 锚点栏的小标题：给左侧列表一个名分，避免四条孤立条目
+class _AnchorCaption extends StatelessWidget {
+  const _AnchorCaption();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Text(
+      IrmiaStrings.of(context).settingsAnchorCaption,
+      style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: scheme.onSurfaceVariant),
+    );
+  }
+}
+
+/// 按点路径取配置里的值（与 Web 端 getPath 同一口径）
+Object? _at(Map<String, dynamic>? root, String path) {
+  Object? node = root;
+  for (final key in path.split('.')) {
+    if (node is! Map || !node.containsKey(key)) return null;
+    node = node[key];
+  }
+  return node;
+}
+
+/// 小数原样成文本：0.8 → "0.8"、1 → "1"。
+/// **不做百分比换算**——框里摆的是 config.json 里的值，换算一概留给旁注（用户 ⑪）。
+String _plainDouble(double value) =>
+    value == value.roundToDouble() ? value.toInt().toString() : value.toString();
+
+/// 首条事件到今天的天数；不可解析返回 null（与 Web 端 daysSince 同一口径）
+int? _daysSince(String? iso) {
+  final dt = DateTime.tryParse(iso ?? '');
+  if (dt == null) return null;
+  final ms = DateTime.now().difference(dt).inMilliseconds;
+  return ms < 0 ? 0 : ms ~/ 86400000;
+}
+
+String _stamp(String? iso) {
+  final dt = DateTime.tryParse(iso ?? '')?.toLocal();
+  if (dt == null) return '—';
+  return '${dt.year}-${_p2(dt.month)}-${_p2(dt.day)} ${_p2(dt.hour)}:${_p2(dt.minute)}';
+}
+
+String _p2(int value) => value.toString().padLeft(2, '0');
+
+TextStyle _mono(double size, Color color) => TextStyle(
+      fontFamily: 'monospace',
+      fontSize: size,
+      color: color,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );

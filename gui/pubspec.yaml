@@ -1,0 +1,134 @@
+name: irmia_gui
+description: "A new Flutter project."
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+# The following defines the version and build number for your application.
+# A version number is three numbers separated by dots, like 1.2.43
+# followed by an optional build number separated by a +.
+# Both the version and the builder number may be overridden in flutter
+# build by specifying --build-name and --build-number, respectively.
+# In Android, build-name is used as versionName while build-number used as versionCode.
+# Read more about Android versioning at https://developer.android.com/studio/publish/versioning
+# In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
+# Read more about iOS versioning at
+# https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
+# In Windows, build-name is used as the major, minor, and patch parts
+# of the product and file versions while build-number is used as the build suffix.
+# 版号口径：这里只写 `x.y.z+build` 的稳定形态——pubspec 的
+# version 会被 Flutter 拆成 4 个整数喂给 Windows 资源版本号（windows/runner/Runner.rc 的
+# FILEVERSION），容不下 `-beta` 这种预发布标记，所以 beta 标记不放这里；
+# 界面显示的那份（带 v 与 beta）在 lib/pages/settings_page.dart 的 guiVersion。
+# 后端同一版号的口径是 src/main.ts 的 AGENT_VERSION（不带 v）。
+# ⚠️ 别把具体版号抄进注释：出包脚本只改版号那一行、不改注释，抄一处就留一处对不上。
+version: 0.1.0+1
+environment:
+  sdk: ^3.9.2
+
+# Dependencies specify other packages that your package needs in order to work.
+# To automatically upgrade your package dependencies to the latest versions
+# consider running `flutter pub upgrade --major-versions`. Alternatively,
+# dependencies can be manually updated by changing the version numbers below to
+# the latest version available on pub.dev. To see which dependencies have newer
+# versions available, run `flutter pub outdated`.
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 中文（以及英文）的 **Material 自带文案**：文本框的剪切/复制/粘贴菜单、
+  # 滚动条与对话框的无障碍标签、日期/数字的本地化格式。这些字符串我们自己造不出来，
+  # 而界面里现有 12 个 `SelectableText` + 2 个 `SelectionArea` + 36 个 `TextField`——
+  # 不引这个包，那排菜单在中文界面上永远是英文的 "Copy / Select all"（2026-10-17 盘点）。
+  #
+  # **它不提供我们自己的界面文案**：那 1760 条在 `lib/i18n/app_strings.dart` 里自建。
+  # 也就是说这个依赖只解决"Material 自己那层皮"，不解决"我们说的话"——
+  # 两者的分工写在 `app.dart` 的 `localizationsDelegates` 与 `i18n/app_strings.dart` 顶部。
+  flutter_localizations:
+    sdk: flutter
+
+  # The following adds the Cupertino Icons font to your application.
+  # Use with the CupertinoIcons class for iOS style icons.
+  cupertino_icons: ^1.0.8
+  # 托盘化（2026-10-04 用户要的）：托盘图标与菜单 + 窗口显示/隐藏
+  tray_manager: ^0.5.0
+  window_manager: ^0.5.0
+  # 可控时钟（`clock.now()`）。**必须在 dependencies 而不是 dev_dependencies**：
+  # `lib/pages/chat_page.dart` 的 `ThinkingProgress.elapsed` 就 import 了它。
+  # 为什么那一处要改用它（2026-10-16「用时每秒走」）：两者在真机上**完全等价**
+  # （`clock` 默认转发到 `DateTime.now()`），差别只在用例里——`flutter_test` 会把
+  # `clock.now()` 接管成**随 `tester.pump(时长)` 前进的假时钟**，而 `DateTime.now()`
+  # 读的是真实墙钟、`pump` 推不动它 ⇒ 没有这一改，"那一行每秒自己走"就只能靠肉眼看真窗口。
+  # 这也是 flutter_test 自己用来驱动帧时间的那只钟（`binding.clock`）。
+  clock: ^1.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # 假时钟。flutter_test 里本来就带着它（传递依赖），但 app 侧有一条"事件一到就重读"的
+  # 节奏要断言（见 test/brand_status_test.dart），直接 import 传递依赖会被
+  # `depend_on_referenced_packages` 判为"用了没声明的依赖"——所以在这里显式声明。
+  fake_async: ^1.3.1
+
+  # The "flutter_lints" package below contains a set of recommended lints to
+  # encourage good coding practices. The lint set provided by the package is
+  # activated in the `analysis_options.yaml` file located at the root of your
+  # package. See that file for information about deactivating specific lint
+  # rules and activating additional ones.
+  flutter_lints: ^5.0.0
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  # The following line ensures that the Material Icons font is
+  # included with your application, so that you can use the icons in
+  # the material Icons class.
+  uses-material-design: true
+
+  assets:
+    - assets/tray.ico
+    # IRMIA 标识（图案本身）。这里只声明 1x 那两份，同目录的 2.0x/ 与 3.0x/ 由 Flutter
+    # 自动收作分辨率变体（按 devicePixelRatio 挑最近的一档，150% 缩放的机器取 2x）。
+    # 两档是**两种几何**，不是同一个图案的两个尺寸：
+    #   mark-48 —— 顶栏卡片那种 40~48 逻辑像素的用法（主几何）；
+    #   mark-16 —— 头像那种 16~24 的小尺寸专用加强版（针尖加粗、环加厚）。
+    # 浅色主题取蓝版、深色主题取白版，选色规则在 lib/theme.dart 顶部。
+    - assets/brand/mark-48.png
+    - assets/brand/mark-48-blue.png
+    - assets/brand/mark-16.png
+    - assets/brand/mark-16-blue.png
+
+  # To add assets to your application, add an assets section, like this:
+  # assets:
+  #   - images/a_dot_burr.jpeg
+  #   - images/a_dot_ham.jpeg
+
+  # An image asset can refer to one or more resolution-specific "variants", see
+  # https://flutter.dev/to/resolution-aware-images
+
+  # For details regarding adding assets from package dependencies, see
+  # https://flutter.dev/to/asset-from-package
+
+  # To add custom fonts to your application, add a fonts section here,
+  # in this "flutter" section. Each entry in this list should have a
+  # "family" key with the font family name, and a "fonts" key with a
+  # list giving the asset and other descriptors for the font. For
+  # example:
+  # fonts:
+  #   - family: Schyler
+  #     fonts:
+  #       - asset: fonts/Schyler-Regular.ttf
+  #       - asset: fonts/Schyler-Italic.ttf
+  #         style: italic
+  #   - family: Trajan Pro
+  #     fonts:
+  #       - asset: fonts/TrajanPro.ttf
+  #       - asset: fonts/TrajanPro_Bold.ttf
+  #         weight: 700
+  #
+  # For details regarding fonts from package dependencies,
+  # see https://flutter.dev/to/font-from-package

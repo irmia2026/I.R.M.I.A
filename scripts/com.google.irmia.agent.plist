@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Irmia Agent — launchd 样例（docs/design.md §4.8「守护交给操作系统」）
+    KeepAlive=true：进程退出就被 launchd 拉起来，语义与 systemd 的 Restart=always 一致。
+    注意 KeepAlive <true/> 表示"无论如何都保持活着"，不是"崩溃才重启"——
+    守护的判据是进程还在不在，而不是它的退出码好不好看。
+    （若只想"崩了才拉"，改成 <dict><key>SuccessfulExit</key><false/></dict>，
+      但那会让一次正常退出变成永久停机，无人值守场景不采用。）
+
+    安装：
+      cp scripts/com.google.irmia.agent.plist ~/Library/LaunchAgents/
+      # 路径按实际项目根与 node 路径改好，然后：
+      launchctl load -w ~/Library/LaunchAgents/com.google.irmia.agent.plist
+      launchctl print gui/$(id -u)/com.google.irmia.agent   # 查询
+      launchctl unload -w ~/Library/LaunchAgents/com.google.irmia.agent.plist  # 卸载
+
+    单实例去重同样由 <项目根>/data/lock.json 负责；launchd 不做去重，
+    第二个实例会在锁处退出（非零退出码）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.google.irmia.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>/opt/irmia-agent/dist/main.js</string>
+    </array>
+
+    <!-- 工作目录必须是项目根：data/、config.json、persona 都按 cwd 解析 -->
+    <key>WorkingDirectory</key>
+    <string>/opt/irmia-agent</string>
+
+    <!-- 守护语义：keep alive -->
+    <key>KeepAlive</key>
+    <true/>
+    <!-- 登录即启动（与 KeepAlive 同时给，避免"首次要等下一次崩溃才起"的窗口） -->
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- 崩溃后重启的节流：最短 10 秒一次，防止启动早期崩溃被疯狂重启 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- 运行现场：launchd 默认把 stdout 丢进 void，必须显式落文件 -->
+    <key>StandardOutPath</key>
+    <string>/opt/irmia-agent/data/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/irmia-agent/data/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <!-- 数据目录显式声明：不依赖 cwd 推断（IRMIA_DATA_DIR 优先于 <cwd>/data） -->
+        <key>IRMIA_DATA_DIR</key>
+        <string>/opt/irmia-agent/data</string>
+        <!-- 密钥不写在这里：用 launchctl setenv IRMIA_API_KEY ... 或 wrapper 脚本注入 -->
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

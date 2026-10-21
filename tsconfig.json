@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    // Node 的 --experimental-strip-types 不会把 .js 重写成 .ts（只做类型擦除），
+    // 因此运行期值导入写 .ts；编译输出由本开关重写回 .js。
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": true,
+    // 注释不进产物（2026-10-04）：`dist/` 是**要发出去的东西**（内测包整棵树照搬），
+    // 而源码注释里写着本机的例子与人名——打包闸门一抓一个准（实测：8 个 dist 文件命中）。
+    // 注释的价值在源码里；产物里留着只会把私事带出门。sourceMap 照旧开着，调试要的原始位置一个不少。
+    "removeComments": true
+  },
+  "include": ["src/**/*.ts"]
+}

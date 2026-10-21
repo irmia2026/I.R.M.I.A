@@ -1,0 +1,62 @@
+# Irmia Agent — systemd 单元样例（docs/design.md §4.8「守护交给操作系统」）
+#
+# 语义（与 Windows 计划任务守护对齐）：
+#   Restart=always    任何退出都拉起来——包括正常退出。守护的判据是"进程还在不在"，
+#                     而不是"退出码好不好看"；坏掉的地基上区分退出原因只会掩盖问题。
+#   RestartSec=5      重启前等 5 秒：崩在启动早期的进程不会被疯狂重启打成死循环。
+#   StartLimitBurst=0 不限制单位时间内的重启次数（配合 StartLimitIntervalSec=0）。
+#                     无人值守机器可能离线数天，任何"重启上限"都意味着某天起它彻底死了。
+#   标准输出/错误落 journal：docker/logs 之外唯一可 grep 的运行现场（journalctl -u irmia-agent -f）。
+#
+# 安装：
+#   sudo cp scripts/irmia-agent.service /etc/systemd/system/irmia-agent.service
+#   sudo sed -i "s#/opt/irmia-agent#$(pwd)#g; s#/usr/bin/node#$(command -v node)#g" /etc/systemd/system/irmia-agent.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now irmia-agent
+#
+# 说明：
+#   · 单实例去重由 <项目根>/data/lock.json 负责（design §4.8），systemd 的
+#     KillMode/Type 不做任何去重；两个实例同时被拉起时，后到的那个在锁处退出。
+#   · IRMIA_API_KEY 不要写进本文件（会进版本库）。用 EnvironmentFile 指向一个
+#     仅 root 可读的文件（chmod 600）。
+#   · 退出码 0/1 一律重启，所以这里不写 SuccessExitStatus。
+
+[Unit]
+Description=Irmia Agent（本地持久化无人值守 Agent）
+Documentation=file:///opt/irmia-agent/docs/design.md
+After=network-online.target
+Wants=network-online.target
+# 0 = 不做重启次数限制（见文件头注释）
+StartLimitIntervalSec=0
+StartLimitBurst=0
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/irmia-agent
+ExecStart=/usr/bin/node /opt/irmia-agent/dist/main.js
+
+Restart=always
+RestartSec=5
+
+# 密钥与可选的环境覆盖（nonexistent 前缀 = 文件缺失不算错误）
+EnvironmentFile=-/etc/irmia-agent.env
+Environment=NODE_ENV=production
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=irmia-agent
+
+# 优雅退出：main.ts 收到 SIGTERM 会先停源停循环、写 session/end、放锁再退出
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 只有主进程算存活理由：看护进程的定时器一律不该让 unit 变成"活着"
+KillMode=control-group
+
+# 常规加固：Agent 只应写自己的数据目录与工作目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
