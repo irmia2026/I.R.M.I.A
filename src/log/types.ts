@@ -2547,6 +2547,35 @@ export interface PluginRecovered extends EventEnvelope<'plugin/recovered', {
   category: string; count: number; recoveredAt: string;
 }> {}
 
+/**
+ * 内置插件的出厂种子首次安装到数据目录的留痕（beta14）。
+ *
+ * 它解释的是**盘上为什么会多出这个插件包**：它不是人装的、也不是 agent 自沉淀的，
+ * 而是出厂那份被原样搬过来的。没有这条记录，事后只能靠"内容哈希和安装包里的一模一样"
+ * 去猜——而那正是最难解释的一句话（"我没装过，它怎么进来的"）。它同时也是"装了几个"
+ * 的唯一凭据：摘要行会随 stdout 滚掉，事件留得住。
+ *
+ * **它不是信任门**（**裁决与 `skill/seed` 同形**，不是逐字同形）：搬过来的插件照样要
+ * `plugin/installed { by: 'human' }` 才进组合。内置插件是**可执行代码**，比技能风险更高，
+ * 为省用户一次点击就开"随包代码自动执行"的口子不值得。
+ *
+ * 可见性 internal：它是**装配账**，不是给她的输入——她知道自己有哪些插件就够了。
+ *
+ * ⚠ 与 `skill/seed` 一个真实差别：内置插件**可以有部分失败**。技能那条路只在"复制成功"
+ * 时记一条；这里则是**装了哪个就记哪个**（`main.ts` 按 `installed` 逐个 append，失败另外
+ * 用 stdout 报），所以同一个种子根可能产出**多条**本事件，也可能一条都没有。
+ */
+export interface PluginBuiltin extends EventEnvelope<'plugin/builtin', {
+  /** 内置插件 id */
+  id: string;
+  /** 内置插件版本 */
+  version: string;
+  /** 内容哈希（与包目录名同源） */
+  contentHash: string;
+  /** 出厂种子相对路径（如 `plugins/builtin/meme`）—— 不是绝对路径 */
+  source: string;
+}> {}
+
 // ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
 
 /**
@@ -3492,10 +3521,9 @@ export type AppEvent =
   | SlashHandled
   | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
-  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | SkillSeeded | HookFired | SpeakSent
-  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | HookFired | SpeakSent
+  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | HookFired | SpeakSent
   | PluginInstalled | PluginEnabled | PluginDisabled | PluginFailed
-  | PluginQuarantined | PluginProbeStarted | PluginRecovered
+  | PluginQuarantined | PluginProbeStarted | PluginRecovered | PluginBuiltin
   | ToolsInventoryChanged
   | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
@@ -3641,6 +3669,7 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   'plugin/installed': 'internal', 'plugin/enabled': 'internal',
   'plugin/disabled': 'internal', 'plugin/failed': 'internal',
   'plugin/quarantined': 'internal', 'plugin/probe-started': 'internal', 'plugin/recovered': 'internal',
+  'plugin/builtin': 'internal',
   // 工具清单指纹的变化（2026-10-11，BUG-3）**同样刻意 internal**，理由与上面那条逐字同形：
   // 它是**装配账**（"这一刻进请求的清单是哪几件、比上次少了哪几件"），而清单本身已经作为
   // tools 段进了请求体——再把它作为一条事件渲染一遍，就是同一件事在她眼前出现两遍。

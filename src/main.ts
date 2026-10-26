@@ -99,6 +99,7 @@ import {
 } from './runtime/gui-guard.ts';
 import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
 import { PluginManager, type PluginView } from './plugin/manager.ts';
+import { BUILTIN_PLUGINS_DIR_NAME, ensureBuiltinPlugins } from './plugin/seed.ts';
 import { PluginCircuitBreaker } from './plugin/circuit-breaker.ts';
 import { composePluginMcp } from './plugin/contributions.ts';
 import { PluginProbeCancelledError, type PluginFailure } from './plugin/failures.ts';
@@ -1265,6 +1266,48 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     append(type, data, 'internal');
   });
   pluginManager.setEvents(await allEventsOf(log));
+  /**
+   * ── 出厂内置插件 → 数据目录的插件包仓库（beta14）──
+   *
+   * 插件实体住在**数据目录**（`<dataDir>/plugins/packages/<id>/<hash>/`），安装目录/仓库里的
+   * `plugins/builtin/` 只是**出厂种子**。这里做那唯一一次安装：
+   *
+   *   · 仓库里还没有那个 `id@hash` 才装（`ensureBuiltinPlugins` 的全部判据在
+   *     `plugin/seed.ts` 的文件头：装过就一个字节都不动、幂等、失败不拦启动）；
+   *   · 装成功写一条 `plugin/builtin`（internal）——它解释“盘上为什么会多出这个插件包”，
+   *     也是“装了几个”的唯一凭据（摘要行会滚，事件留得住）；
+   *   · 它**不是信任门**：装过来的插件照样要 `plugin/installed{by:'human'}` 才进组合；
+   *     内置插件是**可执行代码**，为省一次点击就开“随包代码自动执行”的口子不值得。
+   *
+   * 为什么放在 `setEvents` 之后、`composePluginRuntime` 之前：前者把历史里的确认/启停读回来
+   * （决定“这个包人确认过没有”），后者组合出真正要跑的那一批。内置种子必须先落在盘上，
+   * 否则“人确认过的那个 hash”在仓库里根本找不到——那会让人每次启动重新点一遍。
+   */
+  // 这里直接取 `process.cwd()` 而不是复用下面那个 `launchCwd`：后者刻意在单实例锁之后才声明
+  // （见技能种子那段注释），而内置插件必须在 `setEvents` 之后立刻落盘。两者之间没有任何
+  // `process.chdir`（全文件只有几处读 cwd，没有一处改），所以两份读数必然相同。
+  const builtinSeed = ensureBuiltinPlugins(dataDir, join(process.cwd(), BUILTIN_PLUGINS_DIR_NAME));
+  // 先记**装成功的那几个**，再报失败的那几个——两件事互不抵消。
+  // 为什么不能只在 `state === 'created'` 里记：部分失败时 `state` 是 `failed`，但**成功的那几个
+  // 已经躺在仓库里了**。只在 created 分支记事件，盘上有包、日志里却没有安装记录，
+  // 事后就只能靠"内容哈希和安装包里的一模一样"去猜——那正是本仓库反复吃过的那种悬案。
+  for (const pkg of builtinSeed.installed) {
+    append('plugin/builtin', {
+      id: pkg.manifest.id,
+      version: pkg.manifest.version,
+      contentHash: pkg.contentHash,
+      source: BUILTIN_PLUGINS_DIR_NAME,
+    }, 'internal');
+  }
+  if (builtinSeed.installed.length > 0) {
+    write(`[插件] 首次运行：已把 ${builtinSeed.installed.length} 个内置插件装进包仓库（`
+      + `${builtinSeed.installed.map((pkg) => `${pkg.manifest.id}@${pkg.manifest.version}`).join('、')}）`
+      + '—— 它们还要在界面“扩展”里确认一次才会启用（内置不免除信任门）');
+  }
+  for (const failure of builtinSeed.failures) {
+    write(`[插件] 内置插件 ${failure.dir} 没有装上：${failure.reason}`);
+  }
+  // no-seed / exists 都不必说什么：前者是老安装包的常态，后者是幂等的常态
   let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
   let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
   let circuitBreaker: PluginCircuitBreaker | null = null;

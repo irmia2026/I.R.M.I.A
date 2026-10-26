@@ -22,3 +22,6 @@ astrbot-src/
 qqbot-cache/
 # 品牌资产的拟合中间产物（.npy、比对截图、参考位图），只留几何源与导出物
 brand/_analysis/
+
+# Flutter 测试的 APPDATA/TEMP 重定向（不入库）
+/flutter-state/
