@@ -2879,6 +2879,39 @@ abstract class AppStrings {
   /// 执行点钩子：PreToolUse / PostToolUse / Wake 三处可插入外部命令
   String get extSectionHooksBlurb;
 
+  String get extSectionPlugins;
+  String get extSectionPluginsBlurb;
+  String get extPluginInstall;
+  String get extPluginInstallTitle;
+  String get extPluginSourceDir;
+  String get extPluginSourceHint;
+  String get extPluginAbsoluteRequired;
+  String get extPluginEmpty;
+  String get extPluginEmptyHint;
+  String extPluginSummary(int count);
+  String extPluginStat(int count);
+  String extPluginState(String state);
+  String get extPluginRestartRequired;
+  String extPluginContributions(int skills, int hooks, int mcp);
+  String extPluginVersionHash(String version, String hash);
+  String get extPluginPermissionsLabel;
+  String get extPluginProblemsLabel;
+  String get extPluginReview;
+  String extPluginReviewTitle(String id);
+  String extPluginReviewBody(String id, String hash);
+  String get extPluginEnable;
+  String get extPluginDisable;
+  String extPluginEnableTitle(String id);
+  String extPluginDisableTitle(String id);
+  String get extPluginRestartBody;
+  String get extPluginInstalledToast;
+  String extPluginConfirmedToast(String id);
+  String extPluginRestartToast(String action, String id);
+  String extPluginFailed(String reason);
+  String extPluginCircuit(String contribution, int count);
+  String extPluginCircuitReason(String reason);
+  String extPluginRetryAt(String at);
+
   /// 响应格式无法识别
   String get extBadResponse;
 
@@ -5983,9 +6016,82 @@ class ZhStrings extends AppStrings {
   @override
   String get extSectionHooksBlurb => '执行点钩子：PreToolUse / PostToolUse / Wake 三处可插入外部命令';
   @override
+  String get extSectionPlugins => 'Plugins';
+  @override
+  String get extSectionPluginsBlurb => '按整包哈希审核 Skills、Hooks 与 MCP 贡献；人工启停在重启后生效';
+  @override
+  String get extPluginInstall => '安装插件';
+  @override
+  String get extPluginInstallTitle => '从本地目录安装插件';
+  @override
+  String get extPluginSourceDir => '插件目录（绝对路径）';
+  @override
+  String get extPluginSourceHint => r'例如 C:\packages\demo 或 /home/me/demo';
+  @override
+  String get extPluginAbsoluteRequired => '请输入绝对本地目录';
+  @override
+  String get extPluginEmpty => '还没有安装插件';
+  @override
+  String get extPluginEmptyHint => '先安装本地目录，再审核整包哈希与权限；安装本身不会信任或启用插件。';
+  @override
+  String extPluginSummary(int count) => '$count 个插件包';
+  @override
+  String extPluginStat(int count) => '$count 个插件包';
+  @override
+  String extPluginState(String state) => switch (state) {
+        'untrusted' => '待审核',
+        'disabled' => '已停用',
+        'enabled' => '已启用',
+        'invalid' => '无效',
+        'quarantined' => '已隔离',
+        'probing' => '正在探测',
+        _ => state,
+      };
+  @override
+  String get extPluginRestartRequired => '重启后生效';
+  @override
+  String extPluginContributions(int skills, int hooks, int mcp) => 'Skills $skills · Hooks $hooks · MCP $mcp';
+  @override
+  String extPluginVersionHash(String version, String hash) => '版本 $version · 哈希 $hash';
+  @override
+  String get extPluginPermissionsLabel => '权限';
+  @override
+  String get extPluginProblemsLabel => '问题';
+  @override
+  String get extPluginReview => '审核并信任';
+  @override
+  String extPluginReviewTitle(String id) => '审核插件 $id';
+  @override
+  String extPluginReviewBody(String id, String hash) =>
+      '请核对 $id 的整包哈希 $hash、贡献与权限。插件贡献属于可信代码，不是安全沙箱；确认只绑定这一个哈希。';
+  @override
+  String get extPluginEnable => '启用';
+  @override
+  String get extPluginDisable => '停用';
+  @override
+  String extPluginEnableTitle(String id) => '启用插件 $id？';
+  @override
+  String extPluginDisableTitle(String id) => '停用插件 $id？';
+  @override
+  String get extPluginRestartBody => '人工启停只写入下一份生效状态，重启主进程后才接管；不会立即改变当前贡献。';
+  @override
+  String get extPluginInstalledToast => '已安装，等待审核；安装不代表已信任或启用';
+  @override
+  String extPluginConfirmedToast(String id) => '$id 的当前哈希已确认，仍需单独启用';
+  @override
+  String extPluginRestartToast(String action, String id) => '$id 已$action，重启后生效';
+  @override
+  String extPluginFailed(String reason) => '插件操作失败：$reason';
+  @override
+  String extPluginCircuit(String contribution, int count) => '故障贡献 $contribution · 连续失败 $count 次';
+  @override
+  String extPluginCircuitReason(String reason) => '故障原因：$reason';
+  @override
+  String extPluginRetryAt(String at) => '下次重试：$at';
+  @override
   String get extBadResponse => '响应格式无法识别';
   @override
-  String get extPageSubtitle => '技能、MCP 服务、内置工具与执行点钩子';
+  String get extPageSubtitle => '技能、本地插件、MCP 服务、内置工具与执行点钩子';
   @override
   String get extListHeader => '扩展项';
   @override
@@ -8957,9 +9063,82 @@ class EnStrings extends AppStrings {
   @override
   String get extSectionHooksBlurb => 'Execution hooks: an external command can be plugged in at PreToolUse / PostToolUse / Wake';
   @override
+  String get extSectionPlugins => 'Plugins';
+  @override
+  String get extSectionPluginsBlurb => 'Review Skills, Hooks and MCP contributions by package hash; manual lifecycle changes take effect after restart';
+  @override
+  String get extPluginInstall => 'Install plugin';
+  @override
+  String get extPluginInstallTitle => 'Install a plugin from a local directory';
+  @override
+  String get extPluginSourceDir => 'Plugin directory (absolute path)';
+  @override
+  String get extPluginSourceHint => r'For example C:\packages\demo or /home/me/demo';
+  @override
+  String get extPluginAbsoluteRequired => 'Enter an absolute local directory';
+  @override
+  String get extPluginEmpty => 'No plugins installed';
+  @override
+  String get extPluginEmptyHint => 'Install a local directory, then review its package hash and permissions. Installing neither trusts nor enables it.';
+  @override
+  String extPluginSummary(int count) => '$count plugin packages';
+  @override
+  String extPluginStat(int count) => '$count plugin packages';
+  @override
+  String extPluginState(String state) => switch (state) {
+        'untrusted' => 'Review required',
+        'disabled' => 'Disabled',
+        'enabled' => 'Enabled',
+        'invalid' => 'Invalid',
+        'quarantined' => 'Quarantined',
+        'probing' => 'Probing',
+        _ => state,
+      };
+  @override
+  String get extPluginRestartRequired => 'Takes effect after restart';
+  @override
+  String extPluginContributions(int skills, int hooks, int mcp) => 'Skills $skills · Hooks $hooks · MCP $mcp';
+  @override
+  String extPluginVersionHash(String version, String hash) => 'Version $version · Hash $hash';
+  @override
+  String get extPluginPermissionsLabel => 'Permissions';
+  @override
+  String get extPluginProblemsLabel => 'Problems';
+  @override
+  String get extPluginReview => 'Review and trust';
+  @override
+  String extPluginReviewTitle(String id) => 'Review plugin $id';
+  @override
+  String extPluginReviewBody(String id, String hash) =>
+      'Check the package hash $hash, contributions and permissions for $id. Plugin contributions are trusted code, not a security sandbox; confirmation binds only this hash.';
+  @override
+  String get extPluginEnable => 'Enable';
+  @override
+  String get extPluginDisable => 'Disable';
+  @override
+  String extPluginEnableTitle(String id) => 'Enable plugin $id?';
+  @override
+  String extPluginDisableTitle(String id) => 'Disable plugin $id?';
+  @override
+  String get extPluginRestartBody => 'Manual lifecycle changes update the next effective state only. Restart the main process to apply them; current contributions do not change immediately.';
+  @override
+  String get extPluginInstalledToast => 'Installed and awaiting review; it is not trusted or enabled yet';
+  @override
+  String extPluginConfirmedToast(String id) => 'Confirmed the current hash of $id; enable it separately';
+  @override
+  String extPluginRestartToast(String action, String id) => '$id $action; takes effect after restart';
+  @override
+  String extPluginFailed(String reason) => 'Plugin operation failed: $reason';
+  @override
+  String extPluginCircuit(String contribution, int count) => 'Failed contribution $contribution · $count consecutive failures';
+  @override
+  String extPluginCircuitReason(String reason) => 'Failure reason: $reason';
+  @override
+  String extPluginRetryAt(String at) => 'Next retry: $at';
+  @override
   String get extBadResponse => 'The response shape is not recognized';
   @override
-  String get extPageSubtitle => 'Skills, MCP servers, built-in tools and hooks';
+  String get extPageSubtitle => 'Skills, local plugins, MCP servers, built-in tools and hooks';
   @override
   String get extListHeader => 'Extensions';
   @override

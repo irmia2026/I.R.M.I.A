@@ -2135,12 +2135,25 @@ export interface McpIndexPoint {
    * `0` = 那一格还没有（老快照：行里没有 `desc` 那一截）⇒ 当场重建一次，之后照旧冻结。
    */
   descClauseVersion: number;
+  /**
+   * 那一条快照写的是哪一版**插件组合**（`data.pluginRevision`）。
+   *
+   * 为什么记在这里：运行期与重建都可能问"这份索引是按哪个执行面写的"——把它摆在
+   * 与 `text` 同一个返回值上，排障与重放比对就不必各自再解析一遍事件载荷。
+   * 它**不进渲染字节**（`render` 取的是 `text`），判据也不在它身上
+   * （该不该重建的判据在 `RealLoop.mcpIndexSync` 的 ④）。
+   * ⚠ 缺省必须是 `undefined`、**不能是空串**：空串会与"真的摘要为空"撞车，而真实的
+   * 组合摘要永远是非空 sha256 ⇒ `undefined` 只表示"那一条没说"。
+   */
+  pluginRevision: string | undefined;
   /** 最后一条 `compaction/summary` 的 seq；没有时为 0 */
   coveredSeq: number;
 }
 
 export function mcpIndexOf(events: readonly AppEvent[]): McpIndexPoint {
-  const point: McpIndexPoint = { seq: 0, text: null, version: null, descClauseVersion: 0, coveredSeq: 0 };
+  const point: McpIndexPoint = {
+    seq: 0, text: null, version: null, descClauseVersion: 0, pluginRevision: undefined, coveredSeq: 0,
+  };
   for (const event of events) {
     if (event.type === 'mcp/index') {
       // 后出现的覆盖先出现的（只追加的日志里 seq 升序，取最后一条就是"现在生效的那一版"）
@@ -2150,6 +2163,9 @@ export function mcpIndexOf(events: readonly AppEvent[]): McpIndexPoint {
       // 缺这一格的老快照按 0 算（= 行里没有 desc 那一截）⇒ 该重建一次（判据在那个常量的注释里）
       const clause = event.data.descClauseVersion;
       point.descClauseVersion = typeof clause === 'number' && Number.isFinite(clause) ? clause : 0;
+      // 插件组合摘要（老快照没有这一格 ⇒ undefined：`text` 才是渲染的那一份，这一格只给排障）
+      const revision = event.data.pluginRevision;
+      point.pluginRevision = typeof revision === 'string' && revision !== '' ? revision : undefined;
     } else if (event.type === 'compaction/summary') {
       point.coveredSeq = event.seq;
     }
