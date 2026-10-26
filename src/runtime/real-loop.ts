@@ -1525,6 +1525,19 @@ export interface RealLoopDeps {  log: EventLog;
    * 列表即可（就绪情况 real-loop 看不到——`McpClientPool` 归宿主）。
    */
   mcpServers?: () => readonly string[];
+  /** MCP 池与索引共享的声明面；缺省保持只读内置配置 */
+  mcpDeclarations?: () => readonly import('../mcp/client.js').McpServerEntry[];
+  /**
+   * 插件运行组合的摘要（宿主给）：与上次建索引时记下的值不等 ⇒ **索引该失效**。
+   *
+   * 为什么这一格必须在：插件隔离/恢复/卸载会**从执行面撤走** MCP server 与技能，
+   * 而索引原先只按 `RENDER_VERSION` 与压缩代次判断该不该重建 ⇒ 撤走之后索引仍是旧字节，
+   * 模型继续对着池里已不能调用的 server 名发起调用（"幽灵 server"）。
+   * 缺省 `undefined` ⇒ 不参与判据（不注入插件平台的实例行为完全不变）。
+   */
+  pluginRevision?: () => string | undefined;
+  /** 一轮结算后、下一批输入前应用插件隔离/恢复 */
+  onTurnBoundary?: () => Promise<void>;
   /**
    * **配置热更**：`config.json` 里可热更的那些字段变了之后，由宿主调一次（2026-10-10 加）。
    *
@@ -1652,6 +1665,17 @@ function lastChannelWake(events: readonly AppEvent[]): WakeChannel['data'] | nul
   return null;
 }
 
+/**
+ * 组合摘要的短形（诊断文案用）：只取前 8 位。
+ *
+ * 为什么是 8 位而不是整串：那一行是给人读的（"插件组合变化（a1b2c3d4 → e5f6a7b8）"），
+ * 完整 sha256 在这句里不提供任何多出来的信息；要整串时读事件载荷的 `pluginRevision`。
+ * `undefined` = 宿主不提供这一格（不接插件平台的实例）——如实写"无"，不编一个值。
+ */
+function shortRevision(revision: string | undefined): string {
+  return revision === undefined ? '无' : revision.slice(0, 8);
+}
+
 // ──────────────────────────────── 主体 ────────────────────────────────
 
 export class RealLoop {
@@ -1687,6 +1711,7 @@ export class RealLoop {
    * 而 `busy` 的置位也已提到 prepare 段之前（同一处修的另一半），两者一起才堵住这个缺口。
    */
   private tickInFlight = false;
+  private tickCompletion: Promise<void> | null = null;
   /**
    * 本拍进行期间**被守卫吞掉的拍数**。
    *
@@ -1846,14 +1871,17 @@ export class RealLoop {
    * `tools` 两段常驻前缀，若每轮现问 `SkillManager.catalogText()`，那么**批准装一个技能 /
    * 删一个技能**就会把请求前缀改一次（整段历史掉出 KV 缓存，实测口径 ≈9.6 万 token 一轮）。
    * 用户这一轮的判据是「skill 索引的进入和退出也要有类似 mcp 的进入和退出那样的缓存保护的机制」
-   * ⇒ 字节只来自日志里那条 `skill/index` 快照，而快照只在下面三个点上重建
-   * （`skillIndexSync` 的方法头：首次 / 模板换代 / 压缩之后）。
+   * ⇒ 字节只来自日志里那条 `skill/index` 快照，而快照只在下面四个点上重建
+   * （`skillIndexSync` 的方法头：首次 / 模板换代 / 压缩之后 / 插件 Skill 根变化）。
    *
    * 记在实例上还有一个**本轮内不许抖动**的用处：`agentDeps()` 一轮调一次，它读的就是这一格
    * ⇒ 同一轮里哪怕中途批了一个技能，这一轮所有 step 用的仍是**同一个**字节串
    * （下一拍归集才会换，那才是"一轮之内只允许变一次"）。
    */
   private skillIndexText = '';
+  private skillPackageRootsRevision = -1;
+  /** 上次建 MCP 索引时看到的插件组合摘要（`undefined` = 还没建过 / 宿主不提供） */
+  private pluginRevisionSeen: string | undefined = undefined;
 
   /**
    * 信任表折到哪一条了（`skillIndexSync` 的增量折叠用；seq 只增）。
@@ -2624,12 +2652,13 @@ export class RealLoop {
     return this.userSpokeNote;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
     this.wakeChannelData = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.heartbeatSource.stop();
+    await this.tickCompletion?.catch(() => undefined);
   }
 
   async writeProjectionCache(): Promise<void> {
@@ -2838,6 +2867,11 @@ export class RealLoop {
       // 为什么它非报不可：这条路两个现成刹车都到不了，详见 `notifyReasoningEcho` 的注释。
       if (reason.kind === 'error' && reason.reasoningEcho === true) await this.notifyReasoningEcho(reason);
     } finally {
+      try {
+        await this.deps.onTurnBoundary?.();
+      } catch (error) {
+        this.write(`[插件] turn 边界应用失败：${error instanceof Error ? error.message : String(error)}`);
+      }
       this.busy = false;
     }
   }
@@ -2886,9 +2920,12 @@ export class RealLoop {
     }
     this.tickInFlight = true;
     const startedAt = Date.now();
+    const completion = this.tickOnce();
+    this.tickCompletion = completion;
     try {
-      await this.tickOnce();
+      await completion;
     } finally {
+      if (this.tickCompletion === completion) this.tickCompletion = null;
       // try/finally：`tickOnce` 抛错也一定复位，否则一次异常就把循环永久锁死
       // （外层 `start()` 的 `.catch` 只管报错，不会复位任何标志）。
       this.tickInFlight = false;
@@ -2938,9 +2975,9 @@ export class RealLoop {
    * （KV 缓存整段失效，本仓库实测口径 ≈9.6 万 token 一轮），而用户的意图恰恰是
    * "增删只追加在末尾，到重大变化点才归集"。
    *
-   * ⇒ **索引必须冻结**：渲染读的是日志里那条快照，而快照只在下面三个点上重建。
+   * ⇒ **索引必须冻结**：渲染读的是日志里那条快照，而快照只在下面四个点上重建。
    *
-   * ──────────────────────────── 三个重建触发点（判据） ────────────────────────────
+   * ──────────────────────────── 四个重建触发点（判据） ────────────────────────────
    *
    * ① **本进程至今没有快照**（老日志、或全新的数据目录）——进程启动就是一次"重大变化"：
    *    它改了渲染模板之外的运行时事实，而**绝大多数配置字段仍然要重启才生效**
@@ -2954,6 +2991,14 @@ export class RealLoop {
    *    这一刻才是用户说的"归集到正确的索引位置"：用**当前配置**重建索引，
    *    此前那些"尾部追加"（server 增删的通报）就自然被新索引覆盖了语义
    *    ——它们在历史里逐字节不动（append-only），只是不再是"唯一知道有它"的那一处。
+   * ④ **插件组合变化**（`deps.pluginRevision`，那一格的注释写着它为什么必须在）：
+   *    插件隔离/恢复/卸载会**从执行面撤走** MCP server，而声明面只是跟着变——声明面自己
+   *    不是触发点（理由与配置热更逐字相同，见下一段）。这一支与热更有一处**本质区别**：
+   *    被撤走的 server 已经**不能调用**了，索引却还写着它 ⇒ 模型对着池里不存在的名字
+   *    发起调用（"幽灵 server"）。所以组合摘要一变就重建，不等压缩点。
+   *    ⚠ 判据是"摘要 ≠ 上次建索引时记下的值"，而那一格必须在**重建当下**就更新
+   *    （`pluginRevisionSeen`，与 `skillIndexSync` 的 `skillPackageRootsRevision` 同形）；
+   *    忘了更新，同一份新摘要会每拍都判"过期"⇒ 每拍重建一次索引，缓存保护当场作废。
    *
    * **配置改动刻意不是触发点**（`mcp.servers` 热更之后这条判据**照旧成立，而且是刻意的**）：
    * 它不落 `compaction/summary`。热更把活配置就地改了 ⇒ 本方法读到的 `servers` 立刻是新值，
@@ -2963,19 +3008,25 @@ export class RealLoop {
    * 真正会让索引变的是**下一次重大变化**（③）与**重启**（①）。
    *
    * ⚠️ 一处已知的**行为边界**（热更带来的，写在明处）：如果**这个进程从来没写过快照**
-   * （`point.seq === 0`，例如 `servers` 原本为空 ⇒ 按下面那条"空索引不落库"的口径，
+   * （`point.seq === 0`，例如 `servers` 原本为空 ⇒ 按下面"空索引"那一节的口径，
    * 之后又在运行期热更加了一个 server），那么下一次 `mcpIndexSync` 会把它当成"首次"落一条
    * `mcp/index`——那一次就是一次请求前缀变化（与重启后首次落快照**同一个代价**）。
    * 不是热更独有的病（重启也走这条路），但热更让它更容易被碰上：**加第一个 server 时**
    * 若不想付这一笔，就在加之前先重启一次（那时会在启动期落好快照）——**未实测**，
    * 依据是这三条判据本身。
    *
-   * ─────────────────── 空配置：**不写事件**（这一条有测试钉着） ───────────────────
+   * ─────────────────── 空配置：**首启不写，从非空变空要写墓碑**（这一条有测试钉着） ───────────────────
    *
-   * `servers` 为空 ⇒ 索引段整段不出现 ⇒ 快照与"没有快照"在渲染上**逐字节等价**
-   * （都渲染成空）。此时写一条 `mcp/index` 只会在事件流里多一行没人读的东西，
-   * 却会让"事件序列逐字相同"那类基线（`test/heartbeat-real-wake.test.ts`）无故变红。
-   * ⇒ 空索引**不落库**，实例上那份缓存照旧置空串（渲染结果与没有这一版逐字节相同）。
+   * "空索引"是两种形状，判据必须分开：
+   *   • **从来没有过快照**（`point.seq === 0`）：`servers` 为空 ⇒ 索引段整段不出现 ⇒
+   *     "空快照"与"没有快照"在渲染上**逐字节等价**（都渲染成空）。此时写一条 `mcp/index`
+   *     只会在事件流里多一行没人读的东西，却会让"事件序列逐字相同"那类基线
+   *     （`test/heartbeat-real-wake.test.ts`）无故变红 ⇒ **不写**，缓存照旧置空串。
+   *   • **从非空变空**（`point.seq !== 0 && point.text !== ''`）：这一支**必须写**一条
+   *     `text: ''` 的墓碑快照。不写的话，重建（`replay` 的 `mcpIndexOf`）读到的是上一条
+   *     非空快照——同一个执行面撤走全部 server 之后，"实时请求里已经没有它、重建又把它
+   *     请回来"——同一份日志重建出两份不同的请求，而 append-only 日志的全部意义就是那条承诺。
+   *   写完墓碑之后下一拍 `point.text === ''` ⇒ 不会再写，不会每拍刷事件。
    *
    * 返回"这一拍定下的文本"，便于测试直接断言（生产调用点不需要它）。
    */
@@ -3056,6 +3107,19 @@ export class RealLoop {
     this.eventView = events;
     const point = mcpIndexOf(events);
     const version = RENDER_VERSION;
+    // 插件组合摘要**只读一次**：判据、重建原因、记下的水位必须是同一个值
+    // （宿主那一格是活引用，两次调用之间可能已经变过）。
+    const pluginRevisionNow = this.deps.pluginRevision?.();
+    // 水位**先按日志里那一条快照对齐**（2026-10-26 修）：`pluginRevisionSeen` 初值是
+    // `undefined`，而零插件的实例给的是空组合的 sha256（`e3b0c442…`）⇒ 两者永远不等，
+    // 于是**每一次进程启动**都会判一次 stale、写一条字节完全相同的事件，诊断行还写着
+    // 「插件组合变化（无 → e3b0c442）」——那是在报一件没发生的事。凭什么把"重启后第一次"说成
+    // "组合变了"：重启不改组合，只有装/卸/启/停才改。
+    // 对齐之后，第一次启动仍会因别的判据重建（version/descClauseVersion/coveredSeq 任一不成立），
+    // 但原因会如实写成那一条；只有**真的**换了组合才报「插件组合变化」。
+    if (this.pluginRevisionSeen === undefined && point.seq !== 0) {
+      this.pluginRevisionSeen = point.pluginRevision;
+    }
     // 两条"该重建"的判据**分开**（判据与理由写在 `MCP_INDEX_DESC_CLAUSE_VERSION` 的注释里）：
     //   • version 换代 ⇒ 渲染模板变了（请求体可比性变了）；
     //   • 行模板版本换代 ⇒ 这一行怎么拼变了。它**只重建一次**：重建出来的快照带着当前值，
@@ -3064,15 +3128,30 @@ export class RealLoop {
     const stale = point.seq === 0
       || point.version !== version
       || point.descClauseVersion !== MCP_INDEX_DESC_CLAUSE_VERSION
-      || point.seq < point.coveredSeq;
+      || point.seq < point.coveredSeq
+      // 插件组合换了一批 ⇒ 执行面上那几个 server 已经不在了（判据见方法头 ④）
+      || this.pluginRevisionSeen !== pluginRevisionNow;
     if (!stale) {
       this.mcpIndexText = point.text ?? '';
       return this.mcpIndexText;
     }
+    // 判据一过就记下这一次看到的组合摘要（与 `skillIndexSync` 的 `skillPackageRootsRevision`
+    // 同形）：重建之后无论写没写事件，这件事都已经"看过"了 ⇒ 下一拍不该再为它重建一次。
+    const pluginRevisionBefore = this.pluginRevisionSeen;
+    this.pluginRevisionSeen = pluginRevisionNow;
 
-    const view = mcpIndexView(this.deps.config.mcp.servers, this.deps.dataDir);
-    // 空索引：不写事件（判据见方法头），但**缓存要跟着置空**——她这一刻确实一个 server 都没有。
+    const view = mcpIndexView(this.deps.mcpDeclarations?.() ?? this.deps.config.mcp.servers, this.deps.dataDir);
+    // 空索引分两种形状（判据见方法头"空配置"那一节）：首启不写；**从非空变空必须写墓碑**
+    // ——否则重建会读到上一条非空快照，把已经被撤走的 server 请回请求里。
     if (view.text === '') {
+      if (point.seq !== 0 && (point.text ?? '') !== '') {
+        this.appendSync('mcp/index', {
+          version, text: '', servers: [],
+          descClauseVersion: view.descClauseVersion,
+          ...(pluginRevisionNow === undefined ? {} : { pluginRevision: pluginRevisionNow }),
+        }, 'internal');
+        this.write('[MCP] 常驻索引已清空：声明面里已经一个 server 都没有');
+      }
       this.mcpIndexText = '';
       return this.mcpIndexText;
     }
@@ -3080,6 +3159,8 @@ export class RealLoop {
       version, text: view.text, servers: view.servers,
       // 行模板版本一起落（缺这一格的老快照按 0 算 ⇒ 该重建一次，见那个常量的注释）
       descClauseVersion: view.descClauseVersion,
+      // 插件组合摘要（只可观测：排障与重放比对用，不参与渲染字节）
+      ...(pluginRevisionNow === undefined ? {} : { pluginRevision: pluginRevisionNow }),
     }, 'internal');
     this.mcpIndexText = view.text;
     const reason = point.seq === 0
@@ -3088,7 +3169,9 @@ export class RealLoop {
         ? `模板换代（快照是 v${point.version ?? '?'}）`
         : point.descClauseVersion !== MCP_INDEX_DESC_CLAUSE_VERSION
           ? `索引行模板换代（快照是第 ${point.descClauseVersion} 版，当前第 ${MCP_INDEX_DESC_CLAUSE_VERSION} 版——这一版给行里补了"它是干什么的"那一截）`
-          : '上下文重大变化后归集';
+          : pluginRevisionBefore !== pluginRevisionNow
+            ? `插件组合变化（${shortRevision(pluginRevisionBefore)} → ${shortRevision(pluginRevisionNow)}）`
+            : '上下文重大变化后归集';
     this.write(`[MCP] 常驻索引已重建（${reason}）：${view.servers.length} 个 server，`
       + `${view.servers.filter(row => !row.disabled).length} 个启用`);
     return this.mcpIndexText;
@@ -3110,15 +3193,22 @@ export class RealLoop {
    *      正文里明说"索引不会立刻改字节"），到**下一次归集**（压缩 / reset / 重启）才把那一行
    *      进到索引里。在这一格按"目录变了"重建，就等于每装一个技能改一次请求前缀
    *      ——缓存保护等于没做（那正是用户这一条要治的毛病）。
-   *   ③ **空索引不落事件**（与 `mcpIndexSync` 同一条口径）：一个可用技能都没有时该段整段不出现，
-   *      写一条空快照只会在事件流里多一行没人读的东西，还会让"事件序列逐字相同"的基线无故变红。
-   *   ④ **"构建文本 + 写事件"不在这个方法里**（2026-10-23 抽出）：唯一一份实现在
+   *   ③ **空索引分两种形状**（与 `mcpIndexSync` 同一条口径）：从来没有过快照
+   *      （`point.seq === 0`）时不写——一个可用技能都没有时该段整段不出现，空快照与
+   *      「没有快照」在渲染上逐字节等价，写它只会在事件流里多一行没人读的东西、让
+   *      「事件序列逐字相同」的基线无故变红；而**从非空变空**时必须写一条 `text: ''` 的
+   *      墓碑快照——不写的话，重建（`replay` 的 `skillCatalogForReplay`）读到的仍是上一条
+   *      非空快照，「实时请求里已经没有了、重建又把它请回来」——同一份日志重建出两份不同的
+   *      请求，重放的基础约束当场作废。
+   *   ④ **「构建文本 + 写事件」不在这个方法里**（2026-10-23 抽出）：唯一一份实现在
    *      `skill/index-snapshot.ts` 的 `writeSkillIndexSnapshot`——人工归集（`irmia skill
    *      reindex`）走的是同一份，于是两条路写下的快照**逐字段相同**。这一格只负责
-   *      "什么时候该重建"（上面那三条判据）与"怎么落库"（`appendSync`）。
-   *      那一格正是为"信任表已修好、快照却停在旧字节上"的事故留的人工入口：此时上面三条
+   *      「什么时候该重建」（上面那几条判据）与「怎么落库」（`appendSync`）。
+   *      那一格正是为「信任表已修好、快照却停在旧字节上」的事故留的人工入口：此时上面几条
    *      判据一条都不成立（version 一致、seq 不小于 coveredSeq、日志里已有快照）⇒
    *      **重启也不会重建**，只能等下一次压缩摘要。
+   *   ⑤ **插件技能根换代**（`SkillManager.packageRevision`）：插件的技能根被撤走/换上之后
+   *      同一拍就要重建——否则索引里还列着已经读不到的技能名。
    *
    * ⚠ 它**必须排在 `mcpIndexSync` 之后**（两个调用点都是这样：`warmUp` 与 `tickOnce` 的轮首）：
    * 事件快照 `eventView` 由那条先跑时读下，这里只读它、不再自己读一遍盘。
@@ -3128,14 +3218,16 @@ export class RealLoop {
   async skillIndexSync(): Promise<string> {
     const point = skillIndexOf(this.eventView);
     const version = RENDER_VERSION;
-    // 与 `mcpIndexSync` 的 `stale` 逐条同形：首次 / 模板换代 / 压缩之后（那三条的理由写在那处）
+    // 与 `mcpIndexSync` 的 `stale` 同形，另加插件 Skill 根版本：根变化必须在下一拍重建
     const stale = point.seq === 0
       || point.version !== version
-      || point.seq < point.coveredSeq;
+      || point.seq < point.coveredSeq
+      || this.skillPackageRootsRevision !== (this.skills?.packageRevision ?? 0);
     if (!stale) {
       this.skillIndexText = point.text ?? '';
       return this.skillIndexText;
     }
+    this.skillPackageRootsRevision = this.skills?.packageRevision ?? 0;
 
     // 信任门的真相源是日志：重建**之前**把**还没折过**的 `skill/installed` 折进来。
     //
@@ -3155,14 +3247,6 @@ export class RealLoop {
     }
 
     const catalog = this.skills?.catalog() ?? null;
-    // 构建文本 + 写事件：**与人工归集（`irmia skill reindex`）共用同一份实现**，
-    // 所以那两条路写下的 `skill/index` 逐字段相同（含键顺序）。理由与口径在
-    // `skill/index-snapshot.ts` 的文件头：那里是唯一的写入实现，这里只提供"怎么落库"
-    // （`appendSync` 顺带折投影、压力与信任表）。
-    //
-    // 循环这一路**不传** `skipWhenUnchanged`：这里只在三条判据成立时走到（首次 / 模板换代 /
-    // 快照早于最后一次压缩），而最后那条即使文本一字未变也**必须**写一条——它记的是
-    // "我现在归集到了这次压缩之后"，少了它下一拍还会判过期。
     const snapshot = writeSkillIndexSnapshot({
       events: this.eventView,
       catalog,
@@ -3170,8 +3254,10 @@ export class RealLoop {
     });
     // 缓存跟着定下（空索引也走这条：`text` 就是空串，与 `mcpIndexSync` 那一支同形）
     this.skillIndexText = snapshot.text;
-    if (!snapshot.written) return this.skillIndexText;
-
+    if (!snapshot.written) {
+      if (snapshot.skipped === 'empty') return this.skillIndexText;
+      return this.skillIndexText;
+    }
     const reason = point.seq === 0
       ? '首次（日志里还没有快照）'
       : point.version !== version
@@ -3219,8 +3305,9 @@ export class RealLoop {
     const fields = change.fields.join('、');
     this.write(`[配置] 热更已并入：${fields}（循环这一侧读的是同一份就地改过的 AppConfig，无需重建）`);
     if (change.fields.includes('mcp.servers')) {
-      const enabled = this.deps.config.mcp.servers.filter(entry => entry.disabled !== true).length;
-      this.write(`[MCP] 声明面已热更（当前 ${this.deps.config.mcp.servers.length} 个 server，`
+      const declarations = this.deps.mcpDeclarations?.() ?? this.deps.config.mcp.servers;
+      const enabled = declarations.filter(entry => entry.disabled !== true).length;
+      this.write(`[MCP] 声明面已热更（当前 ${declarations.length} 个 server，`
         + `${enabled} 个启用）：**常驻索引那一段的字节保持不变**——`
         + '它按既有快照机制在下一次上下文重大变化（压缩 / reset）或重启时归集；'
         + '此刻要她看见的变化走的是尾部追加的那条通报（wake/manual · via=mcp）');

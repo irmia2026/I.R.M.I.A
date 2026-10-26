@@ -2342,10 +2342,19 @@ export interface McpIndexEntry {
  *
  * ─────────────────── 什么时候写（`real-loop.mcpIndexSync`，唯一写入点） ───────────────────
  *
- * 判据是"这份快照还代表现在吗"，两个条件**任一**成立就重建（并如实写一条新事件）：
- *   • 日志里**还没有**任何 `mcp/index`（首次、或升级上来的老日志）；
- *   • 最后一条 `mcp/index` 的 `version` ≠ 当前 `RENDER_VERSION`，或者它的 `seq` **早于**
- *     最后一条 `compaction/summary`（那一刻上下文重大变化过 ⇒ 该归集了）。
+ * 判据是"这份快照还代表现在吗"。下面**任一条**成立就重建（并如实写一条新事件）——
+ * 这是 `mcpIndexSync` 里 `stale` 的**完整清单**（同序），加判据时必须同时改这一段：
+ *   • **首次**：日志里**还没有**任何 `mcp/index`（新进程、或升级上来的老日志）；
+ *   • **模板换代**：最后一条的 `version` ≠ 当前 `RENDER_VERSION`；
+ *   • **行模板换代**：最后一条的 `descClauseVersion` ≠ 当前 `MCP_INDEX_DESC_CLAUSE_VERSION`
+ *     （这一行的拼法变了；它只重建一次——重建出来的带着当前值，下一拍就不再成立）；
+ *   • **上下文重大变化**：最后一条的 `seq` **早于**最后一条 `compaction/summary`
+ *     （那一刻上下文换过一版 ⇒ 该归集了）；
+ *   • **插件组合变化**：最后一条记下的 `pluginRevision` ≠ 当前插件组合摘要——插件隔离/
+ *     恢复/卸载会从执行面撤走 server，索引不许还写着已经不能调用的名字（"幽灵 server"）。
+ *
+ * 空索引另有一支：**首启不写、从非空变空写一条 `text: ''` 的墓碑**（判据与理由在
+ * `mcpIndexSync` 的方法头"空配置"那一节；不写会让重建读到上一条非空快照）。
  *
  * 为什么"重大变化点"只认 `compaction/summary`：它是本仓库里**唯一**的"上下文换了一版"的
  * 事实（自动压缩与界面 reset 都写它，人工 `/compact` 也写它），遮蔽点由它唯一确定
@@ -2385,6 +2394,17 @@ export interface McpIndexSnapshot {
    * （`MCP_INDEX_DESC_CLAUSE_VERSION`，唯一常量在 `persona/assets.ts`）。
    */
   descClauseVersion?: number;
+  /**
+   * 写下这条快照时的**插件组合摘要**（`PluginRuntimeComposition.revision`，sha256；2026-10-26 加）。
+   *
+   * 为什么落这一格：它是"这份索引是按哪个执行面写的"的**凭据**。插件隔离/恢复/卸载会从
+   * 执行面撤走 MCP server，索引跟着重建之后，排障与重放比对要能回答"当时池里是哪一批"。
+   * 它只为可观测：渲染读的是 `text`，这一格**一个字节都不进请求**。
+   *
+   * ⚠ **老日志没有这一格 ⇒ `undefined`，不许当成"组合为空"**：组合摘要永远是非空 sha256，
+   * `undefined` 只表示"这一版没说"，与 `descClauseVersion` 缺省按第 0 版算是同一类兼容处理。
+   */
+  pluginRevision?: string;
 }
 
 export interface McpIndex extends EventEnvelope<'mcp/index', McpIndexSnapshot> {}
@@ -2416,9 +2436,15 @@ export interface McpIndex extends EventEnvelope<'mcp/index', McpIndexSnapshot> {
  *
  * ─────────────────── 什么时候写（`real-loop.skillIndexSync`，唯一写入实现） ───────────────────
  *
- * 与 `mcp/index` 的**同一组**判据：① 日志里还没有快照（首次 / 老日志 / 升级）；② 最后一条
- * 快照的 `version` ≠ 当前 `RENDER_VERSION`；③ 最后一条快照的 seq **早于**最后一条
- * `compaction/summary`（上下文重大变化 ⇒ 该归集了）。**"技能目录变了"刻意不是触发点**：
+ * 与 `mcp/index` 的**同一组**判据（完整清单，同序；加判据时同时改这一段）：① 日志里还没有
+ * 快照（首次 / 老日志 / 升级）；② 最后一条快照的 `version` ≠ 当前 `RENDER_VERSION`；
+ * ③ 最后一条快照的 seq **早于**最后一条 `compaction/summary`（上下文重大变化 ⇒ 该归集了）；
+ * ④ 技能根换代：`SkillManager.packageRevision` ≠ 上次建索引时记下的那个值（插件技能根被
+ * 装上/撤走 ⇒ 目录换了，而那批技能由插件包直接放行、不会写 `skill/installed`）。
+ * 空索引同样分两种形状：**首启不写、从非空变空写一条 `text: ''` 的墓碑**——不写的话，
+ * 重建（`replay` 的 `skillCatalogForReplay`）读到的是上一条非空快照，实时请求里已经不存在的
+ * 技能在重建里又冒出来，"同一份日志重建同一份请求"当场作废。
+ * **"技能目录变了"刻意不是触发点**：
  * 增删技能要走尾部追加（那条 `wake/manual{via:'grant'}` + 她自己 `safe_read` 正文），
  * 到下一次归集才把那一行进到索引里——否则每加一个技能就改一次前缀，缓存保护等于没做。
  *
@@ -2501,6 +2527,53 @@ export interface SkillSeeded extends EventEnvelope<'skill/seed', {
   skills: string[];
   /** 复制过去的文件总数（含 references/ assets/ scripts/ 那些随包文件） */
   files: number;
+}> {}
+export interface PluginInstalled extends EventEnvelope<'plugin/installed', {
+  id: string; version: string; contentHash: string; path: string; by: 'human';
+}> {}
+export interface PluginEnabled extends EventEnvelope<'plugin/enabled', { id: string; contentHash: string }> {}
+export interface PluginDisabled extends EventEnvelope<'plugin/disabled', { id: string; contentHash: string }> {}
+export interface PluginFailed extends EventEnvelope<'plugin/failed', { id: string; contentHash: string; reason: string }> {}
+export interface PluginQuarantined extends EventEnvelope<'plugin/quarantined', {
+  id: string; contentHash: string; contributionKind: string; contributionName: string;
+  category: string; count: number; retryAt: string; failedAt: string; reason: string;
+}> {}
+export interface PluginProbeStarted extends EventEnvelope<'plugin/probe-started', {
+  id: string; contentHash: string; contributionKind: string; contributionName: string;
+  category: string; count: number; probeAt: string;
+}> {}
+export interface PluginRecovered extends EventEnvelope<'plugin/recovered', {
+  id: string; contentHash: string; contributionKind: string; contributionName: string;
+  category: string; count: number; recoveredAt: string;
+}> {}
+
+/**
+ * 内置插件的出厂种子首次安装到数据目录的留痕（beta14）。
+ *
+ * 它解释的是**盘上为什么会多出这个插件包**：它不是人装的、也不是 agent 自沉淀的，
+ * 而是出厂那份被原样搬过来的。没有这条记录，事后只能靠"内容哈希和安装包里的一模一样"
+ * 去猜——而那正是最难解释的一句话（"我没装过，它怎么进来的"）。它同时也是"装了几个"
+ * 的唯一凭据：摘要行会随 stdout 滚掉，事件留得住。
+ *
+ * **它不是信任门**（**裁决与 `skill/seed` 同形**，不是逐字同形）：搬过来的插件照样要
+ * `plugin/installed { by: 'human' }` 才进组合。内置插件是**可执行代码**，比技能风险更高，
+ * 为省用户一次点击就开"随包代码自动执行"的口子不值得。
+ *
+ * 可见性 internal：它是**装配账**，不是给她的输入——她知道自己有哪些插件就够了。
+ *
+ * ⚠ 与 `skill/seed` 一个真实差别：内置插件**可以有部分失败**。技能那条路只在"复制成功"
+ * 时记一条；这里则是**装了哪个就记哪个**（`main.ts` 按 `installed` 逐个 append，失败另外
+ * 用 stdout 报），所以同一个种子根可能产出**多条**本事件，也可能一条都没有。
+ */
+export interface PluginBuiltin extends EventEnvelope<'plugin/builtin', {
+  /** 内置插件 id */
+  id: string;
+  /** 内置插件版本 */
+  version: string;
+  /** 内容哈希（与包目录名同源） */
+  contentHash: string;
+  /** 出厂种子相对路径（如 `plugins/builtin/meme`）—— 不是绝对路径 */
+  source: string;
 }> {}
 
 // ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
@@ -2664,6 +2737,7 @@ export type GrantKind = 'mcp-add' | 'mcp-remove' | 'skill-install' | 'skill-remo
 export interface HookFired extends EventEnvelope<'hook/fired', {
   hook: 'PreToolUse' | 'PostToolUse' | 'Wake';
   outcome: 'ok' | 'timeout' | 'error';
+  pluginId?: string; contentHash?: string; contributionName?: string;
 }> {}
 
 export interface SpeakSent extends EventEnvelope<'speak/sent', {
@@ -3448,6 +3522,8 @@ export type AppEvent =
   | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
   | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | HookFired | SpeakSent
+  | PluginInstalled | PluginEnabled | PluginDisabled | PluginFailed
+  | PluginQuarantined | PluginProbeStarted | PluginRecovered | PluginBuiltin
   | ToolsInventoryChanged
   | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
@@ -3590,6 +3666,10 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 写成 model（那会让她每轮读一遍"我的技能是从安装包复制的"——纯粹的常驻开销）。
   // ⚠ 它**不改 `RENDER_VERSION`**：事件不进请求体，渲染口径一个字节都没动。
   'skill/seed': 'internal',
+  'plugin/installed': 'internal', 'plugin/enabled': 'internal',
+  'plugin/disabled': 'internal', 'plugin/failed': 'internal',
+  'plugin/quarantined': 'internal', 'plugin/probe-started': 'internal', 'plugin/recovered': 'internal',
+  'plugin/builtin': 'internal',
   // 工具清单指纹的变化（2026-10-11，BUG-3）**同样刻意 internal**，理由与上面那条逐字同形：
   // 它是**装配账**（"这一刻进请求的清单是哪几件、比上次少了哪几件"），而清单本身已经作为
   // tools 段进了请求体——再把它作为一条事件渲染一遍，就是同一件事在她眼前出现两遍。

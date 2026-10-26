@@ -160,6 +160,10 @@ import { compactTimestamp } from '../tools/fs/text-codec.ts';
 import { estimateTokens } from '../tools/registry.ts';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { TimerStore } from '../wake/timer-store.js';
+import type { PluginManager } from '../plugin/manager.js';
+import type { PluginRuntimeComposition } from '../plugin/runtime.js';
+import { AGENT_VERSION } from '../version.ts';
+import { listPlugins, runPluginCommand } from '../plugin/http.ts';
 import type { DepsManager } from '../deps/manager.js';
 import { DEP_NAMES, type DepName } from '../deps/probe.ts';
 import type { ManagedServiceStatus } from '../services/snowluma.js';
@@ -476,6 +480,10 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 与 set-key 同级：门挡的是误触（按钮点错、脚本里循环调用）——轮换一次，所有
   // 还没换凭据的外部投递方**立刻开始收 401**，那是个需要点头的动作，不是一次顺手点击。
   'regenerate-webhook-token': 'regenerate-webhook-token',
+  'plugin-install': 'plugin-install',
+  'plugin-confirm': 'plugin-confirm',
+  'plugin-enable': 'plugin-enable',
+  'plugin-disable': 'plugin-disable',
 };
 
 /**
@@ -723,6 +731,16 @@ export interface WebServerDeps {
    * 界面上分不清"没有依赖"与"没接上依赖"是最没用的那种观测）。
    */
   deps?: DepsManager | undefined;
+  /** 本地插件管理器；未注入时插件读写接口均返回 501。 */
+  plugins?: PluginManager | undefined;
+  /**
+   * 插件运行组合面（`composePluginRuntime` 的结果）。
+   *
+   * 为什么管理视图要它：`/api/skills` 与 `/api/mcp` 原先只读磁盘目录与 `config.json`，
+   * 于是"插件贡献真的生效了、这两个接口却看不见"——冒烟里 MCP 能调、Hook 能跑、技能进了索引，
+   * 而管理视图一片空白。给函数而不是快照：启停插件后下一次读就该是新的一份。
+   */
+  pluginRuntime?: (() => PluginRuntimeComposition) | undefined;
   /**
    * 内置协议端（`channels.onebot.managed`，v34）。给了它才有 `GET/POST/PUT /api/protocol-side`：
    * 界面据此启停它、看它的状态、改它的目录。
@@ -4041,6 +4059,11 @@ class WebServerImpl implements WebServer {
 
     if (req.method === 'GET') {
       switch (path) {
+        case '/api/plugins': {
+          const result = listPlugins(this.deps.plugins);
+          sendJson(res, result.status, result.body);
+          return;
+        }
         case '/api/projection':
           sendJson(res, 200, this.deps.projection);
           return;
@@ -5739,6 +5762,14 @@ class WebServerImpl implements WebServer {
 
     const now = this.deps.now();
     switch (command) {
+      case 'plugin-install':
+      case 'plugin-confirm':
+      case 'plugin-enable':
+      case 'plugin-disable': {
+        const result = runPluginCommand(command, payload, this.deps.plugins);
+        sendJson(res, result.status, result.body);
+        return;
+      }
       case 'reset-context': {
         // 清空对话历史：**不删事件**（日志是唯一真相源，删了就没法复盘），而是写一条遮蔽摘要，
         // 把 coveredUpToSeq 推到当前水位——渲染层从此只看这之后的事件，等于给她一个干净的上下文。
@@ -8120,7 +8151,15 @@ class WebServerImpl implements WebServer {
    * 不该因为目录暂时读不到就忘掉。
    */
   private async skillsView(options: { rescan?: boolean } = {}): Promise<Record<string, unknown>> {
-    const manager = new SkillManager({ baseRoot: this.deps.skillsRoot ?? process.cwd() });
+    // 插件贡献的技能根由宿主交出（`composePluginRuntime().skillRoots`）：那一份已经过了
+    // 「整包已确认、声明可读」两道关，本视图**只读**接进来，不在这里重判信任——
+    // `SkillManager` 见到带 `packageHash` 的根直接判 trusted（见 `trustCandidate`）。
+    // 未注入组合面 ⇒ 空数组：扫描范围与接插件之前逐字一致。
+    const pluginRoots = this.deps.pluginRuntime?.().skillRoots ?? [];
+    const manager = new SkillManager({
+      baseRoot: this.deps.skillsRoot ?? process.cwd(),
+      packageRoots: pluginRoots,
+    });
     manager.setTrustEvents(await readAllEvents(this.deps.log));
     const scan = manager.scan();
     const catalog = manager.catalog();
@@ -8132,6 +8171,16 @@ class WebServerImpl implements WebServer {
     const ignored = new Set([...onDisk].filter((name) => scanned.has(name)));
     return {
       roots: scan.roots,
+      /**
+       * 哪些技能根来自插件（只读）：`rootName` 与 `items[].rootName` 同一口径，
+       * `packageHash` 指回提供它的那个插件版本——界面据此把「插件带进来的根」与
+       * 「内置根里扫到的」分开展示。未注入组合面时是空数组。
+       */
+      pluginRoots: pluginRoots.map((root) => ({
+        rootName: root.rootName,
+        dir: root.dir,
+        packageHash: root.packageHash,
+      })),
       catalogTokens: catalog.tokens,
       entries: catalog.entries,
       warnings: catalog.warnings,
@@ -8143,7 +8192,11 @@ class WebServerImpl implements WebServer {
       ignoredOnDisk: [...onDisk].sort(),
       ignoredFile: join(this.deps.dataDir, SKILLS_IGNORED_FILE),
       items: scan.candidates.map((candidate) => {
+        // 插件根里的技能由**整包信任**放行：`catalog()` 走的是 `trustCandidate`，见到
+        // `packageHash` 直接判 trusted；而公开的 `trustOf()` 只认 `skill/installed` 事件。
+        // 这一列必须与 catalog 同一结论，否则界面会摆出「详情写着从未确认、条目却在索引里」。
         const verdict = manager.trustOf(candidate.name, candidate.contentHash);
+        const fromPlugin = candidate.packageHash !== undefined;
         return {
           name: candidate.name,
           relDir: candidate.relDir,
@@ -8152,8 +8205,10 @@ class WebServerImpl implements WebServer {
           description: candidate.description,
           bytes: candidate.bytes,
           contentHash: candidate.contentHash,
-          trust: verdict.state,
-          trustDetail: verdict.detail,
+          trust: fromPlugin ? 'trusted' : verdict.state,
+          trustDetail: fromPlugin
+            ? `由已确认插件包 ${candidate.packageHash} 提供（整包信任，无需单独确认）`
+            : verdict.detail,
           inCatalog: inCatalog.has(candidate.name),
           ignored: ignored.has(candidate.name),
         };
@@ -8421,6 +8476,10 @@ class WebServerImpl implements WebServer {
    * 列着工具、页头写着 0 件"这种自相矛盾。另加一组只读的观测字段答"这份清单是什么时候的"：
    * `toolList` / `toolsListAt` / `toolsFrom` / `toolsQuery` / `toolsAgeMs`——界面据此说得出
    * "这是 3 小时前那份清单"，而旧形状（回收即清空）根本读不出这句话，人看到的只有"已停止 · 0 件"。
+   *
+   * **声明面不止 `config.json`**（评审 #9）：已启用插件贡献的 server 也并进这一视图，逐项标
+   * `source`（`config` | `plugin`），插件项再带 `pluginId` / `contentHash`。为什么不能只读
+   * `config.json`：插件贡献真的进了执行面，而这一页看不见——冒烟时 MCP 能调、页面上却一片空白。
    */
   private async mcpView(): Promise<Record<string, unknown>> {
     const problems: string[] = [];
@@ -8432,6 +8491,41 @@ class WebServerImpl implements WebServer {
       configured = parseMcpServers(serversRaw);
     } catch (err) {
       problems.push(describeError(err));
+    }
+
+    /**
+     * 声明面 = 人写的 `config.json` + 已启用插件贡献的 server。
+     *
+     * 两处都**现取**：组合面是「此刻启用了哪些插件」的投影（启停之后下一次读就该是新的一份，
+     * 见 `WebServerDeps.pluginRuntime` 的注释），`config.json` 同理。插件 server 的名字由
+     * `composePluginMcp` 统一加上 `<pluginId>__` 前缀，这里按前缀回溯归属、不重读声明文件：
+     * 插件 id 的字符集是 `[a-z0-9-]`（manifest.ts），不含下划线，所以前缀不会误配到别的插件。
+     *
+     * 重名按「内置优先」处理：执行面那边（`runtime.ts` 的 `mergeMcpDeclarations`）遇到重名
+     * 直接拒绝整份合并，由宿主兜底保留内置声明；这里只是只读视图，把插件那条标成冲突、跳过，
+     * 不能因为一个重名让整个页面 500。
+     */
+    const declared: Array<McpServerEntry & { source: 'config' | 'plugin'; pluginId?: string; contentHash?: string }> =
+      configured.map((entry) => ({ ...entry, source: 'config' as const }));
+    const pluginComposition = this.deps.pluginRuntime?.();
+    const pluginOwnerOf = (name: string): { pluginId: string; contentHash: string } | undefined => {
+      const owner = pluginComposition?.packages.find((pkg) => name.startsWith(`${pkg.manifest.id}__`));
+      return owner === undefined ? undefined : { pluginId: owner.manifest.id, contentHash: owner.contentHash };
+    };
+    const declaredNames = new Set(declared.map((entry) => entry.name));
+    for (const entry of pluginComposition?.mcpServers ?? []) {
+      const owner = pluginOwnerOf(entry.name);
+      if (declaredNames.has(entry.name)) {
+        problems.push(`MCP server ${entry.name}${owner === undefined ? '' : `（插件 ${owner.pluginId}）`}`
+          + ' 与内置声明重名：内置优先，插件这条已跳过');
+        continue;
+      }
+      declaredNames.add(entry.name);
+      declared.push({
+        ...entry,
+        source: 'plugin',
+        ...(owner === undefined ? {} : { pluginId: owner.pluginId, contentHash: owner.contentHash }),
+      });
     }
 
     interface SeenTool { name: string; description: string }
@@ -8558,7 +8652,7 @@ class WebServerImpl implements WebServer {
     const mcpToolNames = registryNames.filter((name) => name.startsWith(MCP_NAME_PREFIX));
     // 工具描述：注册表现取优先（真注册过才有），没有就用事件里那份（server 自报的原话）
     const describe = (name: string): string => this.deps.registry?.get(name)?.description ?? '';
-    const servers = configured.map((entry) => {
+    const servers = declared.map((entry) => {
       const seen = latest.get(entry.name) ?? null;
       const registered = registryNames.filter((name) => name.startsWith(`${MCP_NAME_PREFIX}${entry.name}__`));
       const prefix = `${MCP_NAME_PREFIX}${entry.name}__`;
@@ -8627,6 +8721,11 @@ class WebServerImpl implements WebServer {
       const toolList = toolsFrom === 'none' ? [] : observedTools;
       return {
         name: entry.name,
+        // 这条声明是谁给的（`config` = 人写在 config.json 里的；`plugin` = 已启用插件贡献的）：
+        // 插件项带 `pluginId` / `contentHash`，界面才能把两组分开摆、并说清"是哪个版本带进来的"。
+        source: entry.source,
+        pluginId: entry.pluginId ?? null,
+        contentHash: entry.contentHash ?? null,
         command: entry.command,
         args: entry.args ?? [],
         // env 与 cwd 原样回传（界面只读摆出来）：人得看得出"这个服务带着什么起来"
@@ -8724,8 +8823,13 @@ class WebServerImpl implements WebServer {
     const seenToolNames = servers.flatMap((server) => server.registeredTools);
     const effectiveTools = mcpToolNames.length > 0 ? mcpToolNames : seenToolNames;
     return {
-      configured: configured.map((entry) => ({
+      // 与 `servers[]` 同一份声明面（含插件项），只给界面搭列表用的粗粒度那一层：
+      // `source` 是分组的依据，插件项另外带着归属（`pluginId` / `contentHash`）。
+      configured: declared.map((entry) => ({
         name: entry.name,
+        source: entry.source,
+        pluginId: entry.pluginId ?? null,
+        contentHash: entry.contentHash ?? null,
         command: entry.command,
         args: entry.args ?? [],
         env: entry.env ?? {},
@@ -9713,8 +9817,9 @@ interface McpProbeOutcome {
  * 事件日志是唯一真相源，宁可这条测试在日志里不留痕（结果直接回给点按钮的人）。
  */
 class McpProbeHost implements McpConnectionHost {
-  // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.13' };
+  // 版本报 `AGENT_VERSION` 那一个真源（`src/version.ts`）：探测回执里报的版本必须与宿主
+  // 自报的一致，否则对端日志里会出现两个"同一个 IRMIA 的不同版本"。
+  readonly clientInfo = { name: 'irmia-agent', version: AGENT_VERSION };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

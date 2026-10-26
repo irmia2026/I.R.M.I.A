@@ -130,9 +130,19 @@ export function writeSkillIndexSnapshot(
     tokens: deps.catalog?.tokens ?? 0,
   };
 
-  // 空索引：不写事件（判据见文件头），但把"这一拍定下的是空串"如实交回给调用方
+  // 空索引分两种形状（判据见文件头）：首启不写；**从非空变空必须写墓碑**。
+  // 不写的话，重建（`replay` 的 `skillCatalogForReplay`）读到的仍是上一条非空快照——
+  // 「实时请求里已经没有了、重建又把它请回来」，同一份日志重建出两份不同的请求。
   if (text === '') {
-    return { written: false, seq: point.seq, text: '', ...counts, skipped: 'empty' };
+    if (point.seq === 0 || (point.text ?? '') === '') {
+      // 首启（从来没有过快照）或已经是空快照：空快照与「没有快照」在渲染上逐字节等价，
+      // 再写一条只会在事件流里多一行没人读的东西，还会让「事件序列逐字相同」的基线无故变红。
+      return { written: false, seq: point.seq, text: '', ...counts, skipped: 'empty' };
+    }
+    // 从非空变空：写一条 `text: ''` 的墓碑。写完下一拍 `point.text === ''` ⇒ 不会再写，
+    // 不会每拍刷事件。
+    const event = deps.write({ version, text: '', skills: [] });
+    return { written: true, seq: event.seq, text: '', ...counts, skipped: null };
   }
 
   // 人工归集的幂等：三项一起（理由见文件头最后一段）

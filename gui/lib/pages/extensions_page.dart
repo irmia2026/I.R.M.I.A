@@ -21,11 +21,12 @@ import '../theme/design_tokens.dart';
 import '../ui_kit.dart';
 import '../ui_state.dart';
 import 'page_chrome.dart';
+import 'plugins_panel.dart';
 
 part 'extensions_kit.dart';
 
 /// 扩展页 —— 与 Web 端 #/extensions 同构，版式照 [ChannelsPage]：
-/// 左侧 260px 四项（技能 / MCP / 内置工具 / Hooks）+ 右侧详情工作台；
+/// 左侧 260px 五项（技能 / Plugins / MCP / 内置工具 / Hooks）+ 右侧详情工作台；
 /// 窄窗（<900px）降级为「列表 ↔ 详情」单独视图，详情带「← 列表」返回入口。
 ///
 /// **为什么从"上面一排 tab、下面一列卡片"改成这个形状**：那排 tab 把四类东西压成三个
@@ -33,10 +34,11 @@ part 'extensions_kit.dart';
 /// MCP 要拉进程、工具只是开关、Hooks 是"谁能改我"。左列表 + 右详情能让每一类**各占一整块**
 /// 写自己的引导、表单与说明，而不是在同一列卡片里互相挤。
 ///
-/// 数据只读端点四个：GET /api/skills · /api/mcp · /api/tools · /api/hooks。
-/// 写动作六条命令（都带 X-Confirm，见 server.ts 的 CONFIRM_PHRASES）：
+/// 数据只读端点五个：GET /api/skills · /api/plugins · /api/mcp · /api/tools · /api/hooks。
+/// 写动作都带 X-Confirm（见 server.ts 的 CONFIRM_PHRASES）：
 ///   skill-confirm（信任门放行）· skill-ignore（本机备忘，落 data/skills-ignored.json）·
-///   skill-create（新建骨架）· mcp-save / mcp-remove（写 config.mcp.servers）· mcp-test（真起进程试）·
+///   skill-create（新建骨架）· plugin-install / plugin-confirm / plugin-enable / plugin-disable ·
+///   mcp-save / mcp-remove（写 config.mcp.servers）· mcp-test（真起进程试）·
 ///   hook-save / hook-remove（写 data/hooks.json）
 ///
 /// 四条硬约束（沿袭既有手法）：
@@ -53,7 +55,7 @@ class ExtensionsPage extends StatefulWidget {
   State<ExtensionsPage> createState() => _ExtensionsPageState();
 }
 
-/// 四项的唯一清单（左列表与详情都照它摆）
+/// 五项的唯一清单（左列表与详情都照它摆）
 const _skillsSectionId = 'skills';
 
 List<_SectionDef> _sections(AppStrings s) => <_SectionDef>[
@@ -63,6 +65,12 @@ List<_SectionDef> _sections(AppStrings s) => <_SectionDef>[
     icon: Icons.auto_awesome_outlined,
     // 「在这里能做什么」一句话：它同时是详情页的开场白
     blurb: s.extSectionSkillsBlurb,
+  ),
+  (
+    id: 'plugins',
+    title: s.extSectionPlugins,
+    icon: Icons.extension_outlined,
+    blurb: s.extSectionPluginsBlurb,
   ),
   (
     id: 'mcp',
@@ -92,12 +100,13 @@ List<_SectionDef> _sections(AppStrings s) => <_SectionDef>[
 /// 不能等下一次轮询（`/api/grants` 每次现读，界面在决定之后单独再拉一次）。
 const _sectionKeys = <String, List<String>>{
   'skills': ['skills'],
+  'plugins': ['plugins'],
   'mcp': ['mcp', 'grants'],
   'tools': ['tools'],
   'hooks': ['hooks'],
 };
 
-const _keys = ['skills', 'mcp', 'grants', 'tools', 'hooks'];
+const _keys = ['skills', 'plugins', 'mcp', 'grants', 'tools', 'hooks'];
 
 /// 列表宽度与窄窗阈值：与消息适配器页同宽（两页并排切过去时不该跳一下）
 const _sidebarWidth = 260.0;
@@ -113,7 +122,7 @@ const _wideBreakpoint = 900.0;
 const _mcpTestTimeoutDefaultMs = 30_000;
 
 class _ExtensionsPageState extends State<ExtensionsPage> {
-  /// 选中的分区 id：四项在客户端定义，首项恒有效
+  /// 选中的分区 id：五项在客户端定义，首项恒有效
   String selectedId = _skillsSectionId;
 
   /// 窄窗视图位：false = 列表，true = 详情（宽窗两栏并排，这个位不参与）
@@ -145,6 +154,7 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
 
   /// 正在整组开/关的工具组 id（一行在忙时其余开关暂不可点，避免连点出一串并发写）
   String? busyGroup;
+  bool pluginBusy = false;
 
   /// 本机忽略集的**兜底副本**：服务端 `skills-ignored.json` 是唯一真相源，
   /// 这份只在响应里还没有 `ignored` 字段（旧服务端）时用，保证界面不因字段缺失而错分三段。
@@ -208,7 +218,14 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     try {
       final res = await widget.state.api.get(rescan && key == 'skills' ? '/api/skills?rescan=1' : '/api/$key');
       if (!mounted) return;
-      final view = res is Map<String, dynamic> ? res : null;
+      var view = res is Map<String, dynamic> ? res : null;
+      if (key == 'plugins') {
+        try {
+          view = {'items': parsePluginsResponse(res)};
+        } on FormatException {
+          view = null;
+        }
+      }
       setState(() {
         loading[key] = false;
         data[key] = view;
@@ -228,6 +245,50 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     await Future.wait(_keys.map((key) => load(key)));
     if (mounted) setState(() => firstLoad = false);
   }
+
+  Future<void> _runPluginAction(Future<void> Function() action) async {
+    if (pluginBusy) return;
+    setState(() => pluginBusy = true);
+    try {
+      await action();
+    } finally {
+      if (mounted) setState(() => pluginBusy = false);
+    }
+  }
+
+  Future<void> _installPlugin(String sourceDir) => _runPluginAction(() async {
+    final s = IrmiaStrings.read(context);
+    try {
+      await widget.state.api
+          .post('/api/commands/plugin-install', {'sourceDir': sourceDir}, confirm: 'plugin-install');
+      if (mounted) _toast(s.extPluginInstalledToast, kind: ToastKind.success);
+      await load('plugins', silent: true);
+    } catch (err) {
+      if (mounted) _toast(s.extPluginFailed(_clip('$err', 120)), kind: ToastKind.error);
+    }
+  });
+
+  Future<void> _pluginCommand(String command, String id, String contentHash) => _runPluginAction(() async {
+    final s = IrmiaStrings.read(context);
+    try {
+      await widget.state.api.post(
+        '/api/commands/$command',
+        {'id': id, 'contentHash': contentHash},
+        confirm: command,
+      );
+      if (mounted) {
+        _toast(
+          command == 'plugin-confirm'
+              ? s.extPluginConfirmedToast(id)
+              : s.extPluginRestartToast(command == 'plugin-enable' ? s.extPluginEnable : s.extPluginDisable, id),
+          kind: ToastKind.success,
+        );
+      }
+      await load('plugins', silent: true);
+    } catch (err) {
+      if (mounted) _toast(s.extPluginFailed(_clip('$err', 120)), kind: ToastKind.error);
+    }
+  });
 
   /// 旧服务端的 /api/skills 不带 ignored：退回 ui_state 里的本机标记（老行为照旧可用）
   void _syncIgnoredFallback(Map<String, dynamic> view) {
@@ -301,7 +362,7 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     );
   }
 
-  // ── 左：四个分区 ──
+  // ── 左：五个分区 ──
 
   Widget _listPane(BuildContext context, {required bool narrow}) {
     final s = IrmiaStrings.of(context);
@@ -421,6 +482,12 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     } else {
       body = switch (def.id) {
         'skills' => _skillsPanel(context, data['skills']!),
+        'plugins' => PluginsPanel(
+            view: data['plugins']!,
+            busy: pluginBusy,
+            onInstall: _installPlugin,
+            onCommand: _pluginCommand,
+          ),
         'mcp' => _mcpPanel(context, data['mcp']!),
         'tools' => _toolsPanel(context, data['tools']!),
         _ => _hooksPanel(context, data['hooks']!),
@@ -2108,6 +2175,9 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
             .where((item) => item['inCatalog'] != true && !ignored.contains('${item['name'] ?? ''}'))
             .length;
         return (kind: pending > 0 ? 'idle' : 'running', summary: s.extStatSkills(active, pending));
+      case 'plugins':
+        final items = _maps(view['items']);
+        return (kind: items.isEmpty ? 'sleeping' : 'running', summary: s.extPluginStat(items.length));
       case 'mcp':
         final servers = _maps(view['servers']);
         final running = _int(view['runningCount']);

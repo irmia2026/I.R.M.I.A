@@ -99,6 +99,7 @@ function handleCall(message) {
   const args = params.arguments ?? {};
   const token = params._meta?.progressToken;
   mark('call', { name, args, id: message.id, meta: params._meta });
+  if (process.env.FAKE_MCP_EXIT_ON_CALL === '1') process.exit(7);
 
   const envDelay = Number(process.env.FAKE_MCP_RESPOND_AFTER_MS ?? '0');
   const delay = Number.isFinite(envDelay) && envDelay > 0
@@ -185,6 +186,10 @@ function handle(message) {
   }
   if (message.method === 'tools/list') {
     listCount += 1;
+    if (process.env.FAKE_MCP_HANG_LIST === '1') {
+      mark('list', { n: listCount });
+      return;
+    }
     const pageSize = Number(process.env.FAKE_MCP_PAGE_SIZE ?? '0');
     const failPage = Number(process.env.FAKE_MCP_LIST_FAIL_PAGE ?? '0');
     const all = process.env.FAKE_MCP_LIST_CHANGED === '1' && listCount >= 2

@@ -13,8 +13,9 @@
  * 编译输出由 rewriteRelativeImportExtensions 改回 .js。
  */
 
+import { AGENT_VERSION } from './version.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -36,7 +37,7 @@ import { ensureMemorySeeds } from './persona/memory-maintain.ts';
 import { ensureMemoryIndex } from './persona/memory-injection.ts';
 import { DsClient, type DsResponse } from './model/ds-client.ts';
 import type { SwitchDecision } from './model/transport/registry.ts';
-import { McpClientPool, type McpDeclarationChange } from './mcp/client.ts';
+import { McpClientPool, type McpClientPoolOptions, type McpDeclarationChange } from './mcp/client.ts';
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
 import type { ToolRegistry } from './tools/registry.ts';
@@ -97,6 +98,13 @@ import {
   type GuiGuard, type GuiGuardRecord,
 } from './runtime/gui-guard.ts';
 import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
+import { PluginManager, type PluginView } from './plugin/manager.ts';
+import { BUILTIN_PLUGINS_DIR_NAME, ensureBuiltinPlugins } from './plugin/seed.ts';
+import { PluginCircuitBreaker } from './plugin/circuit-breaker.ts';
+import { composePluginMcp } from './plugin/contributions.ts';
+import { PluginProbeCancelledError, type PluginFailure } from './plugin/failures.ts';
+import { composePluginRuntime, mapPluginMcpOwners, mergeMcpDeclarations, pluginProtectedPaths, type PluginRuntimeComposition } from './plugin/runtime.ts';
+import { allEventsOf } from './state/event-snapshot.ts';
 import { EVENT_LOG_DIR_NAME, TIMER_FILE_NAME, recover, type RecoverResult } from './runtime/recover.ts';
 import { TimerStore } from './wake/timer-store.ts';
 import {
@@ -130,7 +138,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.13';
+export { AGENT_VERSION } from './version.ts';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -734,6 +742,190 @@ export function describeLaneReadout(config: AppConfig, lightLaneKey: string | nu
     + ` · light=${config.models.light.model} @ ${config.models.light.baseUrl}（${lightNote}）`;
 }
 
+// ──────────────────────────── 半开探针 ────────────────────────────
+
+/**
+ * 半开探测的请求预算：**与常驻 MCP 池分开**。
+ *
+ * 常驻池那一格是「单请求 120 秒，progress 通知续期时硬顶 600 秒」——那是为"模型正等着
+ * 一份真实结果"准备的耐心。半开探测回答的是另一个问题：「这条刚失败过的贡献，现在还通不通？」
+ * 它压在 turn 边界与退出流程上（`circuitBreaker.stop()` 要等它收场），一个卡住的 server
+ * 不该把一次"下次再说"拖成十分钟。超过下面这两个数就按"不知道通不通 = 还不通"处理，
+ * 由熔断器继续退避：这比让用户干等一个已经坏掉的东西更诚实，也更早让人看见现场。
+ */
+const PLUGIN_PROBE_REQUEST_TIMEOUT_MS = 15_000;
+const PLUGIN_PROBE_PROGRESS_HARD_CAP_MS = 30_000;
+
+/**
+ * 探针只需要「把这一条贡献拉起来试一次」，所以它只要最小的一对能力。
+ *
+ * 不直接用 `McpClientPool` 当类型，是为了让测试能换一个**不起进程**的替身去验
+ * "只连哪一条、预算多大、能不能取消"这三条判据——真 MCP 子进程的连带行为本来就不是
+ * 单测该碰的东西。
+ */
+export interface PluginProbePool {
+  listTools(serverName: string, options: { requireConnected: boolean }): Promise<unknown>;
+  shutdown(): Promise<unknown>;
+}
+
+export interface PluginProbeDeps {
+  /**
+   * `PluginManager.list()` 的只读面。
+   *
+   * 探测入口要的只是"哪个 `id@hash` 正处于 probing、它记下的故障贡献是哪一条"；
+   * 用函数而不是整个 manager，是为了让这份判据能在没有插件目录的测试里直接验。
+   */
+  list: () => readonly PluginView[];
+  dataDir: string;
+  extraLaunchers?: readonly string[] | undefined;
+  write: (line: string) => void;
+  /** 建池口子：生产就是 `new McpClientPool(...)`；测试可换成替身。 */
+  createPool?: ((options: McpClientPoolOptions) => PluginProbePool) | undefined;
+}
+
+export interface PluginProbeHandle {
+  probe: (pluginId: string, contentHash: string) => Promise<void>;
+  /**
+   * 关停序列专用：把仍在飞的探测池全部关掉，让 `listTools` 立刻失败。
+   *
+   * 没有这一步，`circuitBreaker.stop()` 要等探针把 15s/30s 的预算走完——用户看到的是
+   * "点了退出，进程半天不消失"。而这些池只承担一次探活，没有必须等它落地的状态。
+   */
+  cancelAll: () => Promise<void>;
+}
+
+/**
+ * 建一个「半开探针」：只探 `circuit.contributionName` 指向的那一条贡献。
+ *
+ * 为什么必须只探一条：探针的语义是"复核原故障贡献"，同一包里的其它贡献并没有坏；
+ * 把它们也逐条拉起来，既多起进程，又让每个 server 的超时叠在 turn 边界与退出路径上。
+ *
+ * 各贡献类型的复核方式不同：
+ *   · `mcp`   —— 只把同名 server 交给探测池，其余不连；
+ *   · `skill` —— 只复核声明的技能根目录仍可读，不起 MCP；
+ *   · `hook`  —— **不经过探针**：`circuit-breaker` 在 `drainOnce` 里对 hook 直接跳过
+ *     `runProbe`，改由 `composePluginRuntime` 把命中的条目送进 `HookRunner`，在 turn 边界
+ *     拿真实执行结果回写 `noteSuccess`/`noteFailure`。探针收到 hook 会显式报路由错误。
+ *
+ * 找不到对应贡献时**抛错**而不是静默算成功（错误信息带上贡献名）：熔断器据此继续退避，
+ * 日志里也说得清"探的是哪一条、为什么没找到"。
+ */
+export function createPluginProbe(deps: PluginProbeDeps): PluginProbeHandle {
+  // 在飞的探测池：`cancelAll()` 从这里拿。用 Set 是因为 finally 里要按对象删掉。
+  const activePools = new Set<PluginProbePool>();
+  // 因关停正在被我们收掉的池：它的 `listTools` 拒绝是"宿主主动收摊"，不是插件又坏了。
+  // 按池记而不是只按全局 `cancelled` 判，是为了不把另一个池上真实发生的失败也吞成取消。
+  const cancelledPools = new Set<PluginProbePool>();
+  const createPool = deps.createPool ?? ((options: McpClientPoolOptions) => new McpClientPool(options));
+  let cancelled = false;
+  const labelOf = (id: string, hash: string): string => `${id}@${hash.slice(0, 8)}`;
+
+  const probeMcpContribution = async (view: PluginView, contributionName: string): Promise<void> => {
+    const mcp = composePluginMcp([view.package], deps.extraLaunchers);
+    if (mcp.warnings.length > 0) throw new Error(mcp.warnings.join('; '));
+    const server = mcp.servers.find((entry) => entry.name === contributionName);
+    if (server === undefined) {
+      const declared = mcp.servers.map((entry) => entry.name);
+      throw new Error(`插件 ${view.package.manifest.id} 找不到故障贡献 ${contributionName}：`
+        + `当前 MCP 声明里${declared.length === 0 ? '没有可用 server' : `只有 ${declared.join('、')}`}`);
+    }
+    const pool = createPool({
+      servers: [server],
+      dataDir: deps.dataDir,
+      toolsCache: false,
+      emit: () => {},
+      requestTimeoutMs: PLUGIN_PROBE_REQUEST_TIMEOUT_MS,
+      progressHardCapMs: PLUGIN_PROBE_PROGRESS_HARD_CAP_MS,
+      onLog: (line) => { deps.write(`[插件探测] ${line}`); },
+    });
+    activePools.add(pool);
+    try {
+      await pool.listTools(server.name, { requireConnected: true });
+    } catch (error) {
+      // 关停时 `cancelAll()` 会先把这个池记进 cancelledPools 再 shutdown：这里的拒绝是
+      // "我们让它停的"，必须抛可识别的取消类型 —— 熔断器据此只还原隔离态、不记 strike，
+      // 也不写 plugin/quarantined；否则用户关一次进程就会平白把隔离期翻倍。
+      if (cancelledPools.has(pool)) {
+        throw new PluginProbeCancelledError(`插件 ${labelOf(view.package.manifest.id, view.package.contentHash)} 的半开探测在关停时被取消：${describeError(error)}`);
+      }
+      throw error;
+    } finally {
+      const cancelledHere = cancelledPools.has(pool);
+      activePools.delete(pool);
+      cancelledPools.delete(pool);
+      try {
+        // 关停竞态下 `cancelAll()` 可能已经在收同一个池；`shutdown()` 幂等，重复调用只是等它收完。
+        await pool.shutdown();
+      } catch (error) {
+        // 取消路径上 shutdown 自己的异常不能再冒出来：它会盖掉上面刚抛的
+        // `PluginProbeCancelledError`，熔断器又会把"宿主收摊"误记成插件失败。
+        if (!cancelledHere) throw error;
+        deps.write(`[插件探测] 取消探测池时 shutdown 报错（已忽略，退出继续）：${describeError(error)}`);
+      }
+    }
+  };
+
+  const probeSkillContribution = (view: PluginView, contributionName: string): void => {
+    const declared = view.package.manifest.contributions.skills;
+    if (!declared.includes(contributionName)) {
+      throw new Error(`插件 ${view.package.manifest.id} 找不到故障贡献 ${contributionName}：`
+        + `当前 Skill 声明里${declared.length === 0 ? '没有技能根' : `只有 ${declared.join('、')}`}`);
+    }
+    try {
+      // 探活只需要"这个根还在、还能列目录"；SKILL.md 的扫描与校验由 SkillManager 自己那一拍做。
+      readdirSync(join(view.package.rootDir, contributionName));
+    } catch (error) {
+      throw new Error(`插件 ${view.package.manifest.id} 的 Skill 根目录不可读：${contributionName}（${describeError(error)}）`);
+    }
+  };
+
+  const probe = async (id: string, hash: string): Promise<void> => {
+    // 关停已经开始：新探测不必再起，直接以"取消"收场（熔断器会还原隔离态、不记 strike）。
+    if (cancelled) throw new PluginProbeCancelledError(`插件 ${labelOf(id, hash)} 的半开探测已随宿主关停取消`);
+    const view = deps.list().find((item) => item.package.manifest.id === id
+      && item.package.contentHash === hash && item.state === 'probing');
+    if (view === undefined) {
+      throw new Error(`插件 ${labelOf(id, hash)} 不在半开探测状态（可能已被禁用、移除或重启过），无法探测`);
+    }
+    const circuit = view.circuit;
+    if (circuit === undefined) {
+      throw new Error(`插件 ${labelOf(id, hash)} 处于半开状态却没有记录故障贡献，无法确定该探哪一条`);
+    }
+    switch (circuit.contributionKind) {
+      case 'mcp':
+        return probeMcpContribution(view, circuit.contributionName);
+      case 'hook':
+        // Hook 不由探针复核：`drainOnce`（circuit-breaker.ts）对 hook 直接 dirty+continue，
+        // 真正的复核是 `composePluginRuntime` 把这一条送进 HookRunner、在 turn 边界按执行
+        // 结果回写 `noteSuccess`/`noteFailure`（main.ts 的 hook emit 那一段）。
+        // 今天走不到这里；真被送进来就显式报路由错误——宁可让熔断器看见一条"探针收到
+        // 不该它管的类型"的失败，也不要伪造一次声明复核结果。
+        throw new Error(`插件 ${labelOf(id, hash)} 的 Hook 贡献不由半开探针复核（由 HookRunner 在 turn 边界实测）`);
+      case 'skill':
+        probeSkillContribution(view, circuit.contributionName);
+        return;
+      default:
+        throw new Error(`插件 ${labelOf(id, hash)} 的故障贡献类型未知：${circuit.contributionKind}`);
+    }
+  };
+
+  const cancelAll = async (): Promise<void> => {
+    cancelled = true;
+    const pools = [...activePools];
+    // 先登记"这些池是被我们主动收掉的"：`listTools` 的拒绝要靠这个判据折算成取消。
+    for (const pool of pools) cancelledPools.add(pool);
+    // 关停路径上"某个池收不掉"不该拦住退出：各自 best-effort，异常只影响它自己。
+    const settled = await Promise.allSettled(pools.map(async (pool) => { await pool.shutdown(); }));
+    const failed = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
+    // 但也不能吞掉：退出时哪个探测池没关掉，事后要查得到（与主 MCP 池关机同一条纪律）。
+    if (failed.length > 0) {
+      deps.write(`[插件探测] ${failed.length} 个探测池关停失败，退出继续：${failed.map((item) => describeError(item.reason)).join('; ')}`);
+    }
+  };
+
+  return { probe, cancelAll };
+}
+
 export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const write = options.out ?? ((line: string) => {
     console.log(line);
@@ -1069,6 +1261,100 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     log.append(event, { sync: true });
     return event;
   };
+
+  const pluginManager = new PluginManager(dataDir, (type, data) => {
+    append(type, data, 'internal');
+  });
+  pluginManager.setEvents(await allEventsOf(log));
+  /**
+   * ── 出厂内置插件 → 数据目录的插件包仓库（beta14）──
+   *
+   * 插件实体住在**数据目录**（`<dataDir>/plugins/packages/<id>/<hash>/`），安装目录/仓库里的
+   * `plugins/builtin/` 只是**出厂种子**。这里做那唯一一次安装：
+   *
+   *   · 仓库里还没有那个 `id@hash` 才装（`ensureBuiltinPlugins` 的全部判据在
+   *     `plugin/seed.ts` 的文件头：装过就一个字节都不动、幂等、失败不拦启动）；
+   *   · 装成功写一条 `plugin/builtin`（internal）——它解释“盘上为什么会多出这个插件包”，
+   *     也是“装了几个”的唯一凭据（摘要行会滚，事件留得住）；
+   *   · 它**不是信任门**：装过来的插件照样要 `plugin/installed{by:'human'}` 才进组合；
+   *     内置插件是**可执行代码**，为省一次点击就开“随包代码自动执行”的口子不值得。
+   *
+   * 为什么放在 `setEvents` 之后、`composePluginRuntime` 之前：前者把历史里的确认/启停读回来
+   * （决定“这个包人确认过没有”），后者组合出真正要跑的那一批。内置种子必须先落在盘上，
+   * 否则“人确认过的那个 hash”在仓库里根本找不到——那会让人每次启动重新点一遍。
+   */
+  // 这里直接取 `process.cwd()` 而不是复用下面那个 `launchCwd`：后者刻意在单实例锁之后才声明
+  // （见技能种子那段注释），而内置插件必须在 `setEvents` 之后立刻落盘。两者之间没有任何
+  // `process.chdir`（全文件只有几处读 cwd，没有一处改），所以两份读数必然相同。
+  const builtinSeed = ensureBuiltinPlugins(dataDir, join(process.cwd(), BUILTIN_PLUGINS_DIR_NAME));
+  // 先记**装成功的那几个**，再报失败的那几个——两件事互不抵消。
+  // 为什么不能只在 `state === 'created'` 里记：部分失败时 `state` 是 `failed`，但**成功的那几个
+  // 已经躺在仓库里了**。只在 created 分支记事件，盘上有包、日志里却没有安装记录，
+  // 事后就只能靠"内容哈希和安装包里的一模一样"去猜——那正是本仓库反复吃过的那种悬案。
+  for (const pkg of builtinSeed.installed) {
+    append('plugin/builtin', {
+      id: pkg.manifest.id,
+      version: pkg.manifest.version,
+      contentHash: pkg.contentHash,
+      source: BUILTIN_PLUGINS_DIR_NAME,
+    }, 'internal');
+  }
+  if (builtinSeed.installed.length > 0) {
+    write(`[插件] 首次运行：已把 ${builtinSeed.installed.length} 个内置插件装进包仓库（`
+      + `${builtinSeed.installed.map((pkg) => `${pkg.manifest.id}@${pkg.manifest.version}`).join('、')}）`
+      + '—— 它们还要在界面“扩展”里确认一次才会启用（内置不免除信任门）');
+  }
+  for (const failure of builtinSeed.failures) {
+    write(`[插件] 内置插件 ${failure.dir} 没有装上：${failure.reason}`);
+  }
+  // no-seed / exists 都不必说什么：前者是老安装包的常态，后者是幂等的常态
+  let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
+  let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
+  let circuitBreaker: PluginCircuitBreaker | null = null;
+  let replacePluginHooks: (entries: Parameters<HookRunner['setEntries']>[0]) => void = () => {};
+  let replacePluginSkills: (roots: PluginRuntimeComposition['skillRoots']) => void = () => {};
+  for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
+  const mcpDeclarations = (): readonly import('./mcp/client.js').McpServerEntry[] => {
+    pluginMcpOwners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
+    try {
+      return mergeMcpDeclarations(config.mcp.servers, pluginRuntime.mcpServers);
+    } catch (error) {
+      write(`[插件] MCP 声明冲突，保留内置配置：${describeError(error)}`);
+      return config.mcp.servers;
+    }
+  };
+  let runtimeApplyChain: Promise<unknown> = Promise.resolve();
+  const applyRuntimeDeclarations = <T>(action: (declarations: () => readonly import('./mcp/client.js').McpServerEntry[]) => Promise<T>): Promise<T> => {
+    const run = runtimeApplyChain.then(async () => await action(mcpDeclarations));
+    runtimeApplyChain = run.catch(() => undefined);
+    return run;
+  };
+  const applyPluginRuntime = (): Promise<void> => applyRuntimeDeclarations(async (currentDeclarations) => {
+    pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
+    const owners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
+    pluginMcpOwners = owners;
+    replacePluginSkills(pluginRuntime.skillRoots);
+    replacePluginHooks(pluginRuntime.hookEntries);
+    await mcpPoolRef.pool?.applyDeclarations(currentDeclarations());
+    for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
+  });
+  const mcpPluginFailure = (serverName: string, category: PluginFailure['category'], message: string): PluginFailure | null => {
+    const owner = pluginMcpOwners.get(serverName);
+    if (owner === undefined) return null;
+    return { ...owner, contributionKind: 'mcp', contributionName: serverName, category, message };
+  };
+  /**
+   * 半开探针：只探熔断器记下的那一条贡献，并给它一份独立的短预算。
+   *
+   * 判据与分支都在模块级的 `createPluginProbe`（那里能脱离 `runMain` 验）；这里只做装配，
+   * 顺手把"在飞的探测池"句柄留给退出流程，好在停熔断器之前先让探针 fast-fail。
+   */
+  const pluginProbe = createPluginProbe({
+    list: () => pluginManager.list(),
+    dataDir,
+    extraLaunchers: config.mcp.extraLaunchers,
+    write,
+  });
 
   /**
    * 同 [append]，但**把分配到的 seq 交给载荷构造器**。
@@ -1503,6 +1789,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 每一项都指得出它的定义处，不再手写同义字面量。
   const protectedPaths: readonly string[] = [
     ...protectedHookPaths(dataDir),
+    ...pluginProtectedPaths(dataDir),
     keysPath(dataDir),                                    // data/.keys.json：模型与通道密钥
     join(dataDir, AUTH_FILE_NAME),                        // data/.auth.json：界面密码与会话凭据
     join(dataDir, WEBHOOK_SECRET_FILE_NAME),              // data/.webhook-secret.json：webhook 专用凭据
@@ -1587,7 +1874,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 阶段播报（`/api/health` 的 `phase`）：接下来是 MCP 池与工具注册表的装配
   startupState.setPhase('mcp');
   const mcpPool = new McpClientPool({
-    servers: config.mcp.servers,
+    servers: mcpDeclarations(),
     // 生命周期事件落 mcp/server-started / mcp/server-stopped（internal）：
     // 界面「扩展 → MCP」的运行期状态就是从这两条折出来的（mcpView）
     //
@@ -1597,6 +1884,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // `vision_read` / `speak` 那两个洞的形状，见 resolveEventVisibility 的注释）。
     emit: (type, data) => { append(type, data, resolveEventVisibility(type, 'internal')); },
     dataDir,
+    now: () => now().getTime(),
     onLog: (line) => { write(`[MCP] ${line}`); },
     // 两格池级参数（2026-10-10 接线，出厂值在 config.ts 的 mcp 段）：
     //   · maxInFlight = **整池**在飞上限（超限如实拒绝、不排队；极多 server + 子代理并发时往上调，
@@ -1605,8 +1893,17 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     //     IRMIA_MCP_RSS_SAMPLE 比它优先，见 client.ts 的 resolveRssSampler）。
     maxInFlight: config.mcp.maxInFlight,
     rssSample: config.mcp.rssSample,
+    onSystemicFailure: (signal) => {
+      const failure = mcpPluginFailure(signal.serverName, signal.category, signal.message);
+      if (failure !== null) circuitBreaker?.noteFailure(failure);
+    },
+    onRequestSuccess: (serverName) => {
+      const failure = mcpPluginFailure(serverName, 'timeout', '');
+      if (failure !== null) circuitBreaker?.noteSuccess(failure);
+    },
   });
   mcpPoolRef.pool = mcpPool;
+  circuitBreaker = new PluginCircuitBreaker({ manager: pluginManager, now: () => now().getTime(), apply: applyPluginRuntime, probe: pluginProbe.probe });
   if (config.mcp.servers.length === 0) {
     write('[MCP] config.json 里没有声明任何 server（mcp.servers[] 为空）：'
       + '`mcp` 工具照常在她手里，调用时会如实说"没有已声明的 server"');
@@ -1687,7 +1984,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 失败也不吞：catch 里如实写一行。
     void (async () => {
       try {
-        const declChange = await mcpPool.applyDeclarations(config.mcp.servers);
+        const declChange = await applyRuntimeDeclarations(async (currentDeclarations) => await mcpPool.applyDeclarations(currentDeclarations()));
+        const declarations = mcpDeclarations();
         const touched = declChange.added.length + declChange.removed.length + declChange.changed.length;
         if (touched === 0) {
           // 走到这里只有一种情形：`mcp.servers` 这个字段变了、但**每个 server 的内容都没变**
@@ -1695,7 +1993,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
           write('[MCP] 声明面变了但每个 server 的内容都一样（多半只调了次序）：不重连、不通报');
           return;
         }
-        const note = mcpReloadNoteOf(declChange, config.mcp.servers.length);
+        const note = mcpReloadNoteOf(declChange, declarations.length);
         const event = append('wake/manual', {
           note,
           // 与 web 侧 `wakeForMcpChange` 同一格：界面据此把它渲染成**框架卡片**而不是"用户说的话"
@@ -1900,15 +2198,24 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     for (const problem of hookConfig.problems) write(`[Hook] 配置条目被跳过：${problem}`);
     // enabled: false 的条目保留在文件里但不装配：GUI 的开关就是"临时停用一条钩子"，
     // 与"删掉这条钩子"是两件事（前者把命令行留着，后者要重新拼一遍）。
-    const hookEntries = hookConfig.entries.filter((entry) => entry.enabled !== false);
-    const hookDisabled = hookConfig.entries.length - hookEntries.length;
+    const builtinHookEntries = hookConfig.entries.filter((entry) => entry.enabled !== false);
+    const hookDisabled = hookConfig.entries.length - builtinHookEntries.length;
     const hooks = new HookRunner({
-      entries: hookEntries,
-      emit: (fired) => { emit('hook/fired', { hook: fired.hook, outcome: fired.outcome }); },
+      entries: [...builtinHookEntries, ...pluginRuntime.hookEntries],
+      emit: (fired) => {
+        emit('hook/fired', { hook: fired.hook, outcome: fired.outcome,
+          ...(fired.pluginId === undefined ? {} : { pluginId: fired.pluginId, contentHash: fired.contentHash, contributionName: fired.contributionName }) });
+        if (fired.pluginId === undefined || fired.contentHash === undefined || fired.contributionName === undefined) return;
+        const failure: PluginFailure = { pluginId: fired.pluginId, contentHash: fired.contentHash, contributionKind: 'hook',
+          contributionName: fired.contributionName, category: fired.outcome === 'timeout' ? 'hook-timeout' : 'hook-error', message: `Hook ${fired.outcome}` };
+        if (fired.outcome === 'ok') circuitBreaker?.noteSuccess(failure);
+        else circuitBreaker?.noteFailure(failure);
+      },
       onNote: (text) => { write(`[Hook] ${text}`); },
       // 投影摘要是活数据：每次 fork 前现取，不缓存（钩子看到的必须当时那一刻的事实）
       digest: () => digestProjection(recovery.projection),
     });
+    replacePluginHooks = (entries) => { hooks.setEntries([...builtinHookEntries, ...entries]); };
     if (hooks.size > 0) {
       write(`[Hook] ${hookConfigPath(dataDir)} 已装配 ${hooks.size} 条钩子`
         + `${hookDisabled > 0 ? `（另有 ${hookDisabled} 条被停用）` : ''}`);
@@ -2118,17 +2425,23 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const skills = new SkillManager({
       baseRoot: dataDir,
       compatBaseRoot: launchCwd,
+      packageRoots: pluginRuntime.skillRoots,
       out: write,
       emit: (type, data, visibility) => {
         append(type, data, visibility);
       },
     });
     for (const line of skills.startupWarnings()) write(line);
+    replacePluginSkills = (roots) => { skills.setPackageRoots(roots); };
 
     loop = new RealLoop({
       log, dataDir, projection: recovery.projection, now,
       timezone: config.timezone ?? 'Asia/Shanghai',
       ds, registry, persona, config, out: write,
+      mcpDeclarations,
+      // 插件组合变了 ⇒ 常驻索引必须在下一拍失效（否则撤走的 server 会留在模型索引里）
+      pluginRevision: () => pluginRuntime.revision,
+      onTurnBoundary: async () => { await circuitBreaker?.drain(); },
       // 版本号（`runtime/restart` 的通报里要说"你现在跑的是哪一版"）：给的是**同一个常量**
       // ——`session/start.version` 写的也是它。循环自己不去盘上读 `package.json`：
       // 版本号的唯一真相源就是这一行（见它的注释），多读一处就是多一个会漂的口径。
@@ -2280,9 +2593,12 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
        *
        * 不传的话 web 侧按 `join(process.cwd(), 'config.json')` 自己猜一个——`--config`
        * 指到别处时，界面会把改动写进**另一份文件**，而进程读的还是原来那份：
-       * 屏幕上"已保存"、行为一点没变。判据只有一处（这里给的就是 `loadConfig` 读过的那条）。
+       * 屏幕上「已保存」、行为一点没变。判据只有一处（这里给的就是 `loadConfig` 读过的那条）。
        */
       configPath: loadedConfig.path,
+      plugins: pluginManager,
+      // 管理视图（/api/skills、/api/mcp）要看到插件贡献：给的是函数，读的永远是当下这一份组合
+      pluginRuntime: () => pluginRuntime,
       ...(toolRegistry !== undefined ? { registry: toolRegistry } : {}),
       // 更新检查的数据口（GET /api/update 与 POST /api/update/check 的宿主）
       update: updateService,
@@ -2682,7 +2998,12 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 配置热重载：先撤监听（fs.watch 与那路 250ms 轮询），再做后面那些收尾
     // ——退出过程中不该再有"配置变了 ⇒ 重连一个 MCP server"，那会与下面的池关机打起来。
     configWatcher.stop();
-    loop.stop();
+    // 半开探针此刻可能正握着别的进程：先关掉在飞的探测池，让 `listTools` 立刻失败。
+    // 否则下面的 `circuitBreaker.stop()` 要等探针把 15s/30s 的预算走完，退出会明显变慢。
+    await pluginProbe.cancelAll();
+    await circuitBreaker?.stop();
+    await runtimeApplyChain;
+    await loop.stop();
 
     // MCP server 是**别人的进程**：框架拉起来的就得由框架收尸（与上面协议端同一条纪律）。
     // 走池自己的关机序列，收不掉时如实说出是哪几个——"留了一个孤儿进程"必须看得见。
@@ -2730,6 +3051,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
 
   // ── 起拍 ──
+  circuitBreaker?.start();
   loop.start();
   // 保活跟着主循环起拍（`start()` 会**先跑一拍**：布防当场就有一次"界面在不在"的读数）
   guiGuardRef.guard?.start();

@@ -102,6 +102,8 @@ export interface SkillCandidate {
   rootName: string;
   /** 正文行数（观测用：官方建议 <500 行） */
   bodyLines: number;
+  /** 来自已受信插件包时，信任由整包 hash 提供 */
+  packageHash?: string;
 }
 
 export interface SkillReject {
@@ -488,6 +490,8 @@ export function planSkillRoots(
 
 // ──────────────────────────────── 管理面 ────────────────────────────────
 
+export interface PluginSkillRoot { dir: string; rootName: string; packageHash: string }
+
 export interface SkillManagerOptions {
   /**
    * 技能根基准目录，默认 `process.cwd()`。
@@ -508,6 +512,8 @@ export interface SkillManagerOptions {
   compatBaseRoot?: string;
   /** 技能根（相对 baseRoot 的 posix 路径），默认 DEFAULT_SKILL_ROOTS */
   rootNames?: readonly string[];
+  /** 已由宿主验整包信任的额外技能根；优先级低于内置根 */
+  packageRoots?: readonly PluginSkillRoot[];
   /** catalog 单条 token 预算，默认 CATALOG_ENTRY_TOKEN_BUDGET */
   catalogEntryTokens?: number;
   /** catalog 总 token 预算，默认 CATALOG_TOTAL_TOKEN_BUDGET */
@@ -530,6 +536,8 @@ export class SkillManager {
   private readonly baseRoot: string;
   private readonly compatBaseRoot: string | null;
   private readonly rootNames: readonly string[];
+  private packageRoots: readonly PluginSkillRoot[];
+  private packageRootsRevision = 1;
   private readonly entryTokens: number;
   private readonly totalTokens: number;
   private readonly out: (line: string) => void;
@@ -543,6 +551,7 @@ export class SkillManager {
     this.baseRoot = options.baseRoot ?? process.cwd();
     this.compatBaseRoot = options.compatBaseRoot ?? null;
     this.rootNames = options.rootNames ?? DEFAULT_SKILL_ROOTS;
+    this.packageRoots = options.packageRoots ?? [];
     this.entryTokens = Math.max(1, Math.trunc(options.catalogEntryTokens ?? CATALOG_ENTRY_TOKEN_BUDGET));
     this.totalTokens = Math.max(0, Math.trunc(options.catalogTotalTokens ?? CATALOG_TOTAL_TOKEN_BUDGET));
     this.out = options.out ?? (() => undefined);
@@ -550,25 +559,45 @@ export class SkillManager {
     this.emit = options.emit ?? null;
   }
 
+  setPackageRoots(roots: readonly PluginSkillRoot[]): void {
+    this.packageRoots = roots;
+    this.packageRootsRevision += 1;
+    this.reported.clear();
+  }
+
+  get packageRevision(): number { return this.packageRootsRevision; }
+
   /**
-   * 技能根绝对路径（按优先级）：主根永远在表里，兼容根只在"主根那一份不存在"时补在最后。
+   * 技能根绝对路径（按优先级）：主根永远在表里，兼容根只在「主根那一份不存在」时补在最后，
+   * 已受信的插件技能根排在**所有内置根之后**。
    *
    * `roots[0]` 是**写入面**（`skill-grant` 把获准装上的技能写进第一个根）——它必须是
    * `<dataDir>/skills`，哪怕那个目录今天还不存在：装技能时该建的是数据目录那一份，
-   * 而不是把新技能又装回安装目录（那正是"更新一次全没"的老路）。
+   * 而不是把新技能又装回安装目录（那正是「更新一次全没」的老路）。插件根**永远不进写入面**，
+   * 它们只读：包是不可变的，往那里写等于改内容哈希。
    */
   get roots(): string[] {
     return this.rootPlan().map((root) => root.dir);
   }
 
-  /** 生效计划（`planSkillRoots` 的唯一调用点之一；扫描/定位/诊断三处读到的是同一份） */
-  rootPlan(): SkillRootRef[] {
-    return planSkillRoots(this.baseRoot, this.compatBaseRoot ?? undefined, this.rootNames);
+  /**
+   * 生效计划（`planSkillRoots` 的唯一调用点之一；扫描/定位/诊断三处读到的是同一份）。
+   *
+   * 插件根接在最后而不是另开一份清单：`scan()` 与 `locate()` 都读这里，两处各拼一份迟早
+   * 漂成「扫得到、删不掉」。它们带 `packageHash`（信任由整包哈希提供），所以计划项的类型
+   * 就是 `SkillRootRef & { packageHash?: string }`。
+   */
+  rootPlan(): (SkillRootRef & { packageHash?: string })[] {
+    const builtin = planSkillRoots(this.baseRoot, this.compatBaseRoot ?? undefined, this.rootNames);
+    return [
+      ...builtin,
+      ...this.packageRoots.map((item) => ({ name: item.rootName, dir: item.dir, baseRoot: this.baseRoot, compat: false, packageHash: item.packageHash })),
+    ];
   }
 
   /** 只读区前缀（相对工具白名单根的 posix 路径）：技能目录可读、不可写 */
   get readOnlyPrefixes(): string[] {
-    return [...this.rootNames];
+    return [...this.rootNames, ...this.packageRoots.map((root) => root.rootName)];
   }
 
   /** 去重诊断：同一句话只输出一次，避免每轮 turn 刷屏 */
@@ -584,8 +613,8 @@ export class SkillManager {
     const rejected: SkillReject[] = [];
     const claimed = new Map<string, string>();
 
-    const plan = this.rootPlan();
-    for (const root of plan) {
+    for (const root of this.rootPlan()) {
+      const packageHash = root.packageHash;
       let entries: string[];
       try {
         entries = readdirSync(root.dir).slice().sort(); // 目录名升序：扫描结果确定性
@@ -651,6 +680,7 @@ export class SkillManager {
           bytes: Buffer.byteLength(text, 'utf8'),
           rootName: root.name,
           bodyLines: parsed.bodyLines,
+          ...(packageHash !== undefined ? { packageHash } : {}),
         });
       }
     }
@@ -735,12 +765,17 @@ export class SkillManager {
     return { state: 'trusted', detail: `已由 human 确认（${entry.ts}）` };
   }
 
+  private trustCandidate(candidate: SkillCandidate): SkillTrustVerdict {
+    if (candidate.packageHash !== undefined) return { state: 'trusted', detail: `由已确认插件包 ${candidate.packageHash} 提供` };
+    return this.trustOf(candidate.name, candidate.contentHash);
+  }
+
   /** 未进 catalog 的技能：给人类确认界面/CLI 用的待办面 */
   pending(candidates?: readonly SkillCandidate[]): SkillPending[] {
     const list = candidates ?? this.scan().candidates;
     const out: SkillPending[] = [];
     for (const candidate of list) {
-      const verdict = this.trustOf(candidate.name, candidate.contentHash);
+      const verdict = this.trustCandidate(candidate);
       if (verdict.state === 'trusted') continue;
       out.push({ name: candidate.name, relDir: candidate.relDir, state: verdict.state, detail: verdict.detail });
     }
@@ -764,7 +799,7 @@ export class SkillManager {
           + '过于模糊会永远不会被想起（description 是唯一触发机制：写清能力 + 触发场景 + 关键词）',
         );
       }
-      const verdict = this.trustOf(candidate.name, candidate.contentHash);
+      const verdict = this.trustCandidate(candidate);
       if (verdict.state !== 'trusted') {
         pending.push({ name: candidate.name, relDir: candidate.relDir, state: verdict.state, detail: verdict.detail });
         continue;
@@ -898,7 +933,7 @@ export class SkillManager {
       lines.push(`[技能] ${item.name}（${item.relDir}）未进 catalog：${item.detail}`);
     }
     for (const item of scan.candidates) {
-      const verdict = this.trustOf(item.name, item.contentHash);
+      const verdict = this.trustCandidate(item);
       if (verdict.state === 'trusted') lines.push(`[技能] ${item.name} 已生效（${item.relDir}）`);
     }
     return lines;
