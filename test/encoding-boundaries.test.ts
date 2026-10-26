@@ -551,6 +551,26 @@ describe('HTTP 边界：响应体解码', () => {
     assert.equal(info.text, '中文');
     assert.equal(info.encoding, 'utf8');
   });
+
+  it('v79：没有响应头时读 HTML 的 <meta charset>（此前只信 header）', async () => {
+    const { decodeBodyWithInfo } = await import('../src/tools/net.ts');
+    // Big5 的「中文」+ 一段 `<meta charset="big5">` 外壳（声明本身是 ASCII）
+    const head = Buffer.from('<html><head><meta charset="big5"></head><body>', 'latin1');
+    const info = decodeBodyWithInfo(Buffer.concat([head, Buffer.from([0xa4, 0xa4, 0xa4, 0xe5])]), 'text/html');
+    assert.equal(info.encoding, 'big5');
+    assert.equal(info.source, 'meta', '编码名要如实标出来自 HTML 声明，而不是"判出来的"');
+    assert.equal(info.lossy, false);
+    assert.ok(info.text.includes('中文'));
+  });
+
+  it('v79：站点声明的编码解不出来时说真话（不谎称"谁都没声明"）', async () => {
+    const { decodeBodyWithInfo } = await import('../src/tools/net.ts');
+    // 头里写了一个 Node 不认识的 charset 标签 ⇒ 只能走判定链，但"声明过"这件事必须留在读数里
+    const info = decodeBodyWithInfo(GBK_ZHONGWEN, 'text/html; charset=bogus-enc');
+    assert.equal(info.encoding, 'gb18030');
+    assert.equal(info.source, 'judged');
+    assert.equal(info.declared, 'bogus-enc');
+  });
 });
 
 // ════════════════════════════════ ⑧ 归档成员名 ════════════════════════════════

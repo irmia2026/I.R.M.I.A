@@ -479,12 +479,17 @@ test('⑦ v67 描述与行为一致：默认=增量 · 翻历史不改已读 · 
   const specs = registry.listForModel({ includeDestructive: true });
   assert.equal(specs.length, 22, `代码口径的件数变了（22 = 运行期 23 − mcp）：${specs.length}`);
   const catalogTotal = registry.catalogTokens({ includeDestructive: true });
-  assert.equal(catalogTotal, 5323,
-    `整段 tools 的代码口径变了（v74 实测 5323 = v72 的 5405 + 2 [find 描述 88→90]`
-    + ` − 52 [speak 参数] − 32 [speak/report desc 压缩]；件数仍是 22）：`
-    + `要动这个数就同批复测 docs/design.md §4.18 与 render.ts 的 v74 那一篇（现在 ${catalogTotal}）`);
+  // v79（2026-10-23）：**5323 → 5366（+43）**——`http_get` 描述 **54 → 86（+32）**
+  // ＋ `url` 参数 +7（私网/环回被 SSRF 拒绝）＋ `max_chars` 参数 +4（印出 500000 上限）。
+  // v80（2026-10-23）：`read_channel` 翻页一页的条数 50 → 15 ⇒ **5366，未动**（等宽替换：`before` /
+  // `limit` 两个参数描述里各换一个两位数，`estimateTokens` 那把尺一分不差）。件数仍是 22。
+  // 要动这个数就同批复测 `docs/design.md §4.18` 与 `render.ts` 的 **v80** 那一篇。
+  assert.equal(catalogTotal, 5366,
+    `整段 tools 的代码口径变了（v79 实测 5366 = v74 的 5323 + 43 [http_get 描述 +32 / url +7 /`
+    + ` max_chars +4]；件数仍是 22）：`
+    + `要动这个数就同批复测 docs/design.md §4.18 与 render.ts 的 v79 那一篇（现在 ${catalogTotal}）`);
   assert.ok(5500 - catalogTotal >= 30, `上界 5500 只剩 ${5500 - catalogTotal}（判据 ≥30）`);
-  assert.equal(catalogTotal + 110, 5433, '运行期口径（+ mcp 110，推算值）');
+  assert.equal(catalogTotal + 110, 5476, '运行期口径（+ mcp 110，推算值）');
   // 单件那一件：描述 90 ＋ sid 参数 39 ＋ 名字 4
   assert.equal(
     estimateTokens(tool.name) + tokens + estimateTokens(JSON.stringify(tool.parameters) ?? ''),

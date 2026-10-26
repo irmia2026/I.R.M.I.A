@@ -230,7 +230,7 @@ test('官 Bot：回声的 openid 是**运行期学到**的，学到之后它不�
   const groupEvent = {
     id: 'ROBOT1.0_inbound',
     group_openid: GROUP_OPENID,
-    author: { member_openid: '00000000000000000000000000000001', username: 'OWNER', member_role: 'owner' },
+    author: { member_openid: '00000000000000000000000000000001', username: '阿岚', member_role: 'owner' },
     content: '<qqbot-at-user id="' + SELF_OPENID + '" /> 在吗',
     timestamp: '2026-10-10T16:46:00.000Z',
     mentions: [{ id: SELF_OPENID, bot: true }],
@@ -284,7 +284,7 @@ test('官 Bot：回声的 openid 是**运行期学到**的，学到之后它不�
   const spoken = [{ text: '那条重复的撤了退群不可逆你点哪个群我就退', ts: '2026-10-10T16:46:39.453Z', parts: 3, seq: 900, atMs: Date.parse('2026-10-10T16:46:39.453Z') }];
   const messages = [{
     sid: `qq:group:${GROUP_OPENID}`, channel: 'qq-official', chatType: 'group' as const, chatId: GROUP_OPENID,
-    person: '00000000000000000000000000000001', nickname: 'OWNER', text: '你点哪个群我就退',
+    person: '00000000000000000000000000000001', nickname: '阿岚', text: '你点哪个群我就退',
     messageId: 'm-1', msgSeq: 3, seq: 901, ts: '2026-10-10T16:46:40.000Z',
   }];
   const tk = createAdminTools({
@@ -293,7 +293,7 @@ test('官 Bot：回声的 openid 是**运行期学到**的，学到之后它不�
     channelSpokenReader: async () => spoken,
     selfIds: () => self.values(),
     timezone: 'UTC',
-    resolvePersonName: (person) => (person === '00000000000000000000000000000001' ? '用户（OWNER）' : null),
+    resolvePersonName: (person) => (person === '00000000000000000000000000000001' ? '用户（阿岚）' : null),
   });
   const out = await tk.byName('read_channel').handler({ sid: `qq:group:${GROUP_OPENID}`, limit: 20 }, CTX);
   assert.match(out.content, /（我）：那条重复的撤了退群不可逆你点哪个群我就退/u,
@@ -522,7 +522,7 @@ test('端到端：群里的动静从适配器走到 read_channel 的那一行（
     selfIds: () => self.values(),
     timezone: 'UTC',
     resolvePersonName: (person) => ({
-      '1234567890': '用户（OWNER）',
+      '1234567890': '用户（阿岚）',
       '1234567892': 'Kalo',
     } as Record<string, string>)[person] ?? null,
   });
@@ -530,8 +530,8 @@ test('端到端：群里的动静从适配器走到 read_channel 的那一行（
   assert.equal(out.isError, undefined, `read_channel 报错了：${out.content}\n${JSON.stringify(rec.events)}`);
   const rows = out.content.split('\n').filter((line) => /^\d\d-\d\d \d\d:\d\d /u.test(line));
   assert.deepEqual(rows.map((line) => line.slice(12)), [
-    '[用户（OWNER） 开启了全员禁言]',
-    '[用户（OWNER） 把 Kalo 禁言 600 秒]',
+    '[用户（阿岚） 开启了全员禁言]',
+    '[用户（阿岚） 把 Kalo 禁言 600 秒]',
     '[Kalo 被设为管理员]',
     '[Kalo 加入了群聊]',
     '[Kalo 撤回了一条消息]',
@@ -545,25 +545,25 @@ test('端到端：群里的动静从适配器走到 read_channel 的那一行（
 // ──────────────────────────────── ⑦ notice 那一行（纯函数：逐字与边界） ────────────────────────────────
 
 test('notice 数据 → 逐字一行：拿不到的不编、认不出的不猜', () => {
-  const namer = (id: string): string => (id === '1234567890' ? '用户（OWNER）' : '');
+  const namer = (id: string): string => (id === '1234567890' ? '用户（阿岚）' : '');
   const self = new Set(['1234567891']);
   const line = (raw: Record<string, unknown>, ctxSelf = self): string | null =>
     noticeLineText(noticeDataOf(raw, { selfId: '1234567891' })!, namer, ctxSelf);
 
-  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 1234567890, operator_id: 1234567890, duration: 0 }), '[用户（OWNER） 开启了全员禁言]');
+  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 1234567890, operator_id: 1234567890, duration: 0 }), '[用户（阿岚） 开启了全员禁言]');
   // 全员禁言那一条的协议形状是 `user_id === group_id`（duration 为 0）——两条判据都认
-  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 123456782, operator_id: 1234567890, duration: 0 }), '[用户（OWNER） 开启了全员禁言]');
-  assert.equal(line({ notice_type: 'group_ban', sub_type: 'lift_ban', group_id: 123456782, user_id: 1234567890, operator_id: 1234567890, duration: 0 }), '[用户（OWNER） 解除了全员禁言]');
-  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 999, operator_id: 1234567890, duration: 600 }), '[用户（OWNER） 把 某个群成员（…0999） 禁言 600 秒]');
+  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 123456782, operator_id: 1234567890, duration: 0 }), '[用户（阿岚） 开启了全员禁言]');
+  assert.equal(line({ notice_type: 'group_ban', sub_type: 'lift_ban', group_id: 123456782, user_id: 1234567890, operator_id: 1234567890, duration: 0 }), '[用户（阿岚） 解除了全员禁言]');
+  assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 999, operator_id: 1234567890, duration: 600 }), '[用户（阿岚） 把 某个群成员（…0999） 禁言 600 秒]');
   assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 999, duration: 600 }), '[某个群成员（…0999） 被禁言 600 秒]');
   // 拿不到 duration ⇒ **不写秒数**（不许编一个 0 或 600 出来），而且**不许**读成全员禁言
   assert.equal(line({ notice_type: 'group_ban', sub_type: 'ban', group_id: 123456782, user_id: 999 }), '[某个群成员（…0999） 被禁言]');
   assert.equal(line({ notice_type: 'group_admin', sub_type: 'set', group_id: 123456782, user_id: 999 }), '[某个群成员（…0999） 被设为管理员]');
-  assert.equal(line({ notice_type: 'group_admin', sub_type: 'unset', group_id: 123456782, user_id: 1234567890 }), '[用户（OWNER） 被取消管理员]');
+  assert.equal(line({ notice_type: 'group_admin', sub_type: 'unset', group_id: 123456782, user_id: 1234567890 }), '[用户（阿岚） 被取消管理员]');
   assert.equal(line({ notice_type: 'group_increase', sub_type: 'approve', group_id: 123456782, user_id: 999 }), '[某个群成员（…0999） 加入了群聊]');
   assert.equal(line({ notice_type: 'group_decrease', sub_type: 'kick', group_id: 123456782, user_id: 999, operator_id: 1234567890 }), '[某个群成员（…0999） 被移出群聊]');
   assert.equal(line({ notice_type: 'group_decrease', sub_type: 'kick_me', group_id: 123456782, user_id: 1234567891 }), '[我被移出群聊]');
-  assert.equal(line({ notice_type: 'group_recall', group_id: 123456782, user_id: 999, operator_id: 1234567890 }), '[用户（OWNER） 撤回了 某个群成员（…0999） 的一条消息]');
+  assert.equal(line({ notice_type: 'group_recall', group_id: 123456782, user_id: 999, operator_id: 1234567890 }), '[用户（阿岚） 撤回了 某个群成员（…0999） 的一条消息]');
   assert.equal(line({ notice_type: 'group_recall', group_id: 123456782, user_id: 999, operator_id: 999 }), '[某个群成员（…0999） 撤回了一条消息]');
   // 认不出的类别 ⇒ **整条丢**（不编一件没发生的事）
   assert.equal(line({ notice_type: 'group_upload', group_id: 123456782, user_id: 999 }), '[某个群成员（…0999） 上传了群文件]');

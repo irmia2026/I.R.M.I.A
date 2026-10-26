@@ -425,7 +425,10 @@ test('真唤醒：压缩完成后起 turn、正文逐字进当轮请求体，且
   assert.ok(text.includes('【框架通报 · 上下文压缩】'), '段头要在（她要一眼看出这不是用户说的话）');
   assert.ok(text.includes(`覆盖至 seq ${covered}`), '要说清遮蔽点在哪');
   assert.ok(text.includes('data/events'), '入口要落在她真能读到的路径上');
-  assert.ok(text.includes('**接着做**'), '用户点名要的那一句「如有中断的工作则继续」必须在');
+  assert.ok(text.includes('接着做'), '用户点名要的那一句「如有中断的工作则继续」必须在');
+  // 判据落在**那条正文**上，不是整份请求体：请求体里别处的 `**` 是既有的（记忆索引 / 自述），
+  // 本批只管"框架通报的正文"这一类字。
+  assert.equal(note.includes('**'), false, '正文里不许出现 Markdown 记号（界面不渲染它，星号会原样显示）');
   assert.ok((await rig.ofType('input/claimed')).length >= 2, '那条唤醒被当轮认领掉（不留在队列里反复叫）');
 });
 

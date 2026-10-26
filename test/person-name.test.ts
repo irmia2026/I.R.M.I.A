@@ -4,7 +4,7 @@
  * 现场（只读 `data/events` 复盘的）：10-07 02:26–02:49 他在 OneBot 群里说话，她的 `read_channel`
  * 回执里他一律显示成 **「群友A（群昵称：用户）」**（机器在第一次见面时发的一次性占位名），
  * 她当众回他"这会儿光一串号我还认不了你"，还回了句带引号的"你这位'用户'"；直到 03:05 那一行才
- * 变成「用户（OWNER）」。他最后是靠她另写的一条 `onebot:c2c:<QQ号>` 才对上名的。
+ * 变成「用户（阿岚）」。他最后是靠她另写的一条 `onebot:c2c:<QQ号>` 才对上名的。
  *
  * 顺着这条线查出来的**两处**（都在这一版修了，但只有第一处与上面那一分钟直接相关）：
  *   ① 通知行根本不查名字真源（此刻层「预警：」那一行、点名那句），群里一律印裸 QQ 号/openid
@@ -40,7 +40,7 @@ import { tempDirSync } from './helpers/temp-dirs.ts';
 const TZ = 'Asia/Shanghai';
 const QQ = '1234567890';
 const OTHER = '1719500341';
-const OWNER = '用户（OWNER）';
+const OWNER = '用户（阿岚）';
 
 const PERSONA: PersonaAssets = {
   identity: 'IDENTITY',
@@ -95,22 +95,22 @@ test('① 只有群成员别名（裸 id）时她也认得出：原来断掉的�
   const loop = await makeLoop(t, {
     aliases: [
       '# 身份别名',
-      'qq:c2c:00000000000000000000000000000001 = OWNER（用户）',
+      'qq:c2c:00000000000000000000000000000001 = 阿岚（用户）',
       '# 该群成员（openid，不是 sid；只在认人时用）',
-      `${QQ} = **OWNER（用户）**——02:27 GUI 亲口认领`,
+      `${QQ} = **阿岚（用户）**——02:27 GUI 亲口认领`,
     ].join('\n'),
   });
-  assert.equal(loop.resolvePersonName(QQ), 'OWNER',
+  assert.equal(loop.resolvePersonName(QQ), '阿岚',
     '成员那一段的裸 id 必须能认出来（原来这一档是死信，只剩机器发的占位名）');
   assert.equal(loop.resolvePersonName(OTHER), null, '没写过的人仍然认不出——不猜');
 });
 
 test('①b `#` 开头那行仍然是注释：写在标题行里的映射不算声明（不许偷偷放宽）', async (t) => {
-  // 她 10-07 02:27 那一笔正落在这种形状里（`# 该群成员（…）：1234567890 = **OWNER（用户）**…`，
+  // 她 10-07 02:27 那一笔正落在这种形状里（`# 该群成员（…）：1234567890 = **阿岚（用户）**…`，
   // 见 aliases.md 第 21 行）——`#` 是 markdown 标题/散文，`forEachAliasRow` 一律跳过。
   // 这条**不是**要修的东西：放宽它等于让正文里的等号变成别名。所以这里正面钉住"它不算"。
   const loop = await makeLoop(t, {
-    aliases: `# 该群成员（openid，不是 sid；只在认人时用）：${QQ} = **OWNER（用户）**`,
+    aliases: `# 该群成员（openid，不是 sid；只在认人时用）：${QQ} = **阿岚（用户）**`,
   });
   assert.equal(loop.resolvePersonName(QQ), null, '标题行里的等号不是声明');
 });
@@ -150,10 +150,10 @@ test('④ 别名只改"叫什么"，不改"谁能指挥她"：成员别名写着
   } as unknown as AppEvent);
 
   // 她还没给任何人写过名字时：群里的陌生人一律 external
-  assert.equal(trustOfWake(wake(OTHER), new Map(), 'OWNER'), 'external');
+  assert.equal(trustOfWake(wake(OTHER), new Map(), '阿岚'), 'external');
   // 联系人表声明过的那个 id（用户）：群里也算用户档
   const contacts = new Map([[`onebot:c2c:${QQ}`, OWNER]]);
-  assert.equal(trustOfWake(wake(QQ), contacts, 'OWNER', new Set([QQ])), 'owner');
+  assert.equal(trustOfWake(wake(QQ), contacts, '阿岚', new Set([QQ])), 'owner');
   // **别名不改身份**：就算她在成员段里把别人写成"用户"，那个 id 也不在 ownerIds 里 ⇒ 仍是 external
-  assert.equal(trustOfWake(wake(OTHER), contacts, 'OWNER', new Set([QQ])), 'external');
+  assert.equal(trustOfWake(wake(OTHER), contacts, '阿岚', new Set([QQ])), 'external');
 });

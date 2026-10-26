@@ -24,7 +24,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import type { AppEvent, SkillInstalled, Visibility } from '../log/types.js';
 import { readOnlyPrefixOf } from '../tools/fs/path-guard.ts';
@@ -33,8 +33,19 @@ import { estimateTokens } from '../tools/registry.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
+/**
+ * 技能目录的目录名（`skills`）——**技能域里的唯一常量**：默认根的第一段、出厂种子的目录名、
+ * 数据目录里的落点（`<dataDir>/skills`）、模型抄的那条路径 `skills/<name>/SKILL.md` 的第一段，
+ * 说的都是这一个词。
+ *
+ * ⚠ `tools/fs/env.ts` 里还有一份同名字面量（`SKILLS_DIR_NAME`）：fs 包不 import 技能域
+ * 模块（依赖方向是"技能读文件系统"，反过来会绕成环），所以那一边是**有意的第二份**——
+ * 改这个名字时两处一起改（`DEFAULT_READ_ONLY_PREFIXES` 里的 `'skills'` 也是同一句）。
+ */
+export const SKILLS_DIR_NAME = 'skills';
+
 /** 项目级技能根（相对 baseRoot 的 posix 路径）。顺序即优先级：同名时先到者生效 */
-export const DEFAULT_SKILL_ROOTS = ['skills', '.agents/skills'] as const;
+export const DEFAULT_SKILL_ROOTS = [SKILLS_DIR_NAME, '.agents/skills'] as const;
 
 export const SKILL_FILE_NAME = 'SKILL.md';
 
@@ -343,10 +354,6 @@ export function validateMetadata(fields: Record<string, string>, dirName: string
 
 // ──────────────────────────────── 小工具 ────────────────────────────────
 
-function toPosix(p: string): string {
-  return p.split(sep).join('/');
-}
-
 /**
  * 技能名的合规判定：合规则返回 null，否则返回一句人话（哪里不对 + 正确的是什么）。
  *
@@ -408,11 +415,97 @@ export function clipDescription(
   return { text, tokens: prefixTokens + estimateTokens(text), truncated: true };
 }
 
+// ──────────────────────────────── 技能根：生效计划 ────────────────────────────────
+
+/**
+ * 一个**生效的**技能根。
+ *
+ * 为什么不是 `baseRoot + rootNames` 两张纸就够：技能实体搬进数据目录之后，"默认根"与
+ * "兼容根"会同时出现在一张扫描清单里（见 `planSkillRoots`），而它们的**基准目录不同**
+ * （数据目录 / 工作目录）——`relDir` 与只读区前缀都得各自相对自己的基准算，混成一个 baseRoot
+ * 只会算出一串 `../skills/...`。
+ */
+export interface SkillRootRef {
+  /** 相对**本根基准**的 posix 路径：`skills` 或 `.agents/skills`（也只读区前缀取这个名字） */
+  name: string;
+  /** 根的绝对路径 */
+  dir: string;
+  /** 本根所在的基准目录（主根 = baseRoot；兼容根 = compatBaseRoot） */
+  baseRoot: string;
+  /**
+   * `true` = 这个根来自**兼容基准根**（`<compatBaseRoot>/<name>`）。
+   *
+   * 它只在"主根那一份还不存在、而兼容根那一份存在"时出现——也就是老安装/开发目录这种
+   * 数据目录里还没复制过技能的现场。**它永远排在所有主根之后**（优先级最低）：
+   * 数据目录里一旦有了同名技能，生效的就是数据目录那一份。
+   */
+  compat: boolean;
+}
+
+const isDirectory = (path: string): boolean => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 技能根的生效计划（**唯一判据**）：扫描、定位、删除、启动摘要都读它。
+ *
+ * 三条规则，顺序即优先级：
+ *   ① **主根永远在表里**（哪怕目录还不存在）：`<baseRoot>/<name>`——它是**写入面**
+ *      （`skill-grant` 把新技能装进 `roots[0]`），所以不能因为"今天还没有"就消失；
+ *   ② 主根那一份**不存在**、而 `<compatBaseRoot>/<name>` **存在** ⇒ 追加兼容根（排在最后）；
+ *   ③ 主根存在就**不追加**兼容根：数据目录那一份是技能实体的家，安装目录/仓库里的
+ *      `skills/` 只是出厂种子（装完就该没人读它）。主根存在还去扫种子，等于让
+ *      "用户删掉一个技能"在下次启动时**复活**——那是比"扫不到"更坏的错。
+ *
+ * 为什么兼容根的存在判据是"主根不存在"而不是"主根里没有同名目录"：后者会让
+ * 一个技能在数据目录里被删掉后，又从安装目录的种子里冒出来（同上一条）。
+ */
+export function planSkillRoots(
+  baseRoot: string,
+  compatBaseRoot?: string,
+  rootNames: readonly string[] = DEFAULT_SKILL_ROOTS,
+): SkillRootRef[] {
+  const primary: SkillRootRef[] = rootNames.map((name) => ({
+    name,
+    dir: join(baseRoot, name),
+    baseRoot,
+    compat: false,
+  }));
+  if (compatBaseRoot === undefined || compatBaseRoot === '') return primary;
+  const compat: SkillRootRef[] = [];
+  for (const root of primary) {
+    if (isDirectory(root.dir)) continue;
+    const dir = join(compatBaseRoot, root.name);
+    if (!isDirectory(dir)) continue;
+    compat.push({ name: root.name, dir, baseRoot: compatBaseRoot, compat: true });
+  }
+  return [...primary, ...compat];
+}
+
 // ──────────────────────────────── 管理面 ────────────────────────────────
 
 export interface SkillManagerOptions {
-  /** 技能根基准目录，默认 process.cwd()（技能是项目级资产，与 workspace/ 同级） */
+  /**
+   * 技能根基准目录，默认 `process.cwd()`。
+   *
+   * **运行期装配给的是数据目录**（`main.ts`）：技能实体住在 `<dataDir>/skills`，与
+   * `persona/` 同级——安装器换掉安装目录时技能不该跟着没（见 design §4.19 的信任门：
+   * 哈希绑的是内容，不是安装包）。CLI/Web 也按同一条给（`skill list` / 技能页）。
+   */
   baseRoot?: string;
+  /**
+   * 兼容基准根（缺省不给）：主根那一份不存在时，补扫 `<compatBaseRoot>/<name>`。
+   *
+   * 为什么需要它：数据目录里的 `skills/` 是**首次运行**复制过去的（`ensureSkillsSeed`），
+   * 而复制没发生/没成功的现场（老安装、只读数据目录、开发目录里 data 被清过）不该
+   * 从"7 个技能"掉成"0 个技能"——那正是这次要修的那个病。给 `process.cwd()` 即回到
+   * "安装目录/仓库里那份也能扫到"，但**优先级最低**（数据目录有就绝不看它）。
+   */
+  compatBaseRoot?: string;
   /** 技能根（相对 baseRoot 的 posix 路径），默认 DEFAULT_SKILL_ROOTS */
   rootNames?: readonly string[];
   /** catalog 单条 token 预算，默认 CATALOG_ENTRY_TOKEN_BUDGET */
@@ -435,6 +528,7 @@ export interface SkillManagerOptions {
  */
 export class SkillManager {
   private readonly baseRoot: string;
+  private readonly compatBaseRoot: string | null;
   private readonly rootNames: readonly string[];
   private readonly entryTokens: number;
   private readonly totalTokens: number;
@@ -447,6 +541,7 @@ export class SkillManager {
 
   constructor(options: SkillManagerOptions = {}) {
     this.baseRoot = options.baseRoot ?? process.cwd();
+    this.compatBaseRoot = options.compatBaseRoot ?? null;
     this.rootNames = options.rootNames ?? DEFAULT_SKILL_ROOTS;
     this.entryTokens = Math.max(1, Math.trunc(options.catalogEntryTokens ?? CATALOG_ENTRY_TOKEN_BUDGET));
     this.totalTokens = Math.max(0, Math.trunc(options.catalogTotalTokens ?? CATALOG_TOTAL_TOKEN_BUDGET));
@@ -455,9 +550,20 @@ export class SkillManager {
     this.emit = options.emit ?? null;
   }
 
-  /** 技能根绝对路径（按优先级） */
+  /**
+   * 技能根绝对路径（按优先级）：主根永远在表里，兼容根只在"主根那一份不存在"时补在最后。
+   *
+   * `roots[0]` 是**写入面**（`skill-grant` 把获准装上的技能写进第一个根）——它必须是
+   * `<dataDir>/skills`，哪怕那个目录今天还不存在：装技能时该建的是数据目录那一份，
+   * 而不是把新技能又装回安装目录（那正是"更新一次全没"的老路）。
+   */
   get roots(): string[] {
-    return this.rootNames.map((name) => join(this.baseRoot, name));
+    return this.rootPlan().map((root) => root.dir);
+  }
+
+  /** 生效计划（`planSkillRoots` 的唯一调用点之一；扫描/定位/诊断三处读到的是同一份） */
+  rootPlan(): SkillRootRef[] {
+    return planSkillRoots(this.baseRoot, this.compatBaseRoot ?? undefined, this.rootNames);
   }
 
   /** 只读区前缀（相对工具白名单根的 posix 路径）：技能目录可读、不可写 */
@@ -472,24 +578,26 @@ export class SkillManager {
     this.out(line);
   }
 
-  /** 扫描两个技能根：目录名即 skill 名，读 SKILL.md → 解析 frontmatter → 校验 */
+  /** 扫描技能根：目录名即 skill 名，读 SKILL.md → 解析 frontmatter → 校验 */
   scan(): SkillScanResult {
     const candidates: SkillCandidate[] = [];
     const rejected: SkillReject[] = [];
     const claimed = new Map<string, string>();
 
-    for (const rootName of this.rootNames) {
-      const root = join(this.baseRoot, rootName);
+    const plan = this.rootPlan();
+    for (const root of plan) {
       let entries: string[];
       try {
-        entries = readdirSync(root).slice().sort(); // 目录名升序：扫描结果确定性
+        entries = readdirSync(root.dir).slice().sort(); // 目录名升序：扫描结果确定性
       } catch {
         continue; // 根不存在：不是错误，只是没有这类技能
       }
       for (const entry of entries) {
         if (entry.startsWith('.')) continue; // 隐藏目录不是 skill
-        const dir = join(root, entry);
-        const relDir = toPosix(relative(this.baseRoot, dir));
+        const dir = join(root.dir, entry);
+        // relDir 相对**本根的基准**（主根 = 数据目录，兼容根 = 工作目录）：两种根算出来的
+        // 都是 `skills/<name>`——那正是模型写 `safe_read` 时该抄的那个路径。
+        const relDir = `${root.name}/${entry}`;
         let isDir = false;
         try {
           isDir = statSync(dir).isDirectory();
@@ -541,7 +649,7 @@ export class SkillManager {
           metadata: validated.metadata,
           contentHash: sha256Hex(text),
           bytes: Buffer.byteLength(text, 'utf8'),
-          rootName,
+          rootName: root.name,
           bodyLines: parsed.bodyLines,
         });
       }
@@ -551,22 +659,23 @@ export class SkillManager {
   }
 
   /**
-   * 技能目录的物理位置：两个技能根里**第一个**存在同名目录的那个（根顺序即优先级，与 scan 同源）。
+   * 技能目录的物理位置：技能根里**第一个**存在同名目录的那个（根顺序即优先级，与 scan 同源）。
    *
    * 与 scan 的区别有两点，都是刻意的：
    *   · **不读 SKILL.md、不要求 frontmatter 合法**：删除要能清掉一个写坏了的目录
    *     （缺 SKILL.md、name 与目录不同名……这些恰恰是最该被清理的一类，scan 却把它们列进 rejected）；
-   *   · **两个根都找**：只认第一个根是最容易漏的一处——放在 `.agents/skills/` 下的技能，
-   *     界面上看得见，却会"删不掉"。根列表来自构造参数，所以删除与扫描看到的是同两根。
+   *   · **每个根都找**（含末位的兼容根）：只认第一个根是最容易漏的一处——放在
+   *     `.agents/skills/` 下的技能，界面上看得见，却会"删不掉"。根列表来自 `rootPlan()`，
+   *     所以删除与扫描看到的是同一串根。
    *
    * 名字的安全性由调用方先过 `skillNameProblem`：这里只回答"它在哪"，不负责判定名字。
    */
   locate(name: string): { dir: string; relDir: string; rootName: string } | null {
-    for (const rootName of this.rootNames) {
-      const dir = join(this.baseRoot, rootName, name);
+    for (const root of this.rootPlan()) {
+      const dir = join(root.dir, name);
       try {
         if (statSync(dir).isDirectory()) {
-          return { dir, relDir: toPosix(relative(this.baseRoot, dir)), rootName };
+          return { dir, relDir: `${root.name}/${name}`, rootName: root.name };
         }
       } catch {
         continue; // 这个根里没有：换下一个根（"没有"不是错误）

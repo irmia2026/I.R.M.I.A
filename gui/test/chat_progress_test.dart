@@ -59,7 +59,7 @@ class _FakeChatApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (path.startsWith('/api/events?')) {
       return <String, dynamic>{'events': history};
     }
@@ -72,7 +72,7 @@ class _FakeChatApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async =>
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async =>
       <String, dynamic>{'ok': true};
 
   @override

@@ -97,7 +97,6 @@ import { deliveredToSid, replyableWakeChannel, type ChannelSessionRow } from '..
 import { SESSION_FREQ_WINDOW_MS, type ContactFacts } from '../model/self-brief.ts';
 import type { MachineFacts, MaintenanceWindowNote, RenderChannelContext, RenderImageRef, TurnBlockFacts, UsageFacts } from '../model/render.ts';
 import {
-  COMPACTION_WARNING_COOLDOWN_MS,
   compactionSoonNote,
   compactionWarningRowsOf,
   compactionWarningStateOf,
@@ -126,14 +125,18 @@ import {
   humanTimeoutElapsed, scanSuspension, type Suspension,
 } from './plan-mode.ts';
 import { relationshipForWake } from '../persona/relationship.ts';
+import type { RelationshipNote } from '../persona/relationship.ts';
 import { BudgetGuard, DEFAULT_STALL_MS, stallOf, type StallInfo } from './budget-guard.ts';
-import { createNotifier, type AlertNotifier } from '../alert/notifier.ts';
+import { createNotifier, fingerprintOf, type AlertNotifier } from '../alert/notifier.ts';
 import {
   backfillCandidates, backfillResolvedAlarms, pausedLayers, raisedLayers, unresolvedCategories,
 } from '../alert/startup.ts';
 import { Heartbeat, HeartbeatSource, type HeartbeatFiring } from '../wake/heartbeat.ts';
 import { holdsGroupBatch } from './group-batch.ts';
 import type { SkillManager } from '../skill/skills.js';
+// `skill/index` 的**唯一写入实现**：循环（三条判据成立时）与人工归集（`irmia skill reindex`）
+// 共用这一份，两条路写下的快照逐字段相同。理由见那个文件的文件头。
+import { writeSkillIndexSnapshot } from '../skill/index-snapshot.ts';
 import type { HookRunner } from '../hook/hooks.js';
 import type { TimerStore } from '../wake/timer-store.js';
 import { trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
@@ -306,7 +309,7 @@ function contextEventFilter(event: AppEvent): boolean {
  * 为什么两段都带上 `turn`：唤醒是"跳过一段时间"之后到达的，日志读起来（以及重放时）
  * 必须一眼看得出这条通报说的是哪一拍——只写"刚压过"会让事后复盘猜时刻。
  */
-function compactionWakeNote(args: {
+export function compactionWakeNote(args: {
   turn: number;
   covered: number;
   previous: number;
@@ -317,10 +320,11 @@ function compactionWakeNote(args: {
   // 反斜杠归一成正斜杠（`cli.ts` / `doctor.ts` / 记忆层那一族都是这么写的）：她读到的路径
   // 与工具回执、与她自己敲的相对路径同形；`C:\x\data/events` 这种混写只会让她多试一次。
   const eventsPath = `${dataDir.replace(/\\/gu, '/')}/events/*.jsonl`;
+  // ⚠ 正文是给人/她读的**纯文本**（渲染层不认 Markdown）：强调用「」或换行，不用 `**`。
   return `【框架通报 · 上下文压缩】turn ${turn} 刚做过一次上下文压缩。
-- 你眼前那段往来（遮蔽点前的历史）已经不在现场了，替代品是**交接笔记**：它就在你这次输入的最前面那段「早期历史摘要 · 覆盖至 seq ${covered}」里，标题是「# 交接笔记」。遮蔽点 seq ${covered}${from}。
+- 你眼前那段往来（遮蔽点前的历史）已经不在现场了，替代品是交接笔记：它就在你这次输入的最前面那段「早期历史摘要 · 覆盖至 seq ${covered}」里，标题是「# 交接笔记」。遮蔽点 seq ${covered}${from}。
 - 要看更细的原始记录：用 safe_read 读 ${eventsPath}，按 seq 回查。
-- 如果手上还有没做完的事（做到一半的任务、刚起的头、答应过还没交代的），**接着做**：压缩不会替你结束任何事，这一拍就是给你接着往下做的。`;
+- 如果手上还有没做完的事（做到一半的任务、刚起的头、答应过还没交代的），接着做：压缩不会替你结束任何事，这一拍就是给你接着往下做的。`;
 }
 
 // ══════════════════════ 进程重启的判据与通报（2026-10-11 加） ══════════════════════
@@ -485,7 +489,7 @@ function findOomEvidence(path: string): string | null {
  * 拉起器留痕里提到的**输出落点**（新实例的 stdout/stderr 去哪了）。
  *
  * 为什么从留痕里抠而不是写死一个路径：后端 stdout 的落点是**拉起方决定的**
- * （仓库脚本默认 `D:\IrmiaAgent\agent-console.out.log`、随包脚本默认
+ * （仓库脚本默认 `<安装根>\agent-console.out.log`、随包脚本默认
  * `<dataDir>/restart-backend.log`、自重启那条路用 `--out` 显式给）。写死一个就等于
  * 只在"某一种装法"上有效——而这条路要回答的恰恰是"**这一台**机器上它是怎么起的"。
  * 留痕里那句"完整命令行"把它逐字记着，`>> "<路径>" 2>&1` 就是它。
@@ -644,15 +648,15 @@ export function heapCapOf(argv: readonly string[], heapLimitBytes: number): Runt
 export function deathReasonText(previous: RuntimeRestartPrevious): string {
   switch (previous.death) {
     case 'oom':
-      return '进程崩了，是**内存不足**（Node 报 "JavaScript heap out of memory"）';
+      return '进程崩了，是内存不足（Node 报 "JavaScript heap out of memory"）';
     case 'error':
-      return '进程自己报了**异常退出**（session/end 里写的是 error）';
+      return '进程自己报了异常退出（session/end 里写的是 error）';
     case 'killed':
-      return '进程被**故意换掉**的（拉起器/人关的），只是没来得及走完优雅退出';
+      return '进程被故意换掉的（拉起器/人关的），只是没来得及走完优雅退出';
     case 'unknown':
       return previous.pid === null
-        ? '**日志里没有上一任的痕迹**（这是第一次启动，或者老日志里没有这一条）'
-        : '进程**没能留下停机记录**（被硬杀 / 断电 / 没走完优雅退出），所以说不清具体原因';
+        ? '日志里没有上一任的痕迹（这是第一次启动，或者老日志里没有这一条）'
+        : '进程没能留下停机记录（被硬杀 / 断电 / 没走完优雅退出），所以说不清具体原因';
   }
 }
 
@@ -705,16 +709,17 @@ export function restartWakeNote(args: {
   at: string;
 }): string {
   const { pid, version, previous, at } = args;
+  // ⚠ 正文是给人/她读的**纯文本**（渲染层不认 Markdown）：强调用「」或换行，不用 `**`。
   const lines = [
-    '【框架通报 · 进程重启】**我刚被重启过**（这是一条框架通报，不是用户说的话）。',
+    '【框架通报 · 进程重启】我刚被重启过（这是一条框架通报，不是用户说的话）。',
     `- 上一任：${deathReasonText(previous)}`
       + `${previous.pid === null ? '' : `（上一任 pid ${previous.pid}`}`
       + `${previous.pid === null || previous.startedAt === null ? '' : `，起于 ${previous.startedAt}`}`
       + `${previous.pid === null ? '' : '）'}。`,
-    `- 现在这一任：pid ${pid}，跑的是 **${version}**，重启时刻 ${at}。`,
-    '- 如果刚才有没做完的活（做到一半的任务、刚起的头、答应过还没交代的），**接着做**：'
+    `- 现在这一任：pid ${pid}，跑的是 ${version}，重启时刻 ${at}。`,
+    '- 如果刚才有没做完的活（做到一半的任务、刚起的头、答应过还没交代的），接着做：'
       + '重启只打断了进程，不会替你结束任何事。',
-    '- **重启不影响你的记忆与记忆里的结论**：盘上的记忆、STATE、日志都还在，一个字都没少。'
+    '- 重启不影响你的记忆与记忆里的结论：盘上的记忆、STATE、日志都还在，一个字都没少。'
       + '你只是"中间断了一小段"，而不是"忘了什么"。',
   ];
   return lines.join('\n');
@@ -1610,6 +1615,30 @@ interface TrackedSuspension extends Suspension {
 }
 
 /**
+ * 人审挂起提醒的**指纹参数**（`maybeWarnHumanStall` 的告警与跨重启去重共用这一份）。
+ *
+ * 为什么要抽出来：发送时用它算指纹，`notifier.restore(日志)` 之后又拿同一个指纹去问
+ * "上一个进程提醒过没有"——两处各拼一次，迟早拼成两个指纹，于是每次重启都再催一遍。
+ * `stall: '80%'` 让这条提醒与超时处置那条告警（`{askSeq, outcome:'timed-out'}`）分开：
+ * "快到了"与"已经按未批准办完了"是两件事，不该互相顶掉限流窗口。
+ */
+function humanStallParams(askSeq: number): Record<string, string | number | boolean> {
+  return { askSeq, stall: '80%' };
+}
+
+/** 毫秒 → 小时的人话（4.8 / 6；一位小数，整数不带 `.0`） */
+function hoursLabel(ms: number): string {
+  const hours = Math.round((ms / 3_600_000) * 10) / 10;
+  return Number.isInteger(hours) ? `${hours}` : hours.toFixed(1);
+}
+
+/** 一句提问的**前 40 字**（告警标题/日志行里够人认出是哪一条；全文在事件与卡片里） */
+function questionPreview(question: string): string {
+  const flat = question.replace(/[\s\u3000]+/gu, ' ').trim();
+  return flat.length > 40 ? `${flat.slice(0, 40)}…` : flat;
+}
+
+/**
  * 本批 wake 事件里最近一条 `wake/channel`（M9）。
  *
  * 取"最近一条"而不是"第一条"：同一批里可能攒了几条通道消息（她刚回来时常见），
@@ -1775,6 +1804,18 @@ export class RealLoop {
    * 重启由 warmUp 用 scanSuspension 从日志重建，所以「答复在停机期间写下」那条路照样走得通。
    */
   private suspension: TrackedSuspension | null = null;
+  /**
+   * 已经为**哪一次挂起**发过"到 80% 了"的提醒（`maybeWarnHumanStall`）。
+   *
+   * 键 = `ask:<那条提问的 seq>`；拿不到 seq 时退回 `suspend:<turn>@<askedAt>`（同一 turn 的两次
+   * 挂起仍然是两件事）。答复到达、或新挂起建立时清空——**同一挂起只提醒一次**，别让那行字
+   * 每拍刷一遍。
+   *
+   * 光靠内存挡不住重启（进程起来又忘了），所以另外查一次限流窗口：`notifier.windows()` 里
+   * 有同一个 (类别, askSeq) 指纹 ⇒ 上一个进程已经提醒过（`warmUp` 用日志重建窗口，见那里的
+   * `notifier.restore`）。两条判据同一个结论：这条提醒一件事只发一次。
+   */
+  private humanStallWarnedKey: string | null = null;
   /** 答复探测的增量游标（只扫人审相关事件，不每拍全量重读日志） */
   private humanCursor = 0;
   /**
@@ -2608,6 +2649,10 @@ export class RealLoop {
     // 启动那一次已经覆盖"改配置 + 重启"，这里覆盖运行期上限变化的其余路径（加注看门文件
     // 刚被拾取、判定器被重建……），并保证唤醒门读到的记录与活的上限永远对得上。
     this.releaseLiftedPauses();
+    // 旧版本那条"人审挂起超时暂停"是一次性的历史：记录里 actual < limit ⇒ 它不可能来自撞线
+    // ⇒ 就地把 task 层那条撤掉（判据与理由见 `releaseLegacyHumanTimeoutPause`）。
+    // 用它而不是等 24 小时那条超时：本机现在这条（17:51 那条）就该在启动后第一拍解开。
+    this.releaseLegacyHumanTimeoutPause('human-timeout');
     // MCP 常驻索引（v46）：**在任何输入被认领之前**定下本拍的索引版本。
     // 放在这里（而不是 wake 处理那一段）是为了它不依赖"这一拍有没有 pending"：
     // 索引进的是请求头部，任何一条请求（含心跳拍）都得用同一版。
@@ -3067,6 +3112,13 @@ export class RealLoop {
    *      ——缓存保护等于没做（那正是用户这一条要治的毛病）。
    *   ③ **空索引不落事件**（与 `mcpIndexSync` 同一条口径）：一个可用技能都没有时该段整段不出现，
    *      写一条空快照只会在事件流里多一行没人读的东西，还会让"事件序列逐字相同"的基线无故变红。
+   *   ④ **"构建文本 + 写事件"不在这个方法里**（2026-10-23 抽出）：唯一一份实现在
+   *      `skill/index-snapshot.ts` 的 `writeSkillIndexSnapshot`——人工归集（`irmia skill
+   *      reindex`）走的是同一份，于是两条路写下的快照**逐字段相同**。这一格只负责
+   *      "什么时候该重建"（上面那三条判据）与"怎么落库"（`appendSync`）。
+   *      那一格正是为"信任表已修好、快照却停在旧字节上"的事故留的人工入口：此时上面三条
+   *      判据一条都不成立（version 一致、seq 不小于 coveredSeq、日志里已有快照）⇒
+   *      **重启也不会重建**，只能等下一次压缩摘要。
    *
    * ⚠ 它**必须排在 `mcpIndexSync` 之后**（两个调用点都是这样：`warmUp` 与 `tickOnce` 的轮首）：
    * 事件快照 `eventView` 由那条先跑时读下，这里只读它、不再自己读一遍盘。
@@ -3103,31 +3155,30 @@ export class RealLoop {
     }
 
     const catalog = this.skills?.catalog() ?? null;
-    const text = catalog?.text ?? '';
-    // 空索引：不写事件（判据见方法头 ③），但**缓存要跟着置空**（与 `mcpIndexSync` 那一支同形）
-    if (text === '') {
-      this.skillIndexText = '';
-      return this.skillIndexText;
-    }
-    this.appendSync('skill/index', {
-      version,
-      text,
-      skills: catalog!.entries.map((entry) => ({
-        name: entry.name,
-        // 存的是**进索引的那一句**（已截断；正文永不在此出现，那是渐进披露第二层）
-        description: entry.description,
-        tokens: entry.tokens,
-        ...(entry.truncated ? { truncated: true } : {}),
-      })),
-    }, 'internal');
-    this.skillIndexText = text;
+    // 构建文本 + 写事件：**与人工归集（`irmia skill reindex`）共用同一份实现**，
+    // 所以那两条路写下的 `skill/index` 逐字段相同（含键顺序）。理由与口径在
+    // `skill/index-snapshot.ts` 的文件头：那里是唯一的写入实现，这里只提供"怎么落库"
+    // （`appendSync` 顺带折投影、压力与信任表）。
+    //
+    // 循环这一路**不传** `skipWhenUnchanged`：这里只在三条判据成立时走到（首次 / 模板换代 /
+    // 快照早于最后一次压缩），而最后那条即使文本一字未变也**必须**写一条——它记的是
+    // "我现在归集到了这次压缩之后"，少了它下一拍还会判过期。
+    const snapshot = writeSkillIndexSnapshot({
+      events: this.eventView,
+      catalog,
+      write: (data) => this.appendSync('skill/index', data, 'internal'),
+    });
+    // 缓存跟着定下（空索引也走这条：`text` 就是空串，与 `mcpIndexSync` 那一支同形）
+    this.skillIndexText = snapshot.text;
+    if (!snapshot.written) return this.skillIndexText;
+
     const reason = point.seq === 0
       ? '首次（日志里还没有快照）'
       : point.version !== version
         ? `模板换代（快照是 v${point.version ?? '?'}）`
         : '上下文重大变化后归集';
-    this.write(`[技能] 常驻索引已重建（${reason}）：${catalog!.entries.length} 个技能进索引，`
-      + `${catalog!.pending.length} 个在等信任门`);
+    this.write(`[技能] 常驻索引已重建（${reason}）：${snapshot.entries} 个技能进索引，`
+      + `${snapshot.pending} 个在等信任门`);
     return this.skillIndexText;
   }
 
@@ -3368,11 +3419,12 @@ export class RealLoop {
    *
    * ## 迟滞的实质（★ 判据全在 `planCompactionWarning` 里，这里只说为什么）
    *
-   * **分档 + 冷却 + 重置**（2026-10-21，替换原来"上一次压缩之后报过就永久静默"的
-   * `already-warned` 一刀切；用户 14:33 那次"突然被压缩、之前没预警"就是它造成的）：
-   *   · **跨过 80% / 90% / 95% 各报一次**（跨新档不受冷却约束）；
-   *   · **同档 30 分钟冷却**（`COMPACTION_WARNING_COOLDOWN_MS`）；
-   *   · **压缩（`wrote`）或历史回落到阈值 50% 以下 ⇒ 分档状态归零**，下一次跨 80% 照样报。
+   * **每档只报一次 + 重置**（2026-10-22，替掉上一版"同档 30 分钟冷却、过了冷却可以再报"
+   * ——现场同一档 80 在 07:34 / 08:25 / 09:09 各报一次，用户原话：「压缩临近变成了每次唤醒
+   * 都有。80% 提醒一次、95% 提醒一次就行了」）：
+   *   · **两档**：跨过 **80% / 95%** 各报**一次**；
+   *   · **同一档报过就永久不再报**（判据里**没有时钟**；上一版的 `cooldownMs` 已废弃、恒为 0）；
+   *   · **压缩（`wrote`）或历史回落到阈值 50% 以下 ⇒ 分档状态归零**，下个周期重新可报。
    *
    * 状态**从日志里读**（`compactionWarningStateOf(compactionWarningRowsOf(eventView))`，
    * 不是进程内存、也不是"队列里还有没有"）：重启之后那面旗必须照样成立，否则每次重启都会补一条。
@@ -3394,7 +3446,7 @@ export class RealLoop {
     reason: string,
     thresholdTokens: number,
   ): CompactionWarning {
-    // 分档状态**从日志复算**（重启后同样成立）；`nowMs` 与 `decision` 的 `ts` 同一把钟
+    // 分档状态**从日志复算**（重启后同样成立）；判据不看时钟，所以这里不传 `nowMs`
     const progress = this.compactionWarningState();
     const warning = planCompactionWarning({
       historyTokens,
@@ -3402,7 +3454,6 @@ export class RealLoop {
       reason,
       lastTier: progress.lastTier,
       lastAtMs: progress.lastAtMs,
-      nowMs: this.deps.now().getTime(),
     });
     if (!warning.fired) return warning;
 
@@ -3439,21 +3490,22 @@ export class RealLoop {
   // ──────────────────────── 空拍 · 自我整理提醒（2026-10-20） ────────────────────────
 
   /**
-   * **空拍到第二拍 ⇒ 提醒她「可以进行自我整理」**（用户 2026-10-20 的裁决；判据、文案、
-   * "拍"怎么数、以及为什么不动 `render.ts` 那一条都写在 `model/self-organize-reminder.ts`
-   * 的文件头）。
+   * **空拍到第二拍提醒一次、到第五拍再提醒一次，之后不再提醒**（用户 2026-10-22 的裁决；
+   * 判据、文案、"拍"怎么数、以及为什么不动 `render.ts` 那一条都写在
+   * `model/self-organize-reminder.ts` 的文件头）。
    *
    * ## 为什么与心跳**同一轮**，而不是另起一条唤醒
    *
-   * 第二拍的那一拍心跳本来就会真起一个 turn（"心跳是真实唤醒"，2026-10-05 的口径）。
+   * 那两拍心跳本来就会真起一个 turn（"心跳是真实唤醒"，2026-10-05 的口径）。
    * 本条在 `tickOnce` 里**取 `batch` 之前**把 note 落库 ⇒ 它和那条 `wake/heartbeat` 被同一轮
    * 认领 ⇒ **一次请求都不用多加**，她在那本来就醒着的一拍里看到"可以整理"。
-   * 另起一条唤醒（`compact-soon` 那种写法）在这里要多付一次请求，而第二拍并不缺一次"叫醒"。
+   * 另起一条唤醒（`compact-soon` 那种写法）在这里要多付一次请求，而这两拍并不缺一次"叫醒"。
    *
    * ## 三条不变量
    *
-   *   · **只提醒一次**：迟滞从日志里读（`selfOrganizeTraceOf`），不看进程内存、
-   *     也不看"队列里还有没有"（后者每两拍会各发一条，`compact-soon` 踩过）；
+   *   · **一段安静期最多两次**（第 2 拍、第 5 拍各一次）：计数与"已提示几次"都从日志里读
+   *     （`selfOrganizeTraceOf`），不看进程内存、也不看"队列里还有没有"（后者每两拍会各发
+   *     一条，`compact-soon` 踩过）；第 3 次**永不出现**（用户原话：「然后就不提示了」）；
    *   · **不是派活**：正文只说"可以"，做不做她定（用户原话："提醒可以进行自我整理"）；
    *   · **失败方向**：判不出来就不发——它是一条提示，不该有能力打断一拍。
    *
@@ -3463,13 +3515,15 @@ export class RealLoop {
   private remindSelfOrganizeIfDue(): void {
     const plan = planSelfOrganizeReminder(selfOrganizeTraceOf(this.eventView));
     if (!plan.fired) return;
+    // 第 1 次与第 2 次的正文不同（第二次要说清"这是最后一次"）：分派只有这一处
     this.appendSync('wake/manual', {
-      note: selfOrganizeNote(),
+      note: selfOrganizeNote(plan.reminderIndex === 2 ? 2 : 1),
       via: SELF_ORGANIZE_VIA,
     }, 'model');
     this.write(
-      `[整理] 连续空拍 ${plan.idleBeats} 拍（阈值 ${plan.threshold}）`
-      + ` ⇒ 已提醒一次"可以进行自我整理"（wake/manual · via=${SELF_ORGANIZE_VIA}）`,
+      `[整理] 连续空拍 ${plan.idleBeats} 拍（第 ${plan.reminderIndex} 次提醒的阈值 ${plan.threshold} 拍，`
+      + `本段已提醒 ${plan.remindedCount} 次）`
+      + ` ⇒ 已发第 ${plan.reminderIndex} 次"可以进行自我整理"提醒（wake/manual · via=${SELF_ORGANIZE_VIA}）`,
     );
   }
 
@@ -3969,9 +4023,10 @@ export class RealLoop {
    *
    * 判据在 `BudgetGuard.liftedPauses`（四条：不是不可恢复的暂停、记录确实来自撞线、
    * 有效上限真的被抬高了、当刻不再越线），这里只做两件属于循环层的事：
-   *   ① **人审挂起在台上时 task 层让路**——那条暂停的解除条件是"人答了"（答复到达会写
-   *      `budget/topped-up{by:'human-answer'}`），不是"上限比已用大了"。挂起线索是进程态
-   *      （`this.suspension`，由 warmUp 的 scanSuspension 从日志重建），只有循环层知道；
+   *   ① **人审挂起在台上时 task 层先等一等**：那时她本来就不在跑，暂停早解一拍没有任何好处，
+   *      而"人还在等人答话"这条线索只有循环层知道（`this.suspension`，由 warmUp 的
+   *      scanSuspension 从日志重建）。⚠ 2026-10-22 起人审超时**不再写** task 层暂停了
+   *      （超时 = 按未批准处置并让她继续），所以这一条只对"真撞线 + 恰好挂着人审"那种巧合生效；
    *   ② **落事件**：解除是一件事，就得写进日志。只改投影会在下一次重启时被日志推翻
    *      （这正是本 bug 的成因）。
    *
@@ -4221,54 +4276,196 @@ export class RealLoop {
   // ──────────────────────────────── 人审挂起（design §4.21） ────────────────────────────────
 
   /**
-   * 人审挂起的两条出路，每拍在一处结算：
-   *   ① **答复到达**：解除挂起留下的 task 层暂停，并把挂起 turn 认领过的输入写成
-   *      `input/requeued{reason:'human-answered'}` 送回队列——它们已被 input/claimed 摘走，
-   *      不送回去就再也没人叫醒它（挂起期间 pending 是空的）。
-   *   ② **超时未答**：按 budget-exhausted 同等语义暂停（写 `budget/exhausted{layer:'task'}`），
-   *      下一拍的唤醒门就会拦住所有输入；答复或人工加注都能解除它。
+   * 人审挂起的三条出路，每拍在一处结算：
+   *   ① **答复到达**：把挂起 turn 认领过的输入写成 `input/requeued{reason:'human-answered'}`
+   *      送回队列——它们已被 input/claimed 摘走，不送回去就再也没人叫醒它（挂起期间 pending 是空的）。
+   *   ② **到达上限的 80%**：先提醒一次（`maybeWarnHumanStall`，同一挂起只提醒一次）——
+   *      现场是 06:32 被问、17:51 才有人发现，中间十几个小时界面上一句话都没有。
+   *   ③ **超时未答**：**按"未获批准"处置并让她继续**（2026-10-22 用户裁决「不要有这种玩意」）：
+   *      作废那条待答、计划按 expired 结案（绝不执行）、输入重新入队，并留 `human/timed-out`。
+   *      ⚠ **不再写 `budget/exhausted`**：那条暂停会把整个 agent 的唤醒门关掉，
+   *      一次没人答的提问就变成"她再也不干活"——用户要的恰恰是反过来。
    */
   private async settleHumanSuspension(): Promise<void> {
     const s = this.suspension;
     if (s === null) return;
     if (s.answeredAt === null) s.answeredAt = await this.detectAnswer(s.askedAt);
     if (s.answeredAt === null) {
+      // 先判到点：到点就处置（作废 + 重入队，`this.suspension` 会当场被清空）；
+      // 没到点才轮得到 80% 的提醒——到点那一拍不必再"提醒"一次。
       await this.maybeTimeoutHuman(s);
+      if (this.suspension !== null) await this.maybeWarnHumanStall(s);
       return;
     }
-
-    // 人事已了：「挂起吃掉了 task 层」这条暂停理由不再成立，随答复一起解除。
+    // 答复到达 ⇒ 这一轮挂起（连同它的提醒账）结束：下一次挂起按新的 askSeq 重新记。
+    this.humanStallWarnedKey = null;
+    // 旧版本（2026-10-22 之前）会为这条挂起写一条 task 层暂停：答复到了就把它解开。
     // addedTokens:0 = 不是人工加注（与 rollover 解除日额度同一口径，不伪造加注量）。
-    if (this.deps.projection.lastExhausted['task'] !== undefined) {
-      this.appendSync('budget/topped-up', { layer: 'task', addedTokens: 0, by: 'human-answer' }, 'internal');
-      void this.notifier.ok(CATEGORY.human, '人审挂起已得到答复：任务层暂停已解除。');
-    }
+    const hadPause = this.releaseLegacyHumanTimeoutPause('human-answer');
+    // **销账放在判据外面**：80% 那条提醒也是 `CATEGORY.human` 的故障登记，
+    // 而它发生时**还没有**暂停——答案到了却不销账，那张"框架提示"卡会一直红着
+    // （`ok()` 自己认得"没登记就什么都不写"，所以停在外面不会凭空造一条恢复）。
+    void this.notifier.ok(
+      CATEGORY.human,
+      hadPause
+        ? '人审挂起已得到答复：任务层暂停已解除。'
+        : '人审挂起已得到答复：到上限的提醒作废。',
+    );
+    this.requeueSuspendedInputs(s, 'human-answered');
+    this.suspension = null;
+  }
 
-    // ── 重投之前先问一句：这条输入**还在她的上下文里**吗（v50，2026-10-10 修的真 bug）──
-    //
-    // 判据**只有一条**，落在**一个**点上（就是这里）：把"重投"按它进那一轮的位置分成两类——
-    //   · `seq < 该轮 turn/start` ⇒ **上一拍就已经递到她眼前的那条输入**（当轮输入）；
-    //   · 其余 ⇒ 本轮进行中才插进来的插话（`claimInterruption`），从头到尾还没被递过。
-    // 只有**前一类**才需要再问一句"它还在吗"：**`seq <= 遮蔽点` ⇒ 它已经被
-    // `compaction/summary` 折进摘要了**，她的上下文里没有它 ⇒ **不许再插一条**。
-    //
-    // 现场（逐项对照 1245/14 与 1246/1，本机 03:17）：那条 `input/requeued{human-answered}`
-    // 把 `wake/manual`（**上下文压缩通报**，seq 72233）重新入队，而它早在 turn 1245 就被递过、
-    // 且已经被后面那次压缩折掉 ⇒ 那一拍的请求里**同一个包裹出现两遍**：一条在历史最前面
-    // （`[1]`：标题 + 三行正文 + 遮蔽点），新递的那条**插在历史中间**（`[42]` 附近）
-    // ⇒ **它之后的一切错位**，`input=54396 / hit=16512 / miss=37884`（几乎全 miss）。
-    // 日志自己的判词是 `cacheBreak.class='history' / cause='unattributable'`——
-    // "指纹变了，但两次调用之间没有任何能解释它的事件"，因为那条错位**不是**某条事件的字节
-    // 变化，而是**多了一条一模一样的通报**。
-    //
-    // 为什么这两条合起来就是对的（而且不必再看别的）：
-    //   · **被折掉 = 摘要已经替她说过了** ⇒ 重投既改不了她的判断，又白赔一整段前缀；
-    //   · **插话那一类照旧重投**：它还没被递过，重投是"第一次给她"（不多不少一条）；
-    //   · **没压缩过**（遮蔽点 0）或**遮蔽点在它之前**的，一律照旧——重启打断 / 整轮失败
-    //     那两条路要的正是"再给她一次机会"，`crash-injection.test.ts` 与
-    //     `plan-askhuman.test.ts` 都盯着这件事。
-    // **判据一处**：渲染层不重复判（`render` 照旧只认 `requeuedSeqsOf` 那个集合），
-    // `agent-loop` 也不判——"哪条不该再递"是**投递**的决定，只落在这一行上。
+  /**
+   * **超时：按"未获批准"处置，然后让她继续**（2026-10-22 拆掉"自动暂停整个 agent"）。
+   *
+   * 用户原话：「不要有这种玩意」。一次没人答的提问，正确后果是**这件事不执行**，
+   * 而不是"整台机器停下来等人"。所以这里做四件事，一件都不多：
+   *   ① `human/expired`（既有事件，model 可见）——事实是"时间到了，人可能不在"（§6.1）；
+   *   ② `human/timed-out`（新事件，internal）——处置是"这条待答作废、她继续"；
+   *   ③ `plan/resolved{outcome:'expired'}`（既有事件）——计划簿记结案，**批准位一格不写** ⇒
+   *      需要批准的动作绝不会因为超时而执行；顺带让"同一件事"下次能重新递单（否则永远
+   *      被判成"已经在待批队列里"）；
+   *   ④ `input/requeued{reason:'human-timeout'}`——挂起 turn 认领过的输入回队列，她接着干。
+   *
+   * 判别与预算无关：**不写 `budget/exhausted`**，于是唤醒门（`admitWake` 的
+   * `isPaused('task')`）不会被这条路点亮。真撞预算线那条语义一个字不动（那在
+   * `BudgetGuard` 里，与这里无关）。
+   */
+  private async maybeTimeoutHuman(s: TrackedSuspension): Promise<void> {
+    const nowMs = this.deps.now().getTime();
+    if (!humanTimeoutElapsed(s.askedAt, nowMs, this.humanTimeoutMs)) return;
+    const askedMs = Date.parse(s.askedAt);
+    // waitedMs 取"那一刻 - 提问时刻"（与 `settleHumanAsks` 同一条口径）：时钟读不出来时
+    // 退回超时线本身，绝不编一个数
+    const waitedMs = Number.isNaN(askedMs) ? this.humanTimeoutMs : Math.max(0, nowMs - askedMs);
+
+    // ① 事实：时间到了（既有事件；model 可见——她得知道人可能不在，§6.1）
+    this.appendSync('human/expired', {
+      askSeq: s.askSeq,
+      question: s.question,
+      turn: s.turn,
+      // 只有系统来源的提问会挂起（§6.5）：她自己的提问不挂起，走的是 settleHumanAsks
+      source: 'system',
+      waitedMs,
+      timeoutMs: this.humanTimeoutMs,
+    }, 'model');
+    // ② 处置：这条待答作废（投影里出队、waitingHuman 清掉），她继续
+    this.appendSync('human/timed-out', { askSeq: s.askSeq, question: s.question, waitedMs }, 'internal');
+    // ③ 计划簿记结案（expired）：绝不批准，但也不能一直占着"已在待批队列里"那一格
+    const expiredPlan = this.expirePendingPlanOf(s, waitedMs);
+    // ④ 输入回队列：她接着干（与答复那条共用同一份"还在她上下文里吗"的判据）
+    this.requeueSuspendedInputs(s, 'human-timeout');
+    // ⑤ 旧版本为这条挂起写过的那条 task 层暂停（若有）就地解开——它已经没有语义了
+    this.releaseLegacyHumanTimeoutPause('human-timeout');
+    this.suspension = null;
+    this.humanStallWarnedKey = null;
+
+    const [hours, limitHours] = [hoursLabel(waitedMs), hoursLabel(this.humanTimeoutMs)];
+    this.write(`[人审] 挂起 ${hours} 小时（上限 ${limitHours}）没等到答复：按"未批准"作废这条提问`
+      + `${expiredPlan ? '、计划按 expired 结案' : ''}，${s.wakeSeqs.length} 条输入已重新入队（她继续干活）`);
+    // 80% 那条提醒到此销账（它登记的是"正在等答复"，现在这件事已经办完了）
+    void this.notifier.ok(CATEGORY.human, '到上限仍没人答：已按"未批准"处理并让她继续，提醒作废。');
+    // 给用户一条**看得见**的提醒（普通告警：这是已经办完的事实，不是持续中的故障）
+    await this.notifier.alert({
+      category: CATEGORY.human,
+      level: 'warn',
+      title: `有一条提问等了 ${hours} 小时没答，已按"未批准"处理并让她继续：${questionPreview(s.question)}`,
+      body: `turn ${s.turn} 从 ${s.askedAt} 起的提问「${s.question}」超过了 ${limitHours} 小时的等待上限。`
+        + '框架的处置：这条待答作废（未获批准 ⇒ 需要批准的动作**没有执行**，批准位一格没写），'
+        + `挂起解除，${s.wakeSeqs.length} 条输入重新放回队列——她继续干活，agent 不会因此停下。`
+        + '还想让它执行，就再让她走一次申请/批准；详情见日志页的 human/timed-out。',
+      params: { askSeq: s.askSeq, outcome: 'timed-out' },
+    });
+  }
+
+  /**
+   * 计划簿记：挂起那条提问对应的待批计划按 `expired` 结案（**绝不批准**）。
+   *
+   * 为什么要写这一条：`planApproved` 是"一次执行许可"，超时绝不能碰它；但 `planPending`
+   * 里那一条如果留着，`PlanMode.decide` 此后会把同一件调用判成"已经在待批队列里"而拒绝
+   * 重新落卡（`already`）——她就再也递不出这张单了。`plan/resolved{expired}` 是既有出口
+   * （`PlanOutcome` 本来就有 `'expired'`，见 `plan-mode.ts` 的 `resolve`），结案时不写许可。
+   *
+   * 配哪一条：`plan/pending` 与 `human/asked` 同一个 turn（一次只拦一件调用，所以最多一条）。
+   * 找不到就不写——宁可少一条簿记，也不猜一个 callId。
+   */
+  private expirePendingPlanOf(s: TrackedSuspension, waitedMs: number): boolean {
+    const candidates = this.deps.projection.planPending.filter(item => item.turn === s.turn);
+    const plan = candidates[candidates.length - 1];
+    if (plan === undefined) return false;
+    this.planMode.resolve({
+      callId: plan.callId,
+      tool: plan.tool,
+      arguments: plan.arguments,
+      outcome: 'expired',
+      by: 'human-timeout',
+      note: `人审挂起 ${hoursLabel(waitedMs)} 小时没答：按"未批准"结案（这个调用没有执行，也不会执行）`,
+    });
+    return true;
+  }
+
+  /**
+   * 旧版本留下的"人审挂起超时暂停"**一次性解除**（2026-10-22）。
+   *
+   * 判据只有一条：`task` 层有记录，且**记录里的已用 < 上限**。
+   *
+   * 为什么这一条就够：预算撞线的口径是"当刻用量 >= 上限"（`BudgetGuard` 每一层同此，
+   * step 层是 > ），所以 `actual < limit` 的记录**不可能是撞线**——它只可能是 2026-10-22
+   * 之前那次"人审挂起超时按预算耗尽同等语义暂停"（现场 17:51 那条：limit 552000000 /
+   * actual 67186217，正是本机现在这条）。真撞线的记录这里一律不碰：那是钱的事，
+   * 归加注（`budget/topped-up`）与抬上限（`budget/resumed`）两条既有出口。
+   *
+   * 为什么解除必须落成事件（而不是只改投影）：投影是日志的折叠结果，重启会把同一条
+   * `budget/exhausted` 重放一遍，暂停记录照样回来——那就等于没解。
+   *
+   * 用的就是既有机制：`budget/topped-up`（加注那条路的事件，fold 据此清掉该层记录），
+   * `addedTokens: 0` 表示"不是加注，只是撤掉一条不属于预算的暂停"（与答复解除那条同形）。
+   * 幂等：写完 fold 立刻删掉记录，下一次判据为空。
+   */
+  private releaseLegacyHumanTimeoutPause(by: 'human-answer' | 'human-timeout'): boolean {
+    const record = this.deps.projection.lastExhausted['task'];
+    if (record === undefined) return false;
+    if (record.actual >= record.limit) return false; // 真撞线：不归这条路管
+    this.appendSync('budget/topped-up', { layer: 'task', addedTokens: 0, by }, 'internal');
+    this.write(`[预算] task 层那条旧记录（limit ${record.limit} / actual ${record.actual}）不是撞线：`
+      + `已按"人审挂起超时"那条旧语义撤掉（by ${by}），唤醒门照常放行`);
+    void this.notifier.ok(CATEGORY.budget, 'task 层那条"人审超时暂停"已撤掉（它不是预算撞线）。');
+    return true;
+  }
+
+  /**
+   * 把挂起 turn 认领过的输入送回队列（**答复到达与超时处置共用这一份判据**）。
+   *
+   * ── 重投之前先问一句：这条输入**还在她的上下文里**吗（v50，2026-10-10 修的真 bug）──
+   *
+   * 判据**只有一条**，落在**一个**点上（就是这里）：把"重投"按它进那一轮的位置分成两类——
+   *   · `seq < 该轮 turn/start` ⇒ **上一拍就已经递到她眼前的那条输入**（当轮输入）；
+   *   · 其余 ⇒ 本轮进行中才插进来的插话（`claimInterruption`），从头到尾还没被递过。
+   * 只有**前一类**才需要再问一句"它还在吗"：**`seq <= 遮蔽点` ⇒ 它已经被
+   * `compaction/summary` 折进摘要了**，她的上下文里没有它 ⇒ **不许再插一条**。
+   *
+   * 现场（逐项对照 1245/14 与 1246/1，本机 03:17）：那条 `input/requeued{human-answered}`
+   * 把 `wake/manual`（**上下文压缩通报**，seq 72233）重新入队，而它早在 turn 1245 就被递过、
+   * 且已经被后面那次压缩折掉 ⇒ 那一拍的请求里**同一个包裹出现两遍**：一条在历史最前面
+   * （`[1]`：标题 + 三行正文 + 遮蔽点），新递的那条**插在历史中间**（`[42]` 附近）
+   * ⇒ **它之后的一切错位**，`input=54396 / hit=16512 / miss=37884`（几乎全 miss）。
+   * 日志自己的判词是 `cacheBreak.class='history' / cause='unattributable'`——
+   * "指纹变了，但两次调用之间没有任何能解释它的事件"，因为那条错位**不是**某条事件的字节
+   * 变化，而是**多了一条一模一样的通报**。
+   *
+   * 为什么这两条合起来就是对的（而且不必再看别的）：
+   *   · **被折掉 = 摘要已经替她说过了** ⇒ 重投既改不了她的判断，又白赔一整段前缀；
+   *   · **插话那一类照旧重投**：它还没被递过，重投是"第一次给她"（不多不少一条）；
+   *   · **没压缩过**（遮蔽点 0）或**遮蔽点在它之前**的，一律照旧——重启打断 / 整轮失败
+   *     那两条路要的正是"再给她一次机会"，`crash-injection.test.ts` 与
+   *     `plan-askhuman.test.ts` 都盯着这件事。
+   * **判据一处**：渲染层不重复判（`render` 照旧只认 `requeuedSeqsOf` 那个集合），
+   * `agent-loop` 也不判——"哪条不该再递"是**投递**的决定，只落在这一处。
+   */
+  private requeueSuspendedInputs(
+    s: TrackedSuspension,
+    reason: 'human-answered' | 'human-timeout',
+  ): void {
     const covered = this.coveredPointOf();
     const turnStartSeq = this.turnStartSeqOf(s.turn);
     const keepSeqs: number[] = [];
@@ -4291,41 +4488,71 @@ export class RealLoop {
         wakeSeqs: keepSeqs,
         claimCounts: keepCounts,
         sources: keepSources,
-        reason: 'human-answered',
+        reason,
       }, 'internal');
     }
     // 被折掉的那几条**如实记账**（不静默丢）：投影里它们不再回队列，日志里这一次要说清
     if (folded.length > 0) {
-      this.write(`[人审] turn ${s.turn} 的答复已到位：${folded.length} 条输入**不再重投**`
+      this.write(`[人审] turn ${s.turn} 的挂起已结（${reason}）：${folded.length} 条输入**不再重投**`
         + `（早已递过、且已被上下文压缩折进摘要——遮蔽点 seq ${covered}：${folded.join('、')}）`
         + `：重投它只会把一条已经折掉的通报插回请求中间（那正是一次整段前缀失守的成因）`);
     }
-    this.write(`[人审] turn ${s.turn} 的答复已到位：${keepSeqs.length} 条输入已重新入队`);
-    this.suspension = null;
+    this.write(`[人审] turn ${s.turn} 的挂起已结（${reason}）：${keepSeqs.length} 条输入已重新入队`);
   }
 
-  /** 超时判定与落库。同一事实只落一条事件（投影里已有 task 层耗尽就不再写） */
-  private async maybeTimeoutHuman(s: TrackedSuspension): Promise<void> {
-    const p = this.deps.projection;
-    if (p.lastExhausted['task'] !== undefined) return;
-    if (!humanTimeoutElapsed(s.askedAt, this.deps.now().getTime(), this.humanTimeoutMs)) return;
-    this.appendSync('budget/exhausted', {
-      layer: 'task',
-      // 上限与已用一律走预算层自己的口径：循环层凭空填数字就是伪造事实
-      limit: this.guard.limitOf('task'),
-      actual: this.guard.actualOf(p, 'task'),
-      resumable: true,
-    }, 'internal');
-    const hours = Math.round(this.humanTimeoutMs / 3_600_000);
-    this.write(`[人审] 挂起超过 ${hours} 小时未得到答复：任务层按预算耗尽同等语义暂停`);
+  /**
+   * **超时前提醒**（2026-10-22）：挂起到达上限的 80% 时发一次告警。
+   *
+   * 为什么要它：用户的现场是 06:32 被问、17:51 才有人发现——中间十几个小时界面上一句话都没有。
+   * 上限的 80% 那条线给的是"还来得及回答"的窗口（默认 24h 上限 ⇒ 19.2h 处喊一声）。
+   *
+   * 三条口径：
+   *   ① **同一挂起只提醒一次**：按 `askSeq` 记账（`humanStallWarnedKey`），重启后靠
+   *      `notifier.windows()` 里同一个 (类别, askSeq) 指纹挡住（`warmUp` 用日志重建窗口）。
+   *      答复/超时之后清账 ⇒ 下一次挂起重新提醒。
+   *   ② **不编数字**：标题里的"已 X 小时"是**实测的已挂起时长**（不是 80% 那条线本身）——
+   *      提醒晚到一拍时，它说的是真的等了多久。
+   *   ③ **真撞预算线停着时不提醒**：那时她本来就跑不动，提醒也办不成事，
+   *      而"预算耗尽"自己有一条 critical 告警。⚠ 2026-10-22 之后人审超时**不写**预算暂停，
+   *      所以这一条只对真撞线生效（旧日志里那条"人审超时暂停"会在启动时被撤掉，
+   *      见 `releaseLegacyHumanTimeoutPause`）。
+   *
+   * 用 `notifier.fail` 而不是 `alert`：它是"这条挂起正在发生"的故障登记，答复到达或超时处置时
+   * `notifier.ok(CATEGORY.human)` 正好把这条销账。
+   */
+  private async maybeWarnHumanStall(s: TrackedSuspension): Promise<void> {
+    if (this.deps.projection.lastExhausted['task'] !== undefined) return;
+    const askedMs = Date.parse(s.askedAt);
+    if (Number.isNaN(askedMs)) return; // 时间读不出来就不判：宁可不提醒，也不编一个时长
+    const nowMs = this.deps.now().getTime();
+    const elapsedMs = nowMs - askedMs;
+    // 80% 是"提醒"的判据，上限仍是 humanTimeoutMs（到 100% 由 maybeTimeoutHuman 处置）
+    if (elapsedMs * 5 < this.humanTimeoutMs * 4) return;
+
+    const key = s.askSeq >= 1 ? `ask:${s.askSeq}` : `suspend:${s.turn}@${s.askedAt}`;
+    if (this.humanStallWarnedKey === key) return;
+    if (s.askSeq >= 1) {
+      // 跨重启那一半：这个指纹发过 ⇒ 上一个进程已经提醒过同一条提问（别重启一次又催一次）
+      const fingerprint = fingerprintOf(CATEGORY.human, humanStallParams(s.askSeq));
+      if (this.notifier.windows().has(fingerprint)) {
+        this.humanStallWarnedKey = key;
+        return;
+      }
+    }
+    this.humanStallWarnedKey = key;
+
+    const [elapsed, limit] = [hoursLabel(elapsedMs), hoursLabel(this.humanTimeoutMs)];
+    this.write(`[人审] 挂起已 ${elapsed} 小时（上限 ${limit} 小时）：提醒一次，到点就按"未批准"处理`);
     await this.notifier.fail({
       category: CATEGORY.human,
-      level: 'critical',
-      title: `人审挂起超过 ${hours} 小时：任务层已暂停`,
-      body: `turn ${s.turn} 从 ${s.askedAt} 起一直在等人回答「${s.question}」，已超过 ${hours} 小时的挂起上限。`
-        + '按预算耗尽同等语义处理：任务层暂停、pending 一条不动（resumable）。'
-        + '答复（irmia answer / Web 卡片）会自动解除这个暂停；也可以直接加注解除。',
-      params: { layer: 'task' },
+      level: 'warn',
+      title: `人审挂起已 ${elapsed} 小时（上限 ${limit} 小时）：再不理就按"未批准"处理`,
+      body: `turn ${s.turn} 从 ${s.askedAt} 起一直在等人回答「${s.question}」，已到 ${limit} 小时上限的 80%。`
+        + '到上限就会把这条待答作废（未获批准 ⇒ 需要批准的动作**绝不执行**），'
+        + '并且把她放回去继续干活——**不会**因此停下整个 agent。'
+        + '现在回答还来得及：irmia answer，或界面上的申请单卡片。',
+      // 指纹带上 askSeq：同一条提问只提醒一次，换一条提问是新的一件事
+      params: humanStallParams(s.askSeq),
     });
   }
 
@@ -4371,6 +4598,9 @@ export class RealLoop {
       sources: wakeEvents.map(event => wakeSourceOf(event.type)),
       answeredAt: null,
     };
+    // 新挂起 = 新的一件"等答复"：上一次挂起的提醒账不算数（同一 askSeq 仍由键挡着，
+    // 但换了提问就必须能重新提醒一次）
+    this.humanStallWarnedKey = null;
     this.write(`[人审] turn ${turn} 挂起等答复（${batch.length} 条输入待重入）`);
   }
 
@@ -4511,6 +4741,10 @@ export class RealLoop {
     // 必须排在 setTopUps 之后：有效上限 = 配置 + 加注累计，两个来源都齐了才能比；
     // 也必须排在 scanSuspension 之后：人审挂起在台上时 task 层要让路。
     this.releaseLiftedPauses();
+    // 旧版本那条"人审挂起超时暂停"是一次性的历史：记录里 actual < limit ⇒ 它不可能来自撞线
+    // ⇒ 就地把 task 层那条撤掉（判据与理由见 `releaseLegacyHumanTimeoutPause`）。
+    // 用它而不是等 24 小时那条超时：本机现在这条（17:51 那条）就该在启动后第一拍解开。
+    this.releaseLegacyHumanTimeoutPause('human-timeout');
     // **补写告警的账**（与上面那条 `budget/resumed` 是两件事：那条说"怎么解的"，
     // 这条把"已恢复"补给告警卡）。必须排在 `releaseLiftedPauses` **之后**：那一步会把
     // 抬上限解开的层从 `lastExhausted` 里清掉，清掉之后"当刻还停着哪几层"才是真正的答案
@@ -5191,7 +5425,7 @@ export class RealLoop {
       // 发言人 → 名字：**这一个**判据也交给渲染层（v47），此刻层的「预警：」那一行与点名那句
       // 用它写人名。为什么由宿主注入而不是让渲染层自己查表：名字真源的最后一档要读
       // `data/group-members.json`（渲染层不读盘），而少一档就等于第二份判据——两份判据漂移
-      // 的后果正是 2026-10-11 修的那一处（同一份上下文里"用户（OWNER）"与"1234567890"并存）。
+      // 的后果正是 2026-10-11 修的那一处（同一份上下文里"用户（阿岚）"与"1234567890"并存）。
       personNameOf: (person: string) => this.personNameOf(person),
       // 本轮唤醒的那条通道消息：只用来判"这轮是不是群里有人 @ 了我"。
       // 取的是**原始唤醒数据**而不是 `replyableWakeChannel` 的结论：那个判据问的是"能不能
@@ -6749,7 +6983,7 @@ export class RealLoop {
    * 判据与事后重放**共用一份实现**（persona/relationship.ts）：两处各写一份的代价不是冗余，
    * 是重放出来的请求与当时对不上，而重放的全部意义就在"一模一样"。
    */
-  private relationshipForCurrentWake(): { who: string; content: string } | null {
+  private relationshipForCurrentWake(): RelationshipNote | null {
     const first = this.deps.projection.pending[0];
     if (!first) return null;
     return relationshipForWake(this.deps.log.get(first.wakeSeq), this.deps.dataDir);

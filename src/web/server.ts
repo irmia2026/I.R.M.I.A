@@ -64,6 +64,7 @@ import {
   classifyConfigField, diffConfigFields, readPath as readConfigPath, sameValue as sameConfigValue,
 } from '../config/watcher.ts';
 import { resolveRestartShell } from '../runtime/restart-shell.ts';
+import { StartupState, type ServerBootstrap } from './preflight.ts';
 import { decodeText } from '../util/bytes-text.ts';
 import { chooseRestartPath, parseRestartPath, restartReasonText, restartTraceLine, backendEntry, BUNDLED_NODE_REL, RESTART_FAILURE_REASONS, type RestartPath } from '../runtime/restart-chain.ts';
 import { deriveRequest } from '../runtime/agent-loop.ts';
@@ -90,16 +91,20 @@ import {
 } from '../runtime/replay.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 import { WarnExemptBook } from '../channel/warn-exempt.ts';
+// 「扫码创建 QQ 官方 Bot」的协议层（零依赖：node:crypto + fetch）：三步协议、AES-GCM 解密、
+// 一轮扫码的状态机、凭据连接测试。**不 vendor 官方 SDK**（license 是 UNLICENSED），
+// 也不引任何二维码库——二维码由 q.qq.com 那个页面自己渲染，我们只把 URL 交给系统浏览器。
+import { QqBindSession, testQqCredentials, type QqBindConnectionResult, type QqBindHttp, type QqBindSettled } from '../channel/qq-bind.ts';
 import { installSnowLuma } from '../services/install-snowluma.ts';
 import {
-  KEY_NAMES, isKeyName, keyShapeProblem, keyStatus, planModelKeyWrite, writeKeysFile,
+  KEY_NAMES, isKeyName, keyShapeProblem, keyStatus, planModelKeyWrite, resolveKey, writeKeysFile,
   type KeysWritePlan, type KeyName,
 } from '../config/keys.ts';
 import { groupsForTools, groupIdOfTool, mcpGroupId, mcpServerOfTool } from '../tools/groups.ts';
 // 申请单那一套（她发起 → 待批 → 用户点批准/驳回 → 框架执行 → 回执）：
 // 唯一实现在 `grant/mcp-grant.ts`（判据、落地、卡面文案、回执与唤醒都在那里）
 import {
-  GRANT_REJECT_REASON_MAX, applyGrant, grantReceiptLine, grantsResolvedDirOf, grantsDirOf,
+  GRANT_REJECT_REASON_MAX, applyGrant, grantFileProblems, grantReceiptLine, grantsResolvedDirOf, grantsDirOf,
   isSkillKind, listGrants, readConfiguredServer, wakeForGrant, writeGrantOutcome,
   type GrantApplyResult, type GrantWakeFacts,
 } from '../grant/mcp-grant.ts';
@@ -118,7 +123,7 @@ import {
 import type {
   McpConnectionHost, McpProcess, McpServerEntry, McpShutdownReport, McpToolInfo,
 } from '../mcp/client.js';
-import { aliasNoteOf, channelRenderOf, collectSessions, normalizeSid, parseAliases, parseMemberAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
+import { aliasNoteOf, avatarUrlOf, channelRenderOf, collectSessions, normalizeSid, parseAliases, parseMemberAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
 import { readEndpointFromConfig, resolveServiceDir, maskCredential } from '../services/snowluma.ts';
 import { loadPersona } from '../persona/loader.ts';
 import {
@@ -140,9 +145,11 @@ import { formatCompact } from '../format/units.ts';
 import type { RenderInput, RenderedRequest } from '../model/render.js';
 // `CACHE_HIT_LOW` / `CACHE_SAMPLE_MIN` 建议区**已不用**（判据 2026-10-22 换成滑动窗口，
 // 理由见 `建议规则的阈值` 那段注释）；留着 import 只会让下一个人以为这里还在用旧口径。
-import { clipTaskTitle, inputContentText, render, wakeTitle } from '../model/render.ts';
+import { clipTaskTitle, inputContentText, render, REASONING_ECHO_POLICY, wakeTitle } from '../model/render.ts';
+// 引导第 2 步的「探测」：只读的模型/协议实测（实现与四条纪律都在 model/probe.ts）
+import { MODEL_PROBE_TIMEOUT_MS, probeModels } from '../model/probe.ts';
 import {
-  CACHE_BREAK_CAUSE_LABEL, CACHE_BREAK_CLASS_LABEL, CACHE_BREAK_LABEL,
+  CACHE_BREAK_CAUSE_LABEL, CACHE_BREAK_CLASS_LABEL, CACHE_BREAK_LABEL, type ContextBreakdown,
 } from '../model/context-audit.ts';
 import { SKILL_DESCRIPTION_MAX_CHARS, SKILL_FILE_NAME, SkillManager, skillNameProblem } from '../skill/skills.ts';
 import { applyOne, budgetTokensOf, finalizePressure, wakeSourceOf } from '../state/fold.ts';
@@ -398,6 +405,10 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   'set-compaction-threshold': null,
   // 重启（运行情况页那颗按钮）：会打断她正在做的事，按危险操作处理——短语 = 命令名，防误触不防人
   restart: 'restart',
+  // **结束这个实例**（界面「登出」的第二步，2026-10）：让后端自己优雅退出，**不重启**。
+  // 它打断的东西与 restart 同级（正在跑的那一轮、协议端要重登），所以同样按危险操作处理：
+  // 短语 = 命令名。门挡的是误触（别的地方顺手打一下这条端点），不防人。
+  'stop-instance': 'stop-instance',
   // 「她被怎么称呼」（设置页/消息适配器页）：写 channels.mentionKeywords。它改的是
   // "群里喊她名字算不算在叫她"——不改变能力边界（唤醒仍是同一条路），所以短语 null。
   'set-mention-keywords': null,
@@ -419,6 +430,11 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 落下去就是一条到点会叫醒她的安排"，与 `grant-decide` / `dream` 那几族同一条纪律。
   'timer-set': null,
   'webhook-test': null,
+  // 凭据连接测试（引导页「消息适配器」那一步 /「填写凭据」旁边的「测试连接」）：
+  // 拿当前 AppID + AppSecret **真去换一次 access_token**，只回答"连不连得上"，
+  // 不写任何状态、不改能力边界，所以与 webhook-test 同级（短语 null）。
+  // 它不是 `set-key`：那条会把密钥落盘，而这里连读都只读一份（值不进响应）。
+  'qq-token-test': null,
   // 技能信任门：把某个技能目录标成「由 human 确认」（写 skill/installed）。它只放宽"谁能进
   // catalog"，不放宽"能碰什么"，所以与 persona-approve 同级：短语 null。
   'skill-confirm': null,
@@ -514,6 +530,23 @@ export const UNIMPLEMENTED_COMMANDS: Record<string, string> = {
 
 /** 静态资源 MIME 表已随 `web/` 一起删除：这个服务不再吐任何文件，只吐 JSON。 */
 
+/**
+ * 「登出 → 结束实例」那两步之间，**被注销的那张票**还能用来打 `stop-instance` 的宽限窗口（毫秒）。
+ *
+ * 60 秒的依据：界面那两步是**连着发**的（同一次点击里，几十毫秒），而人手动 `curl`
+ * 补一下也不至隔上一分钟。窗口越短越好——它是"把刚刚被作废的一个能力多留一会儿"，
+ * 不是一条新通道（见 `recentlyLoggedOut` 的字段注释）。
+ */
+export const STOP_INSTANCE_LOGOUT_GRACE_MS = 60_000;
+
+/**
+ * `stop-instance` 的回执写出去之后，隔多久真的开始退出（毫秒）。
+ *
+ * 为什么要等：HTTP 响应要先把字节交给内核再让进程消失——同一 tick 里就退，界面那头
+ * 看到的是一个断掉的连接，而它没法区分"停成功了"与"从来没收到回执"（那正是要避免的形状）。
+ * 60ms 是本地回环上一次小响应的量级（实测中位 5ms），留足一个数量级。
+ */
+export const STOP_INSTANCE_EXIT_DELAY_MS = 60;
 // ──────────────────────────────── 对外类型 ────────────────────────────────
 
 /**
@@ -789,6 +822,57 @@ export interface WebServerDeps {
    * `UpdateService` 一处；这里只做 HTTP 形状与认证。
    */
   update?: UpdateHost | undefined;
+  /**
+   * 「扫码创建 QQ 官方 Bot」的 HTTP 出口覆盖点（测试用）。缺省 = 真的打 q.qq.com 与
+   * api.bot.qq.com（见 `channel/qq-bind.ts` 的 `defaultQqBindHttp`）。
+   *
+   * 为什么留这个口子：这条流程的三步都是**外网**请求，而用例要验的是"三步的顺序、
+   * 解密布局、成功之后写没写盘、过期有没有重建"，不是"今天 q.qq.com 通不通"。
+   */
+  qqBindHttp?: QqBindHttp | undefined;
+  /**
+   * 扫码会话的节奏覆盖点（测试用）。`pollIntervalMs <= 0` = **不起后台定时器**，
+   * 完全由 `GET /api/channels/qq-official/bind/status` 驱动（用例据此避免等 2 秒）。
+   * 生产永远走缺省：2 秒一次、总超时 3 分钟（`channel/qq-bind.ts` 的常量）。
+   */
+  qqBindTiming?: { pollIntervalMs?: number; timeoutMs?: number } | undefined;
+  /**
+   * 启动状态（`preflight.ts` 的 `StartupState`）：`/api/health` 与"未就绪期 503"的**唯一判据**。
+   *
+   * 生产装配里 `main.ts` 在进程很早的时候就造了它（端口早绑那一层也在用**同一个实例**），
+   * 于是"health 说 starting"与"其余 /api 回 503"永远是同一句话的两个面。
+   * 不注入 ⇒ 本模块自建一份**已经就绪**的（测试、CLI、以及任何"不经过启动期"的装配点），
+   * 于是它们的行为与改前逐字相同。
+   */
+  startup?: StartupState | undefined;
+  /**
+   * **已经 bind 好的 socket**（`preflight.ts` 造的那一个）：给了就不自己 `listen`，
+   * 而是在 `listen()` 里把同一个 socket 上的请求交给本模块的 `route`。
+   *
+   * 这样"端口早绑"与"真服务接管"之间**没有空窗**：不关旧服务、不重 bind、不换端口，
+   * 也就不会出现"界面在重启窗口里被 RST 或 ECONNREFUSED"。见 `preflight.ts` 的文件头。
+   */
+  bootstrap?: ServerBootstrap | undefined;
+  /**
+   * **实例自述的静态那一半**（`GET /api/instance`，2026-10 多实例）：名字与"是不是默认实例"。
+   *
+   * 为什么由宿主给、web 层不自己读登记表：那两个字段的真源在 `%APPDATA%\Irmia\instances.json`，
+   * 而 `name` 的规矩是"**新增那一刻**定下、之后永不覆盖"——web 层每次现读盘反而会跟
+   * "后端启动时写的那条"打架（比如用户刚给实例改过名）。端口与 pid 是本模块自己知道的事实。
+   *
+   * 不注入（测试 / CLI / 任何不走登记表的装配）⇒ `name` 用数据目录末段、`isDefault` 为 false：
+   * 那条端点照常答话，只是不说"我是默认实例"（默认意味着"界面不许删"，猜错代价大）。
+   */
+  instanceIdentity?: { name: string; isDefault: boolean } | undefined;
+  /**
+   * 「**结束这个实例**」走到最后一下时的注入点（缺省见 `WebServer.requestGracefulStopExit`）。
+   *
+   * 与 `onRestartExit` 的分工只有一条：那条要**让位给新实例**，这条**不重启**——但退出路径
+   * 是同一套（停源 → 关 web → `session/end` → 落缓存 → 放锁）。缺省同样触发既有的
+   * `SIGTERM` 信号路径，所以"界面登出 = 优雅停机"不需要第二条退出实现。
+   * 注入点只为让用例能断言"退的是哪条路"。
+   */
+  onStopInstanceExit?: (() => void) | undefined;
 }
 
 export interface WebServer {
@@ -825,6 +909,19 @@ export interface WebServer {
    * 断言"回执发出之后才退、而且退的是既有路径"，而不必真的把测试进程结束掉。
    */
   requestGracefulRestartExit(path: RestartPath): void;
+
+  /**
+   * **结束这个实例**（`POST /api/commands/stop-instance` 的收尾，2026-10）：
+   * 界面「登出」的第二步——"把自己这台停了"，**不重启**。
+   *
+   * 与 {@link requestGracefulRestartExit} 共用同一条退出路径（停源 → 关 web → `session/end`
+   * → 落缓存 → 放锁），差别只有一处：这里**不**为任何新实例让位。为什么不能用
+   * `process.exit()`：那会把单实例锁留在盘上、跳过 `session/end` 与收尾——下一个实例
+   * 就得靠"接管陈旧锁"才起得来，而日志会断成两截。
+   *
+   * 延迟调用（`setTimeout` + `unref`）：HTTP 回执必须先回到界面，否则人看到的是"点了没反馈"。
+   */
+  requestGracefulStopExit(): void;
 }
 
 /** 统一错误体（design §4.15：`{ "error": { "code", "message" } }`） */
@@ -1201,8 +1298,9 @@ function sendError(res: ServerResponse, status: number, code: string, message: s
  *
  * 为什么可以未经认证就给出去：它是数据目录的**哈希前 16 位**，不是路径本身。
  * 想拿它反推路径，比直接读 `config.json` 难得多；而本地攻击者本来就看得见那个目录。
- * 挂在 401 的响应体里（而不是另开一条"我是谁"的公开端点），是为了让
- * 「未初始化时只放行设置密码这一条路」那条纪律一个字都不用让步。
+ * 挂在 401 的响应体里，而不是另开一条"我是谁"的公开端点：未认证时能给出的事实越少越好。
+ * 2026-10-23 起确实多了一条公开的 `GET /api/auth/state`，但它**只回答"设过密码没有"**，
+ * 不带这个标识——"实例是谁"仍旧只能从 401 或签发响应里学回来。
  *
  * 归一化（去尾部分隔符、Windows 下转小写）是为了让同一条路径的不同写法算出同一个标识——
  * 界面换个写法启动就认不出自己存的凭据，那正是这次要消灭的那类故障。
@@ -1850,7 +1948,7 @@ export function parseRestartTrace(text: string): {
   /** 这次走的是哪一条（`路径=` / `path=` 那两栏；读不到 = null，绝不猜） */
   path: RestartPath | null;
   backendPid: number;
-  port: 'ready' | 'timeout' | 'waiting' | 'unknown';
+  port: 'ready' | 'starting' | 'starting-timeout' | 'waiting' | 'timeout' | 'unknown';
   guiPid: number;
   ok: boolean | null;
   /** `[结束]` 里 `reason=` 那一栏：**失败坏在哪一环**（机器可读 token；空 = 没读到） */
@@ -1860,21 +1958,26 @@ export function parseRestartTrace(text: string): {
     receipt: text.includes('[回执]'),
     path: parseRestartPath(text),
     backendPid: 0,
-    port: 'unknown' as 'ready' | 'timeout' | 'waiting' | 'unknown',
+    port: 'unknown' as 'ready' | 'starting' | 'starting-timeout' | 'waiting' | 'timeout' | 'unknown',
     guiPid: 0,
     ok: null as boolean | null,
     reason: '',
   };
   const pid = /\[实例\][^\r\n]*?pid=(\d+)/u.exec(text);
   if (pid !== null) out.backendPid = Number(pid[1]);
-  const end = /\[结束\][^\r\n]*/u.exec(text);
+  // 取**最后**一行 `[结束]`：拉起器超时之后还会再等 60 秒复查，通了就补写一行改判的
+  // `[结束] ok=True`（见 `restart-worker.ts` 的 `STARTING_TIMEOUT`）。取第一行会把
+  // "改判成功"读成"超时失败"——那是这条留痕上唯一会自相矛盾的地方，判据落在这里。
+  const endings = [...text.matchAll(/\[结束\][^\r\n]*/gu)];
+  const end = endings.length === 0 ? null : endings[endings.length - 1] ?? null;
   if (end !== null) {
     const line = end[0];
     out.ok = /\bok=True\b/u.test(line);
     const endPid = /\bbackendPid=(\d+)/u.exec(line);
     if (endPid !== null && Number(endPid[1]) !== 0) out.backendPid = Number(endPid[1]);
-    const port = /\bport=(\w+)/u.exec(line);
-    if (port !== null) out.port = port[1] as 'ready' | 'timeout' | 'waiting' | 'unknown';
+    // `[0-9A-Za-z-]+`（不是 `\w+`）：`port=starting-timeout` 那一档自带连字符
+    const port = /\bport=([0-9A-Za-z-]+)/u.exec(line);
+    if (port !== null) out.port = port[1] as 'ready' | 'starting' | 'starting-timeout' | 'waiting' | 'timeout' | 'unknown';
     const gui = /\bguiPid=(\d+)/u.exec(line);
     if (gui !== null) out.guiPid = Number(gui[1]);
     const reason = /\breason=([0-9A-Za-z-]+)/u.exec(line);
@@ -1903,7 +2006,7 @@ export function restartNote(outcome: {
   /** 真实新 pid（来自 lock.json / 脚本的 `[实例]`），0 = 没拿到 */
   backendPid?: number | undefined;
   /** 端口那一档 */
-  port?: 'ready' | 'timeout' | 'waiting' | 'unknown' | undefined;
+  port?: 'ready' | 'starting' | 'starting-timeout' | 'timeout' | 'waiting' | 'unknown' | undefined;
   /** 脚本报的失败原因（可选；`[结束]` 的 `reason=` 那一栏优先） */
   reason?: string | undefined;
   /**
@@ -1935,7 +2038,16 @@ export function restartNote(outcome: {
     const pid = outcome.backendPid === undefined || outcome.backendPid === 0
       ? '没有拿到新进程 pid'
       : `新进程 pid ${outcome.backendPid}`;
-    const port = outcome.port === 'ready' ? '端口已就绪' : `端口未就绪（${outcome.port ?? 'unknown'}）`;
+    /**
+     * 端口那一档翻成人话（`starting-timeout` 与 `timeout` 必须分开说）：
+     * 前者是"端口在听、重活没干完"（进程活着，只是还没就绪），后者是"根本没人听"
+     * （进程可能已经没了）。下一步查的东西完全不同，所以这里不许合成一句。
+     */
+    const port = outcome.port === 'ready'
+      ? '端口已就绪'
+      : outcome.port === 'starting' || outcome.port === 'starting-timeout'
+        ? `端口在听但还没就绪（${outcome.port}：重活没干完）`
+        : `端口未就绪（${outcome.port ?? 'unknown'}）`;
     return `重启失败${where}${why}：${pid} · ${port}——详见 data/restart-trace.log`;
   }
   if (outcome.ok === true) {
@@ -2001,6 +2113,24 @@ const RESTART_RECEIPT_WAIT_MS = ((): number => {
   return Number.isFinite(raw) && raw > 0 ? raw : 8000;
 })();
 const RESTART_RECEIPT_STEP_MS = 50;
+
+/**
+ * 拉起器等**新实例就绪**的窗口（毫秒）：**180 秒**（2026-10-26 从 32 秒抬上来）。
+ *
+ * 事故现场（`data/restart-worker.log`）：窗口是 `RESTART_RECEIPT_WAIT_MS * 4 = 32000`，
+ * 而当天实测"冷启动到开始监听"是 **35 / 42 / 35 秒**——32 秒的窗口对这台机器的数据量
+ * （23.5 万条事件、180 MB 日志）**必然**超时。超时的后果不是"慢一点"，而是这次重启被
+ * 判成失败：拉起器放弃、界面被拉起来却连不上，还得人再点一次。
+ *
+ * 180 秒的依据：冷启动 40 秒 + 重活（MCP / SnowLuma 预热）余量，再乘上"慢机器 + 杀软扫描"
+ * 这一档的抖动。它只是**上限**：health 一答 `ready` 就当场收工（见 `restart-worker.ts`
+ * 的 `probeHealth`），正常情况根本走不到这个数。
+ *
+ * 与它配套的两条兜底（同文件 `restart-worker.ts`）：
+ *   · 超时**不杀新实例**：那时它可能只差几秒就绪，杀掉等于把"重启失败"变成"后端没了"；
+ *   · 超时之后再等 60 秒复查一次，通了就补一行改判的 `[结束] ok=True`。
+ */
+export const RESTART_PORT_WAIT_MS = 180_000;
 
 /**
  * 「重启进行中」这个排他窗口的**上限**（毫秒）。判据只有一处：`WebServer.restartInFlightUntil`。
@@ -2115,8 +2245,11 @@ export interface RestartConfirmation {
   scriptStarted: boolean;
   /** 后端真的换了个人：从 lock.json / 脚本 `[实例]` 读到的**真实**新 pid（0 = 没拿到） */
   backendPid: number;
-  /** ready = 端口在服务；timeout = 脚本等到超时；waiting = 已发出、还没到那一档 */
-  port: 'ready' | 'timeout' | 'waiting' | 'unknown';
+  /**
+   * ready = health 说就绪（能干活）；starting/starting-timeout = 端口在听但还没就绪
+   * （拉起器那两档）；timeout = 脚本等到超时；waiting = 已发出、还没到那一档
+   */
+  port: 'ready' | 'starting' | 'starting-timeout' | 'timeout' | 'waiting' | 'unknown';
   /** 脚本结尾那行的 ok（null = 没读到 ⇒ 结局未确认，**不冒充成功**） */
   ok: boolean | null;
   /** 界面新 pid（脚本 `[结束]` 里那一列；0 = 本次不动界面或没读到） */
@@ -3189,6 +3322,14 @@ class WebServerImpl implements WebServer {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private listening = false;
   private closed = false;
+  /**
+   * 当前这一轮「扫码创建 QQ 官方 Bot」的会话（`null` = 这个进程还没人点过扫码）。
+   *
+   * 为什么是**一个**会话而不是一张按 taskId 排的表：这件事只有一个人在做（本机界面），
+   * 界面再点一次「扫码创建」就是新的一轮（旧的一轮作废、定时器释放——见 `start()`）。
+   * 表会带来"哪一条才是当前这条"的第二份判据，而这个问题只有一个答案。
+   */
+  private qqBind: QqBindSession | null = null;
   /** webhook 桶表的上一拍时刻，用于惰性回填（这里不用，回填在 take 里逐桶做） */
   private readonly webhookRate: WebhookRate;
   /**
@@ -3199,6 +3340,21 @@ class WebServerImpl implements WebServer {
    * 60 秒一条足够让排障的人看见"有个老脚本还在用会话凭据"，又不至于把日志淹掉。
    */
   private lastWebhookRejectLogAt = 0;
+  /**
+   * **刚刚被自己的 `/api/auth/logout` 注销掉的那几张票**（`sha256` → 注销时刻毫秒）。
+   *
+   * 为什么需要它（「登出 = 结束实例」的硬约束）：界面那三步的顺序是
+   * ①作废会话 → ②`stop-instance` → ③等端口消失，**顺序不许换**。可第二步要 Bearer，
+   * 而第一步刚把这张票废掉——不留这一格，"优雅停机"就永远只能退化成按 pid 硬杀
+   * （那正是这一步存在的理由：硬杀丢 `session/end`、丢协议端收尸）。
+   *
+   * 三件事让它不是个洞：
+   *   · 只记**哈希**（32 hex 前 32 位），原文一个字节都不留；
+   *   · **只有刚刚（60 秒内）、且是本实例自己注销的**那张票算数——"上周作废的票"照样 401；
+   *   · 只用来放行**一条**命令（`stop-instance`），它换不来任何读权限。
+   * 换句话：这张票在 60 秒前本来就能杀这个后端，这里只是把那个能力多留了 60 秒。
+   */
+  private readonly recentlyLoggedOut = new Map<string, number>();
   /**
    * 「重启进行中」的判据（**只此一处**）：上一次拉起器**发出**之后的有效期。0 = 没有重启在进行中。
    *
@@ -3218,16 +3374,28 @@ class WebServerImpl implements WebServer {
   /** 上一次拉起器发出时留痕的大小（判"它后来写没写 `[结束]`"的基线；-1 = 没有在飞的） */
   private restartInFlightTraceSize = -1;
 
+  /**
+   * 启动状态（`/api/health` 与"未就绪期 503"的唯一判据）。
+   *
+   * 不注入时是**已经就绪**的一份：本模块单独被构造（测试、CLI）时没有"启动期"这件事，
+   * 于是那两个新判据点对它们全部透明——行为与改前逐字相同。
+   */
+  private readonly startup: StartupState;
+
+  /** 交给 socket 的处理器（`bootstrap` 那条路上由 `handoff` 装进 preflight） */
+  private readonly handler: (req: IncomingMessage, res: ServerResponse) => void;
+
   constructor(deps: WebServerDeps) {
     this.deps = deps;
     this.write = deps.out ?? ((line) => console.log(line));
     this.host = deps.host ?? '127.0.0.1';
-    this.portWanted = deps.port ?? 0;
+    this.portWanted = deps.bootstrap?.port ?? deps.port ?? 0;
     this.configPath = deps.configPath ?? join(process.cwd(), CONFIG_FILE_NAME);
     this.recent = new RecentEventView(deps.log, DASHBOARD_EVENT_WINDOW);
     const rate = deps.webhookRate ?? DEFAULT_WEBHOOK_RATE;
     this.webhookRate = { capacity: rate.capacity, refillPerSec: rate.refillPerSec };
     this.buckets = new TokenBucketTable(this.webhookRate.capacity, this.webhookRate.refillPerSec);
+    this.startup = deps.startup ?? StartupState.readyNow(() => this.port());
 
     // 认证库：注入了就用注入的（测试），否则读盘自建。
     // `uiToken` 只在自建那条路上起作用——判据只有一份，在 AuthStore 里。
@@ -3259,12 +3427,16 @@ class WebServerImpl implements WebServer {
     }
 
     this.pumpedSeq = deps.log.latestSeq();
-    this.server = createServer((req, res) => {
+    this.handler = (req, res) => {
       // route 自己已经兜住所有错误；这里只防水位线以下的意外（同步抛在 route 之外）
       void this.route(req, res).catch((err: unknown) => {
         if (!res.headersSent) sendError(res, 500, 'internal', describeError(err));
         else res.end();
       });
+    };
+    // 端口早绑那一层已经 bind 好了 ⇒ **用它那个 socket**（不重 bind、不换端口、不留空窗）
+    this.server = deps.bootstrap?.server ?? createServer((req, res) => {
+      this.handler(req, res);
     });
   }
 
@@ -3296,11 +3468,12 @@ class WebServerImpl implements WebServer {
     }
     const emitter = process as unknown as {
       listenerCount: (event: string) => number;
-      emit: (event: string) => boolean;
+      emit: (event: string, signal?: string) => boolean;
     };
     if (emitter.listenerCount('SIGTERM') > 0) {
       this.write('[重启] self-restart：让位——走既有退出路径（SIGTERM → 停源/关 web/session:end/放锁）');
-      emitter.emit('SIGTERM');
+      // 把信号名一起带上：`main.ts` 那行日志写的是 `[退出] 收到 ${signal}`，不带就是 `undefined`
+      emitter.emit('SIGTERM', 'SIGTERM');
       return;
     }
     this.write('[重启] self-restart：让位——这个进程没有优雅退出路径可走（没有 SIGTERM 监听者），'
@@ -3308,19 +3481,177 @@ class WebServerImpl implements WebServer {
     process.exit(0);
   }
 
+  /**
+   * **结束这个实例**（`POST /api/commands/stop-instance` 的收尾）：走既有退出路径，**不重启**。
+   *
+   * 三个分支与 {@link requestGracefulRestartExit} 逐条对应，差别只有"不为谁让位"：
+   *   ① 宿主注入了 `onStopInstanceExit` ⇒ 用它（测试用；生产环境的宿主没接）；
+   *   ② 否则有 `SIGTERM` 监听者（`main.ts` 在 `runMain` 里一定装了）⇒ 触发那一条既有信号路径：
+   *      `stop('signal','SIGTERM')` —— 停源 → 关 web → 落 `session/end` → 收尾 → **放锁**；
+   *   ③ 两条都没有（CLI/测试里没装信号处理器）⇒ 如实说一声再退，锁由下一次启动按 pid-gone 接管。
+   *
+   * 为什么不用 `process.exit()`：那会把单实例锁留在盘上、跳过 `session/end` 与收尾——
+   * 下一个实例就得靠"接管陈旧锁"才起得来，日志断成两截。（与 self-restart 同一条理由。）
+   */
+  requestGracefulStopExit(): void {
+    const injected = this.deps.onStopInstanceExit;
+    if (injected !== undefined) {
+      try {
+        injected();
+      } catch (err) {
+        this.write(`[实例] 停止回调抛错：${describeError(err)}`);
+      }
+      return;
+    }
+    const emitter = process as unknown as {
+      listenerCount: (event: string) => number;
+      emit: (event: string, signal?: string) => boolean;
+    };
+    if (emitter.listenerCount('SIGTERM') > 0) {
+      this.write('[实例] 结束实例：走既有退出路径（SIGTERM → 停源/关 web/session:end/放锁）');
+      // 与 self-restart 那一处同一个细节：信号名要带上（否则 `[退出] 收到 undefined`）
+      emitter.emit('SIGTERM', 'SIGTERM');
+      return;
+    }
+    this.write('[实例] 结束实例：这个进程没有优雅退出路径可走（没有 SIGTERM 监听者），'
+      + '直接退出；单实例锁会由下一次启动按 pid-gone 接管');
+    process.exit(0);
+  }
+
+  /**
+   * `/api/instance` 的响应体（**唯一拼装处**）。
+   *
+   * `port` 用 `this.port()`（真的在听的那个），不是配置里想要的：启动期 `bootstrap` 那条路上
+   * 端口是 preflight 早绑的，配置里的值与事实可能不同；界面判活连的也是**事实**那一个。
+   * `name` / `isDefault` 来自宿主注入（登记表里那条，见 `WebServerDeps.instanceIdentity`）；
+   * 没注入时 `name` 退到数据目录末段、`isDefault` 为 false（**不猜**：默认意味着"界面不许删"）。
+   */
+  private instanceReading(): {
+    id: string;
+    name: string;
+    dataDir: string;
+    port: number;
+    pid: number;
+    isDefault: boolean;
+    runningMs: number;
+  } {
+    const dataDir = this.deps.dataDir;
+    const port = this.port();
+    const fallbackName = ((): string => {
+      const tail = dataDir.split(/[\\/]/u).filter((part) => part !== '').pop() ?? '';
+      return tail === '' ? 'instance' : tail;
+    })();
+    const identity = this.deps.instanceIdentity;
+    return {
+      id: instanceIdOf(this.host, port, dataDir),
+      name: identity?.name !== undefined && identity.name.trim() !== '' ? identity.name.trim() : fallbackName,
+      dataDir,
+      port,
+      pid: process.pid,
+      isDefault: identity?.isDefault === true,
+      runningMs: Math.round(process.uptime() * 1000),
+    };
+  }
+
+  /**
+   * 记下"这张票刚被**我们自己**注销"（供 {@link wasJustLoggedOut} 放行 `stop-instance`）。
+   *
+   * 只存哈希、只留 60 秒、只放行一条命令——理由见 `recentlyLoggedOut` 的字段注释。
+   * 顺手清掉过期的条目（这张表最多也就几张票，不需要定时器）。
+   */
+  private noteLoggedOutToken(token: string): void {
+    const value = token.trim();
+    if (value === '') return;
+    const nowMs = this.deps.now().getTime();
+    for (const [key, at] of this.recentlyLoggedOut) {
+      if (nowMs - at > STOP_INSTANCE_LOGOUT_GRACE_MS) this.recentlyLoggedOut.delete(key);
+    }
+    this.recentlyLoggedOut.set(sha256Hex(value), nowMs);
+  }
+
+  /** 这张票是不是**刚刚（60 秒内）被本实例注销掉**的那一张 */
+  private wasJustLoggedOut(token: string): boolean {
+    const value = token.trim();
+    if (value === '') return false;
+    const at = this.recentlyLoggedOut.get(sha256Hex(value));
+    if (at === undefined) return false;
+    return this.deps.now().getTime() - at <= STOP_INSTANCE_LOGOUT_GRACE_MS;
+  }
+
+  /**
+   * `POST /api/commands/stop-instance` 的实现：认证 → 确认短语 → 回执 → 优雅退出。
+   *
+   * **顺序是判据**：回执必须先写出去（`{ok:true,stopping:true}`），再让进程退——
+   * 反过来的话界面拿到的是一个断掉的连接，而它没法区分"停了"与"从来没收到"。
+   * 所以退出那一下挂在一个 `unref` 的定时器上（延迟见 {@link STOP_INSTANCE_EXIT_DELAY_MS}）。
+   */
+  private async handleStopInstance(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
+    if (!body.ok) {
+      sendError(res, body.code === 'payload-too-large' ? 413 : 400, body.code, body.message);
+      return;
+    }
+    // 危险的确认门与 `/api/commands/*` 那条通道**同一份实现**（短语 = 命令名）
+    this.requireConfirm(req, 'stop-instance');
+
+    const provided = (bearerOf(req) ?? '').trim();
+    const verdict = this.auth.authenticate(provided);
+    const viaLogout = !verdict.ok && this.wasJustLoggedOut(provided);
+    if (!verdict.ok && !viaLogout) {
+      if (verdict.reason === 'uninitialized') {
+        this.sendAuthError(res, 401, 'auth-uninitialized', '这台实例还没设密码。请先在界面里设置一个密码。');
+        return;
+      }
+      this.sendAuthError(res, 401, 'unauthorized', '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。');
+      return;
+    }
+    const via = viaLogout
+      ? '刚刚注销的那张会话票'
+      : (verdict.ok && verdict.via === 'legacy-token' ? '旧共享 token' : '有效会话');
+    this.write(`[实例] 收到结束请求（凭据：${via}）——回执发出后走既有退出路径，不重启`
+      + `（${instanceIdOf(this.host, this.port(), this.deps.dataDir)}）`);
+    sendJson(res, 200, { ok: true, stopping: true });
+    const timer = setTimeout(() => {
+      this.requestGracefulStopExit();
+    }, STOP_INSTANCE_EXIT_DELAY_MS);
+    // unref：这条定时器不该成为进程继续活着的理由（那正是"退了却退不掉"的形状）
+    timer.unref();
+  }
+
   async listen(): Promise<void> {
     if (this.listening) return;
-    await new Promise<void>((resolveListen, rejectListen) => {
-      const onError = (err: unknown): void => {
-        rejectListen(err instanceof Error ? err : new Error(String(err)));
-      };
-      this.server.once('error', onError);
-      this.server.listen(this.portWanted, this.host, () => {
-        this.server.off('error', onError);
-        resolveListen();
+    const bootstrap = this.deps.bootstrap;
+    if (bootstrap !== undefined) {
+      /**
+       * 端口早绑那一层已经把 socket 听住了：这里**只换处理器**。
+       *
+       * 次序是判据：先 `handoff`（请求从这一刻起就归真路由了）再 `markReady`——于是
+       * 外面看到的 `/api/health = ready` 永远蕴含"数据路由已经能答"，拉起器（`restart-worker.ts`）
+       * 与界面都只凭这一条就敢说"后端回来了"。
+       */
+      bootstrap.handoff(this.handler);
+      this.listening = true;
+      this.startup.markReady();
+      this.write(`[界面] 就绪：${this.url()}（端口从 bind 起一直在听，重活干完了才接通数据路由）`);
+    } else {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        const onError = (err: unknown): void => {
+          rejectListen(err instanceof Error ? err : new Error(String(err)));
+        };
+        this.server.once('error', onError);
+        this.server.listen(this.portWanted, this.host, () => {
+          this.server.off('error', onError);
+          resolveListen();
+        });
       });
-    });
-    this.listening = true;
+      this.listening = true;
+      /**
+       * 自己 listen 的那条路**不动启动状态**：
+       *   · 没注入 `startup` ⇒ 构造函数给的是"已经就绪"，本来就没什么要改；
+       *   · 注入了 `startup` 而没给 `bootstrap`（只为验"未就绪期 503"的装配）⇒ 那一格的
+       *     用户是调用方，由它自己 `markReady()`；这里替它改就等于把这条判据测没了。
+       */
+    }
 
     const pollMs = this.deps.ssePollMs ?? SSE_POLL_MS;
     this.pumpTimer = setInterval(() => {
@@ -3349,6 +3680,9 @@ class WebServerImpl implements WebServer {
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     this.pumpTimer = null;
     this.heartbeatTimer = null;
+    // 扫码会话的定时器随进程一起放掉：它最长挂 3 分钟，服务都关了就没有"再查一次"的意义
+    this.qqBind?.cancel();
+    this.qqBind = null;
     for (const client of this.sseClients) {
       try {
         client.end();
@@ -3446,20 +3780,141 @@ class WebServerImpl implements WebServer {
   /**
    * `/api/*` 的认证闸 + 认证端点分流。
    *
-   * **待初始化态只放行一条路**：`POST /api/auth/setup`（首次设密码）。除此之外，
-   * 所有 `/api/*` 一律 401 并把话说明白（`auth-uninitialized`：还没设密码，请先在界面里设置）——
-   * 让人对着一个"缺少或无效的 Bearer token"猜半天，是这类门最没品的失败方式。
+   * **待初始化态只放行两条路**：`POST /api/auth/setup`（首次设密码）与
+   * `GET /api/auth/state`（2026-10-23 加的公开事实端点：只回答"设过密码没有"）。
+   * 除此之外，所有 `/api/*` 一律 401 并把话说明白（`auth-uninitialized`：还没设密码，
+   * 请先在界面里设置）——让人对着一个"缺少或无效的 Bearer token"猜半天，是这类门最没品的
+   * 失败方式。
    *
-   * 界面据此**不需要第二条探测通道**：它随便打一条读端点，401 的 `code` 就告诉了它是
-   * "该设密码"还是"该登录"（见 gui/lib/api.dart 的 ApiAuthError.code）。
+   * 界面**两条路都走**：进门时先读 `GET /api/auth/state`（事实），读不到（老服务端）才用
+   * 401 的 `code` 兜底（`auth-uninitialized` = 该设密码，`unauthorized` = 该登录，
+   * 见 gui/lib/api.dart 的 ApiAuthError.code）。只有 code 一条通道的毛病在 2026-10-23
+   * 的死锁现场里露过一次：**分流信号与错误挤在同一条通道上**，而且服务端状态在别处变了
+   * （密码在另一个进程里设上、或凭据文件被重命名做重置）之后，界面没有第二个地方可以复核。
    */
   private async handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const path = url.pathname;
+
+    /**
+     * `GET /api/health`：**不需要任何凭据**的就绪状态读数（2026-10-26 加）。
+     *
+     * 它回答的是"后端此时能不能干活"，而不是"你是谁"——所以位置在认证闸**之前**，
+     * 与 `/api/auth/state` 同一档。调用方只有两个，读的都是同三个字段：
+     *   · 拉起器（`runtime/restart-worker.ts`）：等 `status === 'ready'` 才算这次重启成功
+     *     ——TCP 能连不等于能干活（端口先 bind、重活还在干，正是这次要修的那种"半途"）；
+     *   · 界面：进门前先确认后端真的在（`gui/lib/backend_port.dart` + `app.dart` 的门前重连）。
+     *
+     * 响应里**没有**数据目录、没有会话数、没有任何凭据的影子：`pid` 与 `port` 是本机进程
+     * 本来就对外可见的事实（`data/lock.json` 里也写着），`uptimeMs`/`phase` 只说明"到哪一步了"。
+     */
+    if (path === '/api/health') {
+      if (req.method !== 'GET') {
+        throw new HttpError(405, 'method-not-allowed', '就绪状态只接受 GET /api/health');
+      }
+      sendJson(res, 200, this.startup.reading());
+      return;
+    }
+
+    // 公开的"这台实例设过密码没有"（2026-10-23）：**不需要任何凭据**。
+    //
+    // 为什么它必须公开：界面在"未认证"那一刻就要决定画哪一扇门（设置密码 / 登录），
+    // 而手里还没有任何凭据可用。以前只能靠随便打一条读端点、从 401 的 code 里反推——
+    // 那条通道同时承担"分流信号"与"错误播报"两种含义，于是一次探测的 message 会被当成
+    // 红字显示；更要紧的是没有复核通道，服务端状态变了界面也只能停在旧判断上（死锁）。
+    //
+    // 泄露面：一个布尔，且这个事实本来就从 401 的 code 里读得到（`auth-uninitialized`
+    // 与 `unauthorized` 已经把它说出来了）。响应里**只有** `initialized`——没有 instance、
+    // 没有会话条数、没有任何凭据的影子；判定只是一次内存布尔读取，不做哈希/比较，
+    // 因此也不构成时序侧信道。
+    if (path === '/api/auth/state') {
+      if (req.method !== 'GET') {
+        throw new HttpError(405, 'method-not-allowed', '认证状态只接受 GET /api/auth/state');
+      }
+      sendJson(res, 200, { initialized: this.auth.initialized });
+      return;
+    }
 
     // 认证端点先行：它们在"未认证"这件事上各有各的规矩
     if (path === '/api/auth/setup' || path === '/api/auth/login'
       || path === '/api/auth/logout' || path === '/api/auth/password') {
       await this.handleAuth(req, res, path);
+      return;
+    }
+
+    /**
+     * `GET /api/instance`：**这台实例的自述**（2026-10 多实例）。
+     *
+     * 它回答的是"我现在连着的到底是哪一台"，**不需要任何凭据**——位置与 `/api/health`、
+     * `/api/auth/state` 同一档（在认证闸之前，也在下面那条"未就绪 503"之前：它不依赖任何重活）。
+     *
+     * ⚠ **启动期真正在答话的是 `preflight.ts`**，那一层只放行 `/api/health` 与 `/api/auth/state`，
+     * 其余一律 503——包括这一条。所以界面上"这条答得出" = **它已经就绪**（而不是"端口有人在听"）：
+     * 「启动并登录」等的就是这个（`gui/lib/instances.dart` 的注释与 `AppState._awaitInstanceReady`）。
+     * 这里仍然放在 503 之前，是为了"端口早绑没成功、真服务自己 listen"那条路（那时没有 preflight，
+     * 就绪前后都由本模块答话）。
+     *
+     * 谁在读：
+     *   · **实例选择页**（`gui/lib/instance_picker.dart`）：逐条判活（2 秒超时）、显示名字/端口；
+     *   · 界面切实例时：核对"我切过去的那台真的是它"（id 必须对得上）。
+     *
+     * 泄露面（逐字段核过）：`id` 是数据目录的**哈希**（不是路径）、`name` 是她在选择页上的
+     * 名字、`dataDir` 是**刻意给的**（界面要拿它当 `--data-dir` 与目录判据，而本机任何进程
+     * 都读得到盘上的 config.json）、`port`/`pid` 是本机本来就可见的事实、`isDefault` 一个布尔、
+     * `runningMs` 一个数字。**没有**会话数、没有凭据、没有任何事件内容。
+     */
+    if (path === '/api/instance') {
+      if (req.method !== 'GET') {
+        throw new HttpError(405, 'method-not-allowed', '实例自述只接受 GET /api/instance');
+      }
+      sendJson(res, 200, this.instanceReading());
+      return;
+    }
+
+    /**
+     * `POST /api/commands/stop-instance`：**结束这个实例**（界面「登出」的第二步）。
+     *
+     * 为什么它在认证闸**之前**、自己认证：界面那三步的顺序是
+     * ①`/api/auth/logout`（作废会话）→ ②`stop-instance` → ③等端口消失，**顺序不许换**；
+     * 而①刚把这张票作废——走通用闸的话②必然 401，"优雅停机"就永远只能退化成按 pid 硬杀
+     * （硬杀丢 `session/end`、丢投影落盘、丢协议端收尸）。所以这一条自己认两种凭据：
+     *   · 一张**现在有效**的会话票（脚本/工具的正常姿势）；
+     *   · 一张**本实例刚刚（60 秒内）自己注销掉**的票（界面的姿势，见 `recentlyLoggedOut`）。
+     * 两种都要 `X-Confirm: stop-instance`；除此之外它换不来任何读权限（不经过本处理器的
+     * 其它路径照旧走通用闸）。
+     */
+    if (path === '/api/commands/stop-instance') {
+      if (req.method !== 'POST') {
+        throw new HttpError(405, 'method-not-allowed', '结束实例只接受 POST /api/commands/stop-instance');
+      }
+      await this.handleStopInstance(req, res);
+      return;
+    }
+
+    /**
+     * **未就绪期：其余 `/api` 一律 503 + `{starting:true, phase}`**（2026-10-26）。
+     *
+     * 位置是判据（三条都不许挪）：
+     *   ① 在 `/api/health` 与 `/api/auth/state` **之后**——那两条不依赖任何重活，启动期也得答；
+     *   ② 在 `Bearer` 认证闸**之前**——否则一个没有凭据的调用方（界面的首探、拉起器的探测）
+     *      会先吃 401，于是"后端还没就绪"被读成"你没登录"，人对着密码框反复重输（2026-10-04 那种）；
+     *   ③ 在认证的**写**端点之后——`setup/login/logout/password` 的语义与就绪后**逐字相同**
+     *      （`handleAuth` 一个字没改）。启动期它们进不来是因为 `preflight` 那条 503 挡在前面：
+     *      那时事件日志还不存在，`auth/password-set` 这条**事实**无处可落——先答话、事后补账
+     *      就是丢事实。就绪之后这条路恢复原样。
+     *
+     * 答复写的是"我还没好"，不是挂住不答：挂住（连上、永远不说话）正是这次事故里
+     * 界面与拉起器一起被困住的那种形状。
+     */
+    if (!this.startup.ready()) {
+      sendJson(res, 503, {
+        starting: true,
+        phase: this.startup.phase(),
+        error: {
+          code: 'starting',
+          message: `后端还在启动（阶段 ${this.startup.phase()}）：端口已经在听，重活还没干完。`
+            + '等 /api/health 变成 {"status":"ready"} 再来。',
+        },
+      });
       return;
     }
 
@@ -3491,6 +3946,25 @@ class WebServerImpl implements WebServer {
     if (path.startsWith('/api/commands/')) {
       if (req.method !== 'POST') throw new HttpError(405, 'method-not-allowed', '写命令只接受 POST');
       await this.runCommand(path.slice('/api/commands/'.length), req, res);
+      return;
+    }
+
+    /**
+     * **模型探测**（引导第 2 步「探测」按钮，2026-10-26）：一次只读的外部实测。
+     *
+     * 为什么不挂 `/api/commands/*`：那条通道的语义是"往事件日志写一条命令 + X-Confirm"，
+     * 而探测**不写任何状态**（不落事件、不写配置、不写密钥；代价只有一次极小的模型费用），
+     * 与 `/api/update/check` 同族：方法定语义，形状不对就是 405。
+     *
+     * **它必须在这道认证闸之后**：body 里可以带一把临时密钥（`apiKey`），响应里是端点的
+     * 模型清单。一条不要凭据就能打的 `/api/models/probe` 会成为"用本机网络去探别人端点"的
+     * 跳板，也把"谁能读这台机器的模型清单"这件事放开了。
+     */
+    if (path === '/api/models/probe') {
+      if (req.method !== 'POST') {
+        throw new HttpError(405, 'method-not-allowed', '模型探测只接受 POST /api/models/probe');
+      }
+      await this.handleModelsProbe(req, res);
       return;
     }
 
@@ -3550,6 +4024,21 @@ class WebServerImpl implements WebServer {
       return;
     }
 
+    // 扫码创建 QQ 官方 Bot（2026-10-23，用户原话「加入扫码创建 QQ 官方 bot 的功能……要可选
+    // 扫码创建或者填凭据创建」）。两条端点，**都在上面那道认证闸之后**（都要会话凭据）：
+    //   · `POST /api/channels/qq-official/bind/start`  —— 向 QQ 要一个绑定任务，回 `{taskId, url}`；
+    //   · `GET  /api/channels/qq-official/bind/status` —— 这一轮的状态；**成功那一刻**把凭据
+    //     写进 `data/.keys.json` 并启用通道。
+    //
+    // 为什么不挂 `/api/commands/*`：那条通道的语义是"往事件日志写一条命令 + X-Confirm 危险短语"，
+    // 而这里的 start 不写任何状态（只是向 QQ 要一个任务），status 的副作用走的是与手填凭据
+    // **完全同一条**落盘路径（`writeKeysFile` + `withConfigDoc`）——不是新造的第二条写配置通道。
+    // 与 `/api/protocol-side` 同族：路径一族、方法定语义、形状不对就是 405。
+    if (path === '/api/channels/qq-official/bind/start' || path === '/api/channels/qq-official/bind/status') {
+      await this.handleQqBind(req, res, path);
+      return;
+    }
+
     if (req.method === 'GET') {
       switch (path) {
         case '/api/projection':
@@ -3577,17 +4066,27 @@ class WebServerImpl implements WebServer {
          * 两个端点共用 `listGrants`（一处实现，两处读同一份字节）。
          */
         case '/api/grants': {
+          const grantEvents = await readAllEvents(this.deps.log);
           const items = listGrants(
             // **dataDir**（不是 `grantsDirOf(dataDir)`）：`listGrants` 内部自己拼 `<dataDir>/grants`。
             // 这里先拼一次会让它再拼一次 ⇒ 扫 `data/grants/grants`（不存在）⇒ catch 成空清单
             // ⇒ 只有"已经有 grant/requested 事件"的 id 才出现，她刚写完还没被拾取的那一行永远不返回。
             this.deps.dataDir,
-            await readAllEvents(this.deps.log),
+            grantEvents,
             this.deps.projection.humanAsks,
           );
           sendJson(res, 200, {
             items,
             open: items.filter((item) => item.outcome === null && item.picked).length,
+            /**
+             * **读不出来的那些单子**（2026-10-22 加）：盘上有、日志里还没有、又过不了解析。
+             *
+             * 为什么端点上要带它：界面挑"待批"的判据是 `picked === true`，而这一档**两样都不满足**
+             * （没有 `grant/requested`，于是 `picked:false`；解析不过，于是连卡都挂不出来）——
+             * 它曾经就是"人写了单子、框架一声不响"的那条缝。现在界面据它显示一句
+             * 「有一张单读不出来」，**不静默丢**（判据在 `grantFileProblems` 一处）。
+             */
+            malformed: grantFileProblems(this.deps.dataDir, grantEvents),
             dir: grantsDirOf(this.deps.dataDir),
             resolvedDir: grantsResolvedDirOf(this.deps.dataDir),
           });
@@ -3772,6 +4271,12 @@ class WebServerImpl implements WebServer {
         case '/api/sessions':
           sendJson(res, 200, await this.sessionsView());
           return;
+        // 运行情况页 ·「当前上下文构成」看板（2026-10-24）：**最近一次真实请求**的上下文
+        // 由哪几段组成、各占多少。数据源是最近一条带 `context` 的 `budget/consumed`
+        // （归因事实本来就挂在那条事件上，见 `model/context-audit.ts`）——界面不再自己算。
+        case '/api/context/breakdown':
+          sendJson(res, 200, await this.contextBreakdownView());
+          return;
         // 运行情况页 · 框架提示（v33）：框架最近替她留意的两类事——外部消息里的注入迹象、
         // 它自己发出的告警。与「外部会话」分两条端点：那是"她那边积累了什么"，
         // 这是"框架看到了什么"——后者可能一条都没有，而两份数据没有共同的生命周期
@@ -3935,6 +4440,72 @@ class WebServerImpl implements WebServer {
     });
   }
 
+  // ──────────────────────── 模型探测（引导第 2 步，2026-10-26） ────────────────────────
+
+  /**
+   * `POST /api/models/probe`：`{lane, baseUrl, apiKey?}` → 模型清单 + 两套协议的实测结论。
+   *
+   * 三件事只在这一层做：
+   *   ① **解析密钥**：`apiKey` 缺省 / 空串 ⇒ 用已经存下的那把，走**与 set-key 同一个入口**
+   *      （`resolveKey`：环境变量优先 > `data/.keys.json`；envName 取生效配置里那条路由的）。
+   *      一把都没有 ⇒ `{ok:false, code:'no-api-key'}`，**不是** 401——这是"还没配"，
+   *      与"端点拒绝了这把钥匙"是两句不同的话。
+   *   ② **不让密钥越过这条边界**：本方法不写事件、不写 `this.write` 日志；错误消息只由
+   *      `model/probe.ts` 拼（那里只允许 `protocol//host/path`）。
+   *   ③ **失败也是 200**：`ok:false` 的三种分档是**探测结论**，不是 HTTP 层面的错误。
+   *      走 4xx 的话界面会把它统一弹成"请求失败"，分档文案就没地方落了
+   *      （与 `dep-install` 同一条理由）。
+   *
+   * 探测本身是只读的：不落盘、不写事件、不改配置（见 `src/model/probe.ts` 的文件头）。
+   */
+  private async handleModelsProbe(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
+    if (!body.ok) {
+      sendError(res, body.code === 'payload-too-large' ? 413 : 400, body.code, body.message);
+      return;
+    }
+    const payload = parseJsonObject(body.text);
+
+    const laneRaw = payload['lane'];
+    if (laneRaw !== 'heavy' && laneRaw !== 'light') {
+      throw badRequest('lane 只能是 "heavy" 或 "light"', 'invalid-lane');
+    }
+    const lane: 'heavy' | 'light' = laneRaw;
+
+    const baseRaw = payload['baseUrl'];
+    if (typeof baseRaw !== 'string' || baseRaw.trim() === '') {
+      throw badRequest('缺少 baseUrl（字符串；API 根地址，不含 /responses）', 'missing-base-url');
+    }
+
+    const explicitKey = payload['apiKey'];
+    if (explicitKey !== undefined && typeof explicitKey !== 'string') {
+      throw badRequest('apiKey 必须是字符串（不填 = 用已经存下的那把）', 'invalid-api-key');
+    }
+    const typedKey = typeof explicitKey === 'string' ? explicitKey.trim() : '';
+    // 与 set-key 同一个解析入口（环境变量优先 > data/.keys.json）；`keyEnvName` 也是同一份
+    // "路由 → 格 → 环境变量名" 表，不在这里另写一遍。
+    const apiKey = typedKey !== ''
+      ? typedKey
+      : resolveKey(this.deps.dataDir, lane, { envName: this.keyEnvName(lane) });
+    if (apiKey === null) {
+      sendJson(res, 200, {
+        ok: false,
+        code: 'no-api-key',
+        message: `lane ${lane} 还没有可用的 API Key：先在界面里填一把，或先保存密钥再探测。`,
+      });
+      return;
+    }
+
+    const result = await probeModels({
+      baseUrl: baseRaw,
+      apiKey,
+      // 推荐规则里的"当前配置的模型"：读生效配置（settings 里改过的、Watcher 热更后的那份）
+      model: this.deps.config.models[lane].model,
+      timeoutMs: MODEL_PROBE_TIMEOUT_MS,
+    });
+    sendJson(res, 200, result);
+  }
+
   // ──────────────────────── 内置协议端（可选开启的内置服务，v34） ────────────────────────
 
   /**
@@ -3984,9 +4555,9 @@ class WebServerImpl implements WebServer {
    * 一键装协议端：从**官方 Releases** 代下载 lite 包 → 解压到固定的家 → 复检入口在不在。
    *
    * 用户要的是"引导客户安装 snowluma，尽量少让对方配置"，所以这一步把"找 release、下 zip、
-   * 解压"三步手工压成一次点击。**包从官方拿、不随框架分发、一个字节不改**——许可 §3 允许
-   * 再分发（非商业、附完整许可、不改声明），我们连再分发都算不上；包里自带 LICENSE/EULA，
-   * 随包落地正好满足"附完整许可文本"。
+   * 解压"三步手工压成一次点击。**我们不再分发任何东西**：包从官方拿、只落到用户本机、
+   * 一个字节不改（包里自带 LICENSE/EULA，随包原样落地）。依据是 SnowLumaDevs 的书面授权，
+   * 不是"我们自认有再分发权"——授权范围与三项义务见 `docs/third-party-authorizations.md`。
    *
    * **刻意不在这里顺手写配置**：写配置有它自己那条路（`PUT /api/protocol-side/config`，
    * 带 `withConfigDoc` 的校验与回滚）。一个端点做两件有副作用的事，出错时说不清是哪一件坏的；
@@ -4171,6 +4742,177 @@ class WebServerImpl implements WebServer {
           + '（在那之前，界面上的状态仍是本次启动的那一个）。'
         : '已写入 config.json，且与当前生效的配置一致——不必重启。',
     });
+  }
+
+  // ──────────────────────── 扫码创建 QQ 官方 Bot（2026-10-23） ────────────────────────
+  //
+  // 用户原话：「加入扫码创建 QQ 官方 bot 的功能……在首次启动引导、消息适配器那页，要可选
+  // 扫码创建或者填凭据创建。」协议三步 + 一次解密全在 `channel/qq-bind.ts`（零依赖）；
+  // 这一层只做 HTTP 形状、鉴权后的落盘与错误转译。
+  //
+  // 两条端点都在 `/api/*` 的认证闸之后（没有第二套门），方法不对就是 405。
+
+  /**
+   * `POST .../bind/start` 与 `GET .../bind/status`。
+   *
+   * start：建任务、回 `{taskId, url}`。`url` 就是二维码内容——**页面自己渲染二维码**，
+   * 我们只把它交给系统浏览器（GUI 那一步），所以后端不需要任何二维码库。
+   *
+   * status：把会话的当前状态原样回给界面。**成功那一刻的落盘发生在会话自己的 `poll()` 里**
+   * （`onSettled` → {@link settleQqBind}），不是等界面来"确认"——界面可能已经关了，
+   * 绑定的结果照样要写进配置。
+   */
+  private async handleQqBind(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+    if (path.endsWith('/start')) {
+      if (req.method !== 'POST') {
+        throw new HttpError(
+          405,
+          'method-not-allowed',
+          '发起扫码只接受 POST /api/channels/qq-official/bind/start',
+        );
+      }
+      // 请求体读掉（内容不用，但必须消费）：keep-alive 上不读干净，下一条请求会读到残留
+      const body = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
+      if (!body.ok) {
+        sendError(res, body.code === 'payload-too-large' ? 413 : 400, body.code, body.message);
+        return;
+      }
+      const session = this.qqBindSession();
+      let started: { taskId: string; url: string };
+      try {
+        started = await session.start();
+      } catch (err) {
+        // 502：失败发生在**对端**（QQ 的绑定服务），不是请求本身不合法
+        throw new HttpError(502, 'qq-bind-start-failed', describeError(err));
+      }
+      this.write(`[QQ] 扫码创建：已向 QQ 要了一个绑定任务（task_id ${started.taskId}）`);
+      sendJson(res, 200, { ok: true, taskId: started.taskId, url: started.url });
+      return;
+    }
+
+    if (req.method !== 'GET') {
+      throw new HttpError(
+        405,
+        'method-not-allowed',
+        '查扫码状态只接受 GET /api/channels/qq-official/bind/status',
+      );
+    }
+    const session = this.qqBind;
+    if (session === null) {
+      sendJson(res, 200, {
+        ok: true,
+        status: 'idle',
+        note: '还没发起扫码：先 POST /api/channels/qq-official/bind/start',
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, ...(await session.poll()) });
+  }
+
+  /** 建（或复用）这一轮扫码的会话：时钟与 HTTP 出口都从宿主注入点来（测试可换）。 */
+  private qqBindSession(): QqBindSession {
+    if (this.qqBind !== null) return this.qqBind;
+    const timing = this.deps.qqBindTiming ?? {};
+    this.qqBind = new QqBindSession({
+      ...(this.deps.qqBindHttp === undefined ? {} : { http: this.deps.qqBindHttp }),
+      // 用服务端那口时钟：与事件时间戳、`now` 注入点同一个基准（测试推进它，超时用例才不真等）
+      now: () => this.deps.now().getTime(),
+      ...(timing.pollIntervalMs === undefined ? {} : { pollIntervalMs: timing.pollIntervalMs }),
+      ...(timing.timeoutMs === undefined ? {} : { timeoutMs: timing.timeoutMs }),
+      onSettled: (bound) => this.settleQqBind(bound),
+      onError: (line) => this.write(line),
+    });
+    return this.qqBind;
+  }
+
+  /**
+   * 绑定成功那一刻：**凭据落盘 → 启用通道 → 连接测试**。
+   *
+   * 「与界面里手填 AppID/AppSecret 走同一条落盘路径」是用户明确要求，所以这里一步都不新造：
+   *   · AppID / AppSecret → `writeKeysFile`（就是 `set-key` 写的那两格 `qqAppId` / `qqClientSecret`，
+   *     落 `data/.keys.json`，密钥教义：不进 config.json）；
+   *   · 启用通道 → `withConfigDoc`（就是 `config-update` 走的那条：保住人写的注释、
+   *     写后回读复核、失败回滚，并顺手落一条 `config/changed`）。
+   *
+   * 连接测试（`testQqCredentials`）是**必须**的一步：凭据写对了不等于连得上——机器人可能
+   * 没上线、AppSecret 被轮换过。失败**不否定绑定**（凭据已经存了），但要在回执里说出来。
+   */
+  private async settleQqBind(input: { appId: string; clientSecret: string }): Promise<QqBindSettled> {
+    const shape = keyShapeProblem(input.appId) ?? keyShapeProblem(input.clientSecret);
+    if (shape !== null) {
+      // 写盘前就拒：带空白字符的"凭据"写进去只会让通道在第一次调用时 401
+      throw new Error(`绑定到的凭据形状不对（${shape}），没有写盘`);
+    }
+    const changed = await writeKeysFile(this.deps.dataDir, {
+      qqAppId: input.appId,
+      qqClientSecret: input.clientSecret,
+    });
+    const enabled = await this.enableQqOfficialChannel();
+    const connection = await this.checkQqConnection(input.appId, input.clientSecret);
+    this.write(
+      `[QQ] 扫码绑定成功：AppID ${input.appId}，凭据已写入 data/.keys.json`
+      + `（${changed.length === 0 ? '与盘上一致，未重复写' : changed.join(' / ')}），`
+      + `channels.qqOfficial.enabled 已${enabled ? '启用' : '保持开启'}；`
+      + (connection.ok
+        ? `连接测试通过（access_token 有效期 ${connection.expiresIn ?? 0} 秒）`
+        : `连接测试失败（${connection.error ?? '未知原因'}）`),
+    );
+    return {
+      saved: true,
+      enabled: true,
+      connection,
+      // 界面可以自己按 saved/enabled 拼文案；这一句是给脚本/排障看的完整回执。
+      // **半句都不许有 secret**。
+      note: '绑定成功：AppID 与 AppSecret 已保存并启用（写入 data/.keys.json；'
+        + '通道配置要重启进程后才接管）。',
+    };
+  }
+
+  /**
+   * 把 `channels.qqOfficial.enabled` 写成 true（已经开着就**不写盘、不落事件**）。
+   *
+   * 与 `set-mention-keywords` / `writeProtocolSideConfig` 同一条纪律：整份文档读出来改再写回，
+   * 保住人写的 `$comment`，写后 `loadConfig` 复核，失败即回滚。这不是第二条写配置通道。
+   */
+  private async enableQqOfficialChannel(): Promise<boolean> {
+    await this.withConfigDoc((doc) => {
+      const channels = isRecord(doc['channels']) ? (doc['channels'] as JsonObject) : {};
+      const rawQq = channels['qqOfficial'];
+      if (rawQq !== undefined && rawQq !== null && !isRecord(rawQq)) {
+        throw badRequest('config.json 的 channels.qqOfficial 不是对象：先手工修好它再来改', 'config-shape');
+      }
+      const qq = isRecord(rawQq) ? { ...(rawQq as JsonObject) } : {};
+      const before = qq['enabled'] === true;
+      qq['enabled'] = true;
+      channels['qqOfficial'] = qq;
+      doc['channels'] = channels;
+      // 已经开着 ⇒ 返回 undefined：不写盘（重复扫码不该抖 mtime、也不该多一条 config/changed）
+      return before ? undefined : true;
+    }, 'channels.qqOfficial.enabled');
+    return true;
+  }
+
+  /** 一次性的凭据连接测试（与扫码成功后的自动那一次**同一份实现**）。 */
+  private async checkQqConnection(appId: string, clientSecret: string): Promise<QqBindConnectionResult> {
+    const result = await testQqCredentials({
+      appId,
+      clientSecret,
+      tokenUrl: this.deps.config.channels.qqOfficial.tokenUrl,
+      ...(this.deps.qqBindHttp === undefined ? {} : { http: this.deps.qqBindHttp }),
+    });
+    return result.ok ? { ok: true, expiresIn: result.expiresIn } : { ok: false, error: result.error };
+  }
+
+  /**
+   * 当前生效的 AppID / AppSecret（环境变量优先，其次 `data/.keys.json`）。
+   * 与 `main.ts` 建适配器时读的是**同一条链**（`resolveKey` + 配置里的 envName）。
+   */
+  private readQqCredentials(): { appId: string; clientSecret: string } {
+    const appId = resolveKey(this.deps.dataDir, 'qqAppId', { envName: this.keyEnvName('qqAppId') }) ?? '';
+    const clientSecret = resolveKey(this.deps.dataDir, 'qqClientSecret', {
+      envName: this.keyEnvName('qqClientSecret'),
+    }) ?? '';
+    return { appId, clientSecret };
   }
 
   /**
@@ -4724,6 +5466,13 @@ class WebServerImpl implements WebServer {
     }
 
     if (path === '/api/auth/logout') {
+      /**
+       * **先记下这张票，再注销**（顺序即判据）：界面「登出 = 结束实例」的第二步是
+       * `POST /api/commands/stop-instance`，它要拿同一张票过门——而这一步刚把它作废。
+       * 记一笔哈希（60 秒、只放行那一条命令）之后，那一步才可能**优雅**地停，
+       * 而不是退化成按 pid 硬杀。判据与代价见 `recentlyLoggedOut` 的字段注释。
+       */
+      this.noteLoggedOutToken(provided);
       this.auth.logout(provided);
       sendJson(res, 200, { ok: true, instance: instanceIdOf(this.host, this.port(), this.deps.dataDir) });
       return;
@@ -4939,6 +5688,34 @@ class WebServerImpl implements WebServer {
 
   // ── 写命令 ──
 
+  /**
+   * 危险操作的 `X-Confirm` 判据（**唯一实现**）。
+   *
+   * 为什么抽成一条方法：`/api/commands/*` 那条通道与 `stop-instance`（它为了"登出后还能停"
+   * 自己站在认证闸外面，见 `handleStopInstance`）必须用**同一句话**判确认短语——两处各写一遍
+   * 就会出现"少写一个 `;` 就一边放行一边拦住"的经典分叉。
+   *
+   * 头的值是**短语列表**（以 ';' 分隔，如 `update-config; enable-destructive`）：
+   * 命令级短语必给，字段级危险短语由 config-update 追加。
+   */
+  private requireConfirm(req: IncomingMessage, command: string): string[] {
+    const required = CONFIRM_PHRASES[command];
+    const confirmRaw = req.headers['x-confirm'];
+    const confirmText = (Array.isArray(confirmRaw) ? confirmRaw.join(';') : (confirmRaw ?? '')).trim();
+    const phrases = confirmText.split(';').map((item) => item.trim()).filter((item) => item !== '');
+    // undefined = 这个命令根本不在表里（未知命令，调用方已先拦）；null = 不需要确认短语。
+    // 两种情况都**照样返回解析出来的短语**：`config-update` 的命令级短语是 null，但字段级的
+    // 危险短语（`enable-destructive` 那一族）要从同一份列表里读——早退会把那条判据关掉。
+    if (required !== undefined && required !== null && !phrases.includes(required)) {
+      throw badRequest(
+        `该操作为危险操作：请在 X-Confirm 头里原样给出确认短语 ${required}`
+        + `（收到 ${confirmText === '' ? '（缺失）' : confirmText}）`,
+        'confirm-required',
+      );
+    }
+    return phrases;
+  }
+
   private async runCommand(command: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
     if (!body.ok) {
@@ -4956,18 +5733,9 @@ class WebServerImpl implements WebServer {
       }
       throw notFound(`未知命令：${command}`, 'unknown-command');
     }
-    // X-Confirm 的值是**短语列表**（以 ';' 分隔，如 `update-config; enable-destructive`）：
-    // 命令级短语必给，字段级危险短语由 config-update 追加
-    const confirmRaw = req.headers['x-confirm'];
-    const confirmText = (Array.isArray(confirmRaw) ? confirmRaw.join(';') : (confirmRaw ?? '')).trim();
-    const phrases = confirmText.split(';').map((item) => item.trim()).filter((item) => item !== '');
-    if (required !== null && !phrases.includes(required)) {
-      throw badRequest(
-        `该操作为危险操作：请在 X-Confirm 头里原样给出确认短语 ${required}`
-        + `（收到 ${confirmText === '' ? '（缺失）' : confirmText}）`,
-        'confirm-required',
-      );
-    }
+    // 危险操作确认（frontend.md §4）：短语 = 操作英文标识；字段级的危险在 config-update 里再收紧。
+    // 返回的短语列表要留着：`config-update` 的**字段级**危险短语从同一份列表里读（见 requireConfirm）。
+    const phrases = this.requireConfirm(req, command);
 
     const now = this.deps.now();
     switch (command) {
@@ -5780,7 +6548,8 @@ class WebServerImpl implements WebServer {
             ...(guiExe === '' ? [] : ['--gui-exe', q(guiExe)]),
             ...(guiOnly ? ['--gui-only'] : []),
             '--wait-ms', String(RESTART_RECEIPT_WAIT_MS * 4),
-            '--port-wait-ms', String(RESTART_RECEIPT_WAIT_MS * 4),
+            // 等"就绪"的窗口（不是等"端口能连"）：180 秒，见 RESTART_PORT_WAIT_MS 的注释
+            '--port-wait-ms', String(RESTART_PORT_WAIT_MS),
           ];
           command = restartCommandLine({ shellExe: nodeExe, argv: workerArgv, scriptLog: workerLog });
         } else {
@@ -6429,6 +7198,38 @@ class WebServerImpl implements WebServer {
           url: configured,
           reason: outcome.ok ? null : (outcome.reason ?? '未送达'),
         });
+        return;
+      }
+      case 'qq-token-test': {
+        // 「测试连接」（引导页「填写凭据」那一支，与扫码成功后的自动那一测**同一份实现**）：
+        // 拿 AppID + AppSecret 真去换一次 access_token。凭据写对了不等于连得上——机器人没上线、
+        // AppSecret 被轮换过、AppID 填成了另一个应用，都是到这一步才露头。
+        //
+        // 允许请求体里带**还没保存**的两把值（人刚敲完就点测试，不该逼他先保存一次）；
+        // 不带就用当前生效的那份。**回执只有 ok / expiresIn / 中文原因**：值从不回显，
+        // 也不进日志（盘上那份 `.keys.json` 是唯一该有它们的地方）。
+        const stored = this.readQqCredentials();
+        const askedAppId = typeof payload['appId'] === 'string' ? payload['appId'].trim() : '';
+        const askedSecret = typeof payload['clientSecret'] === 'string' ? payload['clientSecret'].trim() : '';
+        const result = await this.checkQqConnection(
+          askedAppId !== '' ? askedAppId : stored.appId,
+          askedSecret !== '' ? askedSecret : stored.clientSecret,
+        );
+        if (result.ok) {
+          this.write(`[QQ] 连接测试通过：access_token 已换取（有效期 ${result.expiresIn ?? 0} 秒）`);
+          sendJson(res, 200, {
+            ok: true,
+            expiresIn: result.expiresIn ?? 0,
+            note: `access_token 换取成功（有效期 ${result.expiresIn ?? 0} 秒）：凭据可用。`,
+          });
+        } else {
+          this.write(`[QQ] 连接测试失败：${result.error ?? '未知原因'}`);
+          sendJson(res, 200, {
+            ok: false,
+            error: result.error ?? '连不上 QQ 的凭据接口（原因未知）',
+            note: '这一次没连上：按上面的原因核对 AppID / AppSecret 后重试。',
+          });
+        }
         return;
       }
       case 'skill-confirm': {
@@ -8023,6 +8824,10 @@ class WebServerImpl implements WebServer {
         chatType: entry.chatType,
         chatId: entry.chatId,
         person: entry.person,
+        // 头像（2026-10 加）：判据在 `channel/sessions.ts` 的 `avatarUrlOf` 一处，
+        // 这里只是把它发给界面——官方 Bot（`qq:*`）拿不到真实号 ⇒ `null`，界面走首字占位。
+        // **服务端不发 base64、也不代抓图片**：那会把一张网络图变成本地进程的 IO 与缓存问题。
+        avatarUrl: avatarUrlOf(entry.sid),
         lastSeenAt: entry.lastSeenAt,
         lastText: entry.lastText,
         messages: entry.messages,
@@ -8081,6 +8886,112 @@ class WebServerImpl implements WebServer {
       })(),
       unreadTotal: sessions.reduce((sum, entry) => sum + entry.unread, 0),
       restartRequiredForChanges: true,
+    };
+  }
+
+  /**
+   * 「当前上下文构成」看板（运行情况页，2026-10-24）—— **最近一次真实请求**的上下文由哪几段组成。
+   *
+   * 数据源只有一处：最近一条带 `context` 的 `budget/consumed`（归因事实本来就挂在那条事件上，
+   * 见 `model/context-audit.ts` 的文件头）。界面**不自己算**：它拿不到渲染时的段边界
+   * （`render()` 才知道 instructions 到哪结束、哪一条是长期记忆层），在界面里重算就是第二份口径。
+   *
+   * ── 三组的分法（与界面那三行一一对应）──
+   *   · **系统前缀** = `instructions`（人格常驻层）+ `memory`（长期记忆层：技能目录 / MCP 索引 /
+   *     早期摘要）。这两段都在 input 的**最前面**、且都只随资产变化，与人说了什么无关；
+   *   · **工具** = `tools`（清单 JSON）。它单独一组，因为它是唯一"换一档信任就换一版"的段；
+   *   · **对话** = `history` + `state` + `now` + `wake` + `hint`（历史、本轮固定块、此刻层、
+   *     本轮新输入、尾部插播）。这一段每一步都在动，是"她自己攒出来的那部分"。
+   *
+   * ⚠ **`memory` 归在系统前缀而不是对话**：它不是对话内容，而是被注入进来的一层资产
+   * （压缩会改写它、写记忆会重建它）——放进"对话"会让"我说话越多它越大"这种错读成立。
+   *
+   * ── 两个百分比，各自的分母写死在这里 ──
+   *   · `total.ratio` = `total.tokens / budgetTokens`：**离压缩线还有多远**；
+   *   · `groups[].ratio` = 该组 / `total.tokens`：**这份请求里谁占得多**（三组合计 100%）。
+   *     两个分母不是一回事，所以界面上那两处数字不许互相换算。
+   *
+   * ── 为什么 `total.tokens` 用 `context.input.tokens`（估算）而不是 `inputTokens`（供方真值）──
+   *   两个原因，缺一都会让人在屏幕上看见自相矛盾的数：
+   *     ① 三组之和必须等于合计：段 token 全是 `estimateTokens` 的估算，拿供方真值当合计，
+   *        百分比会凭空少掉三成多（实测估算比供方低约 1.65 倍，见 `config.ts` 里
+   *        `compactionThresholdTokens` 那条注释）；
+   *     ② 分母 `compactionThresholdTokens` 就是**估算尺**上的线（压缩判据拿 `estimateHistoryTokens`
+   *        与它比）。分子换一把尺，这个百分比就同时错了方向和幅度。
+   *   ⇒ 供方真值 `data.inputTokens` 不在这里出现；要用它的人去日志页读那条事件（口径分开两处，
+   *   界面才不会被"两个 input token 数"搞混）。
+   *
+   * ── 空态 ──
+   *   从没有过带 `context` 的调用（新实例、或这条改动之前的日志）⇒ `{empty:true}`。
+   *   **不是 404、不是全零**："没有数"与"数是 0"是两件事（这里回全零，界面就会画一条 0% 的进度条）。
+   */
+  private async contextBreakdownView(): Promise<Record<string, unknown>> {
+    const events = await readAllEvents(this.deps.log);
+    // 倒着找第一条带归因的调用：日志按 seq 追加，seq 序即时间序，所以"最后一条"就是"最近一次"
+    let latest: { ts: string; turn: number; step: number; context: ContextBreakdown } | null = null;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event === undefined || event.type !== 'budget/consumed') continue;
+      const context = event.data.context;
+      if (context === undefined) continue;
+      latest = { ts: event.ts, turn: event.data.turn, step: event.data.step, context };
+      break;
+    }
+    if (latest === null) return { empty: true };
+
+    const { context } = latest;
+    /** 只收有 token 的段：0 token 的段（本轮没发块、没有插播）摆出来只是噪音 */
+    const itemsOf = (pairs: ReadonlyArray<readonly [string, number | undefined]>): Array<{ name: string; tokens: number }> =>
+      pairs
+        .filter((pair): pair is readonly [string, number] => (pair[1] ?? 0) > 0)
+        .map(([name, tokens]) => ({ name, tokens }));
+    const buildGroup = (name: string, items: Array<{ name: string; tokens: number }>): Record<string, unknown> | null => {
+      const tokens = items.reduce((sum, item) => sum + item.tokens, 0);
+      if (tokens <= 0) return null;
+      return { name, tokens, items };
+    };
+
+    const groups = [
+      buildGroup('系统前缀', itemsOf([
+        ['人格常驻层', context.instructions.tokens],
+        ['长期记忆层', context.memory?.tokens],
+      ])),
+      buildGroup('工具', itemsOf([
+        // 件数写进名字里：它是"这一版清单一共几件"的唯一读数，界面不必再问 `/api/tools`
+        [`工具清单（${context.tools.count} 件）`, context.tools.tokens],
+      ])),
+      buildGroup('对话', itemsOf([
+        ['历史', context.history.tokens],
+        ['本轮固定块', context.state?.tokens],
+        ['此刻层', context.now.tokens],
+        ['本轮新输入', context.wake.tokens],
+        ['尾部插播', context.hint.tokens],
+      ])),
+    ].filter((group): group is Record<string, unknown> & { tokens: number } => group !== null);
+
+    const totalTokens = groups.reduce((sum, group) => sum + group.tokens, 0);
+    const budgetTokens = this.deps.config.persona.compactionThresholdTokens;
+    return {
+      at: latest.ts,
+      turn: latest.turn,
+      step: latest.step,
+      total: {
+        tokens: totalTokens,
+        budgetTokens,
+        // 预算没配（0 或负数，理论上不该有）时不除：宁可给 0，也不给 Infinity/NaN 让界面炸
+        ratio: budgetTokens > 0 ? totalTokens / budgetTokens : 0,
+      },
+      groups: groups.map((group) => ({
+        ...group,
+        ratio: totalTokens > 0 ? group.tokens / totalTokens : 0,
+      })),
+      notes: {
+        // 「保留历史思维链」= 出厂的 `outOfRegion` 口径（`'keep'` = 区外也全传）。
+        // 线上**没有任何调用点**传 `'omit'`（见 render.ts 的 ReasoningEchoPolicy），所以它恒为真；
+        // 读的是**那条策略常量本身**，不是在这里写一个 `true`——将来真开了开关，这一格自己会变。
+        keepReasoning: REASONING_ECHO_POLICY.outOfRegion === 'keep',
+        renderVersion: context.renderVersion,
+      },
     };
   }
 
@@ -8803,7 +9714,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.12' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.13' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

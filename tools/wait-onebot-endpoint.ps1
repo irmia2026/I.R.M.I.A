@@ -16,7 +16,7 @@
 
 [CmdletBinding()]
 param(
-  [string]$Repo = '<repo>',
+  [string]$Repo = '',
   [string]$DataDir = '',
   [string]$ApiBase = 'http://127.0.0.1:7788',
   [string]$Token = '',
@@ -24,6 +24,12 @@ param(
   [int]$TimeoutSeconds = 900,
   [int]$PollSeconds = 5
 )
+
+# ── 默认值推导：脚本只认「自己在哪」，不写死任何机器路径 ──
+if ($Repo -eq '') {
+  if ([string]::IsNullOrEmpty($PSScriptRoot)) { throw '无法从脚本位置推断项目根：请显式传 -Repo <项目根>' }
+  $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+}
 
 $ErrorActionPreference = 'Stop'
 

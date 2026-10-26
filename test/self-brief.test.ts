@@ -426,14 +426,14 @@ describe("联络方式 · 每扇门后面是谁（用户要求她知道）", () 
  * 通知行上的"谁" —— v47（2026-10-11 用户报「她在群里没认出我」那一笔）
  *
  * 现场（`data/events/000000070784.jsonl`，10-10 01:25 她的心跳自述）：此刻层那行写着
- * `· 清漪粉丝群（…）（群聊@）· 1234567890 —— 曾试图打探/注入 1 次`，而 1234567890 就是用户本人
+ * `· 测试群（…）（群聊@）· 1234567890 —— 曾试图打探/注入 1 次`，而 1234567890 就是用户本人
  * （她的 `aliases.md` 里两条都记着）；同一份上下文里 `read_channel` 那一行写的却是
- * 「用户（OWNER）」。她照着通知行写下"那个叫 1234567890 的想伸手"——同一个人两个名字，
+ * 「用户（阿岚）」。她照着通知行写下"那个叫 1234567890 的想伸手"——同一个人两个名字，
  * 于是把人认成了外人。这一组锁的就是"那一格写什么"。
  */
 describe('通知行 · 发言人那一格走名字真源', () => {
   const QQ = '1234567890';
-  const OWNER = '用户（OWNER）';
+  const OWNER = '用户（阿岚）';
   const nameOf = (person: string): string | null => (person === QQ ? OWNER : null);
 
   /** 一条真实的 OneBot 群唤醒（群名在联系人表里、发言人是用户） */
@@ -450,13 +450,13 @@ describe('通知行 · 发言人那一格走名字真源', () => {
         person: '1719500341', lastText: '教夜璃学你说话', lastSeenAt: '2026-10-09T11:27:40.424Z',
         messages: 30, label: null, readUpToSeq: 0, unread: 7,
       }],
-      contacts: new Map([['onebot:group:123456781', '清漪粉丝群']]),
+      contacts: new Map([['onebot:group:123456781', '测试群']]),
       ...extra,
     };
   }
 
   const warnRow = {
-    who: '清漪粉丝群', chatType: 'group-at' as const, person: QQ, count: 1,
+    who: '测试群', chatType: 'group-at' as const, person: QQ, count: 1,
     lastTs: '2026-10-09T11:27:45.834Z',
   };
 
@@ -466,7 +466,7 @@ describe('通知行 · 发言人那一格走名字真源', () => {
     assert.equal(mention?.includes(QQ), false, '名字认得出时不该再摆那串 QQ 号');
 
     const warn = renderInjectionNote([warnRow], Date.parse('2026-10-09T15:28:44.030Z'), nameOf);
-    assert.ok(warn.includes(`清漪粉丝群（群聊@）· ${OWNER}`), `预警行要写"哪个群 · 谁"：\n${warn}`);
+    assert.ok(warn.includes(`测试群（群聊@）· ${OWNER}`), `预警行要写"哪个群 · 谁"：\n${warn}`);
     assert.equal(warn.includes(QQ), false, '预警行里的用户不该是那串数字');
     assert.ok(warn.includes('曾试图打探/注入 1 次'), '其余字一个都不许动');
   });
@@ -479,7 +479,7 @@ describe('通知行 · 发言人那一格走名字真源', () => {
 
     // 判据给了但查不到（这个人她确实还不认识）——同样回落 id
     const miss = renderInjectionNote([warnRow], Date.parse('2026-10-09T15:28:44.030Z'), () => null);
-    assert.ok(miss.includes(`清漪粉丝群（群聊@）· ${QQ}`), `查不到就照实给 id：\n${miss}`);
+    assert.ok(miss.includes(`测试群（群聊@）· ${QQ}`), `查不到就照实给 id：\n${miss}`);
 
     // 判据给 null（调用方没有 contact facts，如离线渲染）也不许抛
     assert.ok(renderInjectionNote([warnRow], Date.parse('2026-10-09T15:28:44.030Z'), null).includes(QQ));
@@ -513,13 +513,13 @@ describe('通知行 · 发言人那一格走名字真源', () => {
 
   test('私聊那一行一个字都没变：它本来就用会话名，从来不写 id', () => {
     const c2c = {
-      who: '用户（OWNER）', chatType: 'c2c' as const, person: '00000000000000000000000000000001',
+      who: '用户（阿岚）', chatType: 'c2c' as const, person: '00000000000000000000000000000001',
       count: 2, lastTs: '2026-10-09T15:00:00.000Z',
     };
     const withNames = renderInjectionNote([c2c], Date.parse('2026-10-09T15:28:44.030Z'), nameOf);
     const without = renderInjectionNote([c2c], Date.parse('2026-10-09T15:28:44.030Z'));
     assert.equal(withNames, without, '私聊行不查人那一格 ⇒ 有没有判据都同一串字节');
-    assert.ok(withNames.includes('· 用户（OWNER）（单聊）'), withNames);
+    assert.ok(withNames.includes('· 用户（阿岚）（单聊）'), withNames);
     assert.equal(withNames.includes('00000000000000000000000000000001'), false);
   });
 });

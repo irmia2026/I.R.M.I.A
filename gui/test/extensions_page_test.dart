@@ -30,14 +30,14 @@ class _FakeApi extends IrmiaApi {
   final posts = <Map<String, dynamic>>[];
 
   @override
-  Future<dynamic> get(String path) async => routes[path];
+  Future<dynamic> get(String path, {Duration? timeout}) async => routes[path];
 
   /// 写命令的替身：**不发网络**，只记一笔并按 `postReplies` 回一份回执。
   ///
   /// 为什么要它：批准/驳回这条路的两处分寸都在**发出去的 body** 上（批准不带 reason、
   /// 驳回带、留空也照发），而那件事只有"把这次请求记下来"才验得了。
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add({'path': path, ...body});
     return postReplies[path] ?? {'ok': true};
   }

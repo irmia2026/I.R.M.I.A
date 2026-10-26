@@ -30,6 +30,7 @@ import { describe, test } from 'node:test';
 
 import { summarizeEvent } from '../src/cli.ts';
 import type { AppEvent } from '../src/log/types.js';
+import { estimatePrefixHitOf, type ContextBreakdown, type ContextSectionFact } from '../src/model/context-audit.ts';
 import { REASONING_ECHO_POLICY } from '../src/model/render.ts';
 import {
   CACHE_ALERT_MIN_TURNS,
@@ -38,6 +39,8 @@ import {
   cacheAlertConsoleLine,
   cacheAlertPayloadOf,
   cacheAlertReadings,
+  cacheAlertWakeNote,
+  estimateByBucketOf,
   missRatioBandOf,
   planCacheAlert,
   planCacheAlerts,
@@ -71,20 +74,27 @@ function consumed(args: {
   ts: string;
   turn: number;
   lane?: 'heavy' | 'light';
+  /** 模型名（2026-10-26 起窗口按 `lane|model` 分；缺省 `'fake'` 与老夹具一致） */
+  model?: string;
   hit: number;
   miss: number;
+  /** 输入合计（缺省 = hit + miss；零命中夹具要显式给，因为 miss 可能也是 0） */
+  inputTokens?: number;
   output?: number;
   retryCount?: number;
   reasoningTokens?: number;
   renderVersion?: string;
   headHash?: string;
+  /** 整份 `context`（前缀自算那几条用例自己构造；给了它就覆盖下面那份默认段事实） */
+  context?: ContextBreakdown;
 }): AppEvent {
+  const input = args.inputTokens ?? args.hit + args.miss;
   return event('budget/consumed', {
     turn: args.turn,
     step: 1,
     lane: args.lane ?? 'heavy',
-    model: 'fake',
-    inputTokens: args.hit + args.miss,
+    model: args.model ?? 'fake',
+    inputTokens: input,
     outputTokens: args.output ?? 100,
     cacheHitTokens: args.hit,
     cacheMissTokens: args.miss,
@@ -92,23 +102,53 @@ function consumed(args: {
     durationMs: 1000,
     retryCount: args.retryCount ?? 0,
     finishReason: 'completed',
-    tokensTodayAccum: args.hit + args.miss,
-    ...(args.renderVersion === undefined && args.headHash === undefined
-      ? {}
-      : {
-        context: {
-          renderVersion: args.renderVersion ?? '74',
-          instructions: { tokens: 1, hash: 'i' },
-          tools: { tokens: 1, hash: 't', count: 1 },
-          memory: { tokens: 1, hash: 'm' },
-          history: { tokens: 1, hash: 'h', items: 1, headHash: args.headHash ?? 'head-a' },
-          now: { tokens: 1, hash: 'n' },
-          wake: { tokens: 1, hash: 'w' },
-          hint: { tokens: 1, hash: 'x' },
-          input: { items: 1, tokens: 1 },
-        },
-      }),
+    tokensTodayAccum: input,
+    ...(args.context !== undefined
+      ? { context: args.context }
+      : (args.renderVersion === undefined && args.headHash === undefined
+        ? {}
+        : { context: contextOf({ renderVersion: args.renderVersion, headHash: args.headHash }) })),
   }, 'internal', args.ts);
+}
+
+/**
+ * 一份完整的 `context` 段事实（`budget/consumed.context` 的形状）。
+ *
+ * 默认值就是"什么都不变"的那一份；前缀自算的用例只改自己关心的那几段——
+ * 这样"哪一段相同、哪一段不同"在夹具里一眼看得出来。
+ */
+function contextOf(args: {
+  renderVersion?: string;
+  headHash?: string;
+  instructions?: { tokens: number; hash: string };
+  tools?: { tokens: number; hash: string };
+  memory?: { tokens: number; hash: string };
+  history?: { tokens: number; hash: string; items?: number; headHash?: string; headItems?: ContextSectionFact[] };
+  state?: { tokens: number; hash: string };
+  now?: { tokens: number; hash: string };
+  wake?: { tokens: number; hash: string };
+  hint?: { tokens: number; hash: string };
+  input?: { items: number; tokens: number };
+}): ContextBreakdown {
+  const history = args.history ?? { tokens: 1, hash: 'h' };
+  return {
+    renderVersion: args.renderVersion ?? '74',
+    instructions: args.instructions ?? { tokens: 1, hash: 'i' },
+    tools: args.tools ?? { tokens: 1, hash: 't', count: 1 },
+    memory: args.memory ?? { tokens: 1, hash: 'm' },
+    history: {
+      tokens: history.tokens,
+      hash: history.hash,
+      items: history.items ?? 1,
+      headHash: history.headHash ?? (args.headHash ?? 'head-a'),
+      ...(history.headItems === undefined ? {} : { headItems: history.headItems }),
+    },
+    ...(args.state === undefined ? {} : { state: args.state }),
+    now: args.now ?? { tokens: 1, hash: 'n' },
+    wake: args.wake ?? { tokens: 1, hash: 'w' },
+    hint: args.hint ?? { tokens: 1, hash: 'x' },
+    input: args.input ?? { items: 1, tokens: 1 },
+  };
 }
 
 /** 一条 `message/reasoning`（`reasoningEchoPlan` 只认 model 可见的那些） */
@@ -214,12 +254,22 @@ describe('A · 缓存未命中率告警（budget/cache-alert）', () => {
     assert.equal(reading.baselineMissRatio, 0.01, '基线 = 窗口之前 24 小时的每轮中位数');
     assert.equal(reading.windowTurns, CACHE_ALERT_WINDOW_TURNS);
 
-    // 载荷：任务书点名的那六格 + 单位 + 去重键两格，一格都不许少
+    // 载荷：任务书点名的那六格 + 单位 + 去重键两格，一格都不许少。
+    // 2026-10-26 起再加四格（窗口按模型切 + 自算口径，见 `runtime/cache-alert.ts` 的文件头 ①②）：
+    // `model` / `modelsInWindow` / `windowInputTokens` / `windowProviderHitTokens`，
+    // 以及两格口径 `cacheReported` / `cacheEstimated`。
     const payload = cacheAlertPayloadOf(reading);
     assert.deepEqual(Object.keys(payload).sort(), [
-      'baselineMissRatio', 'estCostPerTurn', 'estCostUnit', 'lane',
-      'missRatio', 'missRatioBand', 'renderVersion', 'topContributor', 'windowTurns',
+      'baselineMissRatio', 'cacheEstimated', 'cacheReported', 'estCostPerTurn', 'estCostUnit', 'lane',
+      'missRatio', 'missRatioBand', 'model', 'modelsInWindow', 'renderVersion', 'topContributor',
+      'windowInputTokens', 'windowProviderHitTokens', 'windowTurns',
     ]);
+    assert.equal(payload.model, 'fake', '窗口用的是哪个模型必须落进载荷（文案要带模型名）');
+    assert.deepEqual(payload.modelsInWindow, ['fake'], '这一段只混过一个模型');
+    assert.equal(payload.windowInputTokens, 100_000 * CACHE_ALERT_WINDOW_TURNS, 'Σinput = Σ(hit+miss)');
+    assert.equal(payload.windowProviderHitTokens, 70_000 * CACHE_ALERT_WINDOW_TURNS);
+    assert.equal(payload.cacheReported, true, '供方给了数 ⇒ 这一行读数按供方算');
+    assert.equal(payload.cacheEstimated, false);
     assert.equal(payload.estCostUnit, 'miss-equiv-tokens', '单位必须写进数据里，防误读成金额');
     // estCostPerTurn = 未命中 + 输出 + 命中/10 = 30000 + 100 + 7000 = 37100（**token，不是钱**）
     assert.equal(payload.estCostPerTurn, 37_100);
@@ -390,6 +440,405 @@ describe('A · 缓存未命中率告警（budget/cache-alert）', () => {
   });
 });
 
+// ──────────────── A2. 2026-10-26 这一批：窗口按模型切 + 不返回缓存就自算 ────────────────
+//
+// 用户两条指示（原话）：
+//   ①「缓存命中只看窗口内模型。切换模型就重新放。」
+//   ②「如果是不返回缓存命中的模型就我们自己算。」
+// 现场根据（`<数据目录>\events` seq 250635–250947 / turns 3783–3792）：
+//   `gpt-6.1-sol` 30 拍 hit=47,232 / miss=820,151（94.6%），每拍 hit 恒为 0 或固定的 5,248；
+//   切回 `deepseek-flash` 之后 22 拍 11.1%（逐步 6.3 / 8.1 / 6.5%）。
+// 下面每一条都走**真判据**（`planCacheAlert` / `planCacheAlerts`），只构造事件流。
+
+/** 一段"某个模型"的调用（`hit`/`miss`/`inputTokens` 原样给，做零命中/固定命中那些夹具用） */
+function series(args: {
+  count: number;
+  firstTurn: number;
+  startMinutesAgo: number;
+  model: string;
+  hits: readonly number[];
+  inputs: readonly number[];
+  contextOfIndex?: (index: number) => ContextBreakdown;
+}): AppEvent[] {
+  const out: AppEvent[] = [];
+  for (let index = 0; index < args.count; index += 1) {
+    const hit = args.hits[index] ?? 0;
+    const inputTokens = args.inputs[index] ?? 0;
+    out.push(consumed({
+      ts: at(args.startMinutesAgo - index),
+      turn: args.firstTurn + index,
+      model: args.model,
+      hit,
+      miss: Math.max(0, inputTokens - hit),
+      inputTokens,
+      ...(args.contextOfIndex === undefined ? {} : { context: args.contextOfIndex(index) }),
+    }));
+  }
+  return out;
+}
+
+/** 读数里剔除"诊断那一格"（`modelsInWindow` 就是这么一格：它不参与判据） */
+function withoutModelsInWindow(reading: unknown): Record<string, unknown> {
+  const { modelsInWindow, ...rest } = reading as Record<string, unknown>;
+  void modelsInWindow;
+  return rest;
+}
+
+describe('A2 · 窗口按 lane|model 切（换模型即重开）', () => {
+  test('① 同一模型 20 轮、中间夹 3 轮别的模型 ⇒ 窗口只统计前者，读数与"只喂前者"逐字相同', () => {
+    // 基线 10 轮（同模型、1%）+ 窗口 20 轮（同模型、30%）：模型名都用 deepseek-flash，
+    // 这样"基线也要同模型"那一条也一起被钉住。
+    // ⚠ seq 是**按创建顺序**发的，所以这里按"日志里的顺序"建：基线 → 前 10 轮 → 3 轮别的模型
+    //   → 后 10 轮。那 3 轮夹在窗口中间（不是补在末尾——补在末尾就成了"最新那个模型"）。
+    const baseline = series({
+      count: 10, firstTurn: 1, startMinutesAgo: 200, model: 'deepseek-flash',
+      hits: new Array(10).fill(99_000), inputs: new Array(10).fill(100_000),
+    });
+    const mineFirst = series({
+      count: 10, firstTurn: 100, startMinutesAgo: 30, model: 'deepseek-flash',
+      hits: new Array(10).fill(70_000), inputs: new Array(10).fill(100_000),
+    });
+    // 中间夹 3 轮**另一个模型**（现场就是 gpt-6.1-sol：hit 恒 0 或 5248 那种）
+    const foreign = series({
+      count: 3, firstTurn: 60, startMinutesAgo: 24, model: 'gpt-6.1-sol',
+      hits: [0, 5_248, 0], inputs: [20_000, 21_000, 22_000],
+    });
+    const mineSecond = series({
+      count: 10, firstTurn: 110, startMinutesAgo: 20, model: 'deepseek-flash',
+      hits: new Array(10).fill(70_000), inputs: new Array(10).fill(100_000),
+    });
+
+    const pure = plan([...baseline, ...mineFirst, ...mineSecond]);
+    const mixed = plan([...baseline, ...mineFirst, ...foreign, ...mineSecond]);
+    assert.ok(pure.reading !== null && mixed.reading !== null);
+
+    // **逐字相同**（除了那格"诊断用的模型清单"）：3 轮别的模型一个字节都没进这个窗口
+    assert.deepEqual(withoutModelsInWindow(mixed.reading), withoutModelsInWindow(pure.reading));
+    assert.equal(mixed.reading.windowTurns, CACHE_ALERT_WINDOW_TURNS, '窗口仍是前者的 20 轮');
+    assert.equal(mixed.reading.missRatio, 0.3);
+    assert.equal(mixed.reading.baselineMissRatio, 0.01, '基线也是同一模型那 10 轮');
+    assert.equal(mixed.reading.model, 'deepseek-flash', '窗口用的是最新那个模型');
+    // 夹在里面的模型只在诊断那一格出现，**不参与判据**
+    assert.deepEqual(mixed.reading.modelsInWindow, ['deepseek-flash', 'gpt-6.1-sol']);
+    assert.deepEqual(pure.reading.modelsInWindow, ['deepseek-flash']);
+    assert.equal(pure.fired, true, '30% 且基线 1% ⇒ 照旧报');
+    // 旧口径（"最近 20 档不分模型"）会把这 3 轮也算进来：17 拍 30% + 3 拍几乎全 miss 的别的模型
+    // ⇒ 32.2%（不是 30%）。这里把这笔旧账**算出来留在断言里**，让"为什么要按模型切"
+    // 有一个可复算的对照数——现场那一版是 94.6% 与 11.1% 混成一个 79.8%，偏差比这大得多。
+    const legacyHit = 17 * 70_000 + (0 + 5_248 + 0);
+    const legacyMiss = 17 * 30_000 + (20_000 + 21_000 + 22_000 - 5_248);
+    assert.equal(Math.round((legacyMiss / (legacyHit + legacyMiss)) * 10_000) / 10_000, 0.322);
+  });
+
+  test('② 换了模型之后第一轮 ⇒ 窗口只有 1 个样本，不到 MIN_TURNS ⇒ 不报', () => {
+    const events = [
+      ...normalTurns({ count: 20, firstTurn: 1, startMinutesAgo: 200, renderVersion: '74' }),
+      // 新模型的第一拍：就算它是 100% 未命中，也不许拿"上一个模型的 20 轮"来判
+      consumed({
+        ts: at(5), turn: 300, model: 'gpt-6.1-sol', hit: 0, miss: 21_378,
+      }),
+    ];
+    const verdict = plan(events);
+    assert.equal(verdict.fired, false);
+    assert.equal(verdict.why, 'too-few-turns');
+    assert.ok(verdict.reading !== null);
+    assert.equal(verdict.reading.model, 'gpt-6.1-sol');
+    assert.equal(verdict.reading.windowTurns, 1, '换模型即重开：窗口只有新模型这一拍');
+    assert.ok(verdict.reading.windowTurns < CACHE_ALERT_MIN_TURNS);
+  });
+});
+
+describe('A2 · 不返回缓存命中的模型：我们自己算', () => {
+  /**
+   * 前缀"两段相同"的上下文：`instructions`（1000 tok）与 `memory`（2000 tok）每拍都一样，
+   * `tools` 同哈希但 0 tok（这样"两段之和"就是 1000 + 2000），`history` 每拍都不同 ⇒
+   * 前缀在 memory 之后断掉，`state` / `now` 都不进估算。
+   */
+  const sharingPrefix = (index: number): ContextBreakdown => contextOf({
+    instructions: { tokens: 1_000, hash: 'i-same' },
+    tools: { tokens: 0, hash: 't-same', count: 0 },
+    memory: { tokens: 2_000, hash: 'm-same' },
+    history: {
+      tokens: 100 + index, hash: `h-${index}`, items: 1 + index,
+      headItems: [{ name: '#1', tokens: 100 + index, hash: `head-${index}` }],
+    },
+    state: { tokens: 50, hash: 's-same' },
+    now: { tokens: 5, hash: `n-${index}` },
+  });
+
+  test('③ 零命中模型（供方 hit 恒 0）⇒ 走自算；5 拍前缀两段相同 ⇒ 命中=两段之和、miss=input−它', () => {
+    // 6 拍、每拍 10,000 输入、供方 hit 恒 0（`cacheMissTokens` 也照写入侧口径 = input）
+    const events = series({
+      count: 6, firstTurn: 100, startMinutesAgo: 30, model: 'gpt-6.1-sol',
+      hits: [0, 0, 0, 0, 0, 0], inputs: [10_000, 10_000, 10_000, 10_000, 10_000, 10_000],
+      contextOfIndex: sharingPrefix,
+    });
+    // 纯函数那一半先钉住"两段 tokens 之和"：1000（instructions）+ 0（tools）+ 2000（memory）
+    const estimate = estimatePrefixHitOf(sharingPrefix(0), sharingPrefix(1));
+    assert.equal(estimate, 3_000, '只累加连续相同的段：instructions + tools(0) + memory');
+
+    // 真判据：整窗改自算（第一拍没有同模型上一拍 ⇒ 只算 0，保守）
+    const verdict = plan(events);
+    const reading = verdict.reading;
+    assert.ok(reading !== null);
+    assert.equal(reading.cacheEstimated, true, '这一行读数是按上下文前缀自算的');
+    assert.equal(reading.cacheReported, false, '供方没给数');
+    assert.equal(reading.windowProviderHitTokens, 0, '供方一次都没报命中');
+    assert.equal(reading.windowInputTokens, 60_000);
+    // 5 拍各 3000 = 15,000 估算命中；其余 45,000 是估算未命中 ⇒ 75%
+    assert.equal(reading.missRatio, 0.75);
+    // 逐档也钉一下：第一拍 0 / 后面每拍 3000
+    const samples = estimateByBucketOf({ events, lane: 'heavy', model: 'gpt-6.1-sol' });
+    const values = [...samples.values()].map(sample => sample.hit);
+    assert.deepEqual(values, [0, 3_000, 3_000, 3_000, 3_000, 3_000]);
+    assert.equal(samples.size, 6);
+
+    // 供方没给数 ⇒ 事件里那两格如实写（`budget/consumed` 由写入侧写；这里是同口径的窗口级读数）
+    const payload = cacheAlertPayloadOf(reading);
+    assert.equal(payload.cacheReported, false);
+    assert.equal(payload.cacheEstimated, true);
+    assert.equal(payload.model, 'gpt-6.1-sol');
+    // 没有同模型基线 ⇒ 照旧不报（自算不放宽"相对基线"这一条）
+    assert.equal(verdict.fired, false);
+    assert.equal(verdict.why, 'no-baseline');
+  });
+
+  test('③b 「拍」与「轮」不是同一个数：4 轮 / 32 拍也能自算，但判据仍按轮（不报）', () => {
+    // 现场形状：gpt-6.1-sol 的 30 拍只摊在 4 轮里（每轮 8 步）。口径按**拍**开
+    // （"持续 ≥ 5 拍"），判据的样本下限按**轮**（"≥ 5 轮"）——两个数都写在这里。
+    const events: AppEvent[] = [];
+    for (let turn = 100; turn < 104; turn += 1) {
+      for (let step = 0; step < 8; step += 1) {
+        const index = (turn - 100) * 8 + step;
+        events.push(consumed({
+          ts: at(30 - index * 0.1), turn, model: 'gpt-6.1-sol', hit: 5_248 * (index % 2), miss: 0,
+          // 现场那一拍的输入（21,378）：`c × 4 = 20,992 ≤ 21,378` ⇒ 走"常数命中量"那一档判据
+          inputTokens: 21_378, context: sharingPrefix(index),
+        }));
+      }
+    }
+    const verdict = plan(events);
+    const reading = verdict.reading;
+    assert.ok(reading !== null);
+    assert.equal(reading.windowCalls, 32, '拍数 32');
+    assert.equal(reading.windowTurns, 4, '轮数只有 4');
+    assert.equal(reading.cacheEstimated, true, '口径按拍开 ⇒ 这一行是自算的');
+    assert.equal(verdict.fired, false);
+    assert.equal(verdict.why, 'too-few-turns', '判据按轮：4 轮 < 5 ⇒ 判不出来就不报');
+  });
+
+  test('④ 供方给了数 ⇒ 用供方，cacheEstimated:false（不被自算覆盖）', () => {
+    // 同一份"两段相同"的上下文（自算会给到 3000 命中），但供方明确报了 70,000 命中。
+    // ⇒ 读数必须是供方的 30%，而不是自算出来的那个更大的数。
+    const events = series({
+      count: 6, firstTurn: 100, startMinutesAgo: 30, model: 'deepseek-flash',
+      hits: [70_000, 70_000, 70_000, 70_000, 70_000, 70_000],
+      inputs: [100_000, 100_000, 100_000, 100_000, 100_000, 100_000],
+      contextOfIndex: sharingPrefix,
+    });
+    const verdict = plan(events);
+    const reading = verdict.reading;
+    assert.ok(reading !== null);
+    assert.equal(reading.cacheEstimated, false, '供方给了数 ⇒ 一个字都不自算');
+    assert.equal(reading.cacheReported, true);
+    assert.equal(reading.missRatio, 0.3, '30% = 供方的数（自算会把它盖成 99.7%）');
+    assert.equal(reading.windowProviderHitTokens, 70_000 * 6);
+  });
+
+  test('⑤ 文案三档：常规 / 零命中 / 自算，各自带模型名、都不写钱', () => {
+    // ① 常规：供方给了数（deepseek-flash，30% 且基线 1%）
+    const regular = plan([
+      ...series({
+        count: 10, firstTurn: 1, startMinutesAgo: 200, model: 'deepseek-flash',
+        hits: new Array(10).fill(99_000), inputs: new Array(10).fill(100_000),
+      }),
+      ...series({
+        count: CACHE_ALERT_WINDOW_TURNS, firstTurn: 100, startMinutesAgo: 30, model: 'deepseek-flash',
+        hits: new Array(CACHE_ALERT_WINDOW_TURNS).fill(70_000),
+        inputs: new Array(CACHE_ALERT_WINDOW_TURNS).fill(100_000),
+      }),
+    ]);
+    assert.ok(regular.reading !== null);
+    const regularNote = cacheAlertWakeNote(regular.reading);
+    assert.match(regularNote, /【框架通报 · 缓存成本】最近 20 轮（heavy · deepseek-flash）未命中 30\.0%，24 小时基线 1\.0%——/u);
+    assert.ok(!regularNote.includes(CURRENCY_SIGN), '文案里不许出现货币符号');
+    assert.ok(!regularNote.includes('自算'), '供方给了数就不许说自算');
+
+    // ② 零命中：供方 hit 恒 0（gpt-6.1-sol）
+    const zero = plan(series({
+      count: 6, firstTurn: 100, startMinutesAgo: 30, model: 'gpt-6.1-sol',
+      hits: [0, 0, 0, 0, 0, 0], inputs: [10_000, 10_000, 10_000, 10_000, 10_000, 10_000],
+      contextOfIndex: sharingPrefix,
+    }));
+    assert.ok(zero.reading !== null);
+    const zeroNote = cacheAlertWakeNote(zero.reading);
+    assert.match(zeroNote, /gpt-6\.1-sol 最近 6 轮一次缓存都没命中（命中 0 \/ 输入 60k）/u);
+    assert.match(zeroNote, /该端点很可能不支持前缀缓存，换模型即可恢复/u);
+    assert.ok(!zeroNote.includes(CURRENCY_SIGN));
+
+    // ③ 自算：供方报的是一个**与上下文规模无关的常数**（现场那 9 拍固定 5,248）
+    const fixed = plan(series({
+      count: 6, firstTurn: 100, startMinutesAgo: 30, model: 'gpt-6.1-sol',
+      hits: [0, 5_248, 0, 5_248, 0, 5_248],
+      inputs: [21_378, 20_239, 20_449, 16_074, 22_259, 28_404],
+      contextOfIndex: (index) => contextOf({
+        instructions: { tokens: 7_052, hash: 'd3738e' },
+        tools: { tokens: 5_476, hash: '4d118a', count: 24 },
+        memory: { tokens: 1_057, hash: 'bf5909' },
+        history: {
+          tokens: 200 + index, hash: `h-${index}`, items: 1 + index,
+          headItems: [{ name: '#1', tokens: 200 + index, hash: `head-${index}` }],
+        },
+        now: { tokens: 314, hash: `n-${index}` },
+      }),
+    }));
+    assert.ok(fixed.reading !== null);
+    assert.equal(fixed.reading.cacheEstimated, true, '常数命中量 ⇒ 视作"不返回缓存数据"⇒ 自算');
+    assert.equal(fixed.reading.windowProviderHitTokens, 5_248 * 3, '供方那三拍的 5248 照旧落账');
+    const fixedNote = cacheAlertWakeNote(fixed.reading);
+    assert.match(fixedNote, /（heavy · gpt-6\.1-sol）未命中/u);
+    assert.match(fixedNote, /（该模型不返回缓存数据，本行按上下文前缀自算）/u);
+    assert.ok(!fixedNote.includes(CURRENCY_SIGN));
+    // 三档的读数行（控制台/doctor/cli 同源）也都要带模型名
+    assert.match(cacheAlertReadings(regular.reading), /（heavy · deepseek-flash）/u);
+    assert.match(cacheAlertReadings(zero.reading), /（heavy · gpt-6\.1-sol） · 按上下文前缀自算/u);
+  });
+
+  test('⑤b 自算那一档：前缀断了、命中就塌（判据照旧抓得住）', () => {
+    // 基线（同模型、窗口之前、24 小时内）：10 拍，前缀稳定 ⇒ 自算命中高（约 13.6k / 14k 输入）
+    const stable = (index: number): ContextBreakdown => contextOf({
+      instructions: { tokens: 7_052, hash: 'i' },
+      tools: { tokens: 5_476, hash: 't' },
+      memory: { tokens: 1_057, hash: 'm' },
+      history: {
+        tokens: 20 + index, hash: `hs-${index}`, items: 1 + index,
+        headItems: [{ name: '#1', tokens: 20, hash: 'same-head' }],
+      },
+      now: { tokens: 300, hash: `ns-${index}` },
+    });
+    // 窗口（同模型、最近 20 拍）：instructions 每拍都被改写 ⇒ 自算命中塌到 0
+    const broken = (index: number): ContextBreakdown => contextOf({
+      instructions: { tokens: 7_052, hash: `i-${index}` },
+      tools: { tokens: 5_476, hash: 't' },
+      memory: { tokens: 1_057, hash: 'm' },
+      history: { tokens: 200, hash: `hb-${index}`, items: 2, headItems: [{ name: '#1', tokens: 200, hash: `head-b-${index}` }] },
+      now: { tokens: 300, hash: `nb-${index}` },
+    });
+    const events = [
+      ...series({
+        count: 10, firstTurn: 1, startMinutesAgo: 300, model: 'gpt-6.1-sol',
+        hits: new Array(10).fill(0), inputs: new Array(10).fill(14_000), contextOfIndex: stable,
+      }),
+      ...series({
+        count: CACHE_ALERT_WINDOW_TURNS, firstTurn: 100, startMinutesAgo: 30, model: 'gpt-6.1-sol',
+        hits: new Array(CACHE_ALERT_WINDOW_TURNS).fill(0),
+        inputs: new Array(CACHE_ALERT_WINDOW_TURNS).fill(14_000),
+        contextOfIndex: broken,
+      }),
+    ];
+    const verdict = plan(events);
+    assert.ok(verdict.reading !== null);
+    assert.equal(verdict.reading.cacheEstimated, true);
+    assert.ok(verdict.reading.missRatio > 0.9, `窗口自算未命中应接近 100%：${verdict.reading.missRatio}`);
+    assert.ok(verdict.reading.baselineMissRatio < 0.05, `基线也走自算：前缀稳定时命中高（${verdict.reading.baselineMissRatio}）`);
+    assert.equal(verdict.fired, true, '自算口径下"前缀每拍都断"必须报');
+  });
+});
+
+describe('A2 · 前缀自算（estimatePrefixHitOf）的六条口径', () => {
+  const base = (patch: Parameters<typeof contextOf>[0]): ContextBreakdown => contextOf(patch);
+
+  test('两段相同、history 不同 ⇒ 只算前两段；instructions 一变 ⇒ 0', () => {
+    const a = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 2_000, hash: 'm' },
+      history: { tokens: 5, hash: 'h-a' },
+    });
+    const b = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 2_000, hash: 'm' },
+      history: { tokens: 7, hash: 'h-b' },
+    });
+    assert.equal(estimatePrefixHitOf(a, b), 3_000, 'instructions + memory（tools 那一段 0 token）');
+    assert.equal(estimatePrefixHitOf(b, base({
+      instructions: { tokens: 1_000, hash: 'i-changed' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 2_000, hash: 'm' },
+    })), 0, '第一处就不同 ⇒ 一个 token 都不算');
+  });
+
+  test('history 逐条比：追加 ⇒ 前面算、还能继续；就地改写 ⇒ 算到断点就停', () => {
+    const prev = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 500, hash: 't' },
+      memory: { tokens: 200, hash: 'm' },
+      history: {
+        tokens: 20, hash: 'h1', items: 2,
+        headItems: [{ name: '#1', tokens: 10, hash: 'a' }, { name: '#2', tokens: 10, hash: 'b' }],
+      },
+      state: { tokens: 50, hash: 's' },
+      now: { tokens: 5, hash: 'n1' },
+    });
+    // 追加一条：前缀仍然完整 ⇒ 继续到 state（state 相同、now 不同就停）
+    const appended = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 500, hash: 't' },
+      memory: { tokens: 200, hash: 'm' },
+      history: {
+        tokens: 30, hash: 'h2', items: 3,
+        headItems: [{ name: '#1', tokens: 10, hash: 'a' }, { name: '#2', tokens: 10, hash: 'b' }, { name: '#3', tokens: 10, hash: 'c' }],
+      },
+      state: { tokens: 50, hash: 's' },
+      now: { tokens: 5, hash: 'n2' },
+    });
+    assert.equal(estimatePrefixHitOf(prev, appended), 1_000 + 500 + 200 + 20 + 50);
+    // 就地改写：条数没变而整段哈希变了 ⇒ 第一条就不同 ⇒ 只算到 history 之前
+    const rewritten = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 500, hash: 't' },
+      memory: { tokens: 200, hash: 'm' },
+      history: {
+        tokens: 20, hash: 'h9', items: 2,
+        headItems: [{ name: '#1', tokens: 10, hash: 'a-rewritten' }, { name: '#2', tokens: 10, hash: 'b' }],
+      },
+      state: { tokens: 50, hash: 's' },
+      now: { tokens: 5, hash: 'n2' },
+    });
+    assert.equal(estimatePrefixHitOf(prev, rewritten), 1_000 + 500 + 200);
+  });
+
+  test('没有逐条事实（老日志）⇒ history 一个 token 都不算；两边段集合不同 ⇒ 从缺的那段断', () => {
+    const prev = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 0, hash: 'm' },
+      history: { tokens: 20, hash: 'h1' },
+      now: { tokens: 5, hash: 'n1' },
+    });
+    // 两边都没有 headItems：整段哈希不同 ⇒ 无法逐条比 ⇒ 0（不猜）
+    const cur = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 0, hash: 'm' },
+      history: { tokens: 30, hash: 'h2' },
+      now: { tokens: 5, hash: 'n2' },
+    });
+    assert.equal(estimatePrefixHitOf(prev, cur), 1_000);
+    // 整段哈希相同 ⇒ 整段命中，继续往后比（state 只有一边有 ⇒ 断在 state）
+    const same = base({
+      instructions: { tokens: 1_000, hash: 'i' },
+      tools: { tokens: 0, hash: 't' },
+      memory: { tokens: 0, hash: 'm' },
+      history: { tokens: 20, hash: 'h1' },
+      state: { tokens: 50, hash: 's' },
+      now: { tokens: 5, hash: 'n1' },
+    });
+    assert.equal(estimatePrefixHitOf(prev, same), 1_000 + 20);
+  });
+});
+
 // ──────────────────────────────── B. 前兆判据 ────────────────────────────────
 
 describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => {
@@ -554,15 +1003,27 @@ describe('C · 出口同源（控制台 / doctor / cli tail）', () => {
 
   test('③ cli tail 一行读得到这两条事件（沿用既有 summarize）', () => {
     const alert = event('budget/cache-alert', {
-      lane: 'heavy', windowTurns: 20, missRatio: 0.3, baselineMissRatio: 0.01,
+      lane: 'heavy', model: 'deepseek-flash', modelsInWindow: ['deepseek-flash'],
+      windowTurns: 20, windowInputTokens: 2_000_000, windowProviderHitTokens: 1_400_000,
+      missRatio: 0.3, baselineMissRatio: 0.01,
       estCostPerTurn: 37_100, estCostUnit: 'miss-equiv-tokens',
       topContributor: 'reasoning-echo-eviction', renderVersion: '74', missRatioBand: 3,
+      cacheReported: true, cacheEstimated: false,
     }, 'internal', NOW);
     const line = summarizeEvent(alert);
     assert.match(line, /缓存未命中率 30\.0%（基线 1\.0%）/u);
-    assert.match(line, /最近 20 轮（heavy）/u);
+    assert.match(line, /最近 20 轮（heavy · deepseek-flash）/u);
     assert.match(line, /主嫌疑 reasoning-echo-eviction/u);
     assert.ok(!line.includes(CURRENCY_SIGN));
+
+    // 老事件（2026-10-26 之前写的，没有 `model` 那一格）：`cli tail` 照样要印得出一行，
+    // 缺模型就写"模型未知"——不拿 lane 名顶替（那会把"没记"读成"这条 lane 只有一个模型"）。
+    const legacy = event('budget/cache-alert', {
+      lane: 'heavy', windowTurns: 20, missRatio: 0.3, baselineMissRatio: 0.01,
+      estCostPerTurn: 37_100, estCostUnit: 'miss-equiv-tokens',
+      topContributor: 'unknown', renderVersion: '74', missRatioBand: 3,
+    }, 'internal', NOW);
+    assert.match(summarizeEvent(legacy), /最近 20 轮（heavy · 模型未知）/u);
 
     const pressure = event('model/reasoning-echo', {
       turn: 7, step: 2, kind: 'reasoning_echo_pressure',

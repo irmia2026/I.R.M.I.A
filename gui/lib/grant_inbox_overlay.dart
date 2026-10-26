@@ -373,6 +373,7 @@ class _GrantInboxHostState extends State<GrantInboxHost> {
           bottom: kGrantInboxInset,
           child: GrantInboxPanel(
             pending: pending,
+            malformed: widget.state.malformedGrants,
             collapsed: collapsed,
             busyId: busyId,
             failures: failures,
@@ -409,10 +410,18 @@ class GrantInboxPanel extends StatelessWidget {
     this.collapsed = false,
     this.busyId = '',
     this.failures = const <String, String>{},
+    this.malformed = const <Map<String, dynamic>>[],
   });
 
   /// 待批清单（**最新在最前**，顺序由 `pendingGrantsNewestFirst` 定）
   final List<Map<String, dynamic>> pending;
+
+  /// **读不出来的申请单**（`/api/grants.malformed`，2026-10-22）。
+  ///
+  /// 它与 [pending] 是两条独立的判据：那一档没有可点的卡（`picked:false` + 解析不过），
+  /// 绝不能被并进待批队列；但**也不许什么都不显示**——它是"人写了单子、框架一声不响"
+  /// 那条缝的补丁（过去 `pending` 一空整块就 `SizedBox.shrink()`）。
+  final List<Map<String, dynamic>> malformed;
 
   final void Function(Map<String, dynamic> grant) onApprove;
   final void Function(Map<String, dynamic> grant) onReject;
@@ -432,8 +441,12 @@ class GrantInboxPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (pending.isEmpty) return const SizedBox.shrink();
     final s = IrmiaStrings.of(context);
+    // 「一条待批都没有」不是"什么都不画"：读不出来的单子照样得说出来
+    if (pending.isEmpty) {
+      if (malformed.isEmpty) return const SizedBox.shrink();
+      return SizedBox(width: kGrantInboxWidth, child: _unreadableBar(context, s));
+    }
     if (collapsed) return _collapsedBar(context, s);
     final shown = pending.take(kGrantInboxMaxCards).toList();
     final hidden = pending.length - shown.length;
@@ -444,6 +457,12 @@ class GrantInboxPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(context, s),
+          // 有待批卡时也照样把"读不出来的那一张"说出来：两件事互不遮蔽
+          if (malformed.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.x2),
+              child: _unreadableBar(context, s),
+            ),
           for (final grant in shown)
             Padding(
               padding: const EdgeInsets.only(top: Space.x2),
@@ -492,11 +511,58 @@ class GrantInboxPanel extends StatelessWidget {
     );
   }
 
+  /// **「有一张单读不出来」**（2026-10-22）：唯一会在"一条待批都没有"时也画出来的那一行。
+  ///
+  /// 为什么它必须存在：读不出来的单子既没有 `grant/requested`（于是不进待批队列），
+  /// 又解析不过（于是连卡都挂不出来）——过去 `pending` 一空整块就 `SizedBox.shrink()`，
+  /// 人就永远看不见"有东西在等你"。这里只说两件事：**哪一张**、**为什么读不出来**
+  /// （原因原样来自服务端 `grantFileProblems`，不译、不截断成"未知错误"）。
+  ///
+  /// 不给按钮：一张读不出来的单子没有可批的东西（点批准只会拿到一句错）。
+  /// 想动手就去扩展页看她写的那份原文（`_openExtensions` 那条路）。
+  Widget _unreadableBar(BuildContext context, AppStrings s) {
+    final scheme = Theme.of(context).colorScheme;
+    final first = malformed.first;
+    final more = malformed.length > 1 ? s.grantUnreadableMore(malformed.length - 1) : '';
+    return Container(
+      key: const ValueKey('grant-inbox-unreadable'),
+      padding: const EdgeInsets.all(Space.x3),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: IrmiaTheme.danger.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.error_outline_rounded, size: 14, color: IrmiaTheme.danger),
+              const SizedBox(width: Space.x1),
+              Text(
+                s.grantUnreadableTitle,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: IrmiaTheme.danger,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: Space.x1),
+          Text(
+            '${s.grantUnreadableBody('${first['id'] ?? ''}', '${first['why'] ?? ''}')}$more',
+            style: TextStyle(fontSize: 11.5, height: 1.4, color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 收起之后的**细条**：`N 条待批`，点一下展开。
   ///
   /// 刻意做成"按内容量收窄"的一小条（不是整宽的条）：它停在右下角，越窄越不像一块挡板。
-  Widget _collapsedBar(BuildContext context, AppStrings s) {
-    final scheme = Theme.of(context).colorScheme;
+  Widget _collapsedBar(BuildContext context, AppStrings s) {    final scheme = Theme.of(context).colorScheme;
     return Align(
       alignment: Alignment.bottomRight,
       child: Material(

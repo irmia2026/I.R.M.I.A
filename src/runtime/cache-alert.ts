@@ -74,14 +74,68 @@
  * "相对基线恶化"这一条缺一不可，拿 0 当基线会把"第一次出现未命中"报成"恶化"。
  * 唯一的例外写在 `ratioOutweighsBaseline`：**基线是 0% 而窗口 > 0** —— 那是无中生有，
  * 按"高出 ≥2 倍"读就是成立（0 的两倍还是 0，但这里的语义显然是"本来没有，现在有"）。
+ *
+ * ─────────────────────── 2026-10-26 · 用户两条指示（这一批的根据） ───────────────────────
+ *
+ * ①「**缓存命中只看窗口内模型。切换模型就重新放。**」
+ * ②「**如果是不返回缓存命中的模型就我们自己算。**」
+ *
+ * ────────── ① 为什么窗口必须按模型切（不是洁癖，是实测报错了） ──────────
+ *
+ * heavy 档曾用 `gpt-6.1-sol`（events seq 250635–250947 / turns 3783–3786，2026-10-25 16:37 起），
+ * 30 拍合计 `cacheHitTokens 47,232` / `cacheMissTokens 820,151` ⇒ 未命中 **94.6%**；切回
+ * `deepseek-flash` 之后 22 拍是 **11.1%**（逐步 6.3 / 8.1 / 6.5%）。旧口径把两者算进**同一个**
+ * 20 轮窗口（桶的 key 只有 turn 号，桶里没有模型），于是报出 **79.8%**——读起来像"我们的前缀
+ * 设计坏了"，而现场的两段账各自都说得清（一个端点基本不报命中、一个正常）。
+ * ⇒ 桶的 key 从 `turn` 改成 **`lane|model`**（同一轮里换模型会出现两个桶，这正确），
+ * 窗口 = **同一 model 的最近 {@link CACHE_ALERT_WINDOW_TURNS} 轮**，基线也按同一 lane+model 取。
+ * 换模型的第一拍窗口只有 1 个样本 ⇒ 走既有的 `too-few-turns`（**不报**，等它攒够 5 拍）。
+ * 窗口里若出现 ≥2 个模型（历史残留：升级前写下的日志、同一轮里切换过），**只用最新那个模型的
+ * 桶**；`modelsInWindow` 只作诊断落进载荷，**不参与判据**。
+ *
+ * ────────── ② "不返回缓存数据"怎么判、我们自己怎么算 ──────────
+ *
+ * 判据在 {@link cacheCaliberOf}，两种形状都算"不返回"：
+ *   ⓐ **供方一次都没报命中**：窗口 Σhit = 0 而确实有输入；
+ *   ⓑ **供方报的是一个与上下文规模无关的常数**：窗口里每个非零 hit 都等于同一个 c，
+ *      且 c 只占窗口最大一拍输入的四分之一以下。
+ *      ⚠ 这一条是**从实测反推**的、必须写清：`gpt-6.1-sol` 那 30 拍里 hit 只有 `0` 与固定的
+ *      `5,248` 两种值（9 拍 5248 / 21 拍 0），而输入已从 16,074 涨到 32,225——命中量与上下文
+ *      规模**无关**。只写 ⓐ（`Σhit === 0`）的话，那 9 拍 5248 会让这条判据在**它要修的那场
+ *      事故里一次都不响**，与"绝对线正好落在峰值之上"是同一类错误。
+ *
+ * 自算的口径写在 `model/context-audit.ts` 的 `estimatePrefixHitOf`（逐段逐条比前缀，
+ * **只算完全相同的段**）；这里只负责窗口级的两件事：把每一拍的自算值加总，以及把基线也换成
+ * 同一档口径（否则"自算的 33%"会被拿去跟"供方的 94.6%"比，那条判据永远不响）。
+ * **供方给的数一个字节都不改**（`budget/consumed` 那四格照旧），只在 `budget/consumed` 上留
+ * 两格 `cacheReported`（这一拍 hit>0）/ `cacheEstimated`（这一拍命中量可自算）作痕迹。
+ *
+ * ⚠ **"拍"与"轮"不是同一个数**：口径的启动条件是「持续 ≥ {@link CACHE_ALERT_MIN_TURNS} **拍**」
+ * （一次调用一拍：现场 gpt 那 30 拍只摊在 4 轮里），判据的样本下限仍是「≥ 5 **轮**」。
+ * 于是 gpt 那一段的读数是**自算的 53.5%**、但在它那段里**不报**（4 轮 < 5，判不出来就不报）。
+ * 实测：turns 3783–3786 的 30 拍，供方 94.55% ↔ 自算 **53.5%**（估算命中 403,137 / 867,383 输入）。
+ *
+ * ────────── 文案（用户给的三个形状，逐字落在这里） ──────────
+ *
+ *   常规   `【框架通报 · 缓存成本】最近 20 轮（heavy · deepseek-flash）未命中 11.1%，24 小时基线 2.0%——…`
+ *   零命中 `【框架通报 · 缓存成本】gpt-6.1-sol 最近 20 轮一次缓存都没命中（命中 0 / 输入 860k）——该端点很可能不支持前缀缓存，换模型即可恢复`
+ *   自算   `…（该模型不返回缓存数据，本行按上下文前缀自算）`
+ * 三个形状都**不写钱**（本仓库的铁律，见文件头第一段），且都**必须带模型名**。
  */
 
 import type { AppEvent, CacheAlertPayload, CacheAlertContributor, ModelLane } from '../log/types.js';
+import type { ContextBreakdown } from '../model/context-audit.js';
+import { estimatePrefixHitOf } from '../model/context-audit.ts';
 import { formatCompact, formatPercent } from '../format/units.ts';
 
 // ──────────────────────────────── 阈值（唯一一处定义） ────────────────────────────────
 
-/** ① 窗口长度：最近多少**轮**（同一 lane 分开算） */
+/**
+ * ① 窗口长度：**同一 lane + 同一 model** 最近多少**轮**（2026-10-26 起按模型切，见文件头 ①）。
+ *
+ * 一个模型一个窗口——"最近 20 轮不分模型"那个口径会把两个端点的账混成一个数（实测：
+ * `gpt-6.1-sol` 94.6% + `deepseek-flash` 11.1% ⇒ 旧口径报 79.8%，读起来像我们的前缀坏了）。
+ */
 export const CACHE_ALERT_WINDOW_TURNS = 20;
 /**
  * ② 绝对触发线：窗口未命中率必须**严格大于**它。
@@ -184,14 +238,32 @@ export interface CacheAlertVerdict {
  * **写的是 0**（那一刻 turn 号还没分配，见 `real-loop.ts` 的调用点注释）。0 不是一个轮，
  * 把一整天几十次判定塞进同一个 `turn 0` 会让 `windowTurns` 永远等于 1、这条判据永远不响。
  * ⇒ `turn <= 0` 的调用**各自成一档**；排序统一用 `seq`（日志里恒单调，与时间同序）。
+ *
+ * **桶的 key 是 `lane|model`**（2026-10-26 起，见文件头 ①）：同一个 lane 换了模型就是另一本账，
+ * 新旧模型不许混在同一个 20 轮窗口里。同一轮里换模型会出现两个桶——那是对的。
  */
 interface LaneBucket {
+  /** 桶的 key（`turn:<n>` 或 `call:<seq>`；自算那一档要按同一个 key 把估算值对回来） */
+  key: string;
+  /** 这一档用的模型（`budget/consumed.model`；老日志缺这一格 ⇒ `'unknown'`，不猜） */
+  model: string;
   hit: number;
   miss: number;
+  /** Σ`inputTokens`（`miss` 是"未命中"，`input` 是"这一拍总共发了多少"——两者不是一个数） */
+  input: number;
   output: number;
   retries: number;
   calls: number;
   reasoningCalls: number;
+  /**
+   * 这一档里**每一笔**的命中量与输入量（原样，不聚合）。
+   *
+   * 只服务 `cacheCaliberOf` 的两条判据：ⓐ Σhit===0、ⓑ "非零 hit 恒为同一个常数且与输入规模
+   * 无关"。条目数与 `calls` 相同（一笔一拍一条），量级是"一次调用"，不会把 20 万条事件撑成
+   * 两个大数组。
+   */
+  hits: number[];
+  inputs: number[];
   /** 这一档里出现过的 `context.renderVersion`（按出现顺序去重，最后一次写入的是"最新"） */
   renderVersions: string[];
   /** 这一档里出现过的 `context.history.headHash`（历史前段被改写的直接证据） */
@@ -202,11 +274,16 @@ interface LaneBucket {
   tsMs: number | null;
 }
 
-function emptyBucket(seq: number): LaneBucket {
+function emptyBucket(key: string, seq: number, model: string): LaneBucket {
   return {
-    hit: 0, miss: 0, output: 0, retries: 0, calls: 0, reasoningCalls: 0,
-    renderVersions: [], historyHeads: [], lastSeq: seq, tsMs: null,
+    key, model, hit: 0, miss: 0, input: 0, output: 0, retries: 0, calls: 0, reasoningCalls: 0,
+    hits: [], inputs: [], renderVersions: [], historyHeads: [], lastSeq: seq, tsMs: null,
   };
+}
+
+/** 桶的 key：真轮号按轮分、无轮号的内部调用各自成一档（理由见 {@link LaneBucket}） */
+function bucketKeyOf(data: { turn: number }, seq: number): string {
+  return data.turn > 0 ? `turn:${data.turn}` : `call:${seq}`;
 }
 
 /** 事件 `ts` → 毫秒；解析不出来给 null（**不拿"现在"顶替**——那会把老事件当成刚发生的） */
@@ -234,6 +311,7 @@ function addDistinct(list: string[], value: string | undefined): void {
  *   · **`turn > 0` 才当轮**，其余各自成一档（理由见 {@link LaneBucket}）。
  *   · **失败拍的 0 token 照收**：它们让分母不动、分子不动，等于"这一档没有样本"，
  *     由 {@link CACHE_ALERT_MIN_TURNS} 与分母守卫各自兜住。
+ *   · **桶按 `lane|model` 分**（2026-10-26，文件头 ①）：同一轮里换了模型就是两个桶。
  */
 function collectLanes(events: readonly AppEvent[]): Record<ModelLane, LaneBucket[]> {
   const maps: Record<ModelLane, Map<string, LaneBucket>> = {
@@ -246,17 +324,23 @@ function collectLanes(events: readonly AppEvent[]): Record<ModelLane, LaneBucket
     const d = event.data;
     const byKey = maps[d.lane];
     if (byKey === undefined) continue;
-    const key = d.turn > 0 ? `turn:${d.turn}` : `call:${event.seq}`;
-    const bucket = byKey.get(key) ?? emptyBucket(event.seq);
+    // 模型是**桶的一部分**（文件头 ①）：换模型即换一本账，新旧模型不许混进同一个窗口。
+    // 老日志缺 `model` 的按 `'unknown'` 归（不猜成某一档；它们自成一桶，混不进任何真模型）。
+    const model = typeof d.model === 'string' && d.model !== '' ? d.model : 'unknown';
+    const key = `${bucketKeyOf(d, event.seq)}|${model}`;
+    const bucket = byKey.get(key) ?? emptyBucket(key, event.seq, model);
     const input = Number.isFinite(d.inputTokens) ? Math.max(0, d.inputTokens) : 0;
     const hit = Number.isFinite(d.cacheHitTokens) ? Math.max(0, Math.min(d.cacheHitTokens, input)) : 0;
     const miss = Number.isFinite(d.cacheMissTokens) ? Math.max(0, d.cacheMissTokens) : 0;
     const output = Number.isFinite(d.outputTokens) ? Math.max(0, d.outputTokens) : 0;
     bucket.hit += hit;
     bucket.miss += miss;
+    bucket.input += input;
     bucket.output += output;
     bucket.retries += Number.isFinite(d.retryCount) ? Math.max(0, d.retryCount) : 0;
     bucket.calls += 1;
+    bucket.hits.push(hit);
+    bucket.inputs.push(input);
     bucket.reasoningCalls += (Number.isFinite(d.reasoningTokens) ? (d.reasoningTokens ?? 0) : 0) > 0 ? 1 : 0;
     addDistinct(bucket.renderVersions, d.context?.renderVersion);
     addDistinct(bucket.historyHeads, d.context?.history?.headHash);
@@ -271,10 +355,102 @@ function collectLanes(events: readonly AppEvent[]): Record<ModelLane, LaneBucket
   return { heavy: sorted(maps.heavy), light: sorted(maps.light) };
 }
 
-/** 一档样本的未命中率；分母为 0 ⇒ null（算不出来，不拿 0 冒充） */
-function missRatioOf(bucket: LaneBucket): number | null {
-  const total = bucket.hit + bucket.miss;
-  return total > 0 ? bucket.miss / total : null;
+/** 一对 (命中, 未命中) 的未命中率；分母为 0 ⇒ null（算不出来，不拿 0 冒充） */
+function missRatioPairOf(hit: number, miss: number): number | null {
+  const total = hit + miss;
+  return total > 0 ? miss / total : null;
+}
+
+// ────────────────────── 「不返回缓存数据」的判据 + 自算窗口（2026-10-26） ──────────────────────
+
+/**
+ * 窗口级口径：`'reported'` = 用供方的数；`'zero-hit'` / `'fixed-hit'` = 我们自己算（两种形状，
+ * 文案分档用得上——零命中那一档要单独说"一次都没命中"）。
+ */
+export type CacheCaliber = 'reported' | 'zero-hit' | 'fixed-hit';
+
+/**
+ * **这个模型的窗口"不返回缓存数据"吗**（判据唯一一处，理由与实测写在文件头 ②）。
+ *
+ * ⓐ `zero-hit`：窗口 Σhit = 0 且确实有输入。
+ *    ⚠ 它同时盖住用户说的"`hit+miss === 0` / 字段缺失"两种形状——写入侧
+ *    `cacheMissTokens = inputTokens − cacheHitTokens` 是**我们自己减的**，所以"字段缺失"
+ *    在事件上就是 `hit=0, miss=input`；而真的 `0/0`（失败拍）由"有输入"这一条挡掉。
+ * ⓑ `fixed-hit`：每一个非零 hit 都等于同一个常数 c、至少出现两次、且 c 只占窗口最大一拍输入的
+ *    四分之一以下。这是"命中量与上下文规模无关"的可判形状（现场：5248 × 9 拍 / 输入 16k–32k）。
+ *
+ * 两条都必须先有"真的在发东西"（Σinput > 0）：否则一个窗口全是失败拍也会被读成"不返回"。
+ */
+export function cacheCaliberOf(window: readonly LaneBucket[]): CacheCaliber {
+  const inputTotal = window.reduce((sum, bucket) => sum + bucket.input, 0);
+  if (!(inputTotal > 0)) return 'reported';
+  const hitTotal = window.reduce((sum, bucket) => sum + bucket.hit, 0);
+  if (hitTotal === 0) return 'zero-hit';
+  const nonzero = window.flatMap(bucket => bucket.hits).filter(hit => hit > 0);
+  if (nonzero.length < 2) return 'reported';
+  const fixed = nonzero[0];
+  if (fixed === undefined) return 'reported';
+  if (!nonzero.every(hit => hit === fixed)) return 'reported';
+  const maxInput = Math.max(...window.flatMap(bucket => bucket.inputs));
+  // 常数命中量连最大一拍输入的四分之一都不到 ⇒ 它不是"这段前缀命中了"，是端点报的一个死数
+  if (!(fixed * 4 <= maxInput)) return 'reported';
+  return 'fixed-hit';
+}
+
+/** 一拍的**自算**样本（`hit` 由 `estimatePrefixHitOf` 给，`miss` 是补出来的那一截） */
+interface EstimatedSample {
+  hit: number;
+  miss: number;
+}
+
+/**
+ * **按前缀自算**这个模型的每一档命中量（窗口 + 基线都要用同一档口径，见文件头 ②）。
+ *
+ * 一趟只读遍历，内存里只留"同模型上一拍的 `context`"一份 ⇒ 不随日志长度涨。
+ * 三条口径：
+ *   · **上一拍必须是同一模型的上一拍**（换模型就重新找基准，与窗口同一个判据）；
+ *   · **没有 `context` 的拍**：老日志 —— 这一拍一个 token 都不算（`hit=0`），
+ *     但仍然推进"上一拍"指针？**不推进**：那一拍的前缀根本看不见，拿它当基准等于拿空气比；
+ *   · `hit` 夹在 `[0, inputTokens]` 之间（估算不可能比这一拍实际发出去的多）。
+ *
+ * 只在 `cacheCaliberOf !== 'reported'` 时才被调用（每十秒一次的仪表盘上，正常路径零成本；
+ * 自算那一档多一趟 O(n) 纯比较，已由 `web/server.ts` 的 `cacheAlertsForDashboard` 按
+ * `upToSeq` + 分钟桶缓存）。
+ */
+export function estimateByBucketOf(input: {
+  events: readonly AppEvent[];
+  lane: ModelLane;
+  model: string;
+}): Map<string, EstimatedSample> {
+  const out = new Map<string, EstimatedSample>();
+  let previous: ContextBreakdown | null = null;
+  for (const event of input.events) {
+    if (event.type !== 'budget/consumed') continue;
+    if (event.parentCallId !== undefined) continue;
+    const d = event.data;
+    if (d.lane !== input.lane) continue;
+    const model = typeof d.model === 'string' && d.model !== '' ? d.model : 'unknown';
+    if (model !== input.model) continue;
+    const context = d.context;
+    if (context === undefined) continue;
+    const at = Number.isFinite(d.inputTokens) ? Math.max(0, d.inputTokens) : 0;
+    const estimated = previous === null ? 0 : Math.min(at, Math.max(0, estimatePrefixHitOf(previous, context)));
+    previous = context;
+    const key = `${bucketKeyOf(d, event.seq)}|${model}`;
+    const sample = out.get(key) ?? { hit: 0, miss: 0 };
+    sample.hit += estimated;
+    sample.miss += Math.max(0, at - estimated);
+    out.set(key, sample);
+  }
+  return out;
+}
+
+/** 一档在某一口径下的 (hit, miss)：供方原值，或自算值（自算缺这一档 ⇒ 全按未命中，保守） */
+function hitMissOf(bucket: LaneBucket, estimates: Map<string, EstimatedSample> | null): EstimatedSample {
+  if (estimates === null) return { hit: bucket.hit, miss: bucket.miss };
+  const sample = estimates.get(bucket.key);
+  if (sample === undefined) return { hit: 0, miss: bucket.input };
+  return sample;
 }
 
 /** 中位数（偶数个取中间两个的均值；空集 ⇒ null）。纯函数，不改入参 */
@@ -460,7 +636,16 @@ export function planCacheAlerts(input: {
     verdictOf(lane, lanes[lane], input.events, input.nowMs, input.respectDedupe));
 }
 
-/** 判据本体在一条 lane 上的实现（`planCacheAlert` / `planCacheAlerts` 共用的唯一一份） */
+/**
+ * 判据本体在一条 lane 上的实现（`planCacheAlert` / `planCacheAlerts` 共用的唯一一份）。
+ *
+ * 2026-10-26 起多了两步（文件头 ①②），都排在上面那串出口**之前**：
+ *   ⓪ **选窗口**：先定"这条 lane 最新的模型"，窗口只取**该模型**的最近
+ *      {@link CACHE_ALERT_WINDOW_TURNS} 档，基线也只取该模型的（换模型即重开窗口）；
+ *   ⓪′ **定口径**：该模型的窗口"不返回缓存数据"（`cacheCaliberOf`）就整窗改成**自算**，
+ *      连基线一起换（否则自算的 33% 会被拿去跟供方的 94.6% 比，那条相对线永远不响）。
+ * 两个决定都写在读数里（`model` / `modelsInWindow` / `cacheReported` / `cacheEstimated`）。
+ */
 function verdictOf(
   lane: ModelLane,
   all: LaneBucket[],
@@ -470,29 +655,61 @@ function verdictOf(
 ): CacheAlertVerdict {
   if (all.length === 0) return { fired: false, why: 'no-calls', reading: null };
 
-  const window = all.slice(-CACHE_ALERT_WINDOW_TURNS);
-  // 窗口的 seq 区间：右端是本档末条的 seq，左端是**窗口前一条**的 seq（0 = 没有前一条）
+  // ⓪ 窗口只统计**最新那个模型**的桶（文件头 ①）：换模型就重新放，旧模型的账不并进来。
+  const model = all[all.length - 1]?.model ?? 'unknown';
+  // `modelsInWindow` 是**原始**最近 20 档里出现过的模型（诊断用，不参与判据）：
+  // 它回答"这一段历史上混过几个模型"，而不是"窗口统计了几个模型"（后者恒为 1）。
+  const modelsInWindow = [...new Set(all.slice(-CACHE_ALERT_WINDOW_TURNS).map(bucket => bucket.model))];
+  const modelBuckets = all.filter(bucket => bucket.model === model);
+  const window = modelBuckets.slice(-CACHE_ALERT_WINDOW_TURNS);
+  // 窗口的 seq 区间：右端是本档末条的 seq，左端是**窗口前一条**的 seq（0 = 没有前一条）。
+  // 左端取的是**同模型**窗口前一条：`evictedInWindow` 问的是"这 20 档之间发生过驱逐吗"。
   const windowLastSeq = window[window.length - 1]?.lastSeq ?? 0;
-  const windowPrevSeq = all.length > window.length ? (all[all.length - window.length - 1]?.lastSeq ?? 0) : 0;
+  const windowPrevSeq = modelBuckets.length > window.length
+    ? (modelBuckets[modelBuckets.length - window.length - 1]?.lastSeq ?? 0)
+    : 0;
   const evicted = evictedInWindow(events, windowPrevSeq, windowLastSeq);
 
-  // 基线段：**窗口之前**、且落在 `nowMs` 往前 24 小时内的那些档（理由见文件头）
+  // 基线段：**窗口之前**、**同一模型**、且落在 `nowMs` 往前 24 小时内的那些档（文件头 ③）
   const windowFirstSeq = window[0]?.lastSeq ?? 0;
   const baselineFloorMs = nowMs - CACHE_ALERT_BASELINE_HOURS * 3_600_000;
-  const baseline = all.filter((bucket) => bucket.lastSeq < windowFirstSeq
+  const baseline = modelBuckets.filter((bucket) => bucket.lastSeq < windowFirstSeq
     && bucket.tsMs !== null && bucket.tsMs >= baselineFloorMs);
 
   const sum = (list: readonly LaneBucket[], pick: (bucket: LaneBucket) => number): number =>
     list.reduce((acc, bucket) => acc + pick(bucket), 0);
 
-  const hit = sum(window, bucket => bucket.hit);
-  const miss = sum(window, bucket => bucket.miss);
-  const output = sum(window, bucket => bucket.output);
+  // ⓪′ 口径：供方在这个窗口里报的命中是"没有 / 一个与上下文无关的死数"⇒ 我们自己算。
+  //
+  // ⚠ **两个下限不是同一个数，别混**：
+  //   · **口径**的启动条件是「持续 ≥ {@link CACHE_ALERT_MIN_TURNS} **拍**」——"拍"= 一次模型调用
+  //     （同一轮里可能有好几拍：现场 gpt-6.1-sol 那 30 拍只摊在 **4 轮**里）。按轮算的话，
+  //     那段永远开不了自算，读数会停在供方的 94.5%（那正是用户不要的那个数）。
+  //   · **判据**的样本下限仍然是「≥ {@link CACHE_ALERT_MIN_TURNS} **轮**」（`window.length`，
+  //     出口顺序里那一条 too-few-turns）——于是 gpt 那段现在是"**有自算读数、不报**"。
+  const providerHit = sum(window, bucket => bucket.hit);
+  const windowInput = sum(window, bucket => bucket.input);
   const windowCalls = sum(window, bucket => bucket.calls);
+  const caliber: CacheCaliber = cacheCaliberOf(window);
+  const estimates = caliber !== 'reported' && windowCalls >= CACHE_ALERT_MIN_TURNS
+    ? estimateByBucketOf({ events, lane, model })
+    : null;
+
+  const windowSamples = window.map(bucket => hitMissOf(bucket, estimates));
+  const hit = estimates === null ? providerHit : windowSamples.reduce((acc, sample) => acc + sample.hit, 0);
+  const miss = estimates === null
+    ? sum(window, bucket => bucket.miss)
+    : windowSamples.reduce((acc, sample) => acc + sample.miss, 0);
+  const output = sum(window, bucket => bucket.output);
   const windowReasoningCalls = sum(window, bucket => bucket.reasoningCalls);
   const windowRetries = sum(window, bucket => bucket.retries);
-  const windowRatios = window.map(missRatioOf).filter((value): value is number => value !== null);
-  const baselineRatios = baseline.map(missRatioOf).filter((value): value is number => value !== null);
+  const windowRatios = windowSamples
+    .map(sample => missRatioPairOf(sample.hit, sample.miss))
+    .filter((value): value is number => value !== null);
+  const baselineRatios = baseline
+    .map(bucket => hitMissOf(bucket, estimates))
+    .map(sample => missRatioPairOf(sample.hit, sample.miss))
+    .filter((value): value is number => value !== null);
   const baselineMedian = medianOf(baselineRatios);
 
   // 读数在**任何**出口都算出来（doctor 要读"现在的数"，不只是"叫没叫"）：
@@ -500,13 +717,18 @@ function verdictOf(
   const ratio = hit + miss > 0 ? miss / (hit + miss) : -1;
   const windowVersions = window.flatMap(bucket => bucket.renderVersions);
   const latestVersion = windowVersions[windowVersions.length - 1] ?? 'unknown';
-  const costTokens = window.reduce(
-    (acc, bucket) => acc + bucket.miss + bucket.output + bucket.hit * CACHE_ALERT_HIT_PRICE_RATIO,
+  const costTokens = windowSamples.reduce(
+    (acc, sample, index) => acc + sample.miss + (window[index]?.output ?? 0)
+      + sample.hit * CACHE_ALERT_HIT_PRICE_RATIO,
     0,
   );
   const reading: CacheAlertReading = {
     lane,
+    model,
+    modelsInWindow,
     windowTurns: window.length,
+    windowInputTokens: windowInput,
+    windowProviderHitTokens: providerHit,
     missRatio: ratio < 0 ? -1 : round4(ratio),
     baselineMissRatio: baselineMedian === null ? -1 : round4(baselineMedian),
     estCostPerTurn: window.length === 0 ? 0 : Math.round(costTokens / window.length),
@@ -514,6 +736,8 @@ function verdictOf(
     topContributor: topContributorOf(window, baseline, evicted),
     renderVersion: latestVersion,
     missRatioBand: ratio < 0 ? -1 : missRatioBandOf(ratio),
+    cacheReported: estimates === null,
+    cacheEstimated: estimates !== null,
     windowCalls,
     windowReasoningCalls,
     windowRetries,
@@ -572,7 +796,11 @@ export function alreadyReported(
 export function cacheAlertPayloadOf(reading: CacheAlertReading): CacheAlertPayload {
   return {
     lane: reading.lane,
+    model: reading.model,
+    modelsInWindow: reading.modelsInWindow,
     windowTurns: reading.windowTurns,
+    windowInputTokens: reading.windowInputTokens,
+    windowProviderHitTokens: reading.windowProviderHitTokens,
     missRatio: reading.missRatio,
     baselineMissRatio: reading.baselineMissRatio,
     estCostPerTurn: reading.estCostPerTurn,
@@ -580,6 +808,8 @@ export function cacheAlertPayloadOf(reading: CacheAlertReading): CacheAlertPaylo
     topContributor: reading.topContributor,
     renderVersion: reading.renderVersion,
     missRatioBand: reading.missRatioBand,
+    cacheReported: reading.cacheReported,
+    cacheEstimated: reading.cacheEstimated,
   };
 }
 
@@ -626,16 +856,28 @@ export const CACHE_ALERT_SKIP_TEXT: Record<CacheAlertSkip, string> = {
  * 用户给的三个数就是这三个：**现在的未命中率 / 基线 / 最近多少轮**，
  * 再加一个"每轮大约多少钱"——第四格在本仓库是**未命中当量 token**（不是钱，理由见文件头）。
  *
+ * 2026-10-26 起这一行多了两件东西（文件头 ①②）：
+ *   · **模型名**（`（heavy · deepseek-flash）`）——同一个 lane 换了模型就是另一本账，
+ *     不带模型名的两行读数没法比；
+ *   · **自算标记**（`· 按上下文前缀自算`）——那一个百分数不是供方说的，是我们自己算的。
+ *     这一格必须在**三处出口**都出现（它们共用这一行），否则"同一个指标两个口径"。
+ *
  * 入参刻意取**载荷的那几格**而不是整个 `CacheAlertReading`：`cli tail` 手上只有事件载荷
  * （诊断用的三格不落库），而"同一条判据吐出同一句话"这条要求不该被一个
  * "少了个只给测试看的字段"破坏。
  */
 export function cacheAlertReadings(
-  reading: Pick<CacheAlertPayload, 'lane' | 'windowTurns' | 'missRatio' | 'baselineMissRatio' | 'estCostPerTurn'>,
+  reading: Pick<CacheAlertPayload,
+    'lane' | 'model' | 'windowTurns' | 'missRatio' | 'baselineMissRatio' | 'estCostPerTurn' | 'cacheEstimated'>,
 ): string {
   const laneText = reading.lane === 'heavy' ? 'heavy' : 'light';
+  // 老事件（2026-10-26 之前写的 `budget/cache-alert`）里没有 `model` / `cacheEstimated` 两格：
+  // 那时窗口不分模型。`cli tail` 读老日志照样要能印出一行——缺模型就如实写"模型未知"，
+  // 不拿 lane 名顶替（那会把"没记"读成"只有一条 lane"）。
+  const modelText = String(reading.model ?? '') === '' ? '模型未知' : String(reading.model);
+  const caliberText = reading.cacheEstimated === true ? ' · 按上下文前缀自算' : '';
   return `缓存未命中率 ${percentText(reading.missRatio)}（基线 ${percentText(reading.baselineMissRatio)}）`
-    + ` · 最近 ${reading.windowTurns} 轮（${laneText}）`
+    + ` · 最近 ${reading.windowTurns} 轮（${laneText} · ${modelText}）${caliberText}`
     + ` · 每轮约 ${formatCompact(reading.estCostPerTurn)} 未命中当量`;
 }
 
@@ -682,14 +924,37 @@ export function cacheAlertDoctorDetail(reading: CacheAlertReading, why: CacheAle
  * 渲染形态：`wake/manual` 会被 `renderWake` 拼成 `[界面消息] <本函数返回值>`，
  * 开头的 `【框架通报 · 缓存成本】` 就是给她（与事后读日志的人）认来源的锚
  * （与 `compactionSoonNote` 同一种写法）。
+ *
+ * ⚠ **正文里不许出现 Markdown 记号**（2026-10-22 用户点名的硬性要求）：它是在界面上读的
+ * 纯文本，渲染层不认 Markdown——要强调用「」或换行。
+ *
+ * ────────── 2026-10-26：三档口径，文案按用户给的三句话分（文件头最后一段） ──────────
+ *
+ *   · **常规**（供方给了数）：`最近 N 轮（lane · model）未命中 X%，24 小时基线 Y%——…`
+ *   · **零命中**（供方一次都没报命中）：`<model> 最近 N 轮一次缓存都没命中（命中 0 / 输入 Z）
+ *     ——该端点很可能不支持前缀缓存，换模型即可恢复`（这一档**不出现未命中率**：那个数是我们
+ *     自算的，会在下一句里说清；现场就是 `gpt-6.1-sol`）
+ *   · **自算**（供方报了一个与上下文规模无关的常数）：常规句式 + `（该模型不返回缓存数据，
+ *     本行按上下文前缀自算）`
+ * 三档都**带模型名**、都**不写钱**。
  */
 export function cacheAlertWakeNote(reading: CacheAlertReading): string {
   const laneText = reading.lane === 'heavy' ? 'heavy' : 'light';
   const where = CONTRIBUTOR_TEXT[reading.topContributor];
-  return `【框架通报 · 缓存成本】最近 ${reading.windowTurns} 轮（${laneText}）的**缓存未命中率 ${percentText(reading.missRatio)}**，`
-    + `过去 24 小时的基线是 ${percentText(reading.baselineMissRatio)}——每轮约 ${formatCompact(reading.estCostPerTurn)} 未命中当量`
-    + `（未命中 + 输出 + 命中/10）。这不是你做了什么错事：未命中率高，说明每一拍都在把前缀重编码一遍，钱花在这里。
-- **先别起长任务**：一次长任务要发几十个请求，每一个都按这个价付。等未命中率回到 ${percentText(CACHE_ALERT_MISS_RATIO)} 以内再做。
+  const progress = `每轮约 ${formatCompact(reading.estCostPerTurn)} 未命中当量（未命中 + 输出 + 命中/10）`;
+  // 零命中那一档：供方一次都没报命中（自算值在整个窗口都靠我们估）——它要说的不是"多贵"，
+  // 而是"这条端点不报缓存，换模型就回来了"（现场：gpt-6.1-sol 30 拍里 21 拍 0、9 拍固定 5248）
+  const zeroHit = reading.cacheEstimated && reading.windowProviderHitTokens === 0;
+  const head = zeroHit
+    ? `【框架通报 · 缓存成本】${reading.model} 最近 ${reading.windowTurns} 轮一次缓存都没命中`
+      + `（命中 0 / 输入 ${formatCompact(reading.windowInputTokens)}）`
+      + '——该端点很可能不支持前缀缓存，换模型即可恢复。'
+    : `【框架通报 · 缓存成本】最近 ${reading.windowTurns} 轮（${laneText} · ${reading.model}）`
+      + `未命中 ${percentText(reading.missRatio)}，24 小时基线 ${percentText(reading.baselineMissRatio)}——${progress}`
+      + (reading.cacheEstimated ? '（该模型不返回缓存数据，本行按上下文前缀自算）' : '')
+      + '。';
+  return `${head}这不是你做了什么错事：未命中率高，说明每一拍都在把前缀重编码一遍，代价花在这里。
+- 先别起长任务：一次长任务要发几十个请求，每一个都按这个价付。等未命中率回到 ${percentText(CACHE_ALERT_MISS_RATIO)} 以内再做。
 - 可以跟用户说一句：最近缓存命中低，我少绕两圈。
 - 想自己查就去看 \`budget/consumed.cacheBreak\` 与 \`context.history.headHash\`（每拍一条）；框架的主嫌疑是：${where}。`;
 }

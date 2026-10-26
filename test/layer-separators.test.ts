@@ -43,7 +43,11 @@ function input(extra: Partial<RenderInput> = {}): RenderInput {
     model: 'fake',
     lane: 'heavy',
     // 三节都给：状态 / 关系档案 / 记忆索引（这样块内才有两条节间横线）
-    turnBlock: { state: 'STATE 正文', relationship: { who: 'YG', content: '档案正文' } },
+    // v78：关系档案只有索引（路径 / 字数 / 小节名）+ 一句"如已在上下文中，则不需再读"（陈述，不是指令）
+    turnBlock: {
+      state: 'STATE 正文',
+      relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 4, sections: ['档案'] },
+    },
     memoryIndex: '[记忆索引] 一行指针',
     skillCatalog: '[可用技能]\n- 一件',
     ...extra,

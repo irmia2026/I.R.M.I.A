@@ -28,7 +28,7 @@ class _FakeApi extends IrmiaApi {
   final List<({String path, Map<String, dynamic> body, String? confirm})> posts = [];
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     switch (path) {
       case '/api/config':
         return <String, dynamic>{
@@ -92,7 +92,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add((path: path, body: body, confirm: confirm));
     return <String, dynamic>{'ok': true};
   }

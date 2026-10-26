@@ -25,10 +25,10 @@ class _FakeApi extends IrmiaApi {
   final posts = <Map<String, dynamic>>[];
 
   @override
-  Future<dynamic> get(String path) async => <String, dynamic>{'ok': true};
+  Future<dynamic> get(String path, {Duration? timeout}) async => <String, dynamic>{'ok': true};
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add({'path': path, 'body': body, 'confirm': confirm});
     return <String, dynamic>{'ok': true};
   }
@@ -219,7 +219,7 @@ class _KeywordApi extends IrmiaApi {
   int configGets = 0;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (path == '/api/config') {
       configGets += 1;
       return <String, dynamic>{
@@ -232,7 +232,7 @@ class _KeywordApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async =>
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async =>
       <String, dynamic>{'ok': true};
 
   @override

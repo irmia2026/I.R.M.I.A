@@ -34,7 +34,7 @@ class _FakeAskApi extends IrmiaApi {
   String identity = '# 我是谁\n\n我是伊尔弥亚，这台机器上常驻的伙伴。\n';
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     gets.add(path);
     if (path == '/api/stats/dashboard') return dashboard ?? <String, dynamic>{};
     if (path == '/api/persona/file?path=IDENTITY.md') {
@@ -51,7 +51,7 @@ class _FakeAskApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add({'path': path, 'body': body});
     // 答完就出队：与真实服务端的语义一致（答复落日志 → 队列里少一条）
     dashboard = {...?dashboard, 'ask': {'card': null, 'queued': 0}};

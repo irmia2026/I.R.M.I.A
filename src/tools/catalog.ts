@@ -69,6 +69,17 @@ import { TimerStore as TimerStoreClass } from '../wake/timer-store.ts';
  */
 export const PERSONA_READ_ONLY_PREFIX = 'data/persona';
 
+/**
+ * 技能资产在**工作根口径**下的第二种写法（`<工作根>/data/skills`）。v79 技能搬进数据目录
+ * 之后才有这一条，判据与上一条**逐字同形**（只在默认布局下与 `<dataDir>/skills` 重合）。
+ *
+ * 为什么非有它不可：别名表把 `skills/` 接到 `<dataDir>/skills`，**但别名不接管
+ * `data/skills/…` 这种写法**（首段是 `data`）——别名+只读区只堵住了模型实际会写的那一个
+ * 前缀，而"数据目录里的技能"现在是真资产；少了这一条，`safe_write data/skills/<name>/SKILL.md`
+ * 就成了唯一一条**改得动技能目录**的路（design §4.19 要求的是"可读、不可改"）。
+ */
+export const SKILLS_DATA_READ_ONLY_PREFIX = 'data/skills';
+
 // ──────────────────────────────── 选项 ────────────────────────────────
 
 export interface ToolCatalogOptions {
@@ -191,7 +202,7 @@ export interface ToolCatalogOptions {
    * 为什么必须由宿主接：`ToolContext` 里没有 `log` / `nextSeq()`，而 vision 的事件出口只有
    * `image/attached` 一种（"vision 只该有写这一种事件的能力"）⇒ **它自己一条账都写不出来**。
    * 这正是 2026-10-11 之前的状态：64 次真实模型请求、一条账都没有（真发出去的次数是工具
-   * 自报的 `fresh` 字段数出来的，见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+   * 自报的 `fresh` 字段数出来的，见 `_ops-light2\REPORT.md` ②）。
    *
    * 不传时 `vision_read` 照常注册、只是不记账。**但那时必须有人在别处说清楚**——这正是
    * 上面那一格注释的原话，也是这一格存在的理由。
@@ -417,7 +428,7 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     // 只是读法不同——它不参与未读与话题，只让 read_channel 能摆出"我已经回过什么"。
     ...(options.channelSpokenReader === undefined ? {} : { channelSpokenReader: options.channelSpokenReader }),
     // 群里发生过的事（2026-10-11）：同一个来源（日志），只是**另一种事件**——
-    // 她读一个群时，那一行 `[OWNER 开启了全员禁言]` 就走这个口进来
+    // 她读一个群时，那一行 `[阿岚 开启了全员禁言]` 就走这个口进来
     ...(options.channelNoticeReader === undefined ? {} : { channelNoticeReader: options.channelNoticeReader }),
     // 她自己的管理动作（「我做过」，2026-10-11）：同一个来源（日志）、**第四种事件**——
     // 她翻一个群时那一行 `（我）：[全员禁言 · <群名> · 开启]（回执 ok）` 就走这个口进来
@@ -458,11 +469,18 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
       //
       // 前缀是**相对 ctx.workspaceRoot（仓库根）**的路径，与 `personaRootOf` 的落点同源；
       // P1 的别名表把 `persona/STATE.md` 也改写到同一处，所以两种写法都拦得住。
-      readOnlyPrefixes: [...DEFAULT_READ_ONLY_PREFIXES, PERSONA_READ_ONLY_PREFIX],
+      //
+      // v79：技能搬进数据目录（`<dataDir>/skills`，与 persona/ 同级）之后多登记一条同形状的
+      // 前缀 `data/skills`——任务（1）写在 `SKILLS_DATA_READ_ONLY_PREFIX` 的注释里：
+      // 别名表接的是 `skills/`，`data/skills/…` 这种写法别名不管，只读区必须自己覆盖。
+      readOnlyPrefixes: [...DEFAULT_READ_ONLY_PREFIXES, PERSONA_READ_ONLY_PREFIX, SKILLS_DATA_READ_ONLY_PREFIX],
       readOnlyHints: {
         [PERSONA_READ_ONLY_PREFIX]:
           '人格资产请用 write_persona 改（给 content 整体替换，或给 old/new 只换那一段）——'
           + '它才会记 persona/updated 并留下人格版本；用通用文件工具改，那条改动在人格时间线里是隐形的。',
+        [SKILLS_DATA_READ_ONLY_PREFIX]:
+          '技能目录（数据目录里的那一份）模型可读、不可改：读正文用 safe_read（skills/<name>/SKILL.md）；'
+          + '要改内容请由人修改后重新确认技能（改动会让内容哈希失配、自动退回待确认）。',
       },
     }),
     ...createNetTools(
@@ -484,10 +502,13 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     // 技能目录不在时它照旧注册、照旧能用（端点支持匿名，只是配额低），回执里如实说来源。
     createWebSearchTool({
       ...(options.onNote === undefined ? {} : { onWarning: options.onNote }),
-      // 技能根：本仓库的约定是仓库根下的 `skills/`（`SkillManager` 的 baseRoot 也是 cwd）。
-      // 读了它的 `.env` 才有"技能文档里那份 .env 快路径"；读不到就是匿名档，不报错。
+      // 技能根：v79 起技能实体住在**数据目录**（`<dataDir>/skills`，与 persona/ 同级）——
+      // 那份 `.env` 也在这一份里（种子是整份复制的，`.env` 跟着过去）。
+      // 读了它才有"技能文档里那份 .env 快路径"；读不到就是匿名档，不报错。
       // 目录名只有一处（`web-search.ts` 的 `ANYSEARCH_SKILL_DIR`），不在这里再写一遍字面量。
-      skillRoot: join(process.cwd(), ...ANYSEARCH_SKILL_DIR.split('/')),
+      // ⚠ 以前这里拼的是 `process.cwd()`（安装根/仓库根）：技能搬家之后那已经是**出厂种子**，
+      // 照旧读它会出"改了数据目录里那份 `.env` 却不生效"——所以这一格跟着 baseRoot 一起搬。
+      skillRoot: join(options.dataDir, ...ANYSEARCH_SKILL_DIR.split('/')),
     }),
     ...createVisionTools({
       dsClient: visionClient,

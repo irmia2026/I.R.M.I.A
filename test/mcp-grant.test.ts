@@ -31,8 +31,9 @@ import test from 'node:test';
 
 import { CONFIG_FILE_NAME } from '../src/config/config.ts';
 import {
-  GRANT_REJECT_REASON_MAX, GRANT_WAKE_CARD_SENTENCE, applyGrant, grantContentHash, grantPathOf,
-  grantReceiptLine, grantWakeNoteOf, grantsDirOf, parseGrantRequest, type GrantWakeFacts,
+  GRANT_REJECT_REASON_MAX, GRANT_WAKE_CARD_SENTENCE, applyGrant, grantContentHash, grantFileProblems,
+  grantPathOf, grantReceiptLine, grantWakeNoteOf, grantsDirOf, listGrants, parseGrantRequest,
+  type GrantWakeFacts,
 } from '../src/grant/mcp-grant.ts';
 import type { AppEvent } from '../src/log/types.ts';
 import { mcpDescProblem, MCP_DESC_DECLARED_MAX_CHARS } from '../src/mcp/description.ts';
@@ -588,6 +589,65 @@ test('④b desc 判据的边界（合格 / 空 / 抄名字 / 大小写 / 带后�
     mcpDescProblem('a', ''), mcpDescProblem('a', 'a'),
     '"空着"与"抄名字"是两种理由（她照着改的方向不一样）',
   );
+});
+
+test('④c 删除那一支**不要求 desc**（现场那张 remove-obscura-mcp 就是只有 kind/name/reason）', () => {
+  // 用户 2026-10-22 的疑问是"缺 desc 是不是被静默丢了"。判据就钉在这里：
+  // `mcp-add` 的 desc 必填（会进她的常驻索引，见文件头），`mcp-remove` **不判 desc**
+  // ——删一条不需要描述它。所以那张单子照常过校验、照常进清单。
+  const parsed = parseGrantRequest({
+    kind: 'mcp-remove',
+    name: 'obscura',
+    reason: '功能与 playwright 重叠，两套浏览器工具并存只为多占工具索引和上下文',
+  });
+  assert.equal(parsed.ok, true, `缺 desc 的删除单必须照常通过：${JSON.stringify(parsed)}`);
+  if (parsed.ok) {
+    assert.equal(parsed.request.name, 'obscura');
+    assert.equal(parsed.request.desc, '', '删除单的 desc 一律是空串（它没有"它是干什么的"那一格）');
+    assert.notEqual(parsed.request.reason, '', '理由照旧留着（界面用它兜底显示）');
+  }
+
+  // 反过来：`mcp-add` 缺 desc 仍然当场退回（**不是静默丢**：那句话会原样回到她手上）
+  const add = parseGrantRequest({ kind: 'mcp-add', name: 'obscura', command: 'node' });
+  assert.equal(add.ok, false);
+  if (!add.ok) {
+    assert.equal(add.reason, 'desc-missing');
+    assert.ok(add.detail.length > 0, '退回要说清该改哪一格');
+  }
+});
+
+test('④d 盘上读不出来的单子要点名报出来（`/api/grants.malformed` 的唯一判据）', (t) => {
+  const dir = tempDirSync('irmia-grant-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const grantsDir = grantsDirOf(dataDirOf(dir));
+  mkdirSync(grantsDir, { recursive: true });
+  writeFileSync(join(grantsDir, 'bad-json.json'), '{ 这不是 JSON', 'utf8');
+  writeFileSync(join(grantsDir, 'bad-kind.json'), JSON.stringify({ kind: 'hook-add', name: 'x' }), 'utf8');
+  writeFileSync(join(grantsDir, 'no-desc.json'), JSON.stringify({
+    kind: 'mcp-remove', name: 'obscura', reason: '删掉它',
+  }), 'utf8');
+
+  const problems = grantFileProblems(dataDirOf(dir), []);
+  const byId = new Map(problems.map((item) => [item.id, item.why]));
+  assert.equal(byId.size, 2, `只报读不出来的那两张（实际：${JSON.stringify(problems)}）`);
+  assert.match(byId.get('bad-json') ?? '', /JSON/u);
+  assert.match(byId.get('bad-kind') ?? '', /kind/u, '解析不过的原话要原样带出来');
+  assert.equal(byId.has('no-desc'), false, '缺 desc 的删除单能读：它不该出现在"读不出来"里');
+
+  // `listGrants` 也**一张都不静默丢**：盘上有几个 id 就列几个（读不出来的也列，只是 picked:false）
+  assert.deepEqual(
+    listGrants(dataDirOf(dir), [], []).map((item) => item.id).sort(),
+    ['bad-json', 'bad-kind', 'no-desc'],
+    'listGrants 的口径是"盘上的 id 都在清单里"，读不出来的由 malformed 那一格说清',
+  );
+
+  // 已经进日志的那一张不再报（`listGrants` 的清单里有它，两处说同一件事就是噪声）
+  const requested = {
+    seq: 1, ts: new Date(0).toISOString(), type: 'grant/requested', visibility: 'internal',
+    data: { id: 'bad-kind', kind: 'mcp-remove', name: 'x', by: 'agent', contentHash: '', path: '', reason: '', turn: 0 },
+  } as unknown as AppEvent;
+  const after = grantFileProblems(dataDirOf(dir), [requested]);
+  assert.deepEqual(after.map((item) => item.id), ['bad-json'], '进了日志的 id 由清单那一条负责');
 });
 
 // ──────── ⑤ 唤醒正文末尾那句"卡在哪、怎么处理"（两支共用同一句；用户 2026-10-21） ────────

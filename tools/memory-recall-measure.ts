@@ -8,7 +8,10 @@
  *   node --experimental-strip-types tools/memory-recall-measure.ts --anonymize      # 换名对照实验
  *   node --experimental-strip-types tools/memory-recall-measure.ts --emit-dictionary medium
  *
- * 产物一律写到 `_research/memory-recall/`（`--out` 可改）。**本工具绝不写 `data/**`**。
+ * 产物一律写到**仓库外**的 `memory-recall/`（`--out` 可改）：缺省落在系统临时目录
+ * （`<os.tmpdir()>/irmia-measure/memory-recall/`），或用环境变量 `IRMIA_MEASURE_DIR` 指定根目录。
+ * **本工具绝不写 `data/**`，也不往仓库里建任何目录**（仓库是"源 + 文档"，不是测量台；
+ * 以前缺省写 `_research/` —— 那棵树 2026-10-23 已经整个搬出仓库了）。
  *
  * ──────────────────────────────── 它回答哪四个数 ────────────────────────────────
  *
@@ -33,6 +36,7 @@
  *     **PMI 只当辅助分**（它歧视"常用字拼出来的中文实体名"，实测三个漏召回例子全是这种）。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -63,11 +67,11 @@ const POOL_MIN_COUNT = 2;
  * ⚠ 与最初设想的三处**实测修正**（2026-10-19，见报告）：
  *   ① count 曾经是**双向门**：单向的"够常用"只会选出通用词；
  *   ② **上界后来交给了"日数门"**：`count` 上界实测误杀了高频但真实的名字
- *      （`吱吱` 230、`1号` 228、`清漪群` 524 都被 count 上界 222 挡在门外），
+ *      （`吱吱` 230、`1号` 228、`测试群` 524 都被 count 上界 222 挡在门外），
  *      而"太常用反而是通用词"这件事**日数门管得更准**（通用词 15–20 天都在，名字 2–12 天）；
  *      于是 countMax 置 1（不设上界），对照读数在报告里两版都留着；
  *   ③ **PMI 不再是硬门**（降级为辅助分），硬门换成"命名位置证据 ≥2"——
- *      PMI 歧视"常用字拼出来的名字"（`内测群`/`清漪群`/`长门` 全都没过门槛）。
+ *      PMI 歧视"常用字拼出来的名字"（`内测群`/`测试群`/`长门` 全都没过门槛）。
  *      `pmi` 这个分位现在只用于报告里那一列"辅助分读数"。
  */
 const QUANTILE_COMBOS = [
@@ -594,7 +598,7 @@ export function annotateEvidence(
          * 两个实测依据：
          *   · 不拆尾巴 ⇒ 不再造出 `试群`/`丝群` 这类碎片（它们曾把词典灌满）；
          *   · 头部必须自己是个词 ⇒ `国家`(国+家)、`大家`(大+家)、`老家`、`编号`(编+号) 全部出局，
-         *     而 `清漪粉丝群` 的头部 `清漪`、`内测群` 的 `内测` 都是高频词 ⇒ 留下。
+         *     而 `测试群` 的头部 `测试`、`内测群` 的 `内测` 都是高频词 ⇒ 留下。
          */
         const chars = [...span];
         if (chars.length < 3) continue;
@@ -689,10 +693,15 @@ interface Args {
 
 function parseArgs(argv: string[]): Args {
   const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+  // 产物目录**必须在仓库外**（见文件头）：环境变量 IRMIA_MEASURE_DIR 指定根，
+  // 缺省落系统临时目录。`--out` 仍可整个换掉（包括换到一个临时目录之外的地方）。
+  const measureRoot = (process.env.IRMIA_MEASURE_DIR ?? '').trim();
   const args: Args = {
     dataDir: join(repoRoot, 'data'),
     eventsDir: join(repoRoot, 'data', 'events'),
-    outDir: join(repoRoot, '_research', 'memory-recall'),
+    outDir: measureRoot === ''
+      ? join(tmpdir(), 'irmia-measure', 'memory-recall')
+      : join(measureRoot, 'memory-recall'),
     emitEval: false,
     anonymize: false,
     tiers: DEFAULT_TIERS,

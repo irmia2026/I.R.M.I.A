@@ -110,6 +110,43 @@ export function channelForNamespace(namespace: string): string {
   return namespace === 'onebot' ? 'onebot' : 'qq-official';
 }
 
+/**
+ * QQ 号：**纯数字、5–12 位**（现实里的号段范围）。判据就是这一条——不是"看起来像"。
+ *
+ * 为什么必须卡死（用户 2026-10 的口径：「取不到号就 null，**不许瞎拼**」）：
+ * 拼错一个字符的腾讯头像地址**照样回一张 200 的图**（默认企鹅），于是界面上会出现
+ * "每个会话的头像都长一样"——那是比没有头像更坏的错（它看起来是对的）。
+ */
+const QQ_NUMBER_RE = /^\d{5,12}$/u;
+
+/**
+ * 会话头像的地址（`GET /api/sessions` 的 `avatarUrl`，2026-10 加）。
+ *
+ * 三档，**判据全在 sid 里**，不查任何表、不发任何请求：
+ *   · `onebot:group:<群号>` ⇒ 群头像 `https://p.qlogo.cn/gh/<群号>/<群号>/100`
+ *     （腾讯那条群里两个路径段都是群号，这是它的既有形状，不是我们拼的花样）；
+ *   · `onebot:c2c:<QQ号>`  ⇒ 个人头像 `https://q.qlogo.cn/g?b=qq&nk=<QQ号>&s=100`；
+ *   · **QQ 官方 Bot（`qq:*`）⇒ `null`**：官方 Bot 给的 `person` / `chatId` 是**openid**
+ *     （`1A2B3C…` 那种不透明串），平台**不给我们**任何真实号 ⇒ 也就没有头像可拼。
+ *     这一格是"平台不给"的事实，不是"我们还没做"——**不许拿别的 id 冒充 QQ 号**
+ *     （拼出来的图是 200 的默认头像，看不出来是错的，见 {@link QQ_NUMBER_RE}）。
+ *
+ * 认不出的 chatType（`guild` / `dm` 等）与取不出号的一律 `null`：界面走首字占位。
+ */
+export function avatarUrlOf(sid: string): string | null {
+  const parsed = parseSid(sid);
+  if (parsed === null) return null;
+  // 只有 OneBot 族的 id 才是真的 QQ 号；`qq:` 命名空间里那些是 openid（见上面那一段）
+  if (parsed.namespace !== 'onebot') return null;
+  const id = parsed.chatId.trim();
+  if (!QQ_NUMBER_RE.test(id)) return null;
+  switch (sidKindOf(parsed.chatType)) {
+    case 'group': return `https://p.qlogo.cn/gh/${id}/${id}/100`;
+    case 'c2c': return `https://q.qlogo.cn/g?b=qq&nk=${id}&s=100`;
+    default: return null;
+  }
+}
+
 export interface SessionEntry {
   sid: string;
   /** 通道名（`qq-official` / `onebot`） */
@@ -464,7 +501,7 @@ export function resolveNameForSid(
  * 而占位名发了就不改（见 group-members.ts）。缺口就是这里：**裸 id 的声明没人查**。
  *
  * 一个反例，免得把这一层想得比它大：用户本人 10-07 02:26 那次的映射她写在**标题行**里
- * （`# 该群成员（…）：1234567890 = **OWNER（用户）**…`），而 `#` 是 markdown 标题/散文、
+ * （`# 该群成员（…）：1234567890 = **阿岚（用户）**…`），而 `#` 是 markdown 标题/散文、
  * 一律跳过——那一笔**这一层照样读不到**（判据见 [forEachAliasRow]，测试钉在
  * `test/person-name.test.ts` ①b）。他后来能对上名，靠的是另写了一条 `onebot:c2c:<QQ号>`
  * （会话键那一档）。所以这一层修的是"她按模板写的裸 id 行不许再是死信"，不是"任何写法都认"。

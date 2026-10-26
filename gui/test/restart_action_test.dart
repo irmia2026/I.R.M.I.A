@@ -101,10 +101,10 @@ void main() {
   group('请求：两条路发的是同一个东西', () {
     test('共享请求的 path / body / confirm 逐字', () async {
       final api = _FakeApi();
-      await requestRestart(api, guiExe: r'D:\IrmiaAgent\agent\irmia_gui.exe');
+      await requestRestart(api, guiExe: r'C:\app\irmia_gui.exe');
       expect(api.requests.single.path, '/api/commands/restart');
       expect(api.requests.single.confirm, 'restart', reason: 'X-Confirm 头就是命令名');
-      expect(api.requests.single.body, {'guiExe': r'D:\IrmiaAgent\agent\irmia_gui.exe'});
+      expect(api.requests.single.body, {'guiExe': r'C:\app\irmia_gui.exe'});
     });
 
     testWidgets('首页那颗「重启前后端」发的请求与共享请求完全相同', (tester) async {
@@ -263,7 +263,7 @@ class _FakeApi extends IrmiaApi {
   final List<({String path, Map<String, dynamic> body, String? confirm})> requests = [];
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     switch (path) {
       case '/api/stats/dashboard':
         return <String, dynamic>{
@@ -283,7 +283,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     requests.add((path: path, body: body, confirm: confirm));
     final failure = error;
     if (failure != null) throw failure;

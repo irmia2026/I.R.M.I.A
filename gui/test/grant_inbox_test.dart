@@ -35,7 +35,7 @@ class _FakeApi extends IrmiaApi {
   dynamic reply;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     gets += 1;
     final failure = failures[path];
     if (failure != null) throw failure;
@@ -43,7 +43,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add(<String, dynamic>{'path': path, ...body});
     return reply ?? {'outcome': 'approved', 'exec': <String, dynamic>{'state': 'ok'}};
   }
@@ -219,6 +219,53 @@ void main() {
       expect(api.gets, 1);
       expect(poller.reads, 1);
     });
+
+    // ── 读不出来的单子（2026-10-22）──────────────────────────────
+    //
+    // 那一档既没有 `grant/requested`（于是 `picked:false`、不进待批队列），又解析不过
+    // （于是挂不出卡）。过去它什么都不显示——"人写了单子、框架一声不响"就是这么来的。
+    test('malformed 那一段单独读出来、单独通知（不进待批队列）', () async {
+      final api = _FakeApi()
+        ..routes['/api/grants'] = <String, dynamic>{
+          'items': <dynamic>[pendingGrant()],
+          'malformed': <dynamic>[
+            <String, dynamic>{'id': 'g-bad', 'why': 'kind 只能是 "mcp-add" / "mcp-remove"'},
+          ],
+        };
+      final pending = <List<Map<String, dynamic>>>[];
+      final broken = <List<Map<String, dynamic>>>[];
+      final poller = PendingGrantPoller(
+        api: api,
+        onPending: pending.add,
+        onMalformed: broken.add,
+      );
+      addTearDown(poller.dispose);
+      await poller.refresh();
+      expect(pending.single.single['id'], 'g-1');
+      expect(pending.single.length, 1, reason: '读不出来的那张绝不能被并进待批队列（它没有可点的卡）');
+      expect(broken.single.single['id'], 'g-bad');
+      expect(broken.single.single['why'], contains('mcp-remove'));
+      // 同一份再读一遍：两条链都**不通知**（否则每 10 秒重建一次）
+      await poller.refresh();
+      expect(pending.length, 1);
+      expect(broken.length, 1);
+      expect(poller.lastMalformed.single['id'], 'g-bad');
+    });
+
+    test('读失败：手上的 malformed 也不清空（与待批清单同一条分寸）', () async {
+      final api = _FakeApi()
+        ..routes['/api/grants'] = <String, dynamic>{
+          'items': <dynamic>[],
+          'malformed': <dynamic>[<String, dynamic>{'id': 'g-bad', 'why': '文件读不出来'}],
+        };
+      final poller = PendingGrantPoller(api: api, onPending: (_) {});
+      addTearDown(poller.dispose);
+      await poller.refresh();
+      expect(poller.lastMalformed, hasLength(1));
+      api.failures['/api/grants'] = ApiError(500, 'boom');
+      await poller.refresh();
+      expect(poller.lastMalformed, hasLength(1), reason: '读失败不许让"有一张单读不出来"这句话凭空消失');
+    });
   });
 
   group('AppState · 待批那一格与那次点头', () {
@@ -232,6 +279,22 @@ void main() {
       state.applyPendingGrants(<Map<String, dynamic>>[pendingGrant(), pendingGrant(id: 'g-2')]);
       expect(state.pendingGrantCount, 2);
       expect(notified, 1, reason: '改了清单要通知（卡 / 角标 / 托盘都靠它重建）');
+    });
+
+    test('applyMalformedGrants：独立一格、独立通知，且**不混进**待批清单', () {
+      final api = _FakeApi();
+      final state = AppState(api: api);
+      addTearDown(state.dispose);
+      var notified = 0;
+      state.addListener(() => notified += 1);
+      state.applyMalformedGrants(<Map<String, dynamic>>[
+        <String, dynamic>{'id': 'g-bad', 'why': '文件读不出来'},
+        <String, dynamic>{'id': '', 'why': '没有 id 的那条要丢掉'},
+      ]);
+      expect(state.malformedGrants, hasLength(1), reason: '形状不对的条目滤掉（没有 id 就说不清是哪一张）');
+      expect(state.malformedGrants.single['id'], 'g-bad');
+      expect(state.pendingGrantCount, 0, reason: '它绝不进待批队列（那一档没有可点的卡）');
+      expect(notified, 1);
     });
 
     test('批准：body 里只有 id + decision（批准**不带**理由）', () async {
@@ -334,10 +397,10 @@ class _ThrowingApi extends IrmiaApi {
   _ThrowingApi() : super(baseUrl: 'http://127.0.0.1:1');
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     throw ApiError(500, 'boom');
   }
 
   @override
-  Future<dynamic> get(String path) async => null;
+  Future<dynamic> get(String path, {Duration? timeout}) async => null;
 }

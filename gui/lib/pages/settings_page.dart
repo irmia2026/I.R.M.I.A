@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../app.dart';
+// 只为那条"已知跑很久"的端点放宽总时限（`kApiLongRequestTimeout`，见 _installProtocolSide）
+import '../api.dart';
 // 开外链只有一条实现（系统默认浏览器）：下载页、打开面板与引导页的推荐链接都走它
 import '../external_link.dart';
 import '../i18n/app_strings.dart';
@@ -63,7 +65,7 @@ class SettingsPage extends StatefulWidget {
 /// 标记——beta 只体现在这里与包名/说明里；后端那边对同一版号的口径是 `AGENT_VERSION`
 /// （不带 v，见 src/main.ts）。
 /// ⚠️ 别把具体版号抄进注释：出包脚本只改这一行的字面量、不改注释，抄一处就留一处对不上。
-const guiVersion = 'v0.1.0-beta.12';
+const guiVersion = 'v0.1.0-beta.13';
 
 /// 锚点侧栏宽度（AstrBot 的左侧 section 导航）
 const _railWidth = 180.0;
@@ -161,6 +163,16 @@ const _anchors = <_Anchor>[
 /// 框架现在做的是**从官方 Releases 代下载**（替他点一下下载那三步），不随框架分发、不改它一个字节；
 /// 所以这个地址仍然要摆在界面上——代下载失败时，它就是唯一还走得通的那条路。
 const protocolDownloadUrl = 'https://github.com/SnowLuma/SnowLuma/releases';
+
+/// 第三方署名要摆出来的那几个地址（SnowLumaDevs 的书面要求①：官方项目 + 官方站点 + 许可）。
+///
+/// 为什么是常量而不是从服务端取：这几条是**对方给的地址**，不是本机的运行期事实——
+/// 服务端多一个接口、界面多一次可能失败的读，换来的只是"地址可能被远程改掉"这个坏处。
+/// 地址本身也是**文案**的一部分（对方明确要"官方项目及许可链接"），所以它们进了测试的断言。
+const protocolProjectUrl = 'https://github.com/SnowLuma/SnowLuma';
+const protocolSiteUrl = 'https://snowluma.github.io';
+const protocolEulaUrl = 'https://github.com/SnowLuma/SnowLuma/blob/main/EULA.md';
+const protocolLicenseUrl = 'https://github.com/SnowLuma/SnowLuma/blob/main/LICENSE';
 
 /// 依赖探测结果的界面形状（与 GET /api/deps 的 entries 一一对应）。
 ///
@@ -2554,6 +2566,11 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 10),
           _protocolDownloadGuide(),
+          // 第三方署名（SnowLumaDevs 书面要求①）：卡上**必须**有一处写明"这是独立第三方项目"、
+          // 并给出官方与许可链接。位置放在最后：它是"关于这个组件是谁的"背景信息，
+          // 而上面几步才是此刻要动手的事。
+          const SizedBox(height: 12),
+          _protocolThirdPartyBlock(),
           if (restartRequired) ...[
             const SizedBox(height: 10),
             _restartNote(),
@@ -2565,14 +2582,16 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 这张卡上"有写在飞"的总闸：保存 / 启停 / 一键安装三者任一在跑，其余写动作一律按下。
   ///
-  /// 为什么安装要连启停一起按：安装会把 `<数据目录>/services/snowluma` **整段清空重写**
-  /// （解压器先清目标目录，那是有意的：升级该是一次干净落地）。这期间去启停一个正从那个目录
+  /// 为什么安装要连启停一起按：安装会把 `<数据目录>/services/snowluma` 里**包内那一份文件**
+  /// 整段清空重写（解压器先清目标目录，那是有意的：升级该是一次干净落地；只有它自己写下的
+  /// `config/`、`logs/` 与 `data/`（消息库与身份库）会被保住，见 `src/services/install-snowluma.ts` 的
+  /// `SNOWLUMA_PRESERVED_ON_REINSTALL`）。这期间去启停一个正从那个目录
   /// 跑着的实例，两件事都能弄坏——而坏的样子（文件半新半旧、进程握着被换掉的文件）极难查。
   bool get _protocolCardBusy => protocolSaving || protocolBusy || protocolInstalling;
 
   /// 「一键安装」那一块：主按钮 + 它到底做了什么 + 这一次的结果。
   ///
-  /// 它是这张卡上**唯一的主色填充按钮**（「保存目录」与「打开下载页」都降成 tonal 备选样式）：
+  /// 它是这张卡上**唯一的主色填充按钮**（「保存目录」与「打开下载页」都降成链接/tonal 备选样式）：
   /// 用户要的是"引导客户安装、尽量少让对方配置"，所以主路必须一眼看到、不给第二眼犹豫的机会——
   /// 两处都用主色填充的话，人就分不出哪个才是该点的那个。
   Widget _protocolInstallBlock(_ProtocolInstall? install) {
@@ -2590,7 +2609,7 @@ class _SettingsPageState extends State<SettingsPage> {
               // key 同上：这张卡上按钮不止一个，按文字取会拿到"第几个"这种一改布局就失效的定位
               key: const ValueKey('protocol-side-install'),
               // 安装中**不接受第二次点击**：这条端点是同步的，点两下就是下两份、解压两遍，
-              // 而第二遍会先清空第一遍刚写好的目录（自己踩自己）
+              // 而第二遍会先把第一遍刚写好的包内文件清掉重写（自己踩自己）
               onPressed: protocolInstalling ? null : () => unawaited(_installProtocolSide()),
               style: _btnStyle(context),
               child: protocolInstalling
@@ -3135,6 +3154,10 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 许可口径照实说：包从官方 Releases 代下载、一个字节不改、**不随框架分发**它——
   /// 所以地址永远摆在界面上：一键安装那份是"替他点几下"，这条路是"他自己来"，
   /// 两条路落到盘上的东西是一样的（与「外部依赖」卡里 pwsh 那条同一个姿势）。
+  ///
+  /// 2026-10 起这里**不再是按钮**：SnowLumaDevs 的书面要求②是"无需自动弹出浏览器，
+  /// 清晰展示上述信息即可"（`docs/third-party-authorizations.md`）。所以"打开下载页"降成
+  /// 卡上一行普通链接——人点它才开浏览器，没人点就什么都不发生；安装按钮那条路则**一律不碰外链**。
   Widget _protocolDownloadGuide() {
     final scheme = Theme.of(context).colorScheme;
     return Column(
@@ -3144,17 +3167,141 @@ class _SettingsPageState extends State<SettingsPage> {
           _s.settingsManualDownloadGuide(protocolDownloadUrl),
           style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurfaceVariant),
         ),
-        const SizedBox(height: 6),
-        FilledButton.tonal(
-          onPressed: _protocolCardBusy ? null : () => unawaited(_openUrl(protocolDownloadUrl)),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            minimumSize: const Size(0, 36),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: Text(_s.settingsOpenDownloadPage),
+        const SizedBox(height: 4),
+        _protocolLink(
+          scheme,
+          label: _s.settingsOpenDownloadPage,
+          url: protocolDownloadUrl,
+          keyName: 'protocol-side-download-page',
         ),
       ],
+    );
+  }
+
+  /// 第三方署名块：**对方书面点名要的两件事**（注明"独立第三方项目" + 官方与许可链接）。
+  ///
+  /// 三条纪律，各自对应一句要求（见 `docs/third-party-authorizations.md` §1 的表格）：
+  ///   · **文案进文案表**：这一块不许在页面里写中文（`test/copy_coverage_test.dart` 盯着），
+  ///     中英各一份在 `lib/i18n/app_strings.dart`；
+  ///   · **链接是普通链接、且不自动打开**：地址以文字形式摆在卡上，人点了才交给系统浏览器；
+  ///     安装按钮与安装流程**不碰** [openExternalUrl]（`gui/test/settings_page_test.dart` 有用例钉着）；
+  ///   · **只陈述事实、不重述许可条款**：许可原文在包里的 `LICENSE`/`EULA.md`，随包原样落地；
+  ///     这里只说"我们不改它、使用须遵守它、仅限非商业用途"，改条款就是我们越权了。
+  Widget _protocolThirdPartyBlock() {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _s.settingsProtocolThirdPartyTitle,
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: scheme.onSurface),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _s.settingsProtocolThirdPartyNote,
+            style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurface),
+          ),
+          _protocolLinkRow(
+            _s.settingsProtocolOfficialProject,
+            links: [
+              _protocolLink(
+                scheme,
+                label: protocolProjectUrl,
+                url: protocolProjectUrl,
+                keyName: 'protocol-side-link-project',
+              ),
+            ],
+          ),
+          _protocolLinkRow(
+            _s.settingsProtocolOfficialSite,
+            links: [
+              _protocolLink(
+                scheme,
+                label: protocolSiteUrl,
+                url: protocolSiteUrl,
+                keyName: 'protocol-side-link-site',
+              ),
+            ],
+          ),
+          _protocolLinkRow(
+            _s.settingsProtocolLicenseRow,
+            links: [
+              _protocolLink(
+                scheme,
+                label: 'EULA',
+                url: protocolEulaUrl,
+                keyName: 'protocol-side-link-eula',
+              ),
+              _protocolLink(
+                scheme,
+                label: 'LICENSE',
+                url: protocolLicenseUrl,
+                keyName: 'protocol-side-link-license',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 署名块里的一行：「小标题 + 一排普通链接」。
+  ///
+  /// 小标题与链接**上下两行**而不是左右两列：中英两份小标题的长短差一倍多（"许可（EULA / LICENSE）"
+  /// 与 "License (EULA / LICENSE)"），定宽列在窄窗里会把链接挤到换行以外；竖排两种语言都稳。
+  Widget _protocolLinkRow(String label, {required List<Widget> links}) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(fontSize: 11.5, height: 1.7, color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 2),
+          Wrap(spacing: 14, runSpacing: 2, children: links),
+        ],
+      ),
+    );
+  }
+
+  /// 一条**普通链接**（可点的字 + 下划线），不是按钮。
+  ///
+  /// 为什么不用 TextButton：按钮自带 labelLarge 的字号与最小触控尺寸，塞进 11.5px 的旁注里会把
+  /// 这一行撑高一档（与 `onboarding.dart` 的内联蓝链同一个理由）；而"普通链接"也正是对方要的形态
+  /// ——地址摆在卡上看得见，点不点由人决定。真正的"开浏览器"仍然只有一条实现（`external_link.dart`）。
+  Widget _protocolLink(
+    ColorScheme scheme, {
+    required String label,
+    required String url,
+    required String keyName,
+  }) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: InkWell(
+        key: ValueKey(keyName),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        onTap: () => unawaited(_openUrl(url)),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11.5,
+            height: 1.7,
+            color: scheme.primary,
+            decoration: TextDecoration.underline,
+            decorationColor: scheme.primary,
+          ),
+        ),
+      ),
     );
   }
 
@@ -3301,13 +3448,20 @@ class _SettingsPageState extends State<SettingsPage> {
     Map<String, dynamic> map = const <String, dynamic>{};
     try {
       // 无 body：装到哪由服务端定（固定位置），所以这里没有"选路径"这一步——那正是要压掉的操作。
-      // 这条端点是**同步**的、要跑一两分钟（实测约 104 秒），回执里带着完整的 log。
+      // 这条端点是**同步**的、要跑一两分钟（实测约 104 秒），所以它要一个**放宽**的总时限。
       //
-      // **这条请求不能加客户端总超时**：IrmiaApi 的 connectionTimeout 只覆盖"建连"那一下
-      // （dart:_http 里它只包在 Socket.startConnect 外面），所以它天然等得住一次两分钟的安装。
-      // 反过来，给它套一个 `Future.timeout` 会造出最难查的那种故障——超时只是把回执丢掉，
-      // 服务端的下载照跑：界面上写着"失败"，盘上东西其实装好了；人再点一次又下一遍。
-      final data = await widget.state.api.post('/api/protocol-side/install', const {});
+      // 2026-10-24 改了口径（"GUI 用久了会卡死"那一批）：过去这里是"干脆不设总时限"，
+      // 理由是"超时只是把回执丢掉，服务端的下载照跑，界面却说失败，人再点一次又下一遍"。
+      // 那个顾虑仍然成立——所以时限没有取消，而是**放到足够长**（`kApiLongRequestTimeout`
+      // = 10 分钟，实测耗时的 5 倍以上），并且超时那一刻说的话是"**可能已经生效**"
+      // （见 api.dart 的 [ApiTimeout]），不是"失败"。理由很简单：不设时限的那条路
+      // 一旦卡住，这张卡上的按钮就永远转下去，而人没有任何办法把它停下来——
+      // 那正是"点不动"的观感。10 分钟内一定有一个结局，比"永远没有结局"诚实。
+      final data = await widget.state.api.post(
+        '/api/protocol-side/install',
+        const {},
+        timeout: kApiLongRequestTimeout,
+      );
       map = data is Map ? data.cast<String, dynamic>() : const <String, dynamic>{};
     } catch (err) {
       if (!mounted) return;
@@ -3970,17 +4124,17 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 行尾那枚「编辑」胶囊。
+  /// 行尾那枚「编辑」小按钮。
   ///
-  /// 形状在这里自报一个 StadiumBorder：⑧ 把按钮家族的圆角统一到了 radiusCtl（8），
-  /// 而用户这一条点名要的是**胶囊**。只覆盖 shape——字号与字体栈仍走主题的 buttonText
+  /// 形状**不再自报 `StadiumBorder`**：2026-10-25 圆角收口之后，控件一律走
+  /// `Shape.radiusControl`（10），主题里的 FilledButton 已经给了它，这里只留内边距与
+  /// 最小高度（28 是这一行的行高，不是圆角）。字号与字体栈仍走主题的 buttonText
   /// （⑨ 那条锁：页面里不写 textStyle）。
   Widget _sysEditPill(String id) {
     return FilledButton.tonal(
       key: ValueKey('sys-edit-$id'),
       onPressed: _sysSaving ? null : () => setState(() => _sysEditing.add(id)),
       style: FilledButton.styleFrom(
-        shape: const StadiumBorder(),
         padding: const EdgeInsets.symmetric(horizontal: 14),
         minimumSize: const Size(0, 28),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -4059,19 +4213,29 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // ── 分区十一：账号与安全（B10） ──
 
-  /// 「账号与安全」卡：**改密码** 与 **登出**。
+  /// 「账号与安全」卡：**改密码**、**结束实例**、**退出登录（清除本机凭据）**。
   ///
-  /// 为什么这两件事在这张卡上、而不是塞进模型卡：它们改的是**进来的方式**（凭据），
+  /// 为什么这三件事在这张卡上、而不是塞进模型卡：它们改的是**进来的方式**（凭据），
   /// 与"她怎么说话、用哪个模型"毫无关系。这一页的分区是按"改的是什么"分的
   /// （模型 / 界面 / 发言 / 依赖 / 协议端 / 系统 / 账号），凭据是独立的一类。
   ///
-  /// 两件事各用自己合适的形状：改密码是**三个框一起填**的表单 → 走页面自己的对话框
-  /// （`account_security.dart`，与 ui_kit 上"要填字段的表单用 showDialog"那条分寸一致）；
-  /// 登出不需要填任何东西 → 卡上一颗按钮 + 项目既有的 `confirm`（灰取消 / 红确认）。
+  /// **两颗"离开"的按钮，凭据的下场相反**（2026-10-27，用户的口径「为什么要作废会话？
+  /// 不能就留在那，如果登回来了就接着吗？」）：
+  ///   · 「结束实例」= 停掉后端、回到选择页，**登录状态保留**——回来点「进入」就能进
+  ///     （`AppState.closeInstance`，日志 `[life] close … token=kept`）；
+  ///   · 「退出登录（清除本机凭据）」= 作废会话 + 清本机凭据 + 停后端，**下次要密码**
+  ///     （`AppState.logout`，安全出口，日志 `[life] logout … token=cleared`）。
+  /// 两句话必须各说各的（一处说保留、一处说作废就是把人当没看见），措辞由
+  /// `settingsCloseInstanceBody` / `settingsLogoutBody` 各自负责，页面不拼句子。
+  ///
+  /// 形状照旧：改密码要填三个框 → 页面自己的对话框（`account_security.dart`）；
+  /// 另外两个不需要填任何东西 → 卡上两颗按钮 + 项目既有的 `confirm`（灰取消 / 红确认）。
+  /// 红只给真正毁凭据的那一颗（退出登录）。
   Widget _accountCard() {
     final state = widget.state;
     // 半升级态：这一份是老的共享 token（这台实例还没设过密码）。它开不出"会话"，
-    // 改密码与登出在服务端都做不成——如实写在按钮上面，并把出路（设置密码）一起摆出来。
+    // 改密码与退出登录在服务端都做不成——如实写在按钮上面，并把出路（设置密码）一起摆出来。
+    // 「结束实例」不受影响：它只要一份**有效凭据**（服务端对 legacy token 照认）。
     final legacy = state.onLegacyToken;
     return _SectionCard(
       title: _s.settingsNavAccount,
@@ -4103,6 +4267,18 @@ class _SettingsPageState extends State<SettingsPage> {
               style: _btnStyle(context),
               child: Text(_s.settingsChangePassword),
             ),
+            // 「结束实例」：只停后端，**凭据留着**（这条路不带红色——它不丢任何东西）
+            OutlinedButton(
+              key: const ValueKey('account-close'),
+              onPressed: () => unawaited(_closeInstance()),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                minimumSize: const Size(0, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(_s.settingsCloseInstance),
+            ),
+            // 「退出登录（清除本机凭据）」：安全出口，三件一起（红：它会把票毁掉）
             OutlinedButton(
               key: const ValueKey('account-logout'),
               onPressed: () => unawaited(_logoutAccount()),
@@ -4132,7 +4308,22 @@ class _SettingsPageState extends State<SettingsPage> {
     if (changed && mounted) _toast(_s.settingsPasswordChanged, kind: ToastKind.success);
   }
 
-  /// 登出：危险操作，走项目既有的 confirm（灰取消 / 红确认）。
+  /// 结束实例：只停后端、**登录状态保留**（危险操作照旧走项目既有的 confirm）。
+  ///
+  /// 这里**不需要**再收界面：`AppState.closeInstance()` 把 `ready` 置假，整个壳连同这一页
+  /// 一起换成门（app.dart 里那个三元）——页面上再写一遍"清状态"就是第二份真相。
+  Future<void> _closeInstance() async {
+    final go = await confirm(
+      context,
+      title: _s.settingsCloseInstance,
+      body: _s.settingsCloseInstanceBody,
+      confirmLabel: _s.settingsCloseInstance,
+    );
+    if (!go || !mounted) return;
+    await widget.state.closeInstance();
+  }
+
+  /// 退出登录（清除本机凭据）：作废 + 清凭据 + 停实例，**下次要用密码进来**。
   ///
   /// 这里**不需要**再收界面：`AppState.logout()` 把 `ready` 置假，整个壳连同这一页一起换成门
   /// （app.dart 里那个三元）——页面上再写一遍"清状态"就是第二份真相。

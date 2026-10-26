@@ -516,11 +516,17 @@ void main() {
       expect(theme.textTheme.bodySmall?.height, closeTo(18 / 12, 1e-9));
     });
 
-    test('形状：卡片 12 / 控件 8 / 弹窗跟卡片同值 / 一套阴影', () {
+    test('形状：三档圆角（卡片 16 / 控件 10 / 正圆 999）+ 弹窗跟卡片同值 / 一套阴影', () {
       expect(Shape.radiusCard, 12);
-      expect(Shape.radiusControl, 8);
+      expect(Shape.radiusControl, 10);
+      expect(Shape.radiusPill, 999);
+      // 12 是控件的派生档（+2），只给聊天页那条输入框与发送键
+      expect(Shape.radiusControlLarge, 12);
+      expect(Shape.radiusControlLarge, Shape.radiusControl + 2);
       expect(IrmiaTheme.radiusCard, Shape.radiusCard);
       expect(IrmiaTheme.radiusCtl, Shape.radiusControl);
+      expect(IrmiaTheme.radiusCtlLarge, Shape.radiusControlLarge);
+      expect(IrmiaTheme.radiusPill, Shape.radiusPill);
       expect(Shape.shadows, hasLength(1));
       final dialog = IrmiaTheme.light().dialogTheme;
       expect(
@@ -528,6 +534,11 @@ void main() {
         BorderRadius.circular(Shape.radiusCard),
         reason: '弹窗原来吃 M3 默认的 28，与卡片不是一个形',
       );
+      // 页面里的按钮（描边那一族）也不许再是胶囊：形状必须就是控件圆角
+      final outlined = IrmiaTheme.light().outlinedButtonTheme.style!;
+      final shape = outlined.shape!.resolve(<WidgetState>{})! as RoundedRectangleBorder;
+      expect(shape.borderRadius, BorderRadius.circular(Shape.radiusControl),
+          reason: 'M3 的 OutlinedButton 默认是 StadiumBorder（胶囊）——收口后一律 control');
     });
 
     test('动效常量：120/180/240/1500/2400，两条曲线', () {
@@ -571,11 +582,11 @@ class _FakeApi extends IrmiaApi {
   _FakeApi() : super(baseUrl: 'http://127.0.0.1:1');
 
   @override
-  Future<dynamic> get(String path) async =>
+  Future<dynamic> get(String path, {Duration? timeout}) async =>
       path.startsWith('/api/events') ? <String, dynamic>{'events': <dynamic>[]} : <String, dynamic>{'ok': true};
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async =>
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async =>
       <String, dynamic>{'ok': true};
 
   @override

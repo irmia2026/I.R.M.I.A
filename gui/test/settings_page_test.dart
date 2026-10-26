@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:irmia_gui/api.dart';
 import 'package:irmia_gui/app.dart';
+import 'package:irmia_gui/external_link.dart';
 import 'package:irmia_gui/i18n/app_strings.dart';
 import 'package:irmia_gui/i18n/strings_scope.dart';
 import 'package:irmia_gui/pages/settings_page.dart';
@@ -215,7 +216,7 @@ void main() {
             'status': 'ready',
             'ok': true,
             // 系统 PATH 上那一份（本机实测 3.11.5 就在 PATH 上）——"有就用 PATH 里的"
-            'path': 'C:/Users/irmia/AppData/Local/Programs/Python/Python311/python.exe',
+            'path': 'C:/Users/<user>/AppData/Local/Programs/Python/Python311/python.exe',
             'version': '3.11.5',
             'source': pythonSource,
             'reason': '',
@@ -1092,7 +1093,7 @@ void main() {
     expect(find.textContaining('框架托管 · 15.1.0 · D:/irmia/data/tools/rg/rg.exe'), findsOneWidget);
     expect(
       find.textContaining(
-        '系统 PATH · 3.11.5 · C:/Users/irmia/AppData/Local/Programs/Python/Python311/python.exe',
+        '系统 PATH · 3.11.5 · C:/Users/<user>/AppData/Local/Programs/Python/Python311/python.exe',
       ),
       findsOneWidget,
     );
@@ -1533,7 +1534,9 @@ void main() {
     expect(find.text('还没配置内置协议端。'), findsOneWidget);
     // 引导必须在：下载地址是纯文本给出来的（框架从官方代下载，但自己下的那条路一直在）
     expect(find.textContaining('https://github.com/SnowLuma/SnowLuma/releases'), findsOneWidget);
-    expect(inProtocolCard(find.widgetWithText(FilledButton, '打开下载页')), findsOneWidget);
+    // 2026-10 起这条出路是**普通链接**，不再是按钮：SnowLumaDevs 的书面要求②是"无需自动弹出浏览器"
+    expect(inProtocolCard(find.byKey(const ValueKey('protocol-side-download-page'))), findsOneWidget);
+    expect(inProtocolCard(find.widgetWithText(FilledButton, '打开下载页')), findsNothing);
     // v35 的主路径也必须在这里：没配置的时候正是最需要「一键安装」的时候
     expect(find.byKey(const ValueKey('protocol-side-install')), findsOneWidget);
     // 输入框与开关也必须在——空态里没有它们，人就没有地方可填
@@ -1565,6 +1568,81 @@ void main() {
     await pumpSettings(tester, size: const Size(1350, 3400));
     await pumpUntil(tester, find.text('协议端（可选）'));
     expect(find.textContaining('协议端状态读取失败'), findsNothing);
+  });
+
+  // ── 第三方署名（SnowLumaDevs 的书面要求①②，凭证见 docs/third-party-authorizations.md） ──
+  //
+  // 两条要求落到代码上是两件**不同**的事，所以各有一条用例：
+  //   ① 「在集成界面注明 SnowLuma 是独立第三方项目，并提供官方项目及许可链接」⇒ 说明与链接都在；
+  //   ② 「无需自动弹出浏览器」⇒ 卡片照常渲染时**一个地址都不开**；点链接才开；安装流程**从头到尾**
+  //      不碰 `openExternalUrl`（真开浏览器那条路只有 `external_link.dart` 一处，
+  //      用例把它换成记账的替身，于是"开没开"是可断言的事实，而不是靠读代码）。
+
+  testWidgets('协议端卡片：注明 SnowLuma 是独立第三方项目，官方项目/站点/许可链接都在，且是普通链接', (tester) async {
+    final opened = <String>[];
+    externalUrlOpener = (url) async => opened.add(url);
+    addTearDown(() => externalUrlOpener = openUrlInSystemBrowser);
+
+    await pumpSettings(tester, size: const Size(1350, 4000));
+
+    const zh = ZhStrings();
+    expect(find.text(zh.settingsProtocolThirdPartyTitle), findsOneWidget,
+        reason: '要求①：卡上要有一处点明这是第三方组件');
+    expect(find.text(zh.settingsProtocolThirdPartyNote), findsOneWidget,
+        reason: '要求①：那段说明（独立第三方 / 只代为下载并托管、不改文件 / 须遵守 EULA）必须在屏上');
+
+    // 两个官方链接：**地址本身就是可见文字**（对方要"提供官方项目及许可链接"，藏进 tooltip 不算）
+    expect(inProtocolCard(find.text(protocolProjectUrl)), findsOneWidget);
+    expect(inProtocolCard(find.text(protocolSiteUrl)), findsOneWidget);
+    // 许可那一行（EULA 与 LICENSE）也在
+    expect(find.text(zh.settingsProtocolLicenseRow), findsOneWidget);
+    for (final key in <String>[
+      'protocol-side-link-project',
+      'protocol-side-link-site',
+      'protocol-side-link-eula',
+      'protocol-side-link-license',
+    ]) {
+      expect(find.byKey(ValueKey(key)), findsOneWidget, reason: '缺链接：$key');
+    }
+
+    // 它们是**链接，不是按钮**：这一块不许有"按钮点了就开页面"的形状
+    // （只看协议端卡内部：「外部依赖」卡里 pwsh 那条人装路仍是按钮，它与本授权无关）
+    expect(find.widgetWithText(FilledButton, protocolProjectUrl), findsNothing);
+    expect(find.widgetWithText(FilledButton, protocolSiteUrl), findsNothing);
+    expect(inProtocolCard(find.widgetWithText(FilledButton, '打开下载页')), findsNothing);
+
+    // 要求②：**渲染这一页本身不开任何地址**（不自动弹浏览器）
+    expect(opened, isEmpty, reason: '卡片渲染不许自己开浏览器——对方原话是"无需自动弹出浏览器"');
+
+    // 人点链接才开，而且开的是那一条
+    final project = find.byKey(const ValueKey('protocol-side-link-project'));
+    await tester.ensureVisible(project);
+    await tester.pump();
+    await tester.tap(project);
+    await drain(tester);
+    expect(opened, <String>[protocolProjectUrl], reason: '点「官方项目」只该开这一个地址');
+  });
+
+  testWidgets('一键安装：装成功也**不打开任何外部页面**（安装流程里没有"顺手开浏览器"这一步）', (tester) async {
+    final opened = <String>[];
+    externalUrlOpener = (url) async => opened.add(url);
+    addTearDown(() => externalUrlOpener = openUrlInSystemBrowser);
+
+    await pumpSettings(tester, size: const Size(1350, 4000));
+    expect(opened, isEmpty, reason: '载入页面本身不该开浏览器');
+
+    final install = find.byKey(const ValueKey('protocol-side-install'));
+    await tester.ensureVisible(install);
+    await tester.pump();
+    await tester.tap(install);
+    await pumpUntil(tester, find.textContaining('已装好 v1.14.20'));
+    await drain(tester);
+
+    // 先证"按钮真的点着、请求真的发出去了"——否则"没开浏览器"可能只是"什么都没发生"
+    expect(installCalls, 1, reason: '安装请求必须真的发出（不然这条用例证明不了任何事）');
+    expect(find.textContaining('已装好 v1.14.20'), findsWidgets, reason: '整条安装流程要走完');
+    // 要求②：整条安装流程**不碰** openExternalUrl（下载页、官方站点都不许被自动打开）
+    expect(opened, isEmpty, reason: '安装流程不许打开任何外部页面（对方要求②）');
   });
 
   // ── 一键安装（v35）：一次点击 + 一次重启 + 一次扫码 ──
@@ -1694,10 +1772,10 @@ void main() {
     expect(inProtocolCard(find.textContaining('找到 v1.14.20 的')), findsOneWidget);
     expect(inProtocolCard(find.textContaining('过程记录')), findsOneWidget);
 
-    // 出路还在：手动下载那条路（地址 + 按钮）不能被失败一起吞掉
+    // 出路还在：手动下载那条路（地址 + 链接）不能被失败一起吞掉
     expect(inProtocolCard(find.textContaining('手动出路')), findsOneWidget);
     expect(find.textContaining('https://github.com/SnowLuma/SnowLuma/releases'), findsWidgets);
-    expect(inProtocolCard(find.widgetWithText(FilledButton, '打开下载页')), findsOneWidget);
+    expect(inProtocolCard(find.byKey(const ValueKey('protocol-side-download-page'))), findsOneWidget);
 
     // 没装成就不该往配置里写：**没有** PUT /config（请求停在安装那一条上）
     expect(installCalls, 1);

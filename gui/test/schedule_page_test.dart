@@ -28,7 +28,9 @@ import 'package:irmia_gui/ui_kit.dart';
 ///   ⑦ 「最近的工作记录」整块与周历底部那两句技术说明**都删掉了**（用户点名）；
 ///   ⑧ **列表形态不许压到图例上**（用户 2026-10-12 的截图三）：取真实 rect 断言不重叠；
 ///      「新建安排」两层：常显只有"什么时候 + 要做什么"，其余收进「更多选项」。
-///   ⑨ 长期计划**只做入口**：`置顶`/`约定与承诺`/`稳定事实`/`观察`/`归档` 一个都不许上这一页。
+///   ⑨ **2026-10-25 的六处删除**（反向断言：文案、整块、「去记忆页」一个都不许上屏）：
+///      ① 周历标题下那行 ② 清单标题下那行 ③ 详情那段说明 ④ 整块「长期计划」（含取数）
+///      ⑤ 周历底部"不在 08:00-21:00"那行 ⑥ 页脚那句。另有 ⑦：回到本周 = 控件圆角（10）。
 ///
 /// ## 一条纪律：**这一组用例不许依赖"今天是周几/几点"**
 ///
@@ -50,6 +52,9 @@ class _FakeApi extends IrmiaApi {
 
   final Map<String, dynamic> routes;
   final List<_Post> posts = [];
+
+  /// 这一页读过哪些 GET（反向断言"删了那一块，取数也一起删"用）
+  final List<String> gets = [];
   final Map<String, Object> failGet = {};
   final Map<String, Object> failPost = {};
   Map<String, dynamic> wakeReply = <String, dynamic>{'ok': true, 'deduped': false};
@@ -57,7 +62,8 @@ class _FakeApi extends IrmiaApi {
   String builtAt = '2026-10-20T12:00:00.000Z';
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
+    gets.add(path);
     final failure = failGet[path];
     if (failure != null) throw failure;
     if (path.startsWith('/api/memory?file=')) return routes['/api/memory?file'];
@@ -65,7 +71,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add(_Post(path, body));
     final failure = failPost[path];
     if (failure != null) throw failure;
@@ -247,7 +253,7 @@ Future<AppState> _pump(WidgetTester tester, _FakeApi api,
   await tester.pumpWidget(
     MaterialApp(theme: IrmiaTheme.light(), home: Scaffold(body: SchedulePage(state: state))),
   );
-  // 三块数据各自要跑完 await 链（长期计划是"先清单再正文"两跳）
+  // 数据各自要跑完 await 链（投影 + 会话名单；长期计划那块 2026-10-25 已删，不再读记忆）
   for (var i = 0; i < 8; i += 1) {
     await tester.pump(const Duration(milliseconds: 20));
   }
@@ -295,7 +301,7 @@ void main() {
 
   // ── ① 骨架 ──
 
-  testWidgets('骨架：eyebrow + 大标题「近期安排」+ 三件动作 + 六个分区都在', (tester) async {
+  testWidgets('骨架：eyebrow + 大标题「近期安排」+ 三件动作 + 剩下的分区都在', (tester) async {
     final api = _FakeApi(_routes());
     await _pump(tester, api);
 
@@ -308,9 +314,16 @@ void main() {
 
     expect(find.text('周历'), findsOneWidget);
     expect(find.text('安排清单'), findsOneWidget);
-    expect(find.text('接下来要发生的事'), findsOneWidget);
     expect(find.text('SELECTED PLAN'), findsOneWidget);
-    expect(find.text('长期计划'), findsOneWidget);
+    // ①②③④⑤⑥ 2026-10-25 用户点名删掉的六段 / 两块，一句都不许再上屏
+    expect(find.text('接下来要发生的事'), findsNothing, reason: '② 清单标题下那行删了');
+    expect(find.text('选择一个条目，查看具体安排'), findsNothing, reason: '① 周历标题下那行删了');
+    expect(find.textContaining('点清单或周历里的任意一条'), findsNothing, reason: '③ 详情那段说明删了');
+    expect(find.text('长期计划'), findsNothing, reason: '④ 整块删了');
+    expect(find.textContaining('她单开的那一格'), findsNothing, reason: '④ 整块删了（含右上那句注解）');
+    expect(find.text('去记忆页'), findsNothing, reason: '④ 连「去记忆页」也删了');
+    expect(find.textContaining('不在 08:00'), findsNothing, reason: '⑤ 周历底部那行删了');
+    expect(find.textContaining('安排只是一个行动机会'), findsNothing, reason: '⑥ 页脚那句删了');
     // ⑦ 用户点名删掉的两块：工作记录整块 + 周历底部那两句技术说明
     expect(find.text('最近的工作记录'), findsNothing, reason: '整块删掉了（用户批注"此块无意义可去掉"）');
     expect(find.byKey(const ValueKey('schedule-records')), findsNothing);
@@ -320,7 +333,37 @@ void main() {
       // 图例一处；`cat=work` 那条的清单 chip 又一处 ⇒ 至少一处
       expect(find.text(label), findsWidgets, reason: '四色图例缺一格：$label');
     }
-    expect(find.textContaining('安排只是一个行动机会'), findsOneWidget);
+
+    await _drain(tester);
+  });
+
+  /// ⑦ 「回到本周」：不再是胶囊，圆角 == 控件档（10），高度与隔壁主按钮一致。
+  testWidgets('⑦ 回到本周：圆角 == radiusCtl（控件档 10），与「＋新建安排」同高', (tester) async {
+    final api = _FakeApi(_routes());
+    await _pump(tester, api);
+
+    final back = find.byKey(const ValueKey('schedule-back-week'));
+    expect(back, findsOneWidget);
+
+    // 按钮的 Material 形状就是它真正画出来的样子（OutlinedButton 从 ButtonStyle 解析来的）
+    final shapes = tester
+        .widgetList<Material>(find.descendant(of: back, matching: find.byType(Material)))
+        .map((m) => m.shape)
+        .whereType<RoundedRectangleBorder>()
+        .toList();
+    expect(shapes, isNotEmpty, reason: '回到本周那层 Material 的形状要量得到');
+    for (final shape in shapes) {
+      expect(shape.borderRadius, BorderRadius.circular(IrmiaTheme.radiusCtl),
+          reason: '⑦ 胶囊形 ⇒ 控件圆角（control = 10）');
+    }
+    expect((shapes.first.borderRadius as BorderRadius).topLeft.x, 10,
+        reason: '控件档就是 10（[Shape.radiusControl]）');
+
+    // 高度与隔壁那颗主按钮逐像素一致（同一套内边距 + 同一份 buttonText）
+    final propose = find.byKey(const ValueKey('schedule-propose'));
+    expect(tester.getSize(back).height,
+        moreOrLessEquals(tester.getSize(propose).height, epsilon: 0.5),
+        reason: '次级按钮与主按钮同一行，高度必须一致');
 
     await _drain(tester);
   });
@@ -446,7 +489,7 @@ void main() {
 
     expect(shortGrid, lessThan(tallGrid), reason: '窗口矮 ⇒ 行高压下去（不是让整页滚）');
     expect(_pageScrollables(), findsOneWidget, reason: '矮窗口也只有一个可滚块（清单）');
-    // 矮窗口里两块附加内容先让位（它们真正的家是日志页 / 记忆页）
+    // 矮窗口里只剩清单与详情（前两块附加内容都删了：工作记录上一轮、长期计划这一轮）
     expect(find.byKey(const ValueKey('schedule-records')), findsNothing);
     expect(find.byKey(const ValueKey('schedule-plans')), findsNothing);
     await _drain(tester);
@@ -594,7 +637,8 @@ void main() {
     expect(_block('t-single'), findsNWidgets(1), reason: '单日 ⇒ 一块');
     expect(_blockOn('t-single', _weekdayOfThisWeek(2)), findsOneWidget, reason: '就落在周三那一列');
     expect(_block('t-night'), findsNothing, reason: '23:00 不在 08:00–21:00 这一格里 ⇒ 不画');
-    expect(find.textContaining('不在 08:00–21:00 这一格里：1 条'), findsOneWidget);
+    // ⑤ 2026-10-25 删了那行"不在 08:00-21:00 这一格里：N 条"，它连数都不许再报
+    expect(find.textContaining('不在 08:00'), findsNothing, reason: '⑤ 这行删了');
     // cron 的人话（范围写成"周一至周五"）
     expect(find.descendant(of: _item('t-range'), matching: find.text('周期 · 每周一至周五 14:00')),
         findsOneWidget);
@@ -657,7 +701,7 @@ void main() {
     await _drain(tester);
   });
 
-  testWidgets('周历：不在 08:00–21:00 里的也画不出位置，同样如实说', (tester) async {
+  testWidgets('周历：不在 08:00–21:00 里的也画不出位置（那行读数已删）', (tester) async {
     final now = scheduleNow();
     final api = _FakeApi(_routes(timers: [
       {'timerId': 't-night', 'at': _iso(_dayAt(now, 1, 23, 30)), 'payload': {'title': '深夜那条'}},
@@ -665,7 +709,8 @@ void main() {
     await _pump(tester, api);
 
     expect(_block('t-night'), findsNothing);
-    expect(find.textContaining('不在 08:00–21:00 这一格里：1 条'), findsOneWidget);
+    // ⑤ 那行"不在 08:00-21:00 这一格里：N 条"删掉了——条目本身还在清单里
+    expect(find.textContaining('不在 08:00'), findsNothing, reason: '⑤ 这行删了');
     expect(_item('t-night'), findsOneWidget, reason: '画不出位置 ≠ 没排：它照旧在清单里');
 
     await _drain(tester);
@@ -905,7 +950,7 @@ void main() {
     await _drain(tester);
   });
 
-  // ── ⑨ 最近的工作记录 / 长期计划（只做入口） ──
+  // ── ③ 周历只画用户向的 / 清单排序 ──
 
   testWidgets('③ 周历只画用户向的：她的内务（scope:self）不上时间轴，但留在清单里、带灰角标', (tester) async {
     final now = scheduleNow();
@@ -1016,47 +1061,40 @@ void main() {
     await _drain(tester);
   });
 
-  testWidgets('★ 长期计划：只做入口 ⇒ 记忆分区标题一个都不上这一页', (tester) async {
-    final api = _FakeApi(_routes());
-    final state = await _pump(tester, api);
+  // ── ⑨ 长期计划整块删掉（2026-10-25）：反向断言 ──
 
-    for (final forbidden in ['置顶', '约定与承诺', '稳定事实', '观察', '归档']) {
-      expect(find.textContaining(forbidden), findsNothing,
-          reason: '日程页不许出现记忆分区：$forbidden');
-    }
-    expect(find.text('她还没有单开这一格 · 去记忆页'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('schedule-goto-memory')));
-    await tester.pump();
-    expect(state.pageId, 'memory');
-
-    await _drain(tester);
-  });
-
-  testWidgets('长期计划：她单开了一格时只读那一格（别的分区照旧不许出现）', (tester) async {
-    final api = _FakeApi(_routes(factsContent: '# Facts\n\n'
-        '## 置顶（pinned）\n- 别为了提醒而提醒\n\n'
-        '## 长期计划\n- 每周一次学习复盘\n- 汇报材料周三交\n\n'
-        '## 归档（已失效/已过期，不注入）\n- 旧口令\n'));
+  testWidgets('★ ⑥ 处删除：那六段文案 + 整块「长期计划」+「去记忆页」一个都不上屏', (tester) async {
+    // 数据里**故意**给全：记忆清单与 facts 正文里都有「长期计划」那一格
+    // （删的是界面与取数，不是"假装数据里没有"）
+    final api = _FakeApi(_routes(
+      factsContent: '# Facts\n\n## 长期计划\n- 每周一次学习复盘\n\n',
+    ));
     final sections = ((api.routes['/api/memory'] as Map)['facts'] as Map)['sections'] as List;
-    sections.add({'title': '## 长期计划', 'lines': 2});
+    sections.add({'title': '## 长期计划', 'lines': 1});
     await _pump(tester, api);
 
-    expect(find.byKey(const ValueKey('schedule-plan-section')), findsOneWidget, reason: '只读命中那一格');
-    expect(find.textContaining('每周一次学习复盘'), findsOneWidget);
-    for (final forbidden in ['置顶', '归档', '稳定事实', '观察', '约定与承诺']) {
-      expect(find.textContaining(forbidden), findsNothing, reason: '别格照旧不许出现：$forbidden');
+    const gone = <String, String>{
+      '选择一个条目，查看具体安排': '① 周历标题下那行',
+      '接下来要发生的事': '② 清单标题下那行',
+      '点清单或周历里的任意一条': '③ 详情那段说明（整段）',
+      '长期计划': '④ 整块',
+      '她单开的那一格': '④ 右上那句注解',
+      '去记忆页': '④ 去记忆页',
+      '不在 08:00–21:00 这一格里': '⑤ 周历底部那行',
+      '安排只是一个行动机会': '⑥ 页脚那句',
+    };
+    for (final entry in gone.entries) {
+      expect(find.textContaining(entry.key), findsNothing,
+          reason: '${entry.value}不许再上这一页：「${entry.key}」');
     }
+    // 旧实现按这几个键上过屏：键也不许再挂
+    expect(find.byKey(const ValueKey('schedule-plans')), findsNothing);
+    expect(find.byKey(const ValueKey('schedule-goto-memory')), findsNothing);
+    expect(find.byKey(const ValueKey('schedule-plan-section')), findsNothing);
+    // 整块删干净的另一半：**取数一起删**（这一页不再读 facts.md /api/memory）
+    expect(api.gets.where((path) => path.startsWith('/api/memory')), isEmpty,
+        reason: '删了「长期计划」那一块，只服务它的那趟取数也要删');
 
-    await _drain(tester);
-  });
-
-  testWidgets('长期计划：读不到记忆 ⇒ 如实说"暂未接入"，不假装"没有这一格"', (tester) async {
-    final api = _FakeApi(_routes());
-    api.failGet['/api/memory'] = const ApiError(500, '记忆端点不可用');
-    await _pump(tester, api);
-
-    expect(find.text('她还没有单开这一格 · 去记忆页'), findsNothing);
-    expect(find.textContaining('暂未接入：读不到她的记忆'), findsOneWidget);
     await _drain(tester);
   });
 

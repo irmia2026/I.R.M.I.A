@@ -11,6 +11,8 @@ import 'theme.dart';
 import 'ui_state.dart';
 // 主界面顶部那条"有新版本"提醒（一次性可关；required 不可关。文案在 i18n，数据在 AppState）
 import 'update_check.dart';
+// 顶部第二条细带："有请求等久了"时出现（说清在等哪一条 + 一颗「重试」）
+import 'wait_banner.dart';
 
 /// 侧栏那条**整列对齐基线**（用户 2026-10-04 的截图意见："品牌名太贴边了"＋
 /// "导航项要和品牌名对齐"）。
@@ -95,6 +97,11 @@ class HomeShell extends StatelessWidget {
                     dismissedVersion: state.updateDismissedVersion,
                     onDismiss: () => unawaited(state.dismissUpdateBanner()),
                   ),
+                  // 第二条细带（2026-10-24）：**有请求等久了**才出现，说清"在等哪一条、
+                  // 已等多久"，右端那颗「重试」把这一页整页重挂。平时零高度，不占版面。
+                  // 它挂在页面上方而不是页里，是为了"哪一页都看得见"——卡死时人可能已经
+                  // 切到别的页去了（见 wait_banner.dart 的文件头）。
+                  WaitBanner(state: state),
                   Expanded(child: _PageHost(state: state)),
                 ],
               ),
@@ -401,7 +408,13 @@ class _PageHost extends StatelessWidget {
     return AnimatedSwitcher(
       duration: IrmiaTheme.durPage,
       switchInCurve: Curves.easeOut,
-      child: KeyedSubtree(key: ValueKey(entry.id), child: entry.builder(state)),
+      // key 里带**重挂计数**（`AppState.pageEpoch`）：那颗「重试」一加一，这一页就整页
+      // 重建（重新 initState ⇒ 重新取数）。没有它的话，"页面卡在自己的 loading 里"
+      // 从外面没有任何办法 —— 见 wait_banner.dart 与 `AppState.reloadCurrentPage`。
+      child: KeyedSubtree(
+        key: ValueKey('${entry.id}#${state.pageEpoch}'),
+        child: entry.builder(state),
+      ),
     );
   }
 }

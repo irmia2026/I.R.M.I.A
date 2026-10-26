@@ -33,10 +33,10 @@ class _FakeApi extends IrmiaApi {
   final List<({String path, Map<String, dynamic> body, String? confirm})> posts = [];
 
   @override
-  Future<dynamic> get(String path) async => routes[path];
+  Future<dynamic> get(String path, {Duration? timeout}) async => routes[path];
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add((path: path, body: body, confirm: confirm));
     return {'ok': true, 'name': body['name'], 'movedTo': 'data/trash/20261006T101010Z-weather'};
   }

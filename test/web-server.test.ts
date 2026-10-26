@@ -553,6 +553,34 @@ test('GET /api/grants：盘上还没被拾取的单子也要列出来（不是�
   assert.equal(body.dir, grantsDirOf(fx.dataDir), 'dir 仍然是给她指路的那个目录（不是 dataDir）');
 });
 
+test('GET /api/grants：读不出来的单子进 malformed（不静默丢），能读的照旧列出来', async (t) => {
+  const fx = await setup(t);
+  writeUnpickedGrant(fx, 'g-window'); // 合法、但还没被拾取的那一张
+  const dir = grantsDirOf(fx.dataDir);
+  mkdirSync(dir, { recursive: true });
+  // 两张坏单：一张 JSON 坏了，一张 kind 拼错（都**没有** grant/requested 事件 ⇒ 不在 items 里）
+  writeFileSync(join(dir, 'bad-json.json'), '{ 这不是 JSON', 'utf8');
+  writeFileSync(join(dir, 'bad-kind.json'), JSON.stringify({ kind: 'hook-add', name: 'x' }), 'utf8');
+
+  const res = await call(fx, '/api/grants');
+  assert.equal(res.status, 200);
+  const body = res.body as {
+    items: Array<{ id: string; picked: boolean }>;
+    malformed: Array<{ id: string; why: string }>;
+  };
+  assert.deepEqual(
+    body.malformed.map((item) => item.id).sort(),
+    ['bad-json', 'bad-kind'],
+    `读不出来的两张要点名报出来（实际：${JSON.stringify(body.malformed)}）`,
+  );
+  const why = new Map(body.malformed.map((item) => [item.id, item.why]));
+  assert.match(why.get('bad-json') ?? '', /JSON/u, '读不动的要说清是文件/JSON 的问题');
+  assert.match(why.get('bad-kind') ?? '', /kind/u, '解析不过的原因原样带出来（她照着改的方向在里头）');
+  // 能读的那张照旧在清单里，且**不许**混进 malformed
+  assert.ok(body.items.some((item) => item.id === 'g-window'), '能读的单子照旧列出来');
+  assert.equal(body.malformed.some((item) => item.id === 'g-window'), false);
+});
+
 test('GET /api/stats/dashboard：同一段窗口也在 grants 里（buildDashboard 收的是 dataDir）', async (t) => {
   const fx = await setup(t);
   writeUnpickedGrant(fx, 'g-dash');
@@ -2246,7 +2274,7 @@ test('GET /api/memory：facts 分区、流水账/归档/日记清单与单文件
     '# Facts',
     '',
     '## 置顶（pinned）',
-    '- [!pinned] 用户叫OWNER',
+    '- [!pinned] 用户叫阿岚',
     '',
     '## 稳定事实',
     '- 2026-09-30：他在改 Irmia 的代码',
@@ -2286,7 +2314,7 @@ test('GET /api/memory：facts 分区、流水账/归档/日记清单与单文件
 
   const facts = await call(fx, '/api/memory?file=MEMORIES/facts.md');
   assert.equal(facts.status, 200);
-  assert.match((facts.body as { content: string }).content, /用户叫OWNER/u);
+  assert.match((facts.body as { content: string }).content, /用户叫阿岚/u);
 
   // 回归（2026-10-04 修的「清单里列得出来、点开却说不存在」）：
   // ① 每组的位置由**服务端**说出来（path），不再让界面去拼——流水账与归档过去就是被拼错的；
@@ -2938,8 +2966,221 @@ test('GET /api/sessions：`contacts` 是**对象**，且键是归一后的 sid�
   }, '键归一（group-at → group），值一个字不改');
 });
 
-test('set-contact：写入用归一形态，并清掉同一个会话的旧写法（不留僵尸键）', async (t) => {
+test('GET /api/sessions：`unread` 就是界面那一栏的数——写一笔 channel/read 之后立刻变 0', async (t) => {
+  // 界面「运行情况 → 外部会话」的未读徽章读的就是这条端点的 `sessions[].unread`
+  //（gui/lib/pages/overview_page.dart 的 `_SessionRow.from`），服务端每次请求现折一份
+  //（`sessionsView()` → `collectSessions(await readAllEvents(log))`，那一步走的是按日志实例
+  // 缓存的增量快照，不重读磁盘）。于是这条链路只有两个坏点：
+  //   ① `channel/read` 根本没落库（写入侧——钉在 test/read-channel-unread-clear.test.ts）；
+  //   ② 端点自己缓存住了/折错了（这一条钉的就是 ②）。
+  // 判据与用户那句话同形：**读一次 → 0；直到又来新消息才重新计数**。
   const fx = await setup(t);
+  const write = (no: number): void => {
+    fx.append('channel/message', {
+      channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'GROUP001',
+      text: `第 ${no} 句`, messageId: `m-${no}`, msgSeq: no,
+    });
+  };
+  const view = async (): Promise<{
+    unreadTotal: number;
+    sessions: Array<{ sid: string; unread: number; readUpToSeq: number }>;
+  }> => (await call(fx, '/api/sessions')).body as never;
+
+  for (let no = 1; no <= 5; no += 1) write(no);
+  const before = await view();
+  assert.equal(before.sessions[0]?.sid, 'qq:group:GROUP001');
+  assert.equal(before.sessions[0]?.unread, 5, '五条没读 ⇒ 界面那一栏 5');
+  assert.equal(before.unreadTotal, 5, '合计那一格与逐行那一格同源');
+
+  // `read_channel` 读到最新之后写下的**正是这一条事件**（src/tools/admin.ts 的 `markReadUpTo`）
+  fx.append('channel/read', { sid: 'qq:group:GROUP001', upToSeq: 5 });
+  const after = await view();
+  assert.equal(after.sessions[0]?.unread, 0, '她读过了 ⇒ 下一次请求必须给 0（界面那一栏就靠这个数）');
+  assert.equal(after.sessions[0]?.readUpToSeq, 5, '已读位一并给出来（界面/排障都靠它对号）');
+  assert.equal(after.unreadTotal, 0);
+
+  // 清零不是"从此不再计数"：又来 2 条就重新数
+  write(6);
+  write(7);
+  const again = await view();
+  assert.equal(again.sessions[0]?.unread, 2, '直到再次有未读消息才重新计数');
+  assert.equal(again.unreadTotal, 2);
+});
+
+// ──────────────── /api/sessions 的 `avatarUrl`（会话头像，2026-10 加） ────────────────
+//
+// 判据本身（三种 sid 各拼哪个地址）在 `channel/sessions.ts` 的 `avatarUrlOf`，用例在
+// `test/sessions.test.ts`。**这里钉的是接线**：端点真的把那一格发出去了、类型是 string|null，
+// 而且 `qq:*` 那种平台不给号的会话真的是 null（界面据此走首字占位，不是拿一串 openid 去拼图）。
+//
+// 为什么值得单独立案：拼错的头像**看起来是对的**——腾讯那两个地址拿任何数字都能换回一张 200 的
+// 默认企鹅图，界面上表现为"每个会话头像都一样"，那是比没有头像更坏的错。
+
+test('GET /api/sessions：`avatarUrl` 三种 sid 各给各的地址，`qq:*` 恒为 null', async (t) => {
+  const fx = await setup(t);
+  const write = (data: Record<string, unknown>, no: number): void => {
+    fx.append('channel/message', {
+      text: `第 ${no} 句`, messageId: `m-${no}`, msgSeq: no, ...data,
+    });
+  };
+  write({ channel: 'onebot', chatType: 'group', person: '123456789', chatId: '123456789' }, 1);
+  write({ channel: 'onebot', chatType: 'c2c', person: '10001', chatId: '10001' }, 2);
+  // OneBot 群但群号不是数字（自建协议端的 group_id 理论上都是数字，但外部数据不可信）
+  write({ channel: 'onebot', chatType: 'group', person: 'P', chatId: 'group-abc' }, 3);
+  // QQ 官方 Bot：chatId / person 都是 openid，平台不给真实号 ⇒ 没有头像可拼
+  write({ channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'GROUP001' }, 4);
+  write({ channel: 'qq-official', chatType: 'c2c', person: 'OPENID_C', chatId: 'OPENID_C' }, 5);
+
+  const body = (await call(fx, '/api/sessions')).body as {
+    sessions: Array<{ sid: string; avatarUrl: string | null }>;
+  };
+  const avatarOf = (sid: string): string | null | undefined =>
+    body.sessions.find((row) => row.sid === sid)?.avatarUrl;
+
+assert.equal(avatarOf('onebot:group:123456789'), 'https://p.qlogo.cn/gh/123456789/123456789/100',
+    'OneBot 群 ⇒ 群头像（两个路径段都是群号）');
+  assert.equal(avatarOf('onebot:c2c:10001'), 'https://q.qlogo.cn/g?b=qq&nk=10001&s=100',
+    'OneBot 私聊 ⇒ 个人头像');
+  assert.equal(avatarOf('onebot:group:group-abc'), null, '取不出号 ⇒ null（不瞎拼）');
+  assert.equal(avatarOf('qq:group:GROUP001'), null, '**官方 Bot 必须 null**：平台不给号，不许拿 openid 冒充');
+  assert.equal(avatarOf('qq:c2c:OPENID_C'), null);
+
+  // 每一行都带这一格（不是"有的行有、有的行没有"）：界面按字段存在与否分不出"没给"与"没有头像"
+  for (const row of body.sessions) {
+    assert.ok('avatarUrl' in row, `会话 ${row.sid} 缺 avatarUrl 这一格`);
+    assert.ok(row.avatarUrl === null || typeof row.avatarUrl === 'string');
+  }
+});
+
+// ──────────────── /api/context/breakdown：「当前上下文构成」看板的数据源 ────────────────
+//
+// 两态各一条：**有过真实请求** ⇒ 三组 + 两个百分比 + `notes`；**一次都没有** ⇒ `{empty:true}`。
+// 后者刻意不是"全零"：界面拿到全零会画一条 0% 的进度条，那是把"不知道"画成"很空"。
+
+/** 一条带完整归因的 `budget/consumed`（形状照 `model/context-audit.ts` 的 `ContextBreakdown`） */
+function consumedWithContext(overrides: { turn?: number; step?: number } = {}): Record<string, unknown> {
+  return {
+    ...consumedData(),
+    turn: overrides.turn ?? 12,
+    step: overrides.step ?? 3,
+    context: {
+      renderVersion: '80',
+      instructions: { tokens: 7000, hash: 'h-inst' },
+      tools: { tokens: 4000, hash: 'h-tools', count: 22 },
+      memory: { tokens: 2000, hash: 'h-mem' },
+      history: { tokens: 152000, hash: 'h-hist', items: 255, headHash: 'h-head' },
+      // 固定块只在每轮第 1 步发：这条夹具是第 3 步 ⇒ 没有它（读的一侧必须按"没有"处理）
+      now: { tokens: 3000, hash: 'h-now' },
+      wake: { tokens: 200, hash: 'h-wake' },
+      hint: { tokens: 0, hash: 'h-hint' },
+      input: { items: 260, tokens: 168200 },
+    },
+  };
+}
+
+test('GET /api/context/breakdown：一条真请求 ⇒ 三组、组内分段、两个百分比都算得出来', async (t) => {
+  const fx = await setup(t);
+  fx.append('budget/consumed', consumedWithContext({ turn: 12, step: 3 }));
+
+  const body = (await call(fx, '/api/context/breakdown')).body as {
+    at: string;
+    turn: number;
+    step: number;
+    total: { tokens: number; budgetTokens: number; ratio: number };
+    groups: Array<{ name: string; tokens: number; ratio: number; items: Array<{ name: string; tokens: number }> }>;
+    notes: { keepReasoning: boolean; renderVersion: string };
+  };
+
+assert.equal(body.empty, undefined, '有数就不是空态');
+  assert.equal(body.turn, 12);
+  assert.equal(body.step, 3, '取自哪一拍要说得出来（界面副行要写「取自 12:34 那一拍」）');
+  assert.equal(body.at, fx.now().toISOString());
+
+  // 三组，顺序固定：系统前缀 / 工具 / 对话（界面就按这个顺序画三行）
+  assert.deepEqual(body.groups.map((group) => group.name), ['系统前缀', '工具', '对话']);
+
+  // 系统前缀 = instructions + memory（都在 input 最前面，只随资产变化）
+  assert.deepEqual(body.groups[0]?.items, [
+    { name: '人格常驻层', tokens: 7000 },
+    { name: '长期记忆层', tokens: 2000 },
+  ]);
+  assert.equal(body.groups[0]?.tokens, 9000);
+  // 工具：件数写在名字里（这一版清单几件是唯一读数）
+  assert.deepEqual(body.groups[1]?.items, [{ name: '工具清单（22 件）', tokens: 4000 }]);
+  // 对话：history + state(没有) + now + wake + hint(0 ⇒ 不摆)
+  assert.deepEqual(body.groups[2]?.items, [
+    { name: '历史', tokens: 152000 },
+    { name: '此刻层', tokens: 3000 },
+    { name: '本轮新输入', tokens: 200 },
+  ]);
+  assert.equal(body.groups[2]?.tokens, 155200, '0 token 的段不摆出来（摆出来只是噪音）');
+
+  // 合计 = 三组之和（**不是**段外那个 input.tokens，也不是供方真值：见端点注释里那两条理由）
+  assert.equal(body.total.tokens, 9000 + 4000 + 155200);
+  // 分母是压缩线：与运行期那条判据同一个键
+  assert.equal(body.total.budgetTokens, fx.config.persona.compactionThresholdTokens);
+  assert.ok(Math.abs(body.total.ratio - body.total.tokens / body.total.budgetTokens) < 1e-9,
+    'total.ratio 的分母是压缩线');
+
+  // 组内占比合计 100%（界面上那三行是"这份请求里谁占得多"）
+  const sum = body.groups.reduce((acc, group) => acc + group.ratio, 0);
+  assert.ok(Math.abs(sum - 1) < 1e-9, `三组占比合计应为 1，实际 ${sum}`);
+  assert.ok(Math.abs((body.groups[2]?.ratio ?? 0) - 155200 / 168200) < 1e-9);
+
+  assert.equal(body.notes.renderVersion, '80', '渲染版本原样给（换版时这一格会变）');
+  assert.equal(typeof body.notes.keepReasoning, 'boolean');
+  assert.equal(body.notes.keepReasoning, true, '出厂口径是"区外也全传"（线上没有调用点传 omit）');
+});
+
+test('GET /api/context/breakdown：**最近一条**算数（后写的那拍覆盖前一条）', async (t) => {
+  const fx = await setup(t);
+  fx.append('budget/consumed', consumedWithContext({ turn: 1, step: 1 }));
+  fx.advance(60_000);
+  // 后一条小得多：若端点读错了边（读了第一条），total 会是大那个
+  fx.append('budget/consumed', {
+    ...consumedData(),
+    turn: 2,
+    step: 1,
+    context: {
+      renderVersion: '80',
+      instructions: { tokens: 10, hash: 'i' },
+      tools: { tokens: 5, hash: 't', count: 1 },
+      memory: { tokens: 0, hash: 'm' },
+      history: { tokens: 1, hash: 'h', items: 1, headHash: 'hh' },
+      now: { tokens: 1, hash: 'n' },
+      wake: { tokens: 0, hash: 'w' },
+      hint: { tokens: 0, hash: 'x' },
+      input: { items: 2, tokens: 17 },
+    },
+  });
+
+  const body = (await call(fx, '/api/context/breakdown')).body as {
+    turn: number; total: { tokens: number }; groups: Array<{ name: string; tokens: number }>;
+  };
+  assert.equal(body.turn, 2);
+  assert.equal(body.total.tokens, 17, '最后一条：10 + 5 + 1 + 1');
+  // 0 token 的段整组不出现（这一拍没有"长期记忆层"、没有"本轮新输入"）
+  assert.deepEqual(body.groups[0]?.name, '系统前缀');
+  assert.deepEqual(body.groups[0]?.tokens, 10);
+});
+
+test('GET /api/context/breakdown：从没有过真实请求 ⇒ `{empty:true}`（不是全零）', async (t) => {
+  const fx = await setup(t);
+  // 有日志、也有 budget/consumed，但**没有一条带归因**（这条改动之前的老日志就是这个形状）
+  fx.append('budget/consumed', consumedData());
+
+  const body = (await call(fx, '/api/context/breakdown')).body as Record<string, unknown>;
+  assert.deepEqual(body, { empty: true }, '空态只回这一格：界面据此显示「还没有请求过」');
+});
+
+test('GET /api/context/breakdown：没有 token 同样 401（与其余读端点一个门槛）', async (t) => {
+  const fx = await setup(t);
+  const res = await call(fx, '/api/context/breakdown', { token: null });
+  assert.equal(res.status, 401);
+  assert.equal(errorOf(res).code, 'unauthorized');
+});
+
+test('set-contact：写入用归一形态，并清掉同一个会话的旧写法（不留僵尸键）', async (t) => {  const fx = await setup(t);
   fx.config.persona.contacts['qq:group-at:GROUP001'] = '旧名字';
 
   const res = await call(fx, '/api/commands/set-contact', {

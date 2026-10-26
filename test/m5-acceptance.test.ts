@@ -1152,7 +1152,11 @@ describe('M5-11 冻结回归：同一历史渲染 100 次字节一致', () => {
 
     const renderOnce = (): string => bytesOf(render({
       events,
-      persona: { ...RENDER_PERSONA, relationship: { who: 'YG', content: '他只有一个名字。' } },
+      persona: {
+        ...RENDER_PERSONA,
+        // v78：关系档案只有索引（路径 / 字数 / 小节名）；正文不进上下文，框架不给读取指令
+        relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 7, sections: [] },
+      },
       tools: [{ name: 'read_file', description: '读文件', parameters: { type: 'object', properties: {} } }],
       wakeEvent: null,
       taskCard: taskCardOf(3, 2),

@@ -53,6 +53,9 @@ import {
 } from './runtime/job-manager.ts';
 import { EVENT_LOG_DIR_NAME } from './runtime/recover.ts';
 import { SkillManager, type SkillTrustState } from './skill/skills.ts';
+// `skill/index` 快照的**唯一写入实现**：`skill reindex` 与循环里那次重建共用同一份
+// （两条路写下的快照逐字段相同；理由见那个文件的文件头）
+import { writeSkillIndexSnapshot } from './skill/index-snapshot.ts';
 import { foldTopUps, writeTopUpRequest, type TopUpRequest, type TopUpTotals } from './runtime/topup.ts';
 import { answerHuman, type AnswerOutcome } from './runtime/plan-mode.ts';
 import { isCacheValid, loadProjectionCacheResult, PROJECTION_CACHE_FILE } from './state/projection-cache.ts';
@@ -87,6 +90,8 @@ export const USAGE: readonly string[] = [
   '                                        按版本库快照回滚人格文件并记 persona/updated{by:human}',
   '  skill list                            列出技能目录与其信任状态（已生效 / 待确认 / 被拒绝）',
   '  skill confirm <name> [--by B]         人类确认一个技能：写 skill/installed{by:human}（要求主进程未运行）',
+  '  skill reindex [--dry]                 人工归集一次：用当前信任表重建技能索引快照并追加 skill/index',
+  '                                        （要求主进程未运行；--dry 只打印将要写的内容与 seq，不写盘）',
   '  replay <turn> <step> [--out F] [--diff]',
   '                                        重建该次模型请求体（日志 + 三指纹）；--diff 与当前口径并排对照',
   '  export --from <seq> --to <seq> [--out F]',
@@ -598,8 +603,17 @@ export function summarizeEvent(event: AppEvent): string {
     case 'human/answered': return `${clip(event.data.answer, 60)}（by ${event.data.by}）`;
     case 'human/expired':
       return `未批准、未拒绝：${clip(event.data.question, 40)}（等了 ${Math.round(event.data.waitedMs / 60_000)} 分钟没人答）`;
+    // 超时的**处置**（2026-10-22）：那条待答作废、挂起解除、她继续干活。与上一行分开成两句，
+    // 因为"时间到了"与"框架把这件事办完了"是两件事（读日志的人要能一眼分开）。
+    case 'human/timed-out':
+      return `已按"未批准"处置：${clip(event.data.question, 40)}`
+        + `（等了 ${Math.round(event.data.waitedMs / 60_000)} 分钟没人答；挂起解除，她继续）`;
     case 'model/degraded': return `${event.data.lane} · ${clip(event.data.reason, 60)}`;
     case 'model/restored': return `${event.data.lane} 已恢复`;
+    // 模型切换（2026-10-26）：一行读成"哪条 lane 从哪个模型换到哪个模型"——缓存窗口从这一刻
+    // 重开（判据在 `runtime/cache-alert.ts` 的文件头 ①：窗口 = 同一 model 的最近 20 轮）。
+    case 'runtime/model-switch':
+      return `${event.data.lane} 换模型 ${event.data.from} → ${event.data.to}（缓存窗口从这一刻重开）`;
     case 'model/reasoning-echo': {
       // 思维链回传的处置账（v73）：一行要能回答"这一拍少了/放开了什么"。
       const data = event.data;
@@ -847,10 +861,15 @@ export interface SkillListReport {
 /**
  * 技能清单（只读）：扫描技能根，并用日志里折叠出的信任表裁决每个技能的生效状态。
  * 与运行期同一口径（同一份 SkillManager），所以「CLI 看到的」就是「模型看到的」。
+ *
+ * v79：技能根 = **数据目录**（`<dataDir>/skills`，与运行期那份 `SkillManager` 同一个
+ * `baseRoot`），`baseRoot` 这一格退为**兼容根**（`<cwd>/skills`）——数据目录里还没有
+ * 这一份时才用它。改之前这里按 cwd 扫，于是"运行环境搬走后 CLI 说有 7 个、实际她一个
+ * 都看不到"这种两套说法无从分辨；现在 CLI 与运行期读的是同一条判据（`planSkillRoots`）。
  */
 export function buildSkillList(dataDir: string, baseRoot: string = process.cwd()): SkillListReport {
   const events = readEventsReadOnly(join(dataDir, EVENT_LOG_DIR_NAME)).events;
-  const manager = new SkillManager({ baseRoot });
+  const manager = new SkillManager({ baseRoot: dataDir, compatBaseRoot: baseRoot });
   manager.setTrustEvents(events); // 信任门的真相源是日志，折叠口径只有一处
   const catalog = manager.catalog();
 
@@ -910,6 +929,9 @@ export type ConfirmSkillResult =
  * 与 `review resolve` 同款两道闸门：① 探锁（主进程活着就拒绝写，seq 撞号会让下次启动拒启）；
  * ② 校验技能真的存在且合规，绝不写一条指向空气的确认。确认绑定 SKILL.md 的内容哈希，
  * 之后内容被改动会自动退回待确认（design §4.19）。
+ *
+ * v79：与 `skill list` 同一条基准（数据目录 + cwd 兼容根）——确认的对象必须就是运行期
+ * 会扫到的那一份，否则"CLI 说确认了、catalog 里没有"又是两套说法。
  */
 export async function confirmSkill(
   dataDir: string,
@@ -927,7 +949,7 @@ export async function confirmSkill(
     };
   }
 
-  const manager = new SkillManager({ baseRoot });
+  const manager = new SkillManager({ baseRoot: dataDir, compatBaseRoot: baseRoot });
   const payload = manager.buildInstalledData(input.name, 'human');
   if (payload === null) {
     return {
@@ -953,6 +975,197 @@ export async function confirmSkill(
   } finally {
     log.close();
   }
+}
+
+// ──────────────────────────────── skill reindex：人工归集（2026-10-23） ────────────────────────────────
+
+export interface SkillReindexReport {
+  /** `true` = 这一次真写了一条 `skill/index`；`false` = 没写（为什么看 `skipped`） */
+  written: boolean;
+  /** 写下（真跑）或本该写下（`--dry`）的那条事件 seq；没写时给**已有快照**的 seq */
+  seq: number;
+  /** 进了索引的技能条数 */
+  entries: number;
+  /** 还在等信任门的条数 */
+  pending: number;
+  /** catalog 估算 token（含头部固定文案，与 `skill list` 同一个数） */
+  tokens: number;
+  /** 这一版索引的文本（真写时它就是请求里那一段，逐字节） */
+  text: string;
+  /** 快照的度量衡：写它时的 `RENDER_VERSION` */
+  version: string;
+  /** 最后一条 `compaction/summary` 的 seq（与循环那次同一口径） */
+  coveredSeq: number;
+  /** `true` = 只是演练（`--dry`：一个字节都没写） */
+  dry: boolean;
+  /** 为什么没写；写了就是 `null` */
+  skipped: 'empty' | 'unchanged' | null;
+}
+
+export type SkillReindexResult =
+  | { ok: true; report: SkillReindexReport }
+  // 2 = 参数/状态不对；3 = 主进程在跑（写入故障走上面那条"致命"兜底，退出码 1）
+  | { ok: false; code: 2 | 3; error: string };
+
+/**
+ * **由人发起的一次归集**：用当前信任表重建技能索引快照，并追加一条 `skill/index`。
+ *
+ * ──────────────────────────── 它治的是什么（2026-10-23 事故） ────────────────────────────
+ *
+ * 循环那三条判据（首次 / 模板换代 / 快照早于最后一次压缩）**刻意不含"技能目录变了"**——
+ * 那是缓存保护：否则每装一个技能就改一次请求前缀，等于没做保护（判据见
+ * `RealLoop.skillIndexSync` 方法头 ②）。代价是**快照可能长期落后于信任表**：迁移时
+ * `core.autocrlf` 把 SKILL.md 落成 CRLF，信任门失配，事故当场写下了只有 2 个技能的快照；
+ * 之后信任表修回 7 个，可三条判据一条都不成立 ⇒ 重启也不会重建，她的固定块里少 5 个技能，
+ * 要等下一次压缩摘要才补上。这一条命令就是那个缺口的**人工入口**：
+ * 人说完"现在就归集"，不必伪造一次压缩（那是往真相源里灌假事实），也不必等。
+ *
+ * ──────────────────────────── 与循环那次为什么逐字段相同 ────────────────────────────
+ *
+ * 构建文本与 event data 的**唯一实现**是 `skill/index-snapshot.ts` 的
+ * `writeSkillIndexSnapshot`，这里只是换了一个"怎么落库"的回调（循环是 `appendSync`，
+ * 这里是 `EventLog.append`）。`version` = 当前 `RENDER_VERSION`，`coveredSeq` =
+ * 日志里最后一条 `compaction/summary` 的 seq——**与循环同一口径**，没有新造事件类型、没有新字段。
+ *
+ * ──────────────────────────── 三条纪律 ────────────────────────────
+ *
+ *   ① **探锁**（与 `review resolve` / `skill confirm` 同源）：主进程活着就拒绝写（退出码 3）。
+ *      两个写者各自 `nextSeq` 必然撞号，而撞号的日志会让下一次启动被判「重复 seq」拒绝启动
+ *      ——用一次 CLI 操作把实例搞停，比"这一条晚点归集"严重得多。
+ *   ② **幂等**：内容与当前快照逐字节相同（且同代模板）⇒ **不写事件**（退出码 0）。
+ *      人点的这一下没有新的压缩要覆盖，字节没变还写一条纯属往日志里加噪声。
+ *   ③ **`--dry` 一个字节都不写**：它走的是**同一条代码路径**，只是把"落库"换成"凭空算一个 seq"
+ *      （`readEventsReadOnly` 的 `maxSeq + 1`）——于是演练打印的内容与真跑写下的**必然逐字节相同**，
+ *      不存在"演练跑了另一条分支"这种第二条真相。`--dry` 不探锁（它不写，没有撞号风险）。
+ */
+export async function reindexSkills(
+  dataDir: string,
+  options: { dry?: boolean } = {},
+  now: Date = new Date(),
+  baseRoot: string = process.cwd(),
+): Promise<SkillReindexResult> {
+  const dry = options.dry === true;
+  const eventsDir = join(dataDir, EVENT_LOG_DIR_NAME);
+
+  // 真跑才探锁（判据见上面 ①）；`--dry` 一个字节都不写，不拦它
+  if (!dry) {
+    const lock = readLockFile(join(dataDir, LOCK_FILE_NAME));
+    if (lock.alive === true) {
+      return {
+        ok: false,
+        code: 3,
+        error: `主进程正在运行（pid ${lock.pid ?? '?'}）：此刻写日志会让两个进程的 seq 撞号，`
+          + '日志下次启动会被判为「重复 seq」而拒绝启动。请先优雅停掉主进程再归集'
+          + '（只想先看会写什么就加 --dry，那条一个字节都不写）',
+      };
+    }
+  }
+
+  const scan = readEventsReadOnly(eventsDir);
+  // v79：与 `skill list` / 运行期同一条基准（数据目录 + cwd 兼容根）
+  const roots = { baseRoot: dataDir, compatBaseRoot: baseRoot };
+  if (dry) {
+    // 演练的 seq：按当前日志末尾估的下一条（真跑时由 `EventLog.nextSeq()` 给同一个数）
+    return { ok: true, report: runSkillReindex(scan.events, scan.maxSeq + 1, true, now, roots) };
+  }
+
+  const log = await EventLog.open(eventsDir);
+  try {
+    return { ok: true, report: runSkillReindex(scan.events, log.nextSeq(), false, now, roots, log) };
+  } finally {
+    log.close();
+  }
+}
+
+/**
+ * 归集一次并（真跑时）落库。`dry` 只决定"写不写盘"，**不决定写什么**——
+ * event data 与 seq 都由同一条路径算出来（判据见 [reindexSkills] 的 ③）。
+ */
+function runSkillReindex(
+  events: readonly AppEvent[],
+  nextSeq: number,
+  dry: boolean,
+  now: Date,
+  roots: { baseRoot: string; compatBaseRoot: string },
+  log: EventLog | null = null,
+): SkillReindexReport {
+  // 与 `skill list` 完全同一份口径：同一份 SkillManager、同一份信任事件折叠（真相源是日志）
+  const manager = new SkillManager({ baseRoot: roots.baseRoot, compatBaseRoot: roots.compatBaseRoot });
+  manager.setTrustEvents(events);
+
+  const result = writeSkillIndexSnapshot({
+    events,
+    catalog: manager.catalog(),
+    // `--dry` 时这个回调**照样会跑**，只是不 append：于是演练与真跑打印的是同一份字节
+    write: (data) => {
+      const event = {
+        seq: nextSeq,
+        ts: now.toISOString(),
+        type: 'skill/index',
+        data,
+        // 可见性照抄循环那个调用点（`appendSync('skill/index', …, 'internal')`）：
+        // 形状一致才谈得上"逐字段相同"（`EVENT_VISIBILITY` 里这一格也是 internal）
+        visibility: 'internal',
+        origin: 'cli',
+      } as unknown as AppEvent;
+      log?.append(event, { sync: true });
+      return event;
+    },
+    // 人点的这一下：内容没变就不写（判据见本段方法头 ②，实现见 index-snapshot 文件头末段）
+    skipWhenUnchanged: true,
+  });
+
+  return {
+    written: result.written,
+    seq: result.seq,
+    entries: result.entries,
+    pending: result.pending,
+    tokens: result.tokens,
+    text: result.text,
+    version: result.version,
+    coveredSeq: result.coveredSeq,
+    dry,
+    skipped: result.skipped,
+  };
+}
+
+/** `skill reindex [--dry]` 的输出：真跑一行结论；`--dry` 另把"将要写的 text"整段打出来 */
+export function formatSkillReindex(report: SkillReindexReport): string[] {
+  // 演练的每一行都带这个前缀：截屏/粘贴出来时不会有人把它当成"已经写了"
+  const lead = report.dry ? '（--dry：只打印，不写盘）' : '';
+
+  if (report.skipped === 'empty') {
+    return [
+      `${lead}一个可用技能都没有（信任表里没有已生效的）：空索引不写事件，`
+        + '与循环里那条 `skillIndexSync` ③ 是同一口径',
+    ];
+  }
+  if (report.skipped === 'unchanged') {
+    return [
+      report.dry
+        ? `${lead}索引已是最新（${report.entries} 个技能），真跑也不会写事件（现有快照 seq=${report.seq}）`
+        : `索引已是最新（${report.entries} 个技能），未写事件`,
+    ];
+  }
+
+  const lines = [
+    `${lead}技能索引已归集：${report.entries} 个技能（catalog 估算 ${report.tokens} token）· seq=${report.seq}`,
+  ];
+  if (!report.dry) {
+    lines.push(
+      `下一拍起固定块里那一段就是这 ${report.entries} 个（另有 ${report.pending} 个还在等信任门）；`
+        + '要逐字节核实就用 irmia replay <turn> <step>',
+    );
+    return lines;
+  }
+  lines.push(
+    `version=${report.version} · coveredSeq=${report.coveredSeq}`
+      + `（最后一条 compaction/summary 的 seq——与循环里那次重建同一口径）`,
+    `--- 将要写入的 text（${report.text.split('\n').length} 行；写完它就是请求里那一段）---`,
+    ...report.text.split('\n'),
+    '--- text 结束 ---',
+  );
+  return lines;
 }
 
 // ──────────────────────────────── budget：投影派生 ────────────────────────────────
@@ -1758,6 +1971,18 @@ function parseSkillConfirmArgs(args: readonly string[]): SkillConfirmParse {
   return { ok: true, value: { name, by } };
 }
 
+type SkillReindexParse = { ok: true; value: { dry: boolean } } | { ok: false; error: string };
+
+/** `skill reindex [--dry]`：只有这一个开关（多余的参数一律报错，不做"尽力而为"的猜测） */
+function parseSkillReindexArgs(args: readonly string[]): SkillReindexParse {
+  let dry = false;
+  for (const arg of args) {
+    if (arg === '--dry') dry = true;
+    else return { ok: false, error: `无法识别的参数：${arg}` };
+  }
+  return { ok: true, value: { dry } };
+}
+
 type PersonaLogParse = { ok: true; json: boolean } | { ok: false; error: string };
 
 function parsePersonaLogArgs(args: readonly string[]): PersonaLogParse {
@@ -2101,8 +2326,30 @@ export async function runCli(argv: readonly string[], io: CliIO, ctx: CliContext
       return 0;
     }
 
+    if (sub === 'reindex') {
+      const parsed = parseSkillReindexArgs(subArgs);
+      if (!parsed.ok) {
+        io.err(`skill reindex: ${parsed.error}`);
+        io.err(usageFor('skill reindex'));
+        return 2;
+      }
+      const result = await reindexSkills(
+        ctx.dataDir,
+        { dry: parsed.value.dry },
+        (ctx.now ?? (() => new Date()))(),
+        ctx.cwd ?? process.cwd(),
+      );
+      if (!result.ok) {
+        io.err(`skill reindex: ${result.error}`);
+        return result.code;
+      }
+      for (const line of formatSkillReindex(result.report)) io.out(line);
+      // 空索引（一个可用技能都没有）不是"成功归集"：退出码 2 才有脚本可判的语义
+      return result.report.skipped === 'empty' ? 2 : 0;
+    }
+
     io.err(sub === undefined
-      ? 'skill: 缺少子命令（list | confirm <name>）'
+      ? 'skill: 缺少子命令（list | confirm <name> | reindex [--dry]）'
       : `skill: 未知子命令 ${sub}`);
     io.err(usageFor('skill list'));
     return 2;

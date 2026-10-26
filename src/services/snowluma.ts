@@ -1153,7 +1153,7 @@ export class ManagedProtocolService {
  *
  * 为什么需要它：本次进程没起协议端（配置是启动之后才写下的、或者它是人手工跑的）时，
  * 那个口令只出现在**启动它的那一次**的 stdout 里。实测的现场正是这样：
- * `D:\IrmiaAgent\agent-console.out.log` 里留着
+ * `<安装根>\agent-console.out.log` 里留着
  * ```
  * [协议端] 01:26:39 INFO               [WebUI] initial credentials: user=admin password=d198b971dd2b7b03
  * ```
@@ -1187,8 +1187,12 @@ export function readCredentialFromLogFile(path: string): WebuiCredential | null 
  */
 export function defaultCredentialLogPaths(dir: string): string[] {
   const out: string[] = [];
-  for (const base of ['D:\\Irmia', 'D:\\irmia']) out.push(join(base, 'agent-console.out.log'));
-  // 兜底：数据目录猜"安装根"（`<root>/agent/data/…` 那种布局）
+  // 安装根由**数据目录**推导，候选表就是这几种布局（穷举、写死，不做目录爬取）：
+  //   ① 开发仓库形态：`<安装根>/dev/data` ⇒ 安装根是 data 的上两级
+  //   ② 装出来的形态：`<安装根>/agent/data` ⇒ 安装根是 data 的上三级
+  // ⚠️ 从前这里还列着某个具体安装根的两行绝对路径（两种大小写）——那等于把"某台机器装在哪"
+  //    写进了产品代码；2026-10-23 换成上面这两条推导，本机行为逐字不变。
+  out.push(resolve(dir, '..', '..', 'agent-console.out.log'));
   out.push(resolve(dir, '..', '..', '..', 'agent-console.out.log'));
   return out;
 }

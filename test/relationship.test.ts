@@ -8,6 +8,10 @@
  *   ② real-loop 与 replay 各写一份判据，口径随即漂移（real-loop 支持了 wake/channel，
  *      replay 还只认 webhook/manual），重放出来的请求与当时对不上。
  * 现在判据只有一份（`relationshipForWake`），本文件按**来源**逐条钉住它。
+ *
+ * **v78（2026-10-22）起它返回的是索引**（`{who, path, chars, sections}`），正文不再进这个
+ * 结构——本文件的断言跟着改成路径/字数/小节名。索引怎么渲染、正文怎么按需读，归
+ * `test/relationship-index.test.ts`（那一支是用户点名的四条验收）。
  */
 
 import assert from 'node:assert/strict';
@@ -52,14 +56,19 @@ after(() => {
 
 describe('关系档案路由 · 带人的三种来源', () => {
   test('手动唤醒（本机用户）：person 命中就注入', () => {
-    const dir = fixture({ OWNER: '# OWNER\n\n## 牵挂\n- 他还在改代码\n' });
+    const body = '# 阿岚\n\n## 牵挂\n- 他还在改代码\n';
+    const dir = fixture({ 阿岚: body });
     const note = relationshipForWake(
-      wake('wake/manual', { note: '在吗', person: 'OWNER' }),
+      wake('wake/manual', { note: '在吗', person: '阿岚' }),
       dir,
     );
     assert.ok(note, '用户在聊天框说话，档案必须进上下文');
-    assert.equal(note.who, 'OWNER');
-    assert.ok(note.content.includes('他还在改代码'));
+    assert.equal(note.who, '阿岚');
+    // v78：注入的是**索引**（路径 / 字数 / 小节名），正文要她自己 safe_read
+    assert.equal(note.path, 'persona/RELATIONSHIPS/阿岚.md');
+    assert.equal(note.chars, Array.from(body).length);
+    assert.deepEqual(note.sections, ['牵挂']);
+    assert.equal('content' in note, false, '正文不许进索引结构');
   });
 
   test('IM 来话（wake/channel）：按发送者标识命中', () => {
@@ -78,7 +87,7 @@ describe('关系档案路由 · 带人的三种来源', () => {
   });
 
   test('不带人的唤醒一律不注入', () => {
-    const dir = fixture({ OWNER: '# x\n' });
+    const dir = fixture({ 阿岚: '# x\n' });
     const withoutPerson: AppEvent[] = [
       wake('wake/manual', { note: '脚本注入' }),
       wake('wake/timer', { timerId: 't1', scheduledAt: 'x', firedAt: 'y' }),
@@ -117,14 +126,14 @@ describe('关系档案路由 · 边界', () => {
   });
 
   test('前后空白被裁掉后再找文件', () => {
-    const dir = fixture({ OWNER: '# x\n' });
-    assert.equal(relationshipForWake(wake('wake/manual', { note: 'x', person: '  OWNER  ' }), dir)?.who, 'OWNER');
+    const dir = fixture({ 阿岚: '# x\n' });
+    assert.equal(relationshipForWake(wake('wake/manual', { note: 'x', person: '  阿岚  ' }), dir)?.who, '阿岚');
   });
 });
 
 describe('ownerPersonOf · 手动唤醒该带谁', () => {
   test('正常取值去掉首尾空白', () => {
-    assert.equal(ownerPersonOf({ persona: { owner: ' OWNER ' } }), 'OWNER');
+    assert.equal(ownerPersonOf({ persona: { owner: ' 阿岚 ' } }), '阿岚');
   });
 
   test('空串回落 "owner"（不因为一个空字段就变成没有用户）', () => {
@@ -136,10 +145,10 @@ describe('ownerPersonOf · 手动唤醒该带谁', () => {
 describe('带人入口 · 看门文件（CLI irmia wake）', () => {
   test('person 落进看门文件，人会被主进程拾取', () => {
     const dir = fixture();
-    const path = writeWakeNote(dir, { note: '在吗', person: 'OWNER' }, new Date('2026-10-01T00:00:00.000Z'));
+    const path = writeWakeNote(dir, { note: '在吗', person: '阿岚' }, new Date('2026-10-01T00:00:00.000Z'));
     const payload = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     assert.equal(payload['note'], '在吗');
-    assert.equal(payload['person'], 'OWNER');
+    assert.equal(payload['person'], '阿岚');
   });
 
   test('不带人时不写 person 字段（脚本注入的形态）', () => {
@@ -160,7 +169,12 @@ describe('关系档案 · 会话级回退（她自己维护的"群"这一层）'
       wake('wake/channel', { channel: 'qq-official', chatType: 'group', person: 'stranger', chatId: 'GROUP1' }),
       dir,
     );
-    assert.deepEqual(note, { who: 'GROUP1', content: '这群一贯聊装机，气氛还行' });
+    assert.deepEqual(note, {
+      who: 'GROUP1',
+      path: 'persona/RELATIONSHIPS/GROUP1.md',
+      chars: 12,
+      sections: [],
+    });
   });
 
   test('发言者自己有档案时，优先用他自己的那本', () => {
@@ -169,7 +183,9 @@ describe('关系档案 · 会话级回退（她自己维护的"群"这一层）'
       wake('wake/channel', { channel: 'qq-official', chatType: 'group-at', person: '老张', chatId: 'GROUP1' }),
       dir,
     );
-    assert.deepEqual(note, { who: '老张', content: '熟人，说话客气' });
+    assert.equal(note?.who, '老张', '命中发言者自己的那一本');
+    assert.equal(note?.path, 'persona/RELATIONSHIPS/老张.md');
+    assert.equal(note?.chars, 7);
   });
 
   test('两个都没有 → null：不注入、不报错、不猜', () => {
@@ -195,14 +211,14 @@ describe('关系档案 · 会话级回退（她自己维护的"群"这一层）'
   });
 
   test('QQ 单聊：openid 经 aliases 解析成人名后**命中人名档案**（2026-10-05 修的真 bug）', () => {
-    // 现场形状：档案文件名是人名（`RELATIONSHIPS/OWNER.md`），而唤醒里的 person 是 openid。
+    // 现场形状：档案文件名是人名（`RELATIONSHIPS/阿岚.md`），而唤醒里的 person 是 openid。
     // 不做身份归一 ⇒ 拿 openid 找文件必然落空 ⇒ 他在 QQ 单聊里说话没有档案、在 GUI 里说话却有。
-    const dir = fixture({ OWNER: '他是我用户。' });
+    const dir = fixture({ 阿岚: '他是我用户。' });
     const mem = join(dir, 'workspace', 'MEMORIES');
     mkdirSync(mem, { recursive: true });
     writeFileSync(
       join(mem, 'aliases.md'),
-      '# 别名\nqq:c2c:OPENID1 = OWNER（用户）\n',
+      '# 别名\nqq:c2c:OPENID1 = 阿岚（用户）\n',
       'utf8',
     );
     const note = relationshipForWake(
@@ -211,8 +227,9 @@ describe('关系档案 · 会话级回退（她自己维护的"群"这一层）'
       }),
       dir,
     );
-    assert.equal(note?.who, 'OWNER', '解析出来的人名要用于寻址');
-    assert.equal(note?.content, '他是我用户。');
+    assert.equal(note?.who, '阿岚', '解析出来的人名要用于寻址');
+    assert.equal(note?.path, 'persona/RELATIONSHIPS/阿岚.md', '路径也用解析后的名字');
+    assert.equal(note?.chars, Array.from('他是我用户。').length);
   });
 
   test('没有 aliases 表时行为与从前一致：不猜、不报错（群/成员档案仍按 sid 命中）', () => {

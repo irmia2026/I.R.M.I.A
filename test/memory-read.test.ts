@@ -38,7 +38,7 @@ const FACTS = [
   '- [!pinned] [valid 2026-01-01] (source: turn 3) 用户对花生过敏',  // 4
   '',                                     // 5
   '## 稳定事实',                           // 6
-  '- [valid 2026-09-30] (source: config.json persona.owner) 本机用户 = OWNER', // 7
+  '- [valid 2026-09-30] (source: config.json persona.owner) 本机用户 = 阿岚', // 7
   '  - 子项甲：他周五下午通常开例会',        // 8
   '  - 子项乙：他讨厌八股过渡',              // 9
   '- [valid 2026-10-02] 喝茶不挑',          // 10
@@ -126,7 +126,7 @@ test('memory_read：给 lines 能读一条 + 它的缩进子项', async (t) => {
   const h = await fixture(t);
   const res = await h.tool.handler({ path: 'MEMORIES/facts.md', line: 7, lines: 3 }, h.ctx);
   assert.equal(res.isError, undefined, res.content);
-  assert.match(res.content, /OWNER/u);
+  assert.match(res.content, /阿岚/u);
   assert.match(res.content, /子项甲/u);
   assert.match(res.content, /子项乙/u);
   assert.ok(!res.content.includes('喝茶不挑'), 'lines=3 不该越到第 10 行');
@@ -254,7 +254,7 @@ test('memory_read：读成功落一条 memory/read，**只放指针、不放正�
 
   // **正文一个字都不许进事件**（与 memory/selected 同一条纪律：内容已经作为工具结果留在历史里）
   const serialized = JSON.stringify(reads[0]);
-  assert.ok(!serialized.includes('OWNER'), `事件里不许有正文：${serialized}`);
+  assert.ok(!serialized.includes('阿岚'), `事件里不许有正文：${serialized}`);
   assert.ok(!serialized.includes('子项甲'), `事件里不许有正文：${serialized}`);
 });
 
@@ -341,7 +341,7 @@ test('memory_read ①：按**编号**取那一条正文（编号 = 当次全量�
   assert.match(res.content, /喝茶不挑/u, '要取到那一条的正文');
   assert.match(res.content, new RegExp(`MEMORIES/facts\\.md:${all[at]!.line}`, 'u'), '回执带指针');
   // **不是整个文件**：只该有那一条（默认 1 行）
-  assert.ok(!res.content.includes('OWNER'), `只给那一条，不许带别的条目：\n${res.content}`);
+  assert.ok(!res.content.includes('阿岚'), `只给那一条，不许带别的条目：\n${res.content}`);
   // 访问账照记（走的是与指针那条**完全相同的读法**）
   const read = h.events.filter((e) => e.type === 'memory/read');
   assert.equal(read.length, 1, '按编号读也要落访问账');
@@ -377,7 +377,7 @@ test('memory_read ②：自然语言查询有命中 ⇒ 回**编号 + 指针 + �
   assert.match(res.content, /^\d+\. `MEMORIES\//mu, '每行要给编号与指针');
   assert.match(res.content, /分数=\d+\.\d\d/u, '分数是可核对的凭据');
   // **默认只给编号+摘要**（要正文再按编号取）——所以正文不该在这里
-  assert.ok(!res.content.includes('OWNER'), `query 不直接给正文：\n${res.content}`);
+  assert.ok(!res.content.includes('阿岚'), `query 不直接给正文：\n${res.content}`);
   // 访问账**不记**（这一条只回指针与摘要，没取正文——记成"被读过"是假数据）
   assert.equal(h.events.filter((e) => e.type === 'memory/read').length, 0, 'query 不落访问账');
 });
@@ -584,7 +584,7 @@ test('memory_read：访问账真的落进事件日志，且盘上没有正文', 
   assert.match(reads[1]!, /"pinned":true/u, 'pinned 标记要落进去');
 
   // **盘上没有正文**：这是"只放指针"的盘上证据
-  assert.ok(!onDisk.includes('OWNER'), `日志里不许有正文：\n${onDisk}`);
+  assert.ok(!onDisk.includes('阿岚'), `日志里不许有正文：\n${onDisk}`);
   assert.ok(!onDisk.includes('子项甲'), `日志里不许有正文：\n${onDisk}`);
   assert.ok(!onDisk.includes('花生过敏'), `日志里不许有正文：\n${onDisk}`);
 });

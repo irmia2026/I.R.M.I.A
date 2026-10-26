@@ -1,16 +1,18 @@
 /**
- * 启动入口的纯函数段 —— `src/main.ts`（REVIEW P1-29：唯一的生产装配入口零覆盖）
+ * 启动入口的判据段 —— `src/main.ts`（REVIEW P1-29：唯一的生产装配入口零覆盖）
  *
- * 这一份**不起任何真进程**，也不碰仓库里的任何文件：它只盯 `main.ts` 里那几条"判据型"
- * 纯函数——它们在 2026-10-18 之前是 `runMain` / `main` 的行内表达式，谁也测不到。
+ * 这一份**不起任何真进程**：它只盯 `main.ts` 里那几条"判据型"函数——它们在 2026-10-18
+ * 之前是 `runMain` / `main` 的行内表达式，谁也测不到。它建的是**真目录与真 config.json**
+ * （`loadConfig` 的解析本来就是那段判据的一部分），但不建数据目录、不开日志、不抢锁。
  *
  * 要守住的三件事（每一条都对应一个启动期的真实失败形状）：
- *   ① `resolveDataDir`：数据目录的取值链是 **参数 > `IRMIA_DATA_DIR` > `<cwd>/data`**。
- *      弄错的后果不是报错，而是**静默起在另一个 data 目录上**（两份并行事实）。
- *   ② `isDirectRun`：`process.argv[1]` 与本模块的比对决定"这是入口还是被 import"。
- *      判错的后果很凶：被 import 时也跑 `main()`，测试进程会去抢单实例锁。
- *   ③ `startupExitCode` / `startupFailureLine`：启动失败必须是 **exit 1 + 一行**
- *      `[致命] 启动失败：…`（守护脚本与重启脚本读的就是这两样）。
+ *   ① 数据目录的取值链：**`--data-dir` 参数 > `IRMIA_DATA_DIR` > config.json 的 `dataDir`
+ *      > `<cwd>/data`**（2026-10-23 补上第三档）。弄错的后果不是报错，而是**静默起在另一个
+ *      data 目录上**（两份并行事实）——现场那次：key 从配置那份 `.keys.json` 读到、事件却写进
+ *      `<cwd>/data`，启动摘要写着 `最大 seq 0`，而真实的 235197 条在另一个目录里。
+ *   ② 数据目录与配置**必须一致**：`config.dataDir`（key / 协议端目录 / 依赖自装目录读的那一格）
+ *      与生效 `dataDir`（事件 / 人格 / 锁写的那一格）一旦分家，就是上面那种脑裂。
+ *   ③ `isDirectRun` / `startupExitCode` / `startupFailureLine`：入口判定与失败回执的形状。
  *
  * ⚠️ 范围说清：`runMain` 本体（建目录 / 开日志 / 抢锁 / 起模型 / 装配各通道）**没有被覆盖**，
  * 那需要真起进程与真数据目录，不在本笔内。这份用例只保证"抽出来的判据是对的"。
@@ -18,7 +20,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, test } from 'node:test';
 
@@ -26,47 +28,284 @@ import {
   DEFAULT_DATA_DIR_NAME,
   describeLaneReadout,
   isDirectRun,
+  parseMainArgs,
+  pinDataDir,
   renderStartupSummary,
   resolveDataDir,
+  resolveStartupPaths,
   startupExitCode,
   startupFailureLine,
 } from '../src/main.ts';
-import { defaultConfig } from '../src/config/config.ts';
+import { configHash, defaultConfig, loadConfig } from '../src/config/config.ts';
 import type { PersonaAssets } from '../src/persona/loader.ts';
 import type { RecoverResult } from '../src/runtime/recover.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
-describe('resolveDataDir · 数据目录的取值链：参数 > 环境变量 > <cwd>/data', () => {
-  test('显式参数优先于环境变量（两条都给时用参数）', () => {
-    const dataDir = resolveDataDir({
+describe('resolveDataDir · 数据目录的取值链：参数 > 环境变量 > 配置 > <cwd>/data', () => {
+  const cwd = join('F:', 'cwd');
+
+  test('① 只有 config.json 的 dataDir ⇒ 用它（这是 2026-10-23 修掉的那一档）', () => {
+    const resolved = resolveDataDir({ env: {}, cwd, configDataDir: join('G:', 'from-config') });
+    assert.equal(resolved.dataDir, join('G:', 'from-config'));
+    assert.equal(resolved.source, 'config');
+  });
+
+  test('② 环境变量覆盖 config.json 的 dataDir', () => {
+    const resolved = resolveDataDir({
+      env: { IRMIA_DATA_DIR: join('E:', 'from-env') },
+      cwd,
+      configDataDir: join('G:', 'from-config'),
+    });
+    assert.equal(resolved.dataDir, join('E:', 'from-env'));
+    assert.equal(resolved.source, 'env');
+  });
+
+  test('③ --data-dir 参数覆盖环境变量（三档都给时用参数）', () => {
+    const resolved = resolveDataDir({
       dataDir: join('D:', 'explicit'),
       env: { IRMIA_DATA_DIR: join('E:', 'from-env') },
-      cwd: join('F:', 'cwd'),
+      cwd,
+      configDataDir: join('G:', 'from-config'),
     });
-    assert.equal(dataDir, join('D:', 'explicit'));
+    assert.equal(resolved.dataDir, join('D:', 'explicit'));
+    assert.equal(resolved.source, 'flag');
   });
 
-  test('没有参数时用 IRMIA_DATA_DIR（变量名就是这个，不是别的名字）', () => {
-    const dataDir = resolveDataDir({
-      dataDir: undefined,
-      env: { IRMIA_DATA_DIR: join('E:', 'from-env') },
-      cwd: join('F:', 'cwd'),
-    });
-    assert.equal(dataDir, join('E:', 'from-env'));
-  });
-
-  test('两处都没有时落到 <cwd>/data（出厂目录名 data）', () => {
-    const cwd = join('F:', 'cwd');
+  test('④ 三档都没有 ⇒ 落到 <cwd>/data（出厂目录名 data）', () => {
     assert.equal(DEFAULT_DATA_DIR_NAME, 'data');
-    assert.equal(resolveDataDir({ env: {}, cwd }), join(cwd, 'data'));
+    const resolved = resolveDataDir({ env: {}, cwd });
+    assert.equal(resolved.dataDir, join(cwd, 'data'));
+    assert.equal(resolved.source, 'cwd');
   });
 
-  test('环境变量存在但值是空串时**不会**回落到 cwd（现状语义：空串也是"给了值"）', () => {
+  test('⑤ 相对路径不在这里展开：config 那一档交进来的**已经是绝对路径**（见 loadConfig 的用例）', () => {
+    // 这条钉的是"职责分工"，不是"忘了展开"：把相对路径解析成绝对路径只有一处实现
+    // （`config.ts` 的 `parseAppConfig`，基准是**配置文件所在目录**而不是 cwd）。
+    const resolved = resolveDataDir({ env: {}, cwd, configDataDir: join('G:', 'cfg', 'mydata') });
+    assert.equal(resolved.dataDir, join('G:', 'cfg', 'mydata'));
+  });
+
+  test('环境变量存在但值是空串时**不会**回落到下一档（现状语义：空串也是"给了值"）', () => {
     // 这条不是在夸它，而是在钉住现状：`??` 只看 null/undefined，空串会被原样交给
     // runMain（那里的 mkdirSync 会当场报错，不是静默换目录）。哪天要改成"空串当没给"，
     // 这条用例应当被**显式改掉**，而不是悄悄变绿。
-    assert.equal(resolveDataDir({ env: { IRMIA_DATA_DIR: '' }, cwd: join('F:', 'cwd') }), '');
+    const resolved = resolveDataDir({ env: { IRMIA_DATA_DIR: '' }, cwd, configDataDir: join('G:', 'x') });
+    assert.equal(resolved.dataDir, '');
+    assert.equal(resolved.source, 'env');
+  });
+});
+
+describe('parseMainArgs · 命令行里的 --data-dir / --config / --port（认不出来的一律忽略）', () => {
+  test('两种写法都认：`--data-dir X` 与 `--data-dir=X`', () => {
+    assert.equal(parseMainArgs(['--data-dir', join('D:', 'a')]).dataDir, join('D:', 'a'));
+    assert.equal(parseMainArgs([`--data-dir=${join('D:', 'b')}`]).dataDir, join('D:', 'b'));
+  });
+
+  test('`--config` 同样两种写法（它可以在目录、也可以直接指 config.json）', () => {
+    assert.equal(parseMainArgs(['--config', join('D:', 'cfg')]).configPath, join('D:', 'cfg'));
+    assert.equal(parseMainArgs([`--config=${join('D:', 'cfg', 'config.json')}`]).configPath,
+      join('D:', 'cfg', 'config.json'));
+  });
+
+  // ── `--port`（2026-10 多实例）：界面给新实例选好的空闲端口必须**当场交给进程** ──
+  test('`--port` 两种写法都认，且只认合法端口；非法值当没给（宽容解析的一条）', () => {
+    assert.equal(parseMainArgs(['--port', '7789']).port, 7789);
+    assert.equal(parseMainArgs(['--port=7801']).port, 7801);
+    for (const bad of ['0', '70000', 'abc', '-1', '']) {
+      const args = parseMainArgs([`--port=${bad}`]);
+      assert.equal(args.port, undefined, `非法端口当没给：${bad}`);
+      assert.ok(args.ignored.length >= 1, '并且要留在 ignored 里（诊断时看得见）');
+    }
+  });
+
+  test('`--port` 与另外两个参数一起给：三格各自落地、互不吞', () => {
+    const args = parseMainArgs([
+      '--data-dir', join('D:', 'data'), '--config', join('D:', 'cfg'), '--port', '7790',
+    ]);
+    assert.equal(args.dataDir, join('D:', 'data'));
+    assert.equal(args.configPath, join('D:', 'cfg'));
+    assert.equal(args.port, 7790);
+    assert.deepEqual(args.ignored, []);
+  });
+
+  test('别的参数一律忽略、不报错：拉起器会追加 `--kill-tag=…`，它不该让进程起不来', () => {
+    const args = parseMainArgs(['--kill-tag=probe-4711', '--data-dir', join('D:', 'a')]);
+    assert.equal(args.dataDir, join('D:', 'a'));
+    assert.deepEqual(args.ignored, ['--kill-tag=probe-4711']);
+  });
+
+  test('空值（`--data-dir=`）当没给：手滑不该让无人值守进程起不来', () => {
+    const args = parseMainArgs(['--data-dir=', '--config', '']);
+    assert.equal(args.dataDir, undefined);
+    assert.equal(args.configPath, undefined);
+    assert.deepEqual(args.ignored, ['--data-dir=', '--config']);
+  });
+
+  test('一个参数都没给 ⇒ 三个都不设（走缺省：<cwd>/config.json 与它的 dataDir / web.port）', () => {
+    const args = parseMainArgs([]);
+    assert.equal(args.dataDir, undefined);
+    assert.equal(args.configPath, undefined);
+    assert.equal(args.port, undefined);
+    assert.deepEqual(args.ignored, []);
+  });
+});
+
+// ──────────────────────── 启动期"配置→数据目录"的整条链 ────────────────────────
+//
+// 这一组用**真目录 + 真 config.json**：`loadConfig` 的解析（尤其"相对路径相对配置文件"）
+// 本来就是判据的一部分，拿假的配置对象测等于把它跳过去。
+
+/** 一份最小的 config.json 文档（其余字段全走默认值，与手写配置的常见形态一致） */
+function writeConfig(configDir: string, doc: Record<string, unknown>): string {
+  mkdirSync(configDir, { recursive: true });
+  const path = join(configDir, 'config.json');
+  writeFileSync(path, `${JSON.stringify({ schemaVersion: 1, ...doc }, null, 2)}\n`, 'utf8');
+  return path;
+}
+
+describe('resolveStartupPaths · 先定配置、再定数据目录（顺序即判据）', () => {
+  test('① 配置里写 dataDir ⇒ 用它；来源 config；且它被**钉进** config.dataDir', async () => {
+    const root = tempDirSync('irmia-startup-config-');
+    const configDir = join(root, 'cfg');
+    const dataDir = join(root, 'elsewhere');
+    const configPath = writeConfig(configDir, { dataDir });
+
+    const startup = await resolveStartupPaths({ configPath: configPath, env: {}, cwd: join(root, 'cwd') });
+
+    assert.equal(resolve(startup.dataDir), resolve(dataDir));
+    assert.equal(startup.source, 'config');
+    assert.equal(startup.configDataDir, dataDir);
+    // 决定性的那一条：config.dataDir（keys / 协议端目录读它）与生效 dataDir 必须是同一个
+    assert.equal(resolve(startup.loaded.config.dataDir), resolve(startup.dataDir));
+    assert.equal(startup.loaded.path, resolve(configPath));
+  });
+
+  test('② 环境变量覆盖配置（并说明"配置那一格被覆盖"这条读数拿得到原值）', async () => {
+    const root = tempDirSync('irmia-startup-env-');
+    const configDir = join(root, 'cfg');
+    const fromConfig = join(root, 'from-config');
+    const fromEnv = join(root, 'from-env');
+    writeConfig(configDir, { dataDir: fromConfig });
+
+    const startup = await resolveStartupPaths({
+      configPath: configDir,
+      env: { IRMIA_DATA_DIR: fromEnv },
+      cwd: join(root, 'cwd'),
+    });
+
+    assert.equal(resolve(startup.dataDir), resolve(fromEnv));
+    assert.equal(startup.source, 'env');
+    // 配置里写的那个原值要留着（启动日志那句"配置写的是 …，本次不生效"靠它）
+    assert.equal(startup.configDataDir, fromConfig);
+    // 生效之后配置对象与它一致：否则 key 走一套、事件走另一套（脑裂）
+    assert.equal(resolve(startup.loaded.config.dataDir), resolve(fromEnv));
+  });
+
+  test('③ --data-dir 覆盖环境变量与配置', async () => {
+    const root = tempDirSync('irmia-startup-flag-');
+    const configDir = join(root, 'cfg');
+    writeConfig(configDir, { dataDir: join(root, 'from-config') });
+
+    const startup = await resolveStartupPaths({
+      dataDir: join(root, 'from-flag'),
+      env: { IRMIA_DATA_DIR: join(root, 'from-env') },
+      cwd: join(root, 'cwd'),
+    });
+
+    assert.equal(resolve(startup.dataDir), resolve(join(root, 'from-flag')));
+    assert.equal(startup.source, 'flag');
+  });
+
+  test('④ 配置里没写 dataDir ⇒ 来源 cwd、值 <cwd>/data（不是别的目录名）', async () => {
+    const root = tempDirSync('irmia-startup-cwd-');
+    const configDir = join(root, 'cfg');
+    const cwd = join(root, 'cwd');
+    writeConfig(configDir, {});
+    mkdirSync(cwd, { recursive: true });
+
+    const startup = await resolveStartupPaths({ configPath: configDir, env: {}, cwd });
+
+    assert.equal(startup.configDataDir, null, '没写就是 null（"配置指定了"与"用了默认值"必须分得开）');
+    assert.equal(startup.source, 'cwd');
+    assert.equal(resolve(startup.dataDir), resolve(join(cwd, 'data')));
+  });
+
+  test('⑤ 配置里的**相对** dataDir 相对配置文件所在目录解析（不是 cwd）', async () => {
+    const root = tempDirSync('irmia-startup-rel-');
+    const configDir = join(root, 'cfg');
+    const cwd = join(root, 'cwd');
+    const configPath = writeConfig(configDir, { dataDir: 'mydata' });
+    mkdirSync(cwd, { recursive: true });
+
+    const startup = await resolveStartupPaths({ configPath, env: {}, cwd });
+
+    assert.equal(startup.source, 'config');
+    assert.equal(resolve(startup.dataDir), resolve(join(configDir, 'mydata')),
+      '相对路径的基准是配置目录，不是 cwd');
+    assert.notEqual(resolve(startup.dataDir), resolve(join(cwd, 'mydata')));
+  });
+
+  test('⑥ 回归（防脑裂）：<cwd>/data 存在，但配置指向别处 ⇒ **不许**读 cwd 的那份', async () => {
+    const root = tempDirSync('irmia-startup-split-');
+    const configDir = join(root, 'cfg');
+    const cwd = join(root, 'cwd');
+    const dataDir = join(root, 'real-data');
+    // cwd 下有一份"看起来像数据目录"的 data（现场那次就是这样：它先被建出来、写进了新事件）
+    mkdirSync(join(cwd, 'data', 'events'), { recursive: true });
+    writeFileSync(join(cwd, 'data', '.keys.json'), JSON.stringify({ heavy: 'sk-from-cwd' }), 'utf8');
+    writeConfig(configDir, { dataDir });
+
+    const startup = await resolveStartupPaths({ configPath: configDir, env: {}, cwd });
+
+    assert.equal(resolve(startup.dataDir), resolve(dataDir));
+    assert.equal(startup.source, 'config');
+    assert.notEqual(resolve(startup.dataDir), resolve(join(cwd, 'data')),
+      '<cwd>/data 存在也不能被选中——它正是那次"事件写进另一套"的落点');
+    // 连配置对象那一格也必须是配置说的那个：keys 与事件同源
+    assert.equal(resolve(startup.loaded.config.dataDir), resolve(dataDir));
+  });
+
+  test('--config 可以直接指 config.json 本身（目录与文件两种写法等价）', async () => {
+    const root = tempDirSync('irmia-startup-cfgpath-');
+    const configDir = join(root, 'cfg');
+    const configPath = writeConfig(configDir, { dataDir: join(root, 'data1') });
+
+    const byFile = await resolveStartupPaths({ configPath, env: {}, cwd: root });
+    const byDir = await resolveStartupPaths({ configPath: configDir, env: {}, cwd: root });
+
+    assert.equal(byFile.configDir, byDir.configDir);
+    assert.equal(resolve(byFile.dataDir), resolve(byDir.dataDir));
+  });
+
+  test('configHash 跟着生效配置走：钉了 dataDir 之后指纹与 configHash(config) 一致', async () => {
+    const root = tempDirSync('irmia-startup-hash-');
+    const configDir = join(root, 'cfg');
+    writeConfig(configDir, { dataDir: join(root, 'a') });
+
+    const startup = await resolveStartupPaths({
+      dataDir: join(root, 'b'),
+      env: {},
+      cwd: root,
+    });
+
+    assert.equal(startup.loaded.configHash, configHash(startup.loaded.config));
+  });
+});
+
+describe('pinDataDir · 生效数据目录钉进配置对象（"两边一致"的唯一一处实现）', () => {
+  test('值不同 ⇒ 改它并重算 configHash；值相同 ⇒ 一个字都不动', async () => {
+    const dir = tempDirSync('irmia-pin-');
+    const loaded = await loadConfig(dir);
+    const before = loaded.configHash;
+
+    pinDataDir(loaded, loaded.config.dataDir);
+    assert.equal(loaded.configHash, before, '同一个值不该改指纹');
+
+    pinDataDir(loaded, join(dir, 'other'));
+    assert.equal(loaded.config.dataDir, join(dir, 'other'));
+    assert.equal(loaded.configHash, configHash(loaded.config), '指纹描述的是**生效配置**');
+    assert.notEqual(loaded.configHash, before);
   });
 });
 
@@ -139,9 +378,56 @@ describe('renderStartupSummary · 启动摘要里的四件事（水位/待办/�
     } as unknown as RecoverResult;
   }
 
+  /**
+   * 摘要的头三行（2026-10-23 加）：`数据目录` / `配置` / `数据来源`。
+   *
+   * 为什么单独钉这三行：现场那次脑裂的全部症状就是这三件事对不上，而当时摘要里只有第一行
+   * ——"配置说 A、实际写进 B"因此读不出来。三行必须同时出现、且逐字是那三个标签。
+   */
+  test('头三行必须同时出现：数据目录 / 配置 / 数据来源（一行都不许少）', () => {
+    const configPath = join('D:', 'app', 'config.json');
+    const text = renderStartupSummary({
+      dataDir: join('D:', 'data'),
+      configPath,
+      dataDirSource: 'config',
+      recovery: recoveryOf(),
+      timers: new TimerStore(null),
+      startTurn: 0,
+      mode: 'real',
+      persona,
+    });
+    assert.ok(text.includes(`数据目录: ${join('D:', 'data')}`), text);
+    assert.ok(text.includes(`配置: ${configPath}`), text);
+    assert.ok(text.includes('数据来源: config'), text);
+    // 三行必须是连续的（中间不许被别的读数插进去：它们说的是同一件事）
+    const lines = text.split('\n');
+    const head = lines.indexOf(`数据目录: ${join('D:', 'data')}`);
+    assert.equal(lines[head + 1], `配置: ${configPath}`);
+    assert.equal(lines[head + 2], '数据来源: config');
+  });
+
+  test('三种来源逐字都在（config / env / cwd；参数那一档是 flag）', () => {
+    type Source = Parameters<typeof renderStartupSummary>[0]['dataDirSource'];
+    for (const source of ['config', 'env', 'cwd', 'flag'] as Source[]) {
+      const text = renderStartupSummary({
+        dataDir: join('D:', 'data'),
+        configPath: join('D:', 'app', 'config.json'),
+        dataDirSource: source,
+        recovery: recoveryOf(),
+        timers: new TimerStore(null),
+        startTurn: 0,
+        mode: 'real',
+        persona,
+      });
+      assert.ok(text.includes(`数据来源: ${source}`), text);
+    }
+  });
+
   test('真循环：模式那句是"真循环（已配置模型）"，且四项读数逐项在', () => {
     const text = renderStartupSummary({
       dataDir: join('D:', 'data'),
+      configPath: join('D:', 'app', 'config.json'),
+      dataDirSource: 'config',
       recovery: recoveryOf(),
       timers: new TimerStore(null),
       startTurn: 7,
@@ -163,6 +449,8 @@ describe('renderStartupSummary · 启动摘要里的四件事（水位/待办/�
   test('假循环：没有 API key 时摘要必须说"假循环（仅写事件不调模型）"', () => {
     const text = renderStartupSummary({
       dataDir: join('D:', 'data'),
+      configPath: join('D:', 'app', 'config.json'),
+      dataDirSource: 'cwd',
       recovery: recoveryOf(),
       timers: new TimerStore(null),
       startTurn: 0,
@@ -175,6 +463,8 @@ describe('renderStartupSummary · 启动摘要里的四件事（水位/待办/�
   test('种子人格：摘要必须说出来（不填人格 = 出来的是默认配置）', () => {
     const text = renderStartupSummary({
       dataDir: join('D:', 'data'),
+      configPath: join('D:', 'app', 'config.json'),
+      dataDirSource: 'config',
       recovery: recoveryOf(),
       timers: new TimerStore(null),
       startTurn: 0,
@@ -188,6 +478,8 @@ describe('renderStartupSummary · 启动摘要里的四件事（水位/待办/�
   test('未闭合 turn 与恢复补偿：有就逐条列，没有就不出现"补偿 0 项"', () => {
     const withFacts = renderStartupSummary({
       dataDir: join('D:', 'data'),
+      configPath: join('D:', 'app', 'config.json'),
+      dataDirSource: 'config',
       recovery: recoveryOf({ openTurn: { turn: 9 }, repairs: ['把悬空工具调用标成 unknown'] }),
       timers: new TimerStore(null),
       startTurn: 9,
@@ -200,6 +492,8 @@ describe('renderStartupSummary · 启动摘要里的四件事（水位/待办/�
 
     const clean = renderStartupSummary({
       dataDir: join('D:', 'data'),
+      configPath: join('D:', 'app', 'config.json'),
+      dataDirSource: 'config',
       recovery: recoveryOf({ repairs: [] }),
       timers: new TimerStore(null),
       startTurn: 9,
@@ -294,3 +588,4 @@ describe('describeLaneReadout · 两条 lane 的启动读数（端点 + 密钥�
     assert.ok(line.includes('压过密钥文件'), line, '这正是"填了新 key 却还是 401"的唯一解释');
   });
 });
+

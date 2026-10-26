@@ -23,8 +23,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import test, { describe } from 'node:test';
 
 import type { AppEvent, Visibility } from '../src/log/types.js';
@@ -55,6 +55,7 @@ import { TimerStore } from '../src/wake/timer-store.ts';
 import {
   FixtureClock, createVirtualClock, eventsOf, makeHarness, type EventHarness,
 } from './helpers/m8-fixtures.ts';
+import { tempDirSync } from './helpers/temp-dirs.ts';
 
 const TURN = 3;
 
@@ -960,4 +961,102 @@ describe('M8-9 workspace 文件版本', () => {
       /不在工作区内/,
     );
   });
+
+  /**
+   * **经链接到达的路径照样能建快照**（2026-10-23 修，现场见 `util/real-path.ts` 的文件头）
+   *
+   * 病灶：`path-guard` 交出来的是**展开后**的真路径，而 `ctx.workspaceRoot` 是字面路径。
+   * 老写法拿这两者算相对路径 ⇒ 只要中间有任何一段是链接（她的 `data` 根就是），
+   * 就一定算出 `..\..\data\...` ⇒ 文件写进去了、快照却被跳过（现场原话：
+   * "路径不在工作区内，无法建立版本快照"）。修法与 persona 边界**同一条展开规则**：
+   * 基准根与目标都展开再比。
+   */
+  test('经链接的路径能建快照：工作根经 junction 到达（data/persona/STATE.md）', (t) => {
+    const base = tempDirSync('m8-versions-link-root-');
+    const real = join(base, 'real-ws');
+    const persona = join(real, 'data', 'persona');
+    mkdirSync(persona, { recursive: true });
+    writeFileSync(join(persona, 'STATE.md'), '# 状态\n', 'utf8');
+    const linked = join(base, 'linked-ws');
+    symlinkSync(real, linked, 'junction');
+
+    // 调用方拿到的目标是**展开后**的那一个（path-guard 的 `effective`）
+    const realTarget = realpathSync.native(join(linked, 'data', 'persona', 'STATE.md'));
+    assert.equal(workspaceVersionRelOf(linked, realTarget), 'data/persona/STATE.md',
+      '经 junction 到达的工作根，必须仍能算出工作区相对路径');
+  });
+
+  test('经链接的路径能建快照：工作区内的 data 目录被链接到别处（data/workspace/MEMORIES/x.md）', (t) => {
+    const base = tempDirSync('m8-versions-link-data-');
+    const root = join(base, 'ws');
+    const elsewhere = join(base, 'elsewhere-data');
+    mkdirSync(join(elsewhere, 'workspace', 'MEMORIES'), { recursive: true });
+    writeFileSync(join(elsewhere, 'workspace', 'MEMORIES', 'x.md'), '# 记忆\n', 'utf8');
+    mkdirSync(root, { recursive: true });
+    // `<root>/data` 是链接：字面上它在工作区内，真值在别处——她那一套 data 根常见就是这个形状
+    symlinkSync(elsewhere, join(root, 'data'), 'junction');
+
+    const realTarget = realpathSync.native(join(root, 'data', 'workspace', 'MEMORIES', 'x.md'));
+    assert.equal(workspaceVersionRelOf(root, realTarget), 'data/workspace/MEMORIES/x.md',
+      '字面就在工作区内的路径仍要映射得出来（否则她写进 MEMORIES 的每一笔都少一版快照）');
+  });
+
+  test('工作区内的链接指到工作区内：照旧映射（拒绝的是越界，不是链接本身）', (t) => {
+    const base = tempDirSync('m8-versions-link-inside-');
+    const root = join(base, 'ws');
+    mkdirSync(join(root, 'real'), { recursive: true });
+    writeFileSync(join(root, 'real', 'a.md'), '# a\n', 'utf8');
+    symlinkSync(join(root, 'real'), join(root, 'alias'), 'junction');
+
+    const realTarget = realpathSync.native(join(root, 'alias', 'a.md'));
+    assert.equal(workspaceVersionRelOf(root, realTarget), 'real/a.md');
+  });
+
+  test('**真在工作区外**仍拒绝（两个视角都在外：另一个盘 / .. 上升）', () => {
+    const root = join('C:', 'ws');
+    assert.throws(() => workspaceVersionRelOf(root, join('D:', 'outside', 'x.md')), /不在工作区内/);
+    assert.throws(() => workspaceVersionRelOf(root, resolve(root, '..', 'escape.md')), /不在工作区内/);
+  });
+
+  /**
+   * 端到端（现场复现）：`safe_write` 经 `<root>/data` 这个链接写进记忆目录 ⇒
+   * 文件落盘 **且** `.versions/workspace/...` 里多一版。
+   *
+   * `boundaryRoot: null` 是必须的，也是现场的真相：她那份配置是 `trust.mode: 'full'`
+   * （不设边界），所以写进链接目标是允许的——卡住她的是快照映射，不是写门。
+   */
+  test('经链接写入后自动留快照（safe_write → .versions，现场那条端到端）', async () => {
+    const { buildFsTools } = await import('../src/tools/fs/index.ts');
+    const base = tempDirSync('m8-versions-link-e2e-');
+    const root = join(base, 'ws');
+    const dataDir = join(base, 'data-real');
+    mkdirSync(join(dataDir, 'workspace', 'MEMORIES'), { recursive: true });
+    mkdirSync(root, { recursive: true });
+    symlinkSync(dataDir, join(root, 'data'), 'junction');
+
+    const tools = await buildFsTools({ dataDir, everythingPath: null });
+    const safeWrite = tools.find((tool) => tool.name === 'safe_write')!;
+    const ctx: ToolContext = {
+      callId: 'c-write-link', turn: TURN, step: 1,
+      signal: new AbortController().signal,
+      workspaceRoot: root,
+      boundaryRoot: null,
+    };
+
+    const content = '# 记忆\n\n- 经链接写进来的一条\n';
+    const written = await safeWrite.handler({ path: 'data/workspace/MEMORIES/x.md', content }, ctx);
+    assert.equal(written.isError, undefined, written.content);
+
+    // 文件真的落在链接的目标那边（写门放行 = 与现场一致）
+    assert.equal(readFileSync(join(dataDir, 'workspace', 'MEMORIES', 'x.md'), 'utf8'), content);
+    // 关键读数：这一版**进了**版本库（修之前这里恒为 0，且回执里带一句"路径不在工作区内"）
+    const versions = listFileVersions(dataDir, VERSION_SCOPE_WORKSPACE, 'data/workspace/MEMORIES/x.md');
+    assert.equal(versions.length, 1, `经链接的写入必须留一版快照：${written.content}`);
+    assert.equal(
+      readFileVersion(dataDir, VERSION_SCOPE_WORKSPACE, 'data/workspace/MEMORIES/x.md', versions[0]!.diffHash),
+      content,
+    );
+    assert.doesNotMatch(written.content, /不在工作区内/u, '回执里不该再有那句"少一版快照"的告警');
+  });
 });
+

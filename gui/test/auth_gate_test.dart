@@ -151,6 +151,163 @@ void main() {
       expect(tester.widget<TextField>(find.byType(TextField)).obscureText, isTrue);
     });
 
+    // ── 2026-10-23：门的判据只认事实（公开的 `/api/auth/state`），401 的 code 只是兜底 ──
+    //
+    // 现场：`.auth.json` 存在（有密码），界面却画着"设置密码"，底部红字是探测那次的
+    // `auth-uninitialized` message；提交设置 → 409 → 表单永远失败 ⇒ 死锁。
+    // 这一组钉住三件事：① state 优先于 code；② 探测结果不进红字；③ 站错门时当场换门。
+
+    testWidgets('公开状态端点说"还没设密码" → 设置密码页（哪怕 401 的 code 是 unauthorized）', (tester) async {
+      final api = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = false
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。',
+          code: 'unauthorized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        );
+      final state = AppState(api: api);
+      addTearDown(state.dispose);
+
+      await state.bootstrap();
+      await _pumpGate(tester, state);
+
+      expect(api.authStateCalls, 1, reason: '进门判据要先读公开事实，不能只看 401 的 code');
+      expect(state.gate, AuthGateKind.setup);
+      expect(find.text('设置密码'), findsOneWidget);
+      // 探测结果不是错误：401 那句话不许变成红字（现场就是这么误报的）
+      expect(state.gateError, isEmpty);
+      expect(find.textContaining('请重新登录'), findsNothing);
+      expect(find.byIcon(Icons.error_outline_rounded), findsNothing, reason: '探测结果不该进错误行');
+      // 交叉文案：设置页里不该出现"重新登录"
+      expect(find.textContaining('重新登录'), findsNothing);
+    });
+
+    testWidgets('公开状态端点说"设过密码" → 登录页（哪怕服务端回的是 auth-uninitialized）', (tester) async {
+      final api = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = true
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '这台实例还没设密码。请先在界面里设置一个密码。',
+          code: 'auth-uninitialized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        );
+      final state = AppState(api: api);
+      addTearDown(state.dispose);
+
+      await state.bootstrap();
+      await _pumpGate(tester, state);
+
+      expect(api.authStateCalls, 1);
+      expect(state.gate, AuthGateKind.login);
+      expect(find.text('设置密码'), findsNothing);
+      expect(state.gateError, isEmpty, reason: '401 是分流信号，不是红字');
+      // 交叉文案：登录页里不该出现"还没设密码"这类话
+      expect(find.textContaining('还没设密码'), findsNothing);
+      expect(find.byIcon(Icons.error_outline_rounded), findsNothing);
+    });
+
+    testWidgets('设置提交收到 409 already-initialized → 原地切到登录页（不许对着永远失败的表单）', (tester) async {
+      final api = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = false
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '这台实例还没设密码。请先在界面里设置一个密码。',
+          code: 'auth-uninitialized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        )
+        ..authErrors['/api/auth/setup'] = const ApiAuthError(
+          '这台实例已经设过密码了。忘记密码的处理办法：删掉 data/.auth.json 后重启进程，再设一次。',
+          code: 'already-initialized',
+        );
+      final state = AppState(api: api);
+      addTearDown(state.dispose);
+      await state.bootstrap();
+      await _pumpGate(tester, state);
+      expect(state.gate, AuthGateKind.setup);
+
+      await tester.enterText(find.byType(TextField).at(0), 'irmia-local-pw');
+      await tester.enterText(find.byType(TextField).at(1), 'irmia-local-pw');
+      await tester.tap(find.text('设置并进入'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(state.ready, isFalse);
+      expect(state.gate, AuthGateKind.login, reason: '409 = 这台实例已经有密码，该去登录');
+      expect(find.text('设置密码'), findsNothing);
+      expect(find.text('登录'), findsWidgets);
+      expect(state.gateError, isEmpty, reason: '这不是"设置失败"，是站错了门');
+      expect(find.text('这台实例已设过密码，请用密码登录。'), findsOneWidget);
+      expect(find.byIcon(Icons.error_outline_rounded), findsNothing, reason: '红字那一行不该出现');
+      expect(find.textContaining('忘记密码的处理办法'), findsNothing, reason: '服务端 409 原话不进红字');
+    });
+
+    testWidgets('登录时服务端说"还没设密码" → 切到设置页（反方向也不让表单白转）', (tester) async {
+      final api = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = true
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。',
+          code: 'unauthorized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        )
+        ..authErrors['/api/auth/login'] = const ApiAuthError(
+          '这台实例还没设密码。请先在界面里设置一个密码。',
+          code: 'auth-uninitialized',
+        );
+      final state = AppState(api: api);
+      addTearDown(state.dispose);
+      await state.bootstrap();
+      await _pumpGate(tester, state);
+      expect(state.gate, AuthGateKind.login);
+
+      await tester.enterText(find.byType(TextField), 'irmia-local-pw');
+      await tester.tap(find.widgetWithText(FilledButton, '登录'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(state.gate, AuthGateKind.setup, reason: '服务端说还没设密码，就该去设置页');
+      expect(state.gateError, isEmpty);
+      expect(find.text('再输一遍'), findsOneWidget);
+      expect(find.text('这台实例还没有密码，先设一个。'), findsOneWidget);
+      expect(find.textContaining('重新登录'), findsNothing, reason: '设置页不该出现"重新登录"');
+    });
+
+    testWidgets('两页各说各的：设置页没有"重新登录"，登录页没有"还没设密码"；两页都写明忘记密码怎么办', (tester) async {
+      final setupApi = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = false
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '这台实例还没设密码。请先在界面里设置一个密码。',
+          code: 'auth-uninitialized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        );
+      final setupState = AppState(api: setupApi);
+      addTearDown(setupState.dispose);
+      await setupState.bootstrap();
+      await _pumpGate(tester, setupState);
+
+      expect(find.textContaining('忘记密码'), findsOneWidget, reason: '设置页也要说清恢复路径');
+      expect(find.textContaining('重新登录'), findsNothing);
+
+      final loginApi = _FakeApi()
+        ..instance = '127.0.0.1:7788#aabbccddeeff0011'
+        ..authInitialized = true
+        ..getErrors['/api/projection'] = const ApiAuthError(
+          '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。',
+          code: 'unauthorized',
+          instance: '127.0.0.1:7788#aabbccddeeff0011',
+        );
+      final loginState = AppState(api: loginApi);
+      addTearDown(loginState.dispose);
+      await loginState.bootstrap();
+      await tester.pumpWidget(_harness(loginState));
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.textContaining('忘记密码'), findsOneWidget, reason: '登录页要写明"删掉 .auth.json 重启"这条恢复路径');
+      expect(find.textContaining('还没设密码'), findsNothing);
+    });
+
     testWidgets('两次输入不一致：当场拦下，一个请求都不发', (tester) async {
       final api = _FakeApi()
         ..instance = '127.0.0.1:7788#aabbccddeeff0011'
@@ -350,7 +507,8 @@ void main() {
       expect(served, 2, reason: '仍然只重试一次，不循环打服务端');
       expect(state.ready, isFalse, reason: '票不作数了就得回门上去');
       expect(state.gate, AuthGateKind.login);
-      expect(state.gateError, contains('重新登录'));
+      expect(state.gateError, isEmpty, reason: '401 是分流信号，不是红字那一行里的错误');
+      expect(state.gateHint, AuthGateHint.sessionExpired, reason: '要告诉人"再来一次"，但那句是中性提示');
       expect(state.stateText, contains('重新登录'));
       expect(api.token, isNull);
       expect(store.read(instance), isNull, reason: '已证明不作数的票不该留在盘上，让每次开界面都白跑一趟');
@@ -372,7 +530,9 @@ void main() {
       // 服务端说票不作数了 → 回门
       state.ready = false;
       state.gate = AuthGateKind.login;
-      state.gateError = '会话凭据无效或已失效。请重新登录。';
+      // 换门的原因走中性提示行，**不进红字**（2026-10-23 的口径，见 AppState.gateHint）
+      state.gateHint = AuthGateHint.sessionExpired;
+      state.gateError = '';
       state.notifyListeners();
       await tester.pump();
 
@@ -380,6 +540,8 @@ void main() {
       expect(find.byType(AuthGate), findsOneWidget);
       expect(find.text('登录'), findsWidgets);
       expect(find.textContaining('重新登录'), findsOneWidget);
+      expect(find.byIcon(Icons.error_outline_rounded), findsNothing,
+          reason: '分流信号不是错误：红字那一行不该出现');
     });
 
     test('凭据文件缺了 → 启动握手画登录态，而不是崩或白屏', () async {
@@ -399,6 +561,33 @@ void main() {
       expect(state.ready, isFalse);
       expect(state.gate, AuthGateKind.login);
       expect(state.instance, instance, reason: '实例标识要从 401 里学回来（界面不知道数据目录）');
+    });
+
+    test('老服务端没有 /api/auth/state（落进认证闸回 401）→ 问不出来，门退回 401 的 code 分流', () async {
+      // 半升级现场：界面已经是新的（会先问 state），服务端还是旧的（这条端点不存在）。
+      // 老服务端会把 `/api/auth/state` 当成普通 `/api/*` ⇒ 401。界面必须把"问不出来"
+      // 与"它说没设密码"分得开：前者退回 code 分流，后者才画设置页。
+      const instance = '127.0.0.1:7788#aabbccddeeff0011';
+      final server = await serve((req, res) {
+        if (req.uri.path == '/api/auth/state') {
+          writeAuthError(res, 'unauthorized', '缺少或无效的会话凭据。请重新登录。', instance);
+        } else {
+          writeAuthError(res, 'auth-uninitialized', '这台实例还没设密码。请先在界面里设置一个密码。', instance);
+        }
+        unawaited(res.close());
+      });
+      addTearDown(() => server.close(force: true));
+
+      final api = IrmiaApi(baseUrl: 'http://127.0.0.1:${server.port}');
+      final state = AppState(api: api, sessions: SessionStore());
+      addTearDown(state.dispose);
+
+      expect(await api.authState(), isNull, reason: '401 = 老服务端没有这条端点 ⇒ 问不出来，不是"没设密码"');
+
+      await state.bootstrap();
+      expect(state.gate, AuthGateKind.setup, reason: '问不出来才用 401 的 code：auth-uninitialized ⇒ 设置页');
+      expect(state.gateError, isEmpty);
+      expect(state.gateHint, AuthGateHint.none, reason: '正常进门不算"换了门"，不摆提示');
     });
 
     test('半升级兜底：还没设密码时，老界面那份全局凭据仍能让人进门（并提醒去设密码）', () async {
@@ -828,6 +1017,13 @@ class _FakeApi extends IrmiaApi {
   final Map<String, ApiAuthError> authErrors = {};
   final List<String> authCalls = [];
 
+  /// `GET /api/auth/state` 的回答：true/false = 服务端如实说；null = 老服务端
+  /// （没有这条端点，界面该退回 401 的 code 分流）。默认 null，好让老口径的用例保持原样。
+  bool? authInitialized;
+
+  /// `/api/auth/state` 被问过几次（"先问事实再画门"这条链路的读数）
+  int authStateCalls = 0;
+
   /// true = 每次请求都抛一个**连接类**异常（形状与"主进程没在跑"时 dart:io 抛的一样）。
   ///
   /// 为什么需要它：门前那套自动重连要"服务端不在"才能动起来，而真实端口被拒的异常
@@ -843,7 +1039,19 @@ class _FakeApi extends IrmiaApi {
   int dashboardCalls = 0;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
+    if (path == '/api/auth/state') {
+      authStateCalls += 1;
+      if (down) {
+        throw const SocketException('由于目标计算机积极拒绝，无法连接。');
+      }
+      final failure = getErrors[path];
+      if (failure != null) throw failure; // 模拟"老服务端：这条路径也在认证闸后面"
+      final known = authInitialized;
+      // 没有 initialized 字段 = 问不出来（与"老服务端"同一条路）
+      if (known == null) return <String, dynamic>{};
+      return <String, dynamic>{'initialized': known};
+    }
     if (path == '/api/stats/dashboard') {
       dashboardCalls += 1;
       if (down || failDashboard) {
@@ -874,7 +1082,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     return <String, dynamic>{'ok': true};
   }
 

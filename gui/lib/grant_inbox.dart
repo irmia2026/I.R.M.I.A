@@ -35,6 +35,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'api.dart';
+import 'gui_log.dart';
 
 /// 全局重读待批清单的间隔（秒）。
 ///
@@ -131,6 +132,36 @@ bool samePendingGrants(List<Map<String, dynamic>> a, List<Map<String, dynamic>> 
   return true;
 }
 
+/// 把 `GET /api/grants` 的 `malformed` 那一段过成"读不出来的单子"清单（2026-10-22）。
+///
+/// 服务端判据只有一处（`grantFileProblems`）：盘上有、日志里还没有、又解析不过的那些单子。
+/// 界面**只负责把它们说出来**——那一档在"待批"判据里两样都不满足（`picked:false` 且挂不出卡），
+/// 曾经是"人写了单子、框架一声不响"的那条缝。
+List<Map<String, dynamic>> malformedGrantsOf(Object? raw) {
+  if (raw is! List) return const <Map<String, dynamic>>[];
+  final out = <Map<String, dynamic>>[];
+  for (final item in raw) {
+    if (item is! Map) continue;
+    final id = '${item['id'] ?? ''}'.trim();
+    if (id.isEmpty) continue;
+    out.add(<String, dynamic>{
+      'id': id,
+      'why': '${item['why'] ?? ''}'.trim(),
+    });
+  }
+  return out;
+}
+
+/// 两份"读不出来"清单是不是同一批（按 id + 原因比）：没变就不通知。
+bool sameMalformedGrants(List<Map<String, dynamic>> a, List<Map<String, dynamic>> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i += 1) {
+    if ('${a[i]['id'] ?? ''}' != '${b[i]['id'] ?? ''}') return false;
+    if ('${a[i]['why'] ?? ''}' != '${b[i]['why'] ?? ''}') return false;
+  }
+  return true;
+}
+
 /// 读 `GET /api/grants` 并把「待批」那几条交给宿主（[onPending]）。
 ///
 /// 生命周期由壳（`_IrmiaAppState`）管：进了门 `start()`、回门上 `stop()`、退场 `dispose()`。
@@ -147,6 +178,7 @@ class PendingGrantPoller {
   PendingGrantPoller({
     required this.api,
     required this.onPending,
+    this.onMalformed,
     this.interval = const Duration(seconds: kGrantPollSeconds),
   });
 
@@ -155,14 +187,26 @@ class PendingGrantPoller {
   /// 读到一份**变了**的待批清单时调它（没变不调，见 [samePendingGrants]）
   final void Function(List<Map<String, dynamic>> pending) onPending;
 
+  /// 读到一份**变了**的"读不出来的单子"清单时调它（没变不调，见 [sameMalformedGrants]）。
+  ///
+  /// 它是**独立的一条**而不是并进 [onPending]：待批卡与"有一张单读不出来"是两件事，
+  /// 一张读不出来的单子**绝不能**进待批队列（它没有可点的卡，点它只会拿到一句错）。
+  final void Function(List<Map<String, dynamic>> malformed)? onMalformed;
+
   final Duration interval;
 
   Timer? _timer;
   bool _running = false;
   bool _ticking = false;
 
+  /// 这一拍是**什么时候**开始的（[_kTickLatchMax] 那道年龄锁的判据）
+  DateTime? _tickingSince;
+
   /// 最后一次成功读到的那份（失败时保留它；[last] 也给诊断与用例看）
   List<Map<String, dynamic>> last = const <Map<String, dynamic>>[];
+
+  /// 最后一次成功读到的"读不出来的单子"（同上，失败时保留）
+  List<Map<String, dynamic>> lastMalformed = const <Map<String, dynamic>>[];
 
   /// 最近一次读失败的原因（成功一次就清空）。**只在诊断里用**：界面上不显示它，
   /// 因为"读不到清单"与"没有清单"是两件事，而卡片不出现本身就是"没有可批的"。
@@ -189,17 +233,33 @@ class PendingGrantPoller {
 
   /// 手动读一次（点了批准/驳回之后立刻刷新走这里）。
   Future<void> refresh() async {
-    if (_ticking) return;
+    if (_ticking) {
+      final since = _tickingSince;
+      final age = since == null ? Duration.zero : DateTime.now().difference(since);
+      // **年龄锁**（2026-10-24）：`_ticking` 与 `_schedule()` 是一对——`_schedule` 在
+      // `finally` 里，所以这一拍一旦永远不返回，待批轮询就**再也不排下一拍**
+      // （2026-10-23「用久了卡死」的另一处放大器，形状与 `AppState._readingDashboard` 相同）。
+      // 请求本身现在有时限（`kApiRequestTimeout`），这是第二道锁：超过
+      // [_kTickLatchMax] 就当成那一拍已经死了，放行并留一笔现场。
+      if (age <= _kTickLatchMax) return;
+      guiLog.write('[wait] grants latch stale ${secsOf(age)}');
+    }
     _ticking = true;
+    _tickingSince = DateTime.now();
     try {
       final view = await api.get('/api/grants');
       final raw = view is Map ? view['items'] : null;
       final pending = pendingGrantsNewestFirst(raw);
+      final malformed = malformedGrantsOf(view is Map ? view['malformed'] : null);
       lastError = null;
       reads += 1;
       if (!samePendingGrants(last, pending)) {
         last = pending;
         onPending(pending);
+      }
+      if (!sameMalformedGrants(lastMalformed, malformed)) {
+        lastMalformed = malformed;
+        onMalformed?.call(malformed);
       }
     } on ApiAuthError {
       // 由壳的心跳处理（见类注释）；这里只记一笔，别把清单清空
@@ -209,9 +269,13 @@ class PendingGrantPoller {
       debugPrint('[grant-inbox] read /api/grants failed: $err');
     } finally {
       _ticking = false;
+      _tickingSince = null;
       _schedule();
     }
   }
+
+  /// 防重入闸最多能关多久（与 `AppState.kReadLatchMax` 同一条口径：请求时限的 3 倍）
+  static const Duration _kTickLatchMax = Duration(seconds: 45);
 
   void _schedule() {
     _timer?.cancel();

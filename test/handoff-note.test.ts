@@ -304,7 +304,7 @@ test('M5-2 收录范围：对话本身（他说了什么/我答了什么）+ wak
 
 // ──────────────────────────────── P1-15 wake/job 回读线索 ────────────────────────────────
 //
-// 出处 `D:\IrmiaAgent\_ops-review-stable\REVIEW.md` 第 40 行：`wake/job` 的正文与 `outputFile`
+// 出处 `_ops-review-stable\REVIEW.md` 第 40 行：`wake/job` 的正文与 `outputFile`
 // 都不进交接笔记——折叠之后连"去哪儿重读"都没有。修法：标题之外补一条"全文在哪、多大"。
 
 test('P1-15 正：wake/job 笔记带标题 + outputFile 回读路径；正文一个字不抄，token 增量极小', () => {

@@ -48,8 +48,17 @@ const Map<String, int> kPendingCopy = <String, int>{
   'lib/pages/persona_page.dart': 67,
   'lib/pages/logs_ops.dart': 42,
   'lib/pages/logs_panels.dart': 39,
-  'lib/onboarding.dart': 35,
-  'lib/app.dart': 35,
+  // 2026-10-23：第 3 步 OneBot 那句长文案挪进 AppStrings.onboardingOnebotDetail
+  // （用户原话「配置完成后可自行另行设置」）⇒ 35 → 34，棘轮跟着走。
+  // 2026-10-26：第 2 步的「模型名 / Base URL / API Key」三个标签、Base URL 说明与两句
+  // 非空校验挪进 AppStrings（第 2 步这一屏不再有中文字面量）⇒ 34 → 31。
+  'lib/onboarding.dart': 31,
+  // 2026-10：登出那条路重写成「登出 = 结束实例」（三步 + 选择页），原来那句
+  // `stateText = '已登出'` 没了（选择页那一屏的话全在 instance_picker.dart 的文案表里）
+  // ⇒ 35 → 34，棘轮跟着走。
+  // 2026-10-28：登录页那句 `连不上本地服务：$err` 退役（门上改成三档各说各的，
+  // 话全在 AppStrings 里拼）⇒ 34 → 33，棘轮跟着走。
+  'lib/app.dart': 33,
   'lib/pages/memory_page.dart': 28,
   'lib/pages/logs_widgets.dart': 24,
   'lib/ui_kit.dart': 25,
@@ -102,6 +111,18 @@ const Map<String, String> kExemptLiterals = <String, String>{
   r'# 我是谁\n\n（名字、身份、核心性格。500 token 以内）':
       '人格正文的**形态样本**（引导页第 4 步输入框的 hintText）：它示范的是 IDENTITY.md 该长'
           '什么样，属于内容，不是界面的一层皮。',
+  // ── 2026-10-25：卡死留痕那三类的文案（`[stall]` / `[input]`） ──
+  //
+  // 判据与上面那条 debugPrint 逐字相同：**只进 gui.log，不上界面**。它们是排障现场里
+  // 给人读的那几个字（凌晨三点靠它认出"最后动的是哪个按钮"），不是界面文案——
+  // 界面上的同类动作各自读 `AppStrings`（托盘项、`retry`、`trayRestart` 都是取文案表，
+  // 所以这里只剩两个必须落成字面量的：发送键没有文字标签、切页那一句要带页名）。
+  '发送消息':
+      '`[input] tap=发送消息`（chat_page.dart 的发送键）：发送键是一颗图标钮、没有文字标签，'
+          '文案表里也没有对应的一条——这一句只给日志用（见 gui_log.dart 的行格式一节）。',
+  r'切页 $name':
+      '`last="切页 <页名>"`（stall_watch.dart 的 tracePage）：`[stall]` 那行引用的最后一句话，'
+          '页名来自 PageEntry.label（尚未迁完的那批）；同样只进日志。',
 };
 
 void main() {

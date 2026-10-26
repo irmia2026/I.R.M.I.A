@@ -1482,7 +1482,7 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
       machine: MACHINE_A,
       usage: USAGE_B,
       injection: [{
-        who: '用户（OWNER）', chatType: 'c2c', person: 'OPENID_A', count: 2, lastTs: '2020-06-01T08:48:00.000Z',
+        who: '用户（阿岚）', chatType: 'c2c', person: 'OPENID_A', count: 2, lastTs: '2020-06-01T08:48:00.000Z',
       }],
       taskCard: { title: '盯备份', turn: 3, step: 2, todoOpen: ['看一眼备份目录'] },
       maintenanceWindow: NIGHT,
@@ -1544,7 +1544,7 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
  */
 describe('此刻层 · 注入预警（v25）', () => {
   const c2c: InjectionWarnFacts = {
-    who: '用户（OWNER）', chatType: 'c2c', person: 'OPENID_A', count: 2, lastTs: '2020-06-01T08:48:00.000Z',
+    who: '用户（阿岚）', chatType: 'c2c', person: 'OPENID_A', count: 2, lastTs: '2020-06-01T08:48:00.000Z',
   };
   const group: InjectionWarnFacts = {
     who: '技术群', chatType: 'group', person: 'OPENID_X', count: 1, lastTs: '2020-06-01T06:00:00.000Z',
@@ -1566,7 +1566,7 @@ describe('此刻层 · 注入预警（v25）', () => {
     assert.ok(now.includes('预警：\n[框架提示] 最近 24 小时里有外部消息带着想指挥你的迹象'), now);
     assert.ok(now.includes('那几句话已经附在各自那条消息旁边了。'), '要说清那句话在哪儿，她才知道去看');
     assert.ok(now.includes('历史（最近 24 小时）：'), '用户给的那行标题逐字在');
-    assert.ok(now.includes('· 用户（OWNER）（单聊） —— 曾试图打探/注入 2 次（最近一次 12 分钟前）'), now);
+    assert.ok(now.includes('· 用户（阿岚）（单聊） —— 曾试图打探/注入 2 次（最近一次 12 分钟前）'), now);
     assert.ok(now.includes('· 技术群（群聊）· OPENID_X —— 曾试图打探/注入 1 次（最近一次 3 小时前）'), now);
     const tail = '怎么看、要不要理、要不要点破，都由你。';
     assert.ok(now.includes(tail), '框架给事实，反应归她——这句是那条款的落点');
@@ -2532,16 +2532,16 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     // 界面消息：带来源标注，不再是"无头无主的一句话"——她得能判断这话是谁递的
     assert.equal(renderWake(manual), '[界面消息] 手动戳一下', '无署名时也直说是界面消息');
     assert.equal(
-      renderWake(evt<WakeManual>('wake/manual', { note: '在吗', person: 'OWNER' })),
-      '[界面消息 · OWNER] 在吗',
+      renderWake(evt<WakeManual>('wake/manual', { note: '在吗', person: '阿岚' })),
+      '[界面消息 · 阿岚] 在吗',
     );
     assert.equal(
       renderWake(
-        evt<WakeManual>('wake/manual', { note: '在吗', person: 'OWNER' }, { seq: 42 }),
+        evt<WakeManual>('wake/manual', { note: '在吗', person: '阿岚' }, { seq: 42 }),
         undefined,
         new Set([42]),
       ),
-      '[界面消息 · OWNER · 重投] 在吗',
+      '[界面消息 · 阿岚 · 重投] 在吗',
       '重投的输入要标出来：重启打断一个 turn 后，重放的字节与首次完全相同，她会当成新话重新作答',
     );
     // 非 wake 类型不走这个出口
@@ -2677,7 +2677,8 @@ describe('铁律 6 · 组装顺序', () => {
     resetFactory();
     const persona: RenderPersona = {
       ...BASE_PERSONA,
-      relationship: { who: 'YG', content: '  他只有一个名字。  ' },
+      // v78：关系档案只有索引（路径 / 字数 / 小节名）+ 一句"如已在上下文中，则不需再读"；不给读取指令
+      relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 8, sections: ['他是谁'] },
     };
     const events: AppEvent[] = [
       evt<UserMessage>('message/user', { text: '早期输入', source: 'human' }, { seq: 1 }),
@@ -2691,7 +2692,12 @@ describe('铁律 6 · 组装顺序', () => {
     assert.ok(i0 >= 0, '此刻层含当前时刻');
     assert.ok(i1 > i0 && i2 > i1 && i3 > i2, 'STATE → 关系档案 → 摘要');
     assert.ok(st.includes('[当前状态]\nSTATE 段：正在搭 render 层。'), 'STATE 段去掉首尾空白');
-    assert.ok(st.includes('[关系档案 · YG]\n他只有一个名字。'), '档案正文去掉首尾空白');
+    assert.ok(
+      st.includes('[关系档案 · YG]\n- persona/RELATIONSHIPS/YG.md · 8 字 · 小节：他是谁\n'),
+      '档案只给索引行（v78）',
+    );
+    assert.ok(st.includes('  如已在上下文中，则不需再读。'), '第二行是事实（不是"先 safe_read"那种指令）');
+    assert.equal(st.includes('safe_read'), false, '这一段里不许出现 safe_read（整份请求的 tools 清单里才有）');
     assert.ok(st.includes('[早期历史摘要 · 覆盖至 seq 1]\n早期摘要正文'));
   });
 
@@ -2700,8 +2706,23 @@ describe('铁律 6 · 组装顺序', () => {
     assert.ok(!absent.includes('[关系档案'));
     const nil = stateLayer(renderOnce({ persona: { ...BASE_PERSONA, relationship: null } }));
     assert.ok(!nil.includes('[关系档案'));
-    const withRel = stateLayer(renderOnce({ persona: { ...BASE_PERSONA, relationship: { who: 'YG', content: 'x' } } }));
-    assert.ok(withRel.includes('[关系档案 · YG]\nx'));
+    const withRel = stateLayer(renderOnce({
+      persona: {
+        ...BASE_PERSONA,
+        relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 1, sections: [] },
+      },
+    }));
+    // sections 为空 ⇒ 没有"小节："那一段（不留空壳）
+    assert.ok(withRel.includes('[关系档案 · YG]\n- persona/RELATIONSHIPS/YG.md · 1 字\n'));
+    assert.equal(withRel.includes('小节：'), false);
+    // 0 字节空档案 ⇒ 整段不出现（收回旧边界：v77 之前判的是 `content.trim() !== ''`）
+    const empty = stateLayer(renderOnce({
+      persona: {
+        ...BASE_PERSONA,
+        relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 0, sections: [] },
+      },
+    }));
+    assert.equal(empty.includes('[关系档案'), false, '0 字档案不写那一段（印一行"0 字"等于告诉她有一份空档案）');
   });
 
   test('STATE 段为空时不出现 [当前状态] 段', () => {
@@ -2768,10 +2789,13 @@ describe('铁律 6 · 组装顺序', () => {
       '段头是判层的唯一依据（v56 起第一行是统一分割线），逐字锁住',
     );
     const r = renderOnce({
-      persona: { ...BASE_PERSONA, relationship: { who: 'YG', content: '  他只有一个名字。  ' } },
+      persona: {
+        ...BASE_PERSONA,
+        relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 8, sections: ['他是谁'] },
+      },
       turnBlock: {
         state: 'STATE 段：正在搭 render 层。',
-        relationship: { who: 'YG', content: '  他只有一个名字。  ' },
+        relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 8, sections: ['他是谁'] },
         memory: '## 本轮选中的记忆（正文）\n（示例）\n\n## MEMORIES/facts.md:12\n12| 用户周五下午开例会',
       },
     });
@@ -2781,7 +2805,10 @@ describe('铁律 6 · 组装顺序', () => {
     const i3 = block.indexOf('## 本轮选中的记忆（正文）');
     assert.ok(i1 > 0 && i2 > i1 && i3 > i2, '顺序：当前状态 → 关系档案 → 本轮选中的记忆');
     assert.ok(block.includes('[当前状态]\nSTATE 段：正在搭 render 层。'), '状态正文去掉首尾空白');
-    assert.ok(block.includes('[关系档案 · YG]\n他只有一个名字。'), '档案正文去掉首尾空白');
+    assert.ok(
+      block.includes('[关系档案 · YG]\n- persona/RELATIONSHIPS/YG.md · 8 字 · 小节：他是谁\n'),
+      '档案那一段是索引行（v78），不是正文',
+    );
 
     // 三项里有空的：整段不出现（不写空段），而不是留一行 `[关系档案 · ]`
     const noRel = asMessage(renderOnce({ turnBlock: { state: '只有状态' } }).input[0]!, '固定块').content;
@@ -2803,7 +2830,7 @@ describe('铁律 6 · 组装顺序', () => {
     // **固定块的素材是同一份**——它是宿主在轮首读一次的快照，两步各读一次就不是这个契约了。
     const turnBlock = {
       state: 'STATE 段：正在搭 render 层。',
-      relationship: { who: 'YG', content: '他只有一个名字。' },
+      relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 8, sections: ['他是谁'] },
       memory: '## 本轮选中的记忆（正文）\n（示例）',
     };
     // v30 起固定块里还有记忆索引，所以这条契约测试**带上索引一起跑**：它同样必须轮内冻结
@@ -2912,7 +2939,7 @@ describe('铁律 6 · 组装顺序', () => {
   test('v30：记忆索引在本轮固定块里（不在头部），且是块的**最后一段**', () => {
     const turnBlock = {
       state: 'STATE 段：正在搭 render 层。',
-      relationship: { who: 'YG', content: '他只有一个名字。' },
+      relationship: { who: 'YG', path: 'persona/RELATIONSHIPS/YG.md', chars: 8, sections: ['他是谁'] },
       memory: '## 本轮选中的记忆（正文）\n（示例）',
     };
     const r = renderOnce({ skillCatalog: SKILL_CATALOG_FIXTURE, memoryIndex: MEMORY_INDEX_FIXTURE, turnBlock });

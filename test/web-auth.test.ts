@@ -218,6 +218,49 @@ test('待初始化态：连"设置密码"以外的 auth 端点也不放行（log
   assert.equal(errorOf(change).code, 'auth-uninitialized');
 });
 
+test('公开状态端点：未初始化时回 false，且不需要任何凭据（也不多给任何事实）', async (t) => {
+  const r = await rig(t, { legacyToken: null });
+
+  // 空手问：这是界面在"还没有凭据"那一刻唯一能做的事
+  const anon = await call(r.base, '/api/auth/state');
+  assert.equal(anon.status, 200, anon.text);
+  assert.deepEqual(anon.body, { initialized: false }, '只回答一个布尔，别的一律不给');
+  assert.deepEqual(Object.keys(anon.body as object), ['initialized'], '响应体里不许出现凭据、instance、会话条数');
+
+  // 带一张乱写的凭据也一样：这条端点根本不看凭据（不会因为它"错"而 401）
+  const withJunk = await call(r.base, '/api/auth/state', { token: 'not-a-session-token' });
+  assert.equal(withJunk.status, 200);
+  assert.deepEqual(withJunk.body, { initialized: false });
+
+  // 方法不对是 405（"这个地址存在，只是不接受 POST"），不是 404 也不是 401
+  const post = await call(r.base, '/api/auth/state', { method: 'POST', body: {} });
+  assert.equal(post.status, 405);
+  assert.equal(errorOf(post).code, 'method-not-allowed');
+
+  // 它不落事件：问一次状态不是一次"进门/换锁"
+  assert.deepEqual(await r.readAll(), []);
+});
+
+test('设过密码之后：公开状态端点回 true（错的凭据也不影响它）', async (t) => {
+  const r = await rig(t, { legacyToken: null });
+
+  const before = await call(r.base, '/api/auth/state');
+  assert.deepEqual(before.body, { initialized: false });
+
+  const setup = await call(r.base, '/api/auth/setup', {
+    method: 'POST', body: { password: GOOD_PASSWORD, label: 'gui' },
+  });
+  assert.equal(setup.status, 200, setup.text);
+
+  const after = await call(r.base, '/api/auth/state');
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.body, { initialized: true });
+
+  const withJunk = await call(r.base, '/api/auth/state', { token: 'not-a-session-token' });
+  assert.equal(withJunk.status, 200, '凭据对不对不影响这条端点：它不看凭据');
+  assert.deepEqual(withJunk.body, { initialized: true });
+});
+
 test('设置密码：成功即登录（当场给会话），随后 /api/* 立刻可用', async (t) => {
   const r = await rig(t, { legacyToken: null });
 

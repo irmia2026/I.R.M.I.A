@@ -290,7 +290,9 @@ test('异常退出（OOM 崩的）⇒ 留痕 + 真唤醒，正文含"重启"与�
   for (const line of note.split('\n')) {
     assert.ok(sent.includes(line), `这一行必须逐字进她的请求：\n${line}\n---请求尾部---\n${sent.slice(-1200)}`);
   }
-  assert.ok(sent.includes('**我刚被重启过**'), '段头那句"我刚被重启过"要在（她一眼看出这不是用户说的话）');
+  assert.ok(sent.includes('我刚被重启过'), '段头那句"我刚被重启过"要在（她一眼看出这不是用户说的话）');
+  // 判据落在**那条正文**上，不是整份请求体（请求体里别处的 `**` 是既有的记忆索引/自述）
+  assert.equal(note.includes('**'), false, '正文里不许出现 Markdown 记号（界面不渲染它，星号会原样显示）');
   assert.ok(sent.includes('进程重启'), '正文里要有"重启"这两个字');
   assert.ok(sent.includes('内存不足'), '原因要在正文里（"上一任是因为内存不足崩掉的"）');
   assert.ok(sent.includes('0.1.0-beta.6'), '要说清现在跑的是哪一版');

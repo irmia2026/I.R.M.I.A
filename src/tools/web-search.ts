@@ -7,7 +7,7 @@
  * ──────────────────────────── 它包的就是她一直在手搓的那条路 ────────────────────────────
  *
  * `skills/anysearch/` 是个带脚本目录的技能，四条 CLI **今天没一条干净可用**
- * （实测，判据见 `D:\IrmiaAgent\_ops-audit-7\REPORT.md` §4.1）：
+ * （实测，判据见 `_ops-audit-7\REPORT.md` §4.1）：
  *   · `.py` → `ModuleNotFoundError: No module named 'requests'`（本机没装 requests）；
  *   · `.js` → 仓库根 `package.json` 的 `"type": "module"` 把它顶成 ESM，而脚本是 CommonJS
  *     （`ReferenceError: require is not defined in ES module scope`）；

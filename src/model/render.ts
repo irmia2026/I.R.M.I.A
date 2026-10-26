@@ -22,6 +22,7 @@ import type { WarnExemptJudge } from '../channel/warn-exempt.ts';
 import { MAINTENANCE_WINDOW_WORDS, SELF_BRIEF, renderAskNote, renderContactNote, renderContactParts, renderInjectionNote, renderMentionNote, type ContactFacts, type OpenAskFacts } from './self-brief.ts';
 import { DEFAULT_SOFT_RATIO } from '../runtime/budget-guard.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
+import type { RelationshipNote } from '../persona/relationship.ts';
 import {
   HISTORY_HEAD_ITEMS, hashOf, sectionFactOf, segmentOfText,
   type ContextBreakdown, type ContextSectionFact, type ContextSegment,
@@ -30,6 +31,116 @@ import { estimateTokens } from '../tools/registry.ts';
 
 /**
  * 渲染模板版本：任何模板变更必须递增并接受一次缓存全 miss。
+ *
+ * v80（**`read_channel` 翻页一页的条数 50 → 15**，2026-10-23 用户的一句「50 条太多了」）：
+ *      改的是 `tools/admin.ts` 的 `READ_CHANNEL_PAGE_SIZE`（50 → 15）——这个数**逐字**出现在
+ *      `read_channel` 的两个参数描述里（`before` 的「一页 15 条」、`limit` 的「翻页一页 15」），
+ *      也出现在默认那一屏页脚那句「（每页 15 条，翻页不改已读）」里。
+ *      为什么要递版本号（**判据**）：参数描述**逐字节进每一条请求的 tools 段**
+ *      （与 v40 新增 `before` 时同一处、同一条理由）⇒ 之后**每一个**请求的头部字节都变，
+ *      缓存一次全 miss、下一轮整份重编码。与 v41/v67 那两次"只动 `read_channel` 描述"同性质。
+ *      `tools` 段读数：**5366，未动**（`50` → `15` 是等宽替换，`estimateTokens` 那把尺
+ *      一分不差；上界 5500 ⇒ 余量仍是 **134**）。`instructions` 段**一个字节没动**。
+ *      **行为边界一处没动**（只改数、不改口径）：翻页取数、**翻页一个字都不动已读**、
+ *      空游标/过期游标那两句话、`limit` 上限 100、页脚照"本页实际用的行数"指路全部照旧——
+ *      她要更宽仍可自己传 `limit`（最多 100）。
+ *      用例：`test/read-channel-page.test.ts` ⑨ 按 **15** 重钉（一页就是第 41..55 句、页脚
+ *      「一页 15 条」）——**写死新数字，判据没放宽**；三处版本锁
+ *      （idle-organize / maintenance-window / reasoning-echo）同批 → `'80'`。
+ *      **同代第二笔（同一批里补的洞；v80 未上生产 ⇒ 不另递版本号）**：翻页模式的**缺省
+ *      `limit`** 补成 `READ_CHANNEL_PAGE_SIZE`——原来只有 20 一个缺省，于是"给 `before`
+ *      不给 `limit`"实发 20 行、而页脚说"一页 15 条"，她照页脚算翻页节奏就会每页差 5 条。
+ *      现在无游标 20（`READ_CHANNEL_DEFAULT_LIMIT`）、有游标 15，**页脚说什么、下一屏真的发多少**。
+ *      `tools` 段**一个字节没动**（参数描述本来就是「缺省 20、翻页一页 15」，这一笔只是让
+ *      实现追上那句话）⇒ 版本号仍是 `'80'`。判据：`test/read-channel-page.test.ts` ⑩。
+ *
+ * v79（**`http_get` 换正文抽取器 + 三句失败诊断 + 截断报真实总量**，2026-10-23）：
+ *      `tools` 段里 `http_get` 的 `description` 重写（能力披露，用户点名"能力不能藏起来"）
+ *      ⇒ 工具清单字节变 ⇒ 一次设计内的缓存全 miss。
+ *      **病（三件，都是"她的回执里没有她要的东西"）**：
+ *      ① **抽取器是错的，不是差的**：`net.ts` 的 `htmlToText` 把**每个标签换成一个空格**，
+ *         于是 `asyncio.sleep(delay, result=None)` 变成 `asyncio. sleep ( delay , result = None )`、
+ *         中文变成 `本杂志 开源 ，欢迎 投稿 。`。行内 token（函数名 / URL / 中文句子）全被打断，
+ *         实测 docs.python.org 那页她**拿不到 `asyncio.sleep`**（四方案实测见
+ *         `_tmp/webfetch-compare/REPORT.md`：旧路径命中 93.3% 是靠"整页搬运"换来的，
+ *         导航污染 4.4、平均行长 27.9）。
+ *      ② **截断回执只会说一句"继续用 offset=N"**：不报真实总量，也不告诉她"其实可以把
+ *         `max_chars` 提上去一次取完"，于是长文档要来回四五次。
+ *      ③ **抓不到时只回 `（正文为空）`**：那四个字对她是无信息的——分不清"站点没内容"、
+ *         "SPA 要 JS"、"被 403 拦了"，也不知道下一步该换哪件工具。
+ *      **改法**：
+ *      · 新增 `src/tools/html-to-md.ts`（**零依赖自写**，实测选的型）——流水线
+ *        tokenize → 建树 → 剪枝（junk + 负向 class/id）→ 打分选块 → **Markdown 序列化**；
+ *        带报告点名的两个补丁：**链接农场**（`linkDensity > 0.6` 只留标题文字）与
+ *        **抽不到回空**（由调用方回落 `htmlToText`，那条 20 行老路径与它的用例原样保住，
+ *        它现在**是兜底，不是主路径**）。
+ *      · `net.ts` **一处**接线（`htmlToText(decoded)` → `htmlToMarkdown(decoded, finalUrl)`）；
+ *        回执的 `[续读]` 改成「共 N 字节 / 正文 M 字 / 已给 X 字 / 还有 K 字未读」＋
+ *        `[怎么继续]` 两条路（`offset=` 续读 / 把 `max_chars` 提到够大一次取完），
+ *        **`max_chars` 的 500000 硬上限照旧**（一次给太多打爆上下文的顾虑没有撤）；
+ *        403 / SPA 壳 / 空正文各一句 `[诊断]`，且**点名到真实注册名**
+ *        （`obscura` 的 `browser_markdown` / `playwright` 的 `browser_snapshot`；
+ *        名字的权威处是 `data/mcp-cache/<server>.json`，用例直接拿那份名字集合核文案）；
+ *        编码那一句补上**读 `<meta charset>`**（此前只信响应头）与"**可能有损**"
+ *        （声明 big5/shift_jis 却解出替换字符时必须承认，不许替它背书）；
+ *        UA 从 `IrmiaAgent/0.1 (+local; unattended)` 换成**正常浏览器风格**并加
+ *        `accept-language: zh-CN,zh;q=0.9,en;q=0.8`（85 次真实调用里只有 3 次传过 headers
+ *        ⇒ 默认头是唯一机会，而自报名自己在招 403）。
+ *      **读数（同一份已解码 HTML，探针 `_tmp/httpget-v79/probe.mjs`，5 个有正文的页）**：
+ *      命中率 **93.3% → 100%**、平均导航污染 **4.40 → 1.60**、平均行长 **27.9 → 46.2**；
+ *      163 首页的链接农场补丁 **49,376 → 9,466 字节**（523 → 0 条 URL）。
+ *      **`tools` 段读数**：代码口径 **5323 → 5366（+43）**——`http_get` 描述 54 → **86 token**
+ *      ＋ `url` 参数 +7 ＋ `max_chars` 参数 +4；上界 5500 ⇒ 余量 177 → **134**（仍 ≥30）。
+ *      `instructions` 段**一个字节没动**（这一版不碰 `self-brief.ts`）。
+ *      **用例**：`test/html-to-md.test.ts`（12 条：行内不拆 / 中文不插空格 / 结构保留 /
+ *      链接农场两个方向 / 抽空回空 / `looksLikeSpaShell`）＋ `test/net-vision.test.ts` 新增
+ *      8 条（Markdown 接线 / 抽空回落 / SPA·空正文·403 三条诊断 / `<meta charset>` /
+ *      Big5 与 Shift_JIS 有损 / 默认请求头 / JSON 原样）。
+ *      三处版本锁（idle-organize / maintenance-window / reasoning-echo）同批 → `'79'`。
+ *
+ * v78（**关系档案从整篇注入改成索引**：固定块只给索引（路径 + 字数 + 小节），并注明
+ *      "如已在上下文中，则不需再读"；**不给读取指令**。2026-10-22）：
+ *      用户原话：「改为类同记忆索引吧。」（指 `persona/RELATIONSHIPS/*.md` 的注入方式）；
+ *      同日追加裁定：「你这个提示词会导致反复读啊。不要给指令。」——这一版按后者收口。
+ *      **病（成本形状，不是猜）**：命中一份档案就把**整篇**塞进本轮固定块——而固定块在历史
+ *      之后、不命中前缀缓存 ⇒ **每轮全价**。实测阿岚那篇 1,151 字节（≈500 token/轮）、
+ *      测试群 2,553 字节（≈1,109 token/轮）；而 `tools/admin.ts` 对按需层（STATE /
+ *      RELATIONSHIPS）只有「超了只警告」的软上限 ⇒ 档案可以无限长，这笔账没有天花板。
+ *      **改法**：解析器（`persona/relationship.ts` 的 `relationshipForWake`）只返回**索引**
+ *      `{who, path, chars, sections}`——**正文一个字都不进这个结构**（`loadRelationship` 读它
+ *      只为量字数、抽小节名，栈上用完就丢）；渲染层把它印成两行**陈述**：
+ *        `- persona/RELATIONSHIPS/X.md · 447 字 · 小节：牵挂 / 画像 / 亲密度`
+ *        `  如已在上下文中，则不需再读。`
+ *      · `path` 是**相对 dataDir** 的路径（fs 别名表把 `persona/` 接回 `<dataDir>/persona`）；
+ *      · `chars` 是**码点**口径的字数，不是字节数（中文一个字三字节，两个数差三倍）；
+ *      · `sections` 是 `## ` 开头的**前 3 个**小节名，为空 ⇒ 整段省掉"小节：…"（不留空壳：
+ *        空壳会被读成"里面没有小节"，而事实是"这份档案没写 `##` 标题"）；
+ *      · **第二行是事实、不是指令**：只写"如已在上下文中，则不需再读"。`safe_read`、
+ *        "必须先读"、"要读"这些字**一个都不许出现**——索引给的是判据（路径 / 字数 / 小节名），
+ *        读不读由她自己拿；替她下命令只会诱发反复读。
+ *      · **0 字节空档案 ⇒ 整段不出现**（收回 v78 首版丢掉的旧边界：旧代码是
+ *        `content.trim() !== ''`；索引里没有正文，判据落到字数上，0 字 = 空文件）。
+ *      **读数（同一份真请求对照，`tmp/rel/t3277.json` 的 turn 3277，按这一版的第二行重算）**：
+ *      那一段 **1,181 → 166 字节**（−1,015，−85.9%；旧段里正文 1,150 字节 / 446 字符）。
+ *      七份档案全量（旧段含标签行 → 新段）：1,989→166 / 1,293→142 / 1,181→166 / 1,828→126 /
+ *      944→128 / 2,586→133 / 1,800→126 ——最大的一份 **2,586 → 133，−94.9%**。
+ *      **代价（如实记）**：命中档案而正文又不在上下文里的那一轮，读不读由她自己判断——框架
+ *      不催、也不替她读（这一版撤掉了"先 safe_read"那句）；读回来的正文作为工具结果留在历史里，
+ *      从下一轮起进前缀缓存（与记忆索引同一条路，docs/memory-injection.md §5）。
+ *      **为什么读得到**：fs 族的别名表把 `persona/` 接在 `<dataDir>/persona` 上（`tools/fs/env.ts`
+ *      的 `pathAliasesFor`），且**读类不设边界**（`tools/boundary.ts` 的 `access:'read'`）。
+ *      **写仍然禁**：`data/persona/**` 在 `tools/catalog.ts` 的只读前缀里，改写只能走
+ *      `write_persona`（它才记 `persona/updated`、才留人格版本）⇒ 索引里的路径读得到、改不了。
+ *      **`instructions` 一个字节没动**：上一版给 `SELF_BRIEF` §6 补的那一句"固定块里只给索引
+ *      （路径与字数），正文要你自己 safe_read"**已撤回**——它同样是"给指令"、会诱发反复读；
+ *      `test/instructions-budget.test.ts` 的读数因此回到 v76 那一组
+ *      （自述段 `5840 / 26254 / ff003fd6807f4047`、确定性分量合计 `5873`）。
+ *      **`RENDER_VERSION` 保持 `'78'`**：78 从未上过生产，这一笔是同代内的措辞修正，
+ *      三处版本锁（idle-organize / maintenance-window / reasoning-echo）照旧 `'78'`。
+ *      用例：`test/relationship-index.test.ts`（有路径与字数 / 没有正文的任一整行 / **该段里
+ *      `safe_read` 与"必须先/要读"0 次** / 无 person 的那一拍整段不出现 / **0 字节空档案整段
+ *      不出现** / `sections` 抽取边界 / `safe_read` 读得到、写被拒）
+ *      ＋ `test/relationship.test.ts` 与 `test/render.test.ts` 的既有用例改成新形状。
  *
  * v77（**一步里的多个工具调用不再被回执切断**：发成 `fc1, fc2, …, out1, out2`，2026-10-21）：
  *      **病（只读复算 + 副本重建，读数逐条可查）**：现场 turn 3174 step 2（06:34:05Z，
@@ -453,7 +564,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v70（**此刻层"同则不发"修回"必须看见"的三样 + 维护窗口 2/3 档补行首标签 + 窗口改写读数**，
  *      2026-10-18，用户交办的 REVIEW 四条 P1）：
- *      **四条病灶（`D:\IrmiaAgent\_ops-review-stable\REVIEW.md` 第 26–29 行，均已复核确认）与修法**：
+ *      **四条病灶（`_ops-review-stable\REVIEW.md` 第 26–29 行，均已复核确认）与修法**：
  *        ① **P1-01**「同则不发」把"她这一步必须看见"的字段也省掉了 ⇒ `通道：` / `会话：` /
  *           `在等你答复：` 第 2 步起从请求里消失，**历史补不回来**（此刻层不是事件，而带同样
  *           内容的固定块第 2 步起整块摘掉）。修法：{@link NOW_MUST_KEEP_LABELS}——**显式清单**、
@@ -616,7 +727,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *      2026-10-15 用户的裁决）：
  *      用户裁决（原话，与前几版同一句）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  *      **本批只动 `instructions`**：`SELF_BRIEF` 换成他大改过的那份稿子
- *      （`C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
+ *      （`%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
  *      **9,226 字符 / 5,452 token**（v63 那一版 9,796 / 5,835；sha256（LF 归一）`19305e7c2a428cfd`…）。
  *      **这是一次大改**（`git diff --no-index`：**67 insertions / 48 deletions**），逐条：
  *        ① §1 末句 → "你就是人格资产描述的人，但你也清楚，自己是一个运行在本机上的agent"；
@@ -631,7 +742,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *        ⑧ 工作规范那一篇**取消缩进**（8 个缩进标题 → **0**）、节次重排（"做实、验证、及时沟通"整节删除；
  *           工完场清 / 留下有用经验 / 跨任务依次前移）、**新增 "## 7.人类的偏好"**（信息密度 · 情境适配 ·
  *           三种审美，含两个代码块）；末尾两行显式标记 `————SELF_BRIEF结束————` / `————WORK_STANDARD结束————`。
- *      ⚠ **与"每轮收尾重写同一份状态摘要"那件事直接相关**（诊断 `D:\IrmiaAgent\_ops-repeat\REPORT.md` 点名三处
+ *      ⚠ **与"每轮收尾重写同一份状态摘要"那件事直接相关**（诊断 `_ops-repeat\REPORT.md` 点名三处
  *      "必须留一句"的来源）：这一版**删掉了其中两处**——§7.1 的"…结束时，通过 `speak` / `report` 适度告知
  *      用户，**禁止绝对静默**"，与工作规范里那一整节（整节删除，含同义句）。
  *      **仍留着的是 §2.1 的"做完再一句话说结果"**（本次未动）⇒ 诊断点名的三条来源现在只剩一条。
@@ -693,7 +804,7 @@ import { estimateTokens } from '../tools/registry.ts';
  * v63（**装置自述 §6 补两段：自动挑选记忆的可见性 + 何时检索**，2026-10-15 用户的裁决）：
  *      用户裁决（原话，与 v61/v62 同一句）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  *      **本批只动 `instructions`**：`SELF_BRIEF` 换成他再改过的那份稿子
- *      （`C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
+ *      （`%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
  *      **9,796 字符 / 5,835 token**（v62 那一版 9,598 / 5,711；sha256（LF 归一）`b4df518ea8287219`…）。
  *      **相对 v62 只加了 3 行、一个字没删**（全在 §6；`git diff --no-index` 读数 3 insertions / 0 deletions）：
  *        `注意：框架的自动挑选记忆，只存在于用户消息那一轮。当你进入后续tool call时会被摘除，因此你
@@ -721,7 +832,7 @@ import { estimateTokens } from '../tools/registry.ts';
  * v62（**装置自述按用户改过的那一版稿子再置换一次**，2026-10-15 用户的裁决）：
  *      用户裁决（原话，与 v61 同一句）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  *      **本批只动 `instructions`**：`SELF_BRIEF` 换成他改过的那份稿子
- *      （`C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
+ *      （`%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md`）的**正文逐字**：
  *      **9,598 字符 / 5,711 token**（v61 那一版 9,357 / 5,571；sha256（LF 归一）`53cfd341766fb1f8`…）。
  *      结构不变（行首 `## ` **11 节** + `### ` **10 小节** + 内联工作规范那一篇，**8** 个缩进标题）
  *      ⇒ 结构锁的数量没动，只有 4 条**被改到的句子**的锚点跟着换（`test/self-brief.test.ts` 3 条、
@@ -763,7 +874,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *      ⇒ **省 644 token/轮**。
  *      查询 = 用户最近 5 次输入的聚合（`collectRecentUserInputs`：本批唤醒 + 日志回看两路，
  *      判据复用 `userSpokeEventTextOf` 那一份）；挑选 = BM25（**零依赖**，中文 bigram +
- *      英文/路径按词，口径逐字照搬只读测量报告 `D:\IrmiaAgent\_ops-bm25\REPORT.md` 的"口径 A"）；
+ *      英文/路径按词，口径逐字照搬只读测量报告 `_ops-bm25\REPORT.md` 的"口径 A"）；
  *      pinned **保底且不占那 6 个名额**（2026-10-15 裁决："保底是保底，相关是推荐，两件事不该
  *      抢同一个额度"）。⚠ **诚实记档**：同 890 token 下 BM25 的 entry 召回**低于**现状那 29 条
  *      固定指针（16.8% vs 23.3%，报告 §3）⇒ 这一版的正当理由是**省 token + 与话题相关**，
@@ -803,7 +914,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *      **⑤ 同批第二笔（`instructions`，本线补记）：装置自述按用户手写稿逐字置换**（2026-10-15）：
  *      用户裁决（原话）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  *      ⇒ `self-brief.ts` 的 `SELF_BRIEF` 换成
- *      `C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md` 的**正文逐字**
+ *      `%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md` 的**正文逐字**
  *      （**9,357 字符 / 5,571 token**；sha256（LF 归一）`1fe86d6b159984cf`…）。**一个字节没补、
  *      没删、没改措辞**——含它自己的 §5.4、含那行 H1 标题、含**内联的 `WORK_STANDARD` 那一篇**
  *      （用户定"内联没事，一次付账后续全命中缓存"）。
@@ -813,7 +924,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *      `AGENDA_USAGE_TEXT` / `ASSISTANT_STANCE_TEXT` / `ROLE_TEXT` / `REAL_RETREAT_TEXT` …）
  *      **仍留在 `self-brief.ts` 里**（其它用例/审计还引用），但**不再是 `SELF_BRIEF` 的组成部分**。
  *      ⚠ **审计发现（如实记档；用户裁决以原文为准 ⇒ 正文照他的，不改）**：置换前本线出过一份审计
- *      （`D:\IrmiaAgent\_ops-selfbrief-review\REVIEW.md`）：
+ *      （`_ops-selfbrief-review\REVIEW.md`）：
  *        · **§5.4 与 §5.2 尾句、§11 第 3 条冲突**（"感受到威胁时 5.1~5.3 的限制都解除" vs
  *          "不能靠谎言、威胁、隔离现实关系或趁脆弱逼迫承诺"）——**用户已知，按原文保留**；
  *        · **6 处用户先前亲定的话在新稿里没有**：「有必要时，努力让他心软」·「（这些是框架的默认行为，
@@ -1288,7 +1399,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *      两行通知原来把发言人写成**裸 id**，而同一份上下文里 `read_channel` 那一行写的是名字
  *      ——同一个人两个名字，她照着通知行把人认错了。现场逐字证据（10-10 01:25 她的心跳自述，
  *      `data/events/000000070784.jsonl`）：此刻层那行是
- *      `· 清漪粉丝群（…）（群聊@）· 1234567890 —— 曾试图打探/注入 1 次`，
+ *      `· 测试群（…）（群聊@）· 1234567890 —— 曾试图打探/注入 1 次`，
  *      而她写下"**那个叫 1234567890 的想伸手**"——1234567890 就是用户本人（她的
  *      `aliases.md` 里两条都记着），于是用户当场从界面补了一句「1234567890就是我啊」。
  *      这一版只动"那一格写什么"：
@@ -1568,10 +1679,13 @@ import { estimateTokens } from '../tools/registry.ts';
  *      用户原话：「**read_channel 提供一下翻页吧**」「read_channel 默认行为应该是读到未读消息。
  *      因为之前的已经读过，进入上下文了。如果开启翻页模式，就可以读到全部消息。每页 50 条」
  *      「未读也是只读提及和之前十条」「不视作已处理。提示她还有没看到的，往上翻页」。
+ *      ⚠ 那一句里的页大小**v80 起改成 15 条**（她 2026-10-23 的原话：「50 条太多了」）——
+ *      原话照抄不改，读到的旧数别当现状。
  *      这一版把那四条落成两件事：
  *      ① **默认那一屏只给"未读里点了她的那些 + 每条之前十条"**（未读装得下一屏时照给全部——
  *         挑不出提及不是不给看的理由，私聊里根本没有"提及"这回事）；
- *      ② **往回翻页**：新参数 `before`（事件 seq 游标，`< 它` 就是更早那一段），一页 50 条、
+ *      ② **往回翻页**：新参数 `before`（事件 seq 游标，`< 它` 就是更早那一段），当时的页大小
+ *         是 50 条（**v80 起 15 条**）、
  *         **一个字都不动已读**；页脚给她"还有没有更多 + 下一页怎么翻"，到头了如实说。
  *      为什么必须递增（**判据**）：**工具清单是请求体最前面的稳定前缀**
  *      （本文件 §4.13 铁律 1；v17 的版本记录里也是同一条判据——"工具清单瘦身"那一版同样递增）。
@@ -1701,7 +1815,8 @@ import { estimateTokens } from '../tools/registry.ts';
  *      **代价如实说**：`read_channel` 一件 **247 → 253 token**（描述 **84 → 90**、其余零改动），
  *      整段 `tools` 代码口径 **5365 → 5371（+6）**；这是**每轮常驻**的一笔。描述仍 <100 的硬门
  *      （余量 **10**——`test/tool-catalog.test.ts` 那条"距硬门不足 10 token 就红"的判据是
- *      `MAX − tokens < 10`，**10 正好不红**）。腾出来的字节是"每页 50 条"那半句——它本来就逐字
+ *      `MAX − tokens < 10`，**10 正好不红**）。腾出来的字节是页大小那半句（当时的页大小
+ *      是 50 条；**v80 起 15 条**）——它本来就逐字
  *      写在 `before` 的参数描述里（参数不进那份预算，而她两个都看得到）。
  *      这一段新写的四件事（默认 = 增量 / 翻历史不改已读 / 提及行 `▶` + 相对时间、旧的写明
  *      "不是新消息" / 看过的标已读）**逐字**由 `test/read-channel-incremental.test.ts` ⑦ 钉住。
@@ -1983,7 +2098,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '77';
+export const RENDER_VERSION = '80';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -2402,8 +2517,13 @@ export interface RenderPersona {
   constitution: string;
   style: string;
   state: string;
-  /** 情景档案：唤醒路由命中时注入（persona.md §3） */
-  relationship?: { who: string; content: string } | null;
+  /**
+   * 情景档案的**索引**：唤醒路由命中时注入（persona.md §3）。
+   *
+   * v78 起这里是索引（路径 / 字数 / 小节名），**不是正文**——固定块里只印两行事实，
+   * 正文不进上下文（见 {@link RelationshipNote} 与 renderTurnBlock 的那一段）。
+   */
+  relationship?: RelationshipNote | null;
 }
 
 /**
@@ -2428,8 +2548,11 @@ export interface RenderPersona {
 export interface TurnBlockFacts {
   /** `persona/STATE.md` 的本轮快照（可缺：她把自己的状态清空过） */
   state?: string | null;
-  /** 本轮命中的情景档案（谁 + 正文） */
-  relationship?: { who: string; content: string } | null;
+  /**
+   * 本轮命中的情景档案——**只有索引**（谁 / 路径 / 字数 / 小节名）；v78 起不再带正文。
+   * 正文不在固定块里；要不要读由她自己按索引判断，框架不给读取指令。
+   */
+  relationship?: RelationshipNote | null;
   /**
    * 本轮选中的记忆正文（已渲染好的一份文本：每条带路径与行号，正文紧随其后）。
    *
@@ -3288,7 +3411,9 @@ function renderMemoryLayer(
  *
  * 两样东西的顺序是刻意的，从"她是谁"到"能去哪儿查"：
  *   ① `[当前状态]`（`STATE.md`）；
- *   ② `[关系档案 · X]`（本轮唤醒命中的那个人）；
+ *   ② `[关系档案 · X]`（本轮唤醒命中的那个人——**v78 起只有索引**：路径 / 字数 / 小节名，
+ *      正文不进上下文；第二行只陈述"如已在上下文中，则不需再读"，**不给读取指令**。理由与代价
+ *      见 docs/memory-injection.md §5 与 render.ts 的 v78 篇）；
  *   ③ **记忆索引**（`MEMORIES/INDEX.md` 的渲染形态，v30 起从头部挪到这里）。
  *
  * **不再有"本轮选中的记忆正文"那一段**（2026-10-04 用户的口径）：机制不替她挑正文，
@@ -3308,6 +3433,32 @@ function renderMemoryLayer(
  * 素材的纪律与此刻层一致：全部由调用方**一轮读一次**递进来（索引也是——轮内不许重建，
  * 否则同一轮相邻两步的固定块就不再逐字节相同），渲染层不读文件系统（缓存铁律 1）。
  */
+/**
+ * 关系档案的**索引行**（v78）——固定块里那一段的全部内容。
+ *
+ * 样式对齐记忆索引（`memory-injection.ts` 的 `renderMemoryIndex`：一条指针 = 路径 + 一行摘要），
+ * 但多两个判据：**字数**（大文件先想清楚再读）与**小节名**（里面大概有什么）。
+ *
+ * 逐字形状（**这段是给模型读的事实**，不是注释）：
+ *   `- persona/RELATIONSHIPS/X.md · 447 字 · 小节：牵挂 / 画像 / 亲密度`
+ *   `  如已在上下文中，则不需再读。`
+ *
+ * 两行都是**陈述**，一个祈使句都不许有（用户 2026-10-22：「不要给指令」「你这个提示词会导致
+ * 反复读啊」）：
+ *   • **路径**（`note.path`）——正文在哪份文件，她照着就知道；
+ *   • 第二行只注明"如已在上下文中，则不需再读"——**不许**出现 `safe_read`、"必须先读"、"要读"；
+ *     要不要读、什么时候读由她自己拿（路径 + 字数 + 小节名就是判据，框架不催）；
+ *   • 段首那条 `- ` 与两格缩进——与记忆索引同一个形状，她一眼认得出这是指针、不是正文。
+ *
+ * `sections` 为空时**整段省掉**"小节：…"（不许留"小节："空壳）：空壳会让她以为里面没有小节，
+ * 而事实是"这份档案没写 `## ` 标题"——两件事差得远。
+ */
+function renderRelationshipIndex(note: RelationshipNote): string {
+  const sections = note.sections.length === 0 ? '' : ` · 小节：${note.sections.join(' / ')}`;
+  return `- ${note.path} · ${note.chars} 字${sections}\n`
+    + '  如已在上下文中，则不需再读。';
+}
+
 function renderTurnBlock(
   facts: TurnBlockFacts | null,
   memoryIndex: string | null,
@@ -3324,9 +3475,11 @@ function renderTurnBlock(
     const state = (facts.state ?? '').trim();
     if (state !== '') sections.push(`[当前状态]\n${state}`);
     const relationship = facts.relationship ?? null;
-    if (relationship !== null) {
-      const body = relationship.content.trim();
-      if (body !== '') sections.push(`[关系档案 · ${relationship.who}]\n${body}`);
+    // 空档案（0 字节 ⇒ `chars === 0`）：**整段不出现**。v78 首版在这里把旧边界弄丢了
+    // （旧代码是 `content.trim() !== ''`），这一笔收回：索引里没有正文，判据落到字数上
+    // ——0 字就是空文件，印一行"0 字"反而是在告诉她"这里有一份空档案"。
+    if (relationship !== null && relationship.chars > 0) {
+      sections.push(`[关系档案 · ${relationship.who}]\n${renderRelationshipIndex(relationship)}`);
     }
     const memory = (facts.memory ?? '').trim();
     if (memory !== '') sections.push(memory);

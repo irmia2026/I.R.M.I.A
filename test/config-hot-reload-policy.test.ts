@@ -1,7 +1,7 @@
 /**
  * 配置生效口径的**唯一一处** —— `src/config/watcher.ts` 的 `HOT_RELOAD_FIELDS` / `HOT_RELOAD_POLICY`
  *
- * 为什么单开一份用例（REVIEW P1-30）：这句话过去被手抄在五个地方（README、ARCHITECTURE、
+ * 为什么单开一份用例（REVIEW P1-30）：这句话过去被手抄在五个地方（README、docs/ARCHITECTURE、
  * `config/config.ts`、`log/types.ts`、`web/server.ts`），最后抄成两种相反的结论——四处说
  * "全部字段都要重启（热更白名单是空的）"，而真值一直是 `HOT_RELOAD_FIELDS = ['mcp.servers']`
  * 且**刻意不重建** MCP 常驻索引。现在只剩一处常量，这份用例盯住"常量与名单不许分岔"：
@@ -22,7 +22,7 @@ import {
 } from '../src/config/watcher.ts';
 
 describe('HOT_RELOAD_FIELDS · 今天的热更名单', () => {
-  test('只有 mcp.servers 一项（改这一条 = 改口径，要同批改 README/ARCHITECTURE/那份常量）', () => {
+  test('只有 mcp.servers 一项（改这一条 = 改口径，要同批改 README/docs/ARCHITECTURE/那份常量）', () => {
     assert.deepEqual([...HOT_RELOAD_FIELDS], ['mcp.servers']);
   });
 });

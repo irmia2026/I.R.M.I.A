@@ -1979,7 +1979,7 @@ describe('fsTools 注册', () => {
     assert.equal(env.maxReadLines, 2000);
   });
 
-  it('createEnv 从数据目录推导别名表：三个前缀各指向自己的根', async () => {
+  it('createEnv 从数据目录推导别名表：四个前缀各指向自己的根', async () => {
     const root = join(tmpdir(), 'irmia-env-alias');
     const env = createEnv({ dataDir: join(root, 'data') }, { now: () => new Date(0) });
     const aliases = env.pathAliases({ workspaceRoot: root });
@@ -1989,7 +1989,16 @@ describe('fsTools 注册', () => {
         ['MEMORIES', join(root, 'data', 'workspace', 'MEMORIES')],
         ['diary', join(root, 'data', 'workspace', 'diary')],
         ['persona', join(root, 'data', 'persona')],
+        // v79：技能实体住在数据目录（与 persona/ 同级），模型读正文仍写 `skills/<name>/SKILL.md`
+        ['skills', join(root, 'data', 'skills')],
       ],
+    );
+    // `skills/` 是**数据目录优先**（alias-first）：安装目录里的 `skills/` 只是出厂种子，
+    // 主根优先会让模型读到种子那份（信任门绑的却是数据目录那份的内容哈希）。
+    // 其余三条保持 P1 起的"主根优先"（没有 mode 字段 = 缺省语义，一个字节都没改）。
+    assert.deepEqual(
+      aliases.filter((a) => a.mode !== undefined).map((a) => [a.prefix, a.mode]),
+      [['skills', 'alias-first']],
     );
     // 别名表**刻意不含 workspace/**：仓库根真的有一个同名目录（http_download 的落点），
     // 别名它会制造歧义——那个问题归"描述说清根在哪"，不归别名表。

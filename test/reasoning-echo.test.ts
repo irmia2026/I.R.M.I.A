@@ -161,9 +161,9 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 77（v75 驱逐阶梯化/轮内锚定 → v77 多调用步的 `fc…fc,out…out`）', () => {
-    assert.equal(RENDER_VERSION, '77');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '77');
+  test('RENDER_VERSION 递到 80（v78 关系档案改索引 → v79 http_get 换正文抽取器 → v80 read_channel 翻页一页的条数 50→15）', () => {
+    assert.equal(RENDER_VERSION, '80');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '80');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {

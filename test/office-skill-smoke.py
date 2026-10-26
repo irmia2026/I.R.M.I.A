@@ -6,7 +6,7 @@
 这个技能是纯 Python 脚本，塞进 node 的测试列表只会互相拖累。所以它是独立脚本，
 在**仓库外**的工作目录里跑（技能产物不许写进仓库）：
 
-    python test/office-skill-smoke.py --dir D:\\IrmiaAgent\\_ops-office-kit\\smoke
+    python test/office-skill-smoke.py --dir _ops-office-kit\\smoke
 
 覆盖（每条都打印关键读数 + 产物路径 + PASS/FAIL）：
   ① md → docx（标题/列表/表格/中文/插图）      ② docx → 预览文本

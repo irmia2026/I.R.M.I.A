@@ -24,6 +24,8 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
+import { expandRealPath, realPathOrNull } from '../util/real-path.ts';
+
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 /** 版本库根目录名（与 schema §11 目录树的隐藏目录约定一致） */
@@ -258,13 +260,84 @@ export function normalizeVersionPath(input: string, label = '文件路径'): str
 /**
  * 把一个绝对路径映射成 workspace 分区里的版本库相对路径。
  * 输入是**已在工作区之内**的绝对路径（调用方用 path-guard 保证），这里只做映射不做放行判断。
+ *
+ * ── 判据：**三个视角，只要能接回工作区就收**（2026-10-23 修）──
+ *
+ * 病灶（现场见 `util/real-path.ts` 的文件头）：path-guard 交出来的是**展开后**的真路径，
+ * 而 `ctx.workspaceRoot` 是字面路径。老写法拿这两者算相对路径 ⇒ 只要路径上有一段落在了
+ * 链接之后（她的 `data` 根就是），就一定算出 `..\..\data\...` ⇒ **文件写进去了、快照却被
+ * 跳过**（现场原话："路径不在工作区内，无法建立版本快照"，文件写入前后的备份都还在、
+ * 版本库里那一版却没有）。
+ *
+ * 三个视角依次尝试，第一个接得上的就是答案：
+ *   ① **真实视角**：基准根与目标**都**展开（`expandRealPath`）再算。根自身经 junction
+ *      到达时（同一个仓库挂着两条路径、其中一条是链接），两边重合。
+ *   ② **字面视角**：目标若是按字面给的（未经守卫展开），按字面根算——`data/...` 这种
+ *      "字面上就在工作区内"的路径因此仍然映射得出来。
+ *   ③ **反查视角**：目标是展开过的、而它从工作区里进来时经过**工作区内的一个链接子项**
+ *      （`<root>/data` → `<安装根>/data`）——那就把那一项的名字接回去当第一段。
+ *      这一眼只查根下**一层**（`data/…` 这类形状就够），而且只在前两眼落空时跑。
+ *   三眼都接不上 ⇒ 拒绝。`..`、绝对路径、跨盘符、以及工作区外那条真路径一律在外
+ *   （见 `relativeInside`）。
+ *
+ * ⚠️ 这不是安全边界，别把它当边界用：写入能不能落到某处由 `fs/path-guard.ts` 在**写那一刻**
+ * 判（`trust.mode = 'workspace'` 时它按 realpath 之后的落点比边界；`'full'` 档本来就不拦）。
+ * 这里只决定"这份内容在版本库里记成哪个相对路径"，而结果经过 `normalizeVersionPath` 之后
+ * 只可能落在 `.versions/` 之内——失败的那一侧永远是"少一版快照"，不是"能写到别处去"。
  */
 export function workspaceVersionRelOf(workspaceRoot: string, absPath: string): string {
-  const rel = relative(workspaceRoot, absPath).replaceAll('\\', '/');
-  if (rel === '' || rel === '.' || rel.startsWith('../')) {
+  const rel = relativeInside(expandRealPath(workspaceRoot), expandRealPath(absPath))
+    ?? relativeInside(resolve(workspaceRoot), resolve(absPath))
+    ?? relThroughLinkedEntry(workspaceRoot, absPath);
+  if (rel === null) {
     throw new Error(`路径不在工作区内，无法建立版本快照：${absPath}`);
   }
   return normalizeVersionPath(rel, '工作区相对路径');
+}
+
+/**
+ * **反查**：目标真值在 `workspaceRoot` 的哪个链接子项之下？（见上面第 ③ 眼的来由）
+ *
+ * 遍历根下的**一层**子项，逐个取真实路径，看目标是否落在它下面；命中就把那一项的名字
+ * 当作第一段接回去（`data` + `workspace/MEMORIES/x.md`）。子项本身就是目标（文件级链接）
+ * 时，它的名字就是全部。
+ *
+ * 为什么按名字排序：同一份盘 + 同一个输入 ⇒ 同一个结果（两个链接指到同一处时才需要这条，
+ * 而"结果稳定"比"也许更准"重要——版本库的键不该随目录项的返回顺序漂）。
+ * 读不到根（不存在 / 权限）⇒ `null`：没有反查可言，交由调用方报"不在工作区内"。
+ */
+function relThroughLinkedEntry(workspaceRoot: string, absPath: string): string | null {
+  const target = expandRealPath(absPath);
+  let names: string[];
+  try {
+    names = readdirSync(workspaceRoot);
+  } catch {
+    return null;
+  }
+  for (const name of [...names].sort()) {
+    const real = realPathOrNull(join(workspaceRoot, name));
+    if (real === null) continue;
+    // 那个子项本身就是目标（文件级链接）：名字就是全部相对路径
+    if (isInsideRoot(real, target) && isInsideRoot(target, real)) return name;
+    const rest = relativeInside(real, target);
+    if (rest !== null) return `${name}/${rest}`;
+  }
+  return null;
+}
+
+/**
+ * `target` 相对 `root` 的路径；**不在里面返回 null**（含 root 自己）。
+ *
+ * 四条"在外"的形状都要拦：空串与 `.`（就是 root 本身、不是它里面的一份资产）、
+ * `..` 开头（上升段）、`..`（上一级）、以及跨盘符时 `relative()` 给出的绝对路径
+ * （Windows 上两个盘之间没有相对路径，`relative()` 会原样返回绝对路径——那不是"在里面"）。
+ */
+function relativeInside(root: string, target: string): string | null {
+  const rel = relative(root, target).replaceAll('\\', '/');
+  if (rel === '' || rel === '.' || rel === '..') return null;
+  if (rel.startsWith('../')) return null;
+  if (isAbsolute(rel)) return null;
+  return rel;
 }
 
 /** 某个文件某一版本的快照路径：`<dataDir>/.versions/<scope>/<相对路径>/<diffHash>.md` */

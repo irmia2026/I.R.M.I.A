@@ -17,20 +17,22 @@ import '../app.dart';
 import '../i18n/app_strings.dart';
 import '../i18n/strings_scope.dart';
 import '../theme.dart';
+import '../theme/design_tokens.dart';
 import '../ui_kit.dart';
 import 'page_chrome.dart';
 
 /// 「日程」页（一级第三项）——设计稿 `Agent 近期安排 · 周历与清单.html` 那一页。
 ///
-/// ## 一屏里有什么（照设计稿逐块）
+/// ## 一屏里有什么（照设计稿逐块，2026-10-25 又删了六处）
 /// 页头（eyebrow + 大标题 + 搜索 / 回到本周 / ＋新建安排）→ 四张计数卡 → **左周历 + 右清单**（点一天筛清单、
-/// 点一条看详情）→ 选中详情 → 最近的工作记录 → 长期计划入口 → 页脚那句话。
+/// 点一条看详情）→ 选中详情。页脚那句话、周历底部"格外的条目"那行、整块「长期计划」都删掉了
+/// （用户这轮点名；见下方"这一页不回答什么"）。
 ///
 /// ## 布局纪律（用户 2026-10-12 的硬要求）：**整页不滚，只有「安排清单」在块内滚**
 /// 最外层是 `Column` + `Expanded`，每一块自己管自己的高度：页面里**只有一个 `Scrollable`**
 /// （清单那一块的 [ListView]，键 `schedule-list`）。窗口矮的时候**压缩周历行高**
-/// （[kMinRowHeight]…[kRowHeight]），而不是让整页长出去；屏再矮就先收起两块附加内容
-/// （工作记录 / 长期计划——它们真正的家是日志页与记忆页）。
+/// （[kMinRowHeight]…[kRowHeight]），而不是让整页长出去；屏再矮就先收起选中详情。
+///（从前还能收起"两块附加内容"；2026-10-25 删掉长期计划之后只剩详情一块可让位。）
 ///
 /// ## 数据：只读投影 + `payload` 约定（不新增端点、不改事件形状）
 /// `GET /api/projection` 的 `timers` + 每条 `payload` 的七格：既有三格 `why`/`note`/`sid`（v55）
@@ -50,8 +52,8 @@ import 'page_chrome.dart';
 ///     「健身 · 每周三练」是 `cron='0 20 * * 2,4,6'` 一条，只按 `at` 画就只出一块——
 ///     那是规则使然，不是渲染 bug）；**认不出的 cron 一条都不画**（宁可少画，不许画错）；
 ///   · 「安排清单」两类都留（那才是"接下来要发生什么"），但她自己的**降级排在后面** + 灰角标；
-///   · 也**不摊记忆正文**——「长期计划」只做**一个紧凑入口**，只认白名单里的那一个分区
-///     （见 [kSchedulePlanSectionTitles]）；`置顶`/`约定与承诺`/`稳定事实`/`观察`/`归档` 连读都不读。
+///   · 也**不摊记忆正文**：整块「长期计划」2026-10-25 删掉了（用户点名）——记忆的家是记忆页，
+///     这一页不再读 `facts.md`、也没有"去记忆页"那个入口。
 class SchedulePage extends StatefulWidget {
   const SchedulePage({super.key, required this.state});
 
@@ -83,13 +85,6 @@ class _SchedulePageState extends State<SchedulePage> {
   /// 会话清单（`GET /api/sessions`）：「到哪儿说」的名字 + 「新建安排」里那个下拉的选项。
   /// 读不到就静默降级（显示原串、下拉只剩"不用"）——它是附加信息，不该把整页拖进错误态。
   List<_Session>? sessions;
-
-  /// 长期计划那**一个分区**（白名单命中的那个；null = 还没读到 / 没有这一格）。
-  /// ⚠ 只存命中的那一个——**不存整份 facts**（见类注释"这一页不回答什么"）。
-  _FactsSection? planSection;
-
-  /// 读记忆失败的原因（只影响「长期计划」那一块：如实说一句，不假装"没有这一格"）
-  String? plansError;
 
   String? error;
   bool loading = true;
@@ -137,8 +132,8 @@ class _SchedulePageState extends State<SchedulePage> {
   Future<void> load() async {
     final s = IrmiaStrings.read(context);
     final api = widget.state.api;
-    // 两块附加内容各自吃自己的错，但**和主数据一起等**（一次刷新要等人等的就是同一件事）
-    final extras = Future.wait([_loadSessions(), _loadPlanSection()]);
+    // 附加信息（会话名单）自己吃自己的错，但**和主数据一起等**（一次刷新要等人等的就是同一件事）
+    final extras = _loadSessions();
     try {
       final data = await api.get('/api/projection');
       if (mounted) {
@@ -167,46 +162,6 @@ class _SchedulePageState extends State<SchedulePage> {
       setState(() => sessions = [for (final item in list) _Session.from(item)]);
     } catch (_) {
       // 静默：名单只是"人认得的那半"，读不到就显示原串
-    }
-  }
-
-  /// 长期计划：从 `facts.md` 里**只取白名单命中的那一个分区**（最多 3 行）。
-  ///
-  /// 为什么不整份摊出来（用户 2026-10-12 的批注：「写了不应该进入日程页的内容」）：
-  /// 那份文件里有 `置顶（pinned）` / `约定与承诺` / `稳定事实` / `观察` / `归档（已失效/已过期，不注入）`
-  /// ——那些是**记忆**，日程页只回答"接下来要发生什么"。所以判据是**白名单**：只有标题命中
-  /// [kSchedulePlanSectionTitles] 的那一个分区才有机会上屏，其余分区连读都不读，根本不存在"漏了一格"。
-  /// 命不中 ⇒ 如实显示"她还没有单开这一格"。
-  Future<void> _loadPlanSection() async {
-    final s = IrmiaStrings.read(context);
-    try {
-      final view = await widget.state.api.get('/api/memory');
-      final factsView = view is Map ? view['facts'] : null;
-      final path = factsView is Map ? '${factsView['path'] ?? ''}' : '';
-      if (path.isEmpty) throw StateError(s.schedMemoryFactsMissing);
-      if (!_hasPlanSection(factsView)) {
-        // 清单里就没有这一档：不用再读正文（少一次往返）
-        if (mounted) {
-          setState(() {
-            planSection = null;
-            plansError = null;
-          });
-        }
-        return;
-      }
-      final file = await widget.state.api.get('/api/memory?file=${Uri.encodeComponent(path)}');
-      final content = file is Map ? '${file['content'] ?? ''}' : '';
-      if (!mounted) return;
-      setState(() {
-        planSection = _pickPlanSection(content);
-        plansError = null;
-      });
-    } catch (err) {
-      if (!mounted) return;
-      setState(() {
-        planSection = null;
-        plansError = '$err';
-      });
     }
   }
 
@@ -277,23 +232,7 @@ class _SchedulePageState extends State<SchedulePage> {
         return _atOf(t) == null;
       }).length;
 
-  /// **用户向、能算出钟点、但钟点不在 08:00–21:00 这一格**里的条目（同样画不出来）。
-  /// 有能算的 `cron` 就按它的钟点算（周期条目一整天都在格外的只算一条），否则按 `at`。
-  int get _outOfRangeCount => _timers.where((t) {
-        if (!_isOwnerFacing(t)) return false;
-        final cron = _cronOf(t);
-        if (cron.isNotEmpty) {
-          final spec = _parseCron(cron);
-          if (spec == null) return false; // 算不出 ⇒ 归上面那一类，别数两次
-          return spec.hour * 60 + spec.minute < _gridStartMinute ||
-              spec.hour * 60 + spec.minute > _gridEndMinute;
-        }
-        final at = _atOf(t);
-        if (at == null) return false;
-        final minutes = at.hour * 60 + at.minute;
-        return minutes < _gridStartMinute || minutes > _gridEndMinute;
-      }).length;
-
+  /// sid → 人名（「到哪儿说」那一格用）。读不到名单时是空表（显示原串）。
   Map<String, String> get _nameOfSid {
     final rows = sessions;
     if (rows == null) return const {};
@@ -541,6 +480,15 @@ class _SchedulePageState extends State<SchedulePage> {
                   weekStart = _weekStartOf(scheduleNow());
                   selectedDay = null;
                 }),
+                // ⑦ 用户 2026-10-25：「回到本周」现在是胶囊形 ⇒ 统一成卡片圆角那套的**控件档**
+                // （[IrmiaTheme.radiusCtl] = 10）。高度与隔壁「＋新建安排」逐像素一致：
+                // 内边距同一套栅格（16/12），字号同一份 buttonText（主题给的）。
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: Space.x4, vertical: Space.x3),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+                  ),
+                ),
                 child: Text(s.schedBackToThisWeek),
               ),
               const SizedBox(width: 8),
@@ -571,9 +519,11 @@ class _SchedulePageState extends State<SchedulePage> {
     );
   }
 
-  /// 不滚的那一版主体：回执（可有）+ 计数卡（定高）+ 工作区（Expanded）+ 页脚（定高）
+  /// 不滚的那一版主体：回执（可有）+ 计数卡（定高）+ 工作区（Expanded）。
+  ///
+  /// 页脚那句「安排只是一个行动机会 · 到点后…」2026-10-25 删掉了（用户点名）：
+  /// 它是全页最大的一块"解释性"文字，而这一页的每一块已经各自说清了自己是什么。
   Widget _body() {
-    final s = IrmiaStrings.of(context);
     final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(
       builder: (context, box) => Column(
@@ -587,30 +537,22 @@ class _SchedulePageState extends State<SchedulePage> {
           _summary(),
           const SizedBox(height: 14),
           Expanded(child: _workspace(box.maxHeight)),
-          const SizedBox(height: 8),
-          Text(
-            // 设计稿页脚那句，逐字；只把她的名字换成**读来的那个**（界面从不写死名字）
-            s.schedFooter(widget.state.herDisplayName),
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 10.5, color: scheme.onSurfaceVariant),
-          ),
         ],
       ),
     );
   }
 
-  /// 工作区：左周历 + 右（清单 ＋ 详情 ＋ 两块附加）。
+  /// 工作区：左周历 + 右（清单 ＋ 详情）。
   ///
   /// ⚠ 这里的**阈值是量出来的、不是猜的**：`Expanded` 把"剩下的高度"给工作区，而右栏的
-  /// 清单是 `Expanded`（可以缩到很小），所以真正怕溢出的是那些**定高块**（详情 / 两块附加）。
-  /// 高度不够时按顺序让位：先两块附加（它们真正的家是日志页与记忆页），再详情（整页不滚是硬要求）。
+  /// 清单是 `Expanded`（可以缩到很小），所以真正怕溢出的是那块**定高块**（详情）。
+  /// 高度不够时唯一能让位的就是详情（整页不滚是硬要求）；2026-10-25 删掉长期计划之后，
+  /// 从前那档 `≥ 620 才摆两块附加` 的阈值跟着一起删了。
   ///
   /// 阈值口径（`available` = 工作区拿到的高度）：
-  ///   · ≥ 620：详情（~230）＋ 两块附加（各 ~95）都摆得下，清单还剩一截；
-  ///   · 420–620：只留详情（明细还是要能看）；
-  ///   · < 420：只剩清单（矮到这一步，别的都摆不下了）。
+  ///   · ≥ 420：清单 + 详情；
+  ///   · < 420：只剩清单（矮到这一步，明细就摆不下了）。
   Widget _workspace(double available) {
-    final showExtras = available >= 620;
     final showDetail = available >= 420;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -626,10 +568,6 @@ class _SchedulePageState extends State<SchedulePage> {
               if (showDetail) ...[
                 const SizedBox(height: 12),
                 _detailPanel(),
-              ],
-              if (showExtras) ...[
-                const SizedBox(height: 12),
-                _plansPanel(),
               ],
             ],
           ),
@@ -712,18 +650,13 @@ class _SchedulePageState extends State<SchedulePage> {
     return _Panel(
       children: [
         Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          // 标题只剩一行了（① 删掉下面那行说明）：与右边那排小控件居中对齐
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(s.schedCalendarTitle, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  Text(s.schedCalendarHint,
-                      style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
-                ],
-              ),
+              // ① 用户 2026-10-25：删掉标题下面那行「选择一个条目，查看具体安排」。
+              // 周历本身就用星期行 + 刻度说清了自己是什么，那行只是复述。
+              child: Text(s.schedCalendarTitle, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
             ),
             _miniButton('schedule-prev-week', Icons.chevron_left_rounded, s.schedPrevWeek,
                 () => setState(() {
@@ -836,7 +769,9 @@ class _SchedulePageState extends State<SchedulePage> {
                     height: 7,
                     decoration: BoxDecoration(
                       color: category.of(context),
-                      borderRadius: BorderRadius.circular(3),
+                      // 图例那颗是**圆点**：正圆走 [Shape.pill]（999 = 按尺寸自己算圆），
+                      // 不是"半径 3 的小方块"。见 design_tokens 的三档口径。
+                      borderRadius: Shape.pill,
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -847,13 +782,14 @@ class _SchedulePageState extends State<SchedulePage> {
           ],
         ),
         // ⚠ 这里**不再写**"块高按 dur 算 / 分类色按 cat"那两句技术说明（用户 2026-10-12 批注
-        // 「此文字无意义可去掉」）。下面两句留着：它们说的是"有 N 条画不到格子里，去清单看"，
-        // 是**数据**不是实现说明。
+        // 「此文字无意义可去掉」）。剩下这一句留着：它说的是"有 N 条周期条目画不到格子里，
+        // 去清单看"——是**数据**不是实现说明。
+        //
+        // ⑤⑥ 2026-10-25 用户点名的两行一起删了：
+        //   · 「不在 08:00-21:00 这一格里：N 条（在清单里）」；
+        //   · 页脚「安排只是一个行动机会 · 到点后…」。
         if (_unplaceableCount > 0)
           Text(s.schedUnplaceable(_unplaceableCount),
-              style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant)),
-        if (_outOfRangeCount > 0)
-          Text(s.schedOutOfRange(_outOfRangeCount),
               style: TextStyle(fontSize: 10, color: scheme.onSurfaceVariant)),
       ],
     );
@@ -1124,16 +1060,21 @@ class _SchedulePageState extends State<SchedulePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(s.schedListTitle, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 4),
-                    Text(
-                      [
-                        s.schedListSubtitle,
-                        if (day != null) s.schedFilterDay(_dayLabel(s, day)),
-                        if (query.isNotEmpty) s.schedFilterQuery(query),
-                        if (filtered) s.schedFilterCount(timers.length),
-                      ].join(' · '),
-                      style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
-                    ),
+                    // ② 用户 2026-10-25：删掉「安排清单」下面那行「接下来要发生的事」。
+                    // 筛选态（只看某天 / 匹配某个词 / 条数）**仍然要有一行**——那是当前读数，
+                    // 不是复述；所以这里只在筛选时出现，标题下不再常驻第二行。
+                    if (day != null || query.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          [
+                            if (day != null) s.schedFilterDay(_dayLabel(s, day)),
+                            if (query.isNotEmpty) s.schedFilterQuery(query),
+                            s.schedFilterCount(timers.length),
+                          ].join(' · '),
+                          style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1256,13 +1197,11 @@ class _SchedulePageState extends State<SchedulePage> {
             ],
           ],
         ),
-        const SizedBox(height: 8),
-        if (timer == null)
-          Text(
-            s.schedDetailEmptyHint,
-            style: TextStyle(fontSize: 11.5, height: 1.5, color: scheme.onSurfaceVariant),
-          )
-        else ...[
+        // ③ 用户 2026-10-25：删掉「选择一个安排」下面那段说明
+        // （"点清单或周历里的任意一条…"整段）。没选中时这一格就只留标题，
+        // 不再用一段话教人怎么点。
+        if (timer != null) ...[
+          const SizedBox(height: 8),
           _DetailRow(
             label: s.schedFieldWhen,
             value: at == null
@@ -1301,68 +1240,6 @@ class _SchedulePageState extends State<SchedulePage> {
               ),
             ],
           ),
-        ],
-      ],
-    );
-  }
-
-  // ── 分区六：长期计划（**只做入口，不搬记忆正文**） ──
-
-  /// 判据（用户 2026-10-12 的批注「写了不应该进入日程页的内容」）：**日程页只回答"接下来要发生什么"**。
-  /// 所以这一块**只认白名单里的那一个分区**（[kSchedulePlanSectionTitles]，最多 3 行 + 一句"还有 N 行"），
-  /// 命不中就是一句实话 + 去记忆页的按钮；`置顶`/`约定与承诺`/`稳定事实`/`观察`/`归档` 这些
-  /// **连读都不读**——白名单是结构性保证：不是"记得别显示"，是**没有那条路**。
-  Widget _plansPanel() {
-    final s = IrmiaStrings.of(context);
-    final scheme = Theme.of(context).colorScheme;
-    final section = planSection;
-    final err = plansError;
-    return _Panel(
-      key: const ValueKey('schedule-plans'),
-      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
-      children: [
-        Row(
-          children: [
-            Text(s.schedPlanTitle, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(s.schedPlanNote,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 10.5, color: scheme.onSurfaceVariant)),
-            ),
-            TextButton(
-              key: const ValueKey('schedule-goto-memory'),
-              onPressed: () => widget.state.setPage('memory'),
-              style: _linkStyle,
-              child: Text(s.schedGoMemory),
-            ),
-          ],
-        ),
-        if (err != null)
-          HintLine(s.schedPlanUnavailable(err))
-        else if (section == null)
-          // 与用户给的那句逐字相同（她的记忆里还没有这一格）
-          HintLine(s.schedPlanEmpty)
-        else ...[
-          const SizedBox(height: 4),
-          Text('## ${section.title}'.substring(3),
-              key: const ValueKey('schedule-plan-section'),
-              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600)),
-          for (final line in section.items)
-            Padding(
-              padding: const EdgeInsets.only(top: 3),
-              child: Text('· $line',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
-            ),
-          if (section.more > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 3),
-              child: Text(s.schedPlanMore(section.more),
-                  style: TextStyle(fontSize: 10.5, color: scheme.onSurfaceVariant)),
-            ),
         ],
       ],
     );
@@ -1642,67 +1519,6 @@ String _statusOf(AppStrings s, Map<String, dynamic> timer) {
   return s.schedStatusWaiting;
 }
 
-// ════════════════════════════════ 长期计划：白名单 ════════════════════════════════
-
-/// 「长期计划」那一格**只认这几个分区标题**（含匹配）。日程页不许出现的分区
-/// （`置顶`/`约定与承诺`/`稳定事实`/`观察`/`归档`）**一条都不在这里**——这是结构性保证。
-// 白名单本身是**数据**：`kSchedulePlanSectionTitles`（见 app_strings.dart 的「数据」区）
-
-/// 记忆清单里有没有这一档（`/api/memory` 的 `facts.sections[]`）——有才去读正文
-bool _hasPlanSection(Object? factsView) {
-  final sections = factsView is Map ? factsView['sections'] : null;
-  if (sections is! List) return false;
-  for (final raw in sections.whereType<Map>()) {
-    final title = '${raw['title'] ?? ''}'.replaceFirst('## ', '').trim();
-    if (kSchedulePlanSectionTitles.any(title.contains)) return true;
-  }
-  return false;
-}
-
-/// `facts.md` 正文里**只挑白名单命中的那一个分区**（最多 [maxItems] 行，多的记进 [more]）。
-/// 返回 null = 没有这一格（界面显示"她还没有单开这一格"）。
-///
-/// ⚠ 这个函数的返回值里**不可能出现别的分区**：它只把命中的那一个装出来。
-_FactsSection? _pickPlanSection(String content) {
-  const maxItems = 3;
-  String? title;
-  var items = <String>[];
-  var matched = false;
-
-  for (final raw in content.split('\n')) {
-    final line = raw.trimRight();
-    if (line.startsWith('## ')) {
-      if (matched) break; // 命中那一段已经收完，后面的分区连读都不读
-      final candidate = line.substring(3).trim();
-      if (kSchedulePlanSectionTitles.any(candidate.contains)) {
-        matched = true;
-        title = candidate;
-        items = <String>[];
-      }
-      continue;
-    }
-    if (!matched) continue;
-    final text = line.trim();
-    if (text.isEmpty) continue;
-    items.add(text.startsWith('- ') ? text.substring(2).trim() : text);
-  }
-  if (!matched) return null;
-  return _FactsSection(
-    title: title ?? '',
-    items: items.take(maxItems).toList(),
-    more: items.length > maxItems ? items.length - maxItems : 0,
-  );
-}
-
-/// 命中分区的那几行（[more] = 没摆下的行数）
-class _FactsSection {
-  const _FactsSection({required this.title, required this.items, required this.more});
-
-  final String title;
-  final List<String> items;
-  final int more;
-}
-
 // ════════════════════════════════ 小件 ════════════════════════════════
 
 /// 发出去的那一句话（照原样带回这一页做回执）
@@ -1825,7 +1641,8 @@ class _ViewToggle extends StatelessWidget {
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
         color: scheme.surfaceContainer,
-        borderRadius: BorderRadius.circular(10),
+        // 分段控件属于"控件"：圆角走 [Shape.radiusControl]（10），不再是写死的 10/7。
+        borderRadius: BorderRadius.circular(Shape.radiusControl),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1842,12 +1659,13 @@ class _ViewToggle extends StatelessWidget {
     return InkWell(
       key: key,
       onTap: onTap,
-      borderRadius: BorderRadius.circular(7),
+      // 内段 = 外框圆角 − 外框内边距（3），这样两段叠在一起时圆角是"同心的"
+      borderRadius: const BorderRadius.all(Radius.circular(Shape.radiusControl - 3)),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
         decoration: BoxDecoration(
           color: selected ? scheme.surface : null,
-          borderRadius: BorderRadius.circular(7),
+          borderRadius: const BorderRadius.all(Radius.circular(Shape.radiusControl - 3)),
           boxShadow: selected ? IrmiaTheme.hairline : null,
         ),
         child: Text(

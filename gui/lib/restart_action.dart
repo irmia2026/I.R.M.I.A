@@ -35,6 +35,8 @@ import 'dart:io' show Platform;
 
 import 'api.dart';
 import 'i18n/app_strings.dart';
+// 关键动作的留痕（`[input] tap=… page=…`）：卡死时"人最后按的是不是重启"要能看见
+import 'stall_watch.dart';
 import 'ui_kit.dart';
 
 /// 命令名：服务端 `CONFIRM_PHRASES` 的键，也是 `X-Confirm` 头要带的那半截
@@ -186,9 +188,27 @@ Future<void> performRestart({
   Duration tick = const Duration(seconds: 1),
   int maxTicks = 90,
 }) async {
+  // 关键动作留痕：首页那颗按钮、托盘那一项、引导页的「立即重启」都汇到这一行。
+  // 名字取按钮上的原话（`strings.trayRestart`），于是日志与屏幕上是同一句。
+  traceInput(strings.trayRestart);
   Object? result;
   try {
     result = await requestRestart(api, guiExe: guiExe);
+  } on ApiTimeout catch (err) {
+    // **没等到回执**，与"没发出去"是两件事（2026-10-24 加，见 api.dart 的 [ApiTimeout]）。
+    // 这条端点的语义是"把重启链条发出去"：超时只说明界面没等到那句话，链条很可能已经动了。
+    // 说成"重启没能发出"就是在骗人——人会再点一次，于是同一台机器被重启两遍。
+    // 所以这里走"已发出、结局未确认"那一支：先说出来，再照旧等后端回来。
+    say(strings.restartNoReceipt(err.shortReason), ToastKind.info);
+    await awaitBackendBack(
+      strings: strings,
+      say: say,
+      online: online,
+      alive: alive,
+      tick: tick,
+      maxTicks: maxTicks,
+    );
+    return;
   } catch (err) {
     // 请求没出去 = 一个进程都没动（409 已在重启中 / 400 路径不存在 / WMI 起不来 / 网络）
     say(strings.restartRefused(err.toString()), ToastKind.error);

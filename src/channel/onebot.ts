@@ -1225,7 +1225,7 @@ export class OneBotClient {
        * **2026-10-11：`notice` 不再"记一行就丢"**（用户点的第二件，见 `noticeDataOf`）。
        * 这一支原先只写日志——于是"别人开了全员禁言"这类事实整条链不存在：她读那个群，
        * 看不到半小时前发生过什么。现在它落成 `channel/notice`（internal、不唤醒、不计未读），
-       * 由 `read_channel` 按 `noticeLineText` 渲染成一行 `[OWNER 开启了全员禁言]`。
+       * 由 `read_channel` 按 `noticeLineText` 渲染成一行 `[阿岚 开启了全员禁言]`。
        *
        * 日志照旧写（那是"协议端到底推没推"的凭据），只是从"只写日志"变成"写日志 + 落事件"。
        */

@@ -399,7 +399,7 @@ export const SCHEDULING_TEXT = [
  * **改动 M**（2026-10-13，用户裁决逐字）：**排的时候把话写在哪一格**（`payload` 的三格约定）。
  *
  * 用户这一批的口径（逐字）：「不需要拉 onebot，**把目前我考虑的东西做完就行**」⇒ 按设计线
- * （`D:\IrmiaAgent\_ops-timer-design\ALIGN.md` 的 §4.1 / §4.2 / §6）给的最小可用版本：**一个新字段
+ * （`_ops-timer-design\ALIGN.md` 的 §4.1 / §4.2 / §6）给的最小可用版本：**一个新字段
  * 都不加**，全部约进既有的 `payload`（`set` 的 `payload` 本来就是"到期时回注给未来的你"那个
  * 任意 JSON 值，`admin.ts` 的 `timer.payload` 参数描述与这里**同批**点明形状）。
  *
@@ -611,7 +611,7 @@ export const MEMORY_MAINTENANCE_RULE = '你还有一份长期记忆，落在 `ME
  * 用户这一批的裁决（原话，与前几版同一句）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  * ⇒ 正文**一个字节都不改、不补、不删、不"优化措辞"**（含内联的工作规范那一篇）。
  *
- * · 来源：`C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md`（用户手写，2026-10-20 这一版）
+ * · 来源：`%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md`（用户手写，2026-10-20 这一版）
  *   **25,616 字节 / 9646 字符 / 249 行**（LF 归一；原文件 CRLF=false、无 BOM）
  *   · sha256（LF 归一）**`b0d9fe2b97bce2bb4bc08004284d77caef58942e03e716e43ab4cf0531f93d2e`**
  *   ⇒ 从 `SELF_BRIEF` 取回来再算一遍是**同一个 sha256**（逐码点相等，见下面"换法"）。
@@ -661,7 +661,7 @@ export const MEMORY_MAINTENANCE_RULE = '你还有一份长期记忆，落在 `ME
  * 用户这一批的裁决（原话，与前几版同一句）：**「忠实我的原文不要改动。这个是个人项目，以我个人风格为准。」**
  * ⇒ 正文**一个字节都不改、不补、不删、不"优化措辞"**（含内联的工作规范那一篇）。
  *
- * · 来源：`C:\path\to\Desktop\SELF_BRIEF_with_work_reference.md`（用户手写、2026-10-15 大改）
+ * · 来源：`%USERPROFILE%\Desktop\SELF_BRIEF_with_work_reference.md`（用户手写、2026-10-15 大改）
  *   **9226 字符 / 239 行**（LF 归一；原文件 CRLF=false）· sha256（LF 归一）`19305e7c2a428cfd`…
  * · 结构（**v65 重数**）：H1 **2**（自述 + 工作规范）· 行首 `## ` **17** · `### ` **10** ·
  *   **缩进标题 0**（v62 那版的 8 个缩进标题随工作规范一起**取消缩进**）。
@@ -678,11 +678,11 @@ export const MEMORY_MAINTENANCE_RULE = '你还有一份长期记忆，落在 `ME
  *   ⑦ **§11 总原则整节删除**（6 条），改为显式结束标记；
  *   ⑧ 工作规范那一篇**取消缩进**、节次重排（"做实、验证、及时沟通"整节删除；工完场清/留下有用经验/
  *      跨任务依次前移），**新增 "## 7.人类的偏好"**（信息密度 · 情境适配 · 三种审美，含两个代码块）。
- *   ⚠ **与"每轮收尾重写同一份状态摘要"那件事相关（诊断 `D:\IrmiaAgent\_ops-repeat\REPORT.md`）**：
+ *   ⚠ **与"每轮收尾重写同一份状态摘要"那件事相关（诊断 `_ops-repeat\REPORT.md`）**：
  *   这一版**删掉了两处"必须说话"的硬要求**——§7.1 的"…结束时，通过 `speak` / `report` 适度告知用户，
  *   **禁止绝对静默**"与工作规范 §3 里的同义句（整节删除）⇒ 诊断点名的三条来源**少了两条**；
  *   **仍留着的是 §2.1 的"做完再一句话说结果"**（这条不在本次改动里）。**只记录，不改他的字。**
- * · **审计发现（如实记档，正文不动）**：见 `D:\IrmiaAgent\_ops-selfbrief-review\REVIEW.md`
+ * · **审计发现（如实记档，正文不动）**：见 `_ops-selfbrief-review\REVIEW.md`
  *   （v61 那一版审计：§5.4 与 §5.2/§11 冲突、6 处旧话缺失、"以人格资产为准"改成职责分工）。
  *   **v65 起 §11 已不存在**（用户自己删的）⇒ 那条冲突的另一半只剩 §5.2；**§5.4 原样保留**。
  *   **用户裁决：以原文为准** ⇒ 只记录、不修改。
@@ -983,7 +983,7 @@ export interface ContactFacts {
    * （用户手写的联系人表 > 她的会话别名 > 她的**群成员别名** > 群成员档案里那个自动占位名），
    * 而最后一档要读盘（`data/group-members.json`），渲染层是纯函数、不读盘。所以在渲染层再拼一套
    * 只会得到"少一档"的第二份判据——而两份判据漂移的后果正是这次的现象：
-   * 同一条消息，`read_channel` 那行写着「用户（OWNER）」，此刻层的预警行却写着「1234567890」，
+   * 同一条消息，`read_channel` 那行写着「用户（阿岚）」，此刻层的预警行却写着「1234567890」，
    * 她半夜照着后者把用户当成了外人（10-10 01:25 的心跳自述："那个叫 1234567890 的想伸手"）。
    *
    * 契约两条：**认不出返回 null**（调用方照实回落到 `person` 那串 id，绝不编名字）；
@@ -1359,7 +1359,7 @@ export function renderMentionNote(facts: ContactFacts): string | null {
   // 发言人那一格走**名字真源**（宿主注入的 `facts.personNameOf`，与 read_channel 每行那个"谁"
   // 同一个函数）：认得出就写名字，认不出才照实写那串 id。2026-10-11 之前这里恒印 `wake.person`
   // ——群里就成了一行"有人在 XX 群里 @ 了你（这次是 1234567890）"，而同一份上下文里
-  // read_channel 那行写着"用户（OWNER）"：同一个人两个名字，她照着通知行把用户当外人。
+  // read_channel 那行写着"用户（阿岚）"：同一个人两个名字，她照着通知行把用户当外人。
   const personLabel = labelForPerson(wake.person, facts.personNameOf);
   const who = wake.person === '' || wake.person === entry.person ? '' : `（这次是 ${personLabel}）`;
   const unread = entry.unread ?? 0;

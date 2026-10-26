@@ -2672,6 +2672,19 @@ export interface LoadedConfig {
   appliedUpgradeTargets: number[];
   /** configHash(config) 的现成结果 */
   configHash: string;
+  /**
+   * 这份配置**写下的** `dataDir` 原文（逐字，可能是相对路径）；没写就是 `null`。
+   *
+   * 为什么要单独交出来：`config.dataDir` 永远有值（没写的时候是出厂的
+   * `<配置目录>/data`），于是"配置指定了数据目录"与"配置什么都没说、用了默认值"
+   * 在生效配置里**长得一模一样**。而启动摘要的「数据来源」必须说清是哪一种
+   * ——把默认值说成"配置指定的"正是最难查的那类误导。
+   *
+   * 首次启动（目录里没有 config.json、本次新建了一份）算**写了**：新建的那份里确实有
+   * `dataDir`，且它此后就在盘上生效；不这么算的话，"这次的文件里有没有 dataDir"
+   * 会随第一次启动而改变，数据目录就会在第二次启动时悄悄换一个。
+   */
+  dataDirWritten: string | null;
 }
 
 function isNotFound(err: unknown): boolean {
@@ -2722,6 +2735,8 @@ export async function loadConfig(dir: string, options: LoadConfigOptions = {}): 
       createdDefault: true,
       appliedUpgradeTargets: [],
       configHash: configHash(config),
+      // 刚写下的那份里就有 `dataDir`（见接口注释：算"写了"，否则数据目录会在第二次启动时变）
+      dataDirWritten: config.dataDir,
     };
   }
 
@@ -2751,5 +2766,16 @@ export async function loadConfig(dir: string, options: LoadConfigOptions = {}): 
   }
 
   const config = parseAppConfig(doc, dirAbs);
-  return { config, path, createdDefault: false, appliedUpgradeTargets: applied, configHash: configHash(config) };
+  // `dataDir` 写没写：解析后的 `config.dataDir` 永远有值（缺省是 `<dir>/data`），
+  // 所以"写没写"只能从文档里看。空串会在 `parseAppConfig` 里当场报错，走不到这里。
+  const rawDataDir = doc['dataDir'];
+  const dataDirWritten = typeof rawDataDir === 'string' ? rawDataDir : null;
+  return {
+    config,
+    path,
+    createdDefault: false,
+    appliedUpgradeTargets: applied,
+    configHash: configHash(config),
+    dataDirWritten,
+  };
 }

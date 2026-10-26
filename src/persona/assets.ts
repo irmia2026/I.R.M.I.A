@@ -92,7 +92,7 @@ export const ASSET_NOTE_CHARS_MAX = 60;
 /**
  * **指路那一截**（路径一类）的长度上限：给得比说明宽。
  *
- * 为什么不能都用 60：`已在 PATH（D:\IrmiaAgent\tools\ffmpeg\ffmpeg-8.1.1-essentials_build\bin\ffmpeg.exe）`
+ * 为什么不能都用 60：`已在 PATH（<安装根>\tools\ffmpeg\ffmpeg-8.1.1-essentials_build\bin\ffmpeg.exe）`
  * 是**一条指路**，而 Windows 上一条真路径很容易过 60 字符。指路被切成
  * `…essentials_build\…` 就**指不到任何文件**了——那不是省 token，是把这一格弄坏
  * （用户 2026-10-07 点名的正是这条：`已在 PATH → …` / `路径：…` 这一类别跟着说明一起截）。
@@ -657,7 +657,7 @@ export function clipAssetNote(text: string, max = ASSET_NOTE_CHARS_MAX): string 
  *
  * 为什么判据收得这么紧（**别放宽**）：只要一段**话**里出现过路径就给它 120 字符的额度，
  * 等于让"命令 + 细节"从这条路绕回来——实测那条 335 字符的说明里就有
- * `"<repo>\skills\anysearch\scripts\anysearch_cli.ps1"`。
+ * `"<仓库>\skills\anysearch\scripts\anysearch_cli.ps1"`。
  * 判据一宽，最该被截的那一类恰好豁免，这一版就白改了。
  * 反过来，真路径里极少带空格（带空格的那些本来就该用引号，展示层不负责解引用）。
  */

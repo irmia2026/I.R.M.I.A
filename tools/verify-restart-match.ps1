@@ -21,7 +21,7 @@
 #     脚本侧也一起钉死了：相对路径现在**相对 `-Repo`** 解析，不再用进程 cwd；
 #   · 中途与收尾的 Stop-Process 只认 root/tag 两个字符串，用户在用的那个实例一个字节都不碰；
 #   · 界面支路用的是**沙盒里自己写的 .cmd 替身**——绝不用
-#     `D:\IrmiaAgent\agent\gui\build\…\irmia_gui.exe` 那个真路径起进程（那会给用户弹一个真窗口）。
+#     `<安装根>agentgui\build\…\irmia_gui.exe` 那个真路径起进程（那会给用户弹一个真窗口）。
 #
 # 用法（从仓库根跑）：pwsh -File tools/verify-restart-match.ps1
 # 退出码 0 = 全部判据对上；非 0 = 有对不上的（脚本会把对不上的那条打出来）。
@@ -29,10 +29,21 @@
 param(
   [string]$Root = 'C:\irmia-verify-match',
   [int]$Port = 7798,
-  [string]$Repo = '<repo>',
-  [string]$NodeExe = 'D:\IrmiaAgent\tools\node\node.exe',
+  [string]$Repo = '',
+  [string]$NodeExe = '',
   [int]$TimeoutSeconds = 90
 )
+
+# ── 默认值推导：脚本只认「自己在哪」，不写死任何机器路径 ──
+if ($Repo -eq '') {
+  if ([string]::IsNullOrEmpty($PSScriptRoot)) { throw '无法从脚本位置推断项目根：请显式传 -Repo <项目根>' }
+  $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+}
+if ($NodeExe -eq '') {
+  $found = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+  if ($null -eq $found) { throw 'PATH 上找不到 node.exe：请用 -NodeExe 指定绝对路径' }
+  $NodeExe = $found.Source
+}
 
 $ErrorActionPreference = 'Stop'
 $fail = @()

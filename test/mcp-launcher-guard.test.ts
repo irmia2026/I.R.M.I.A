@@ -390,7 +390,7 @@ test('⑦ 放行的形状一个都不许被误拦（`uvx` / `node <绝对路径>
   // 实测能起的形状（判据只该拦"起不来的"，多拦一条 = 把一个能用的配置打死）
   for (const command of [
     'uvx', 'uv', 'node', 'python', 'deno', 'pwsh', 'cmd',
-    'D:\\IrmiaAgent\\tools\\node\\node.exe',              // 绝对路径 .exe（实测 spawned exit=0）
+    'C:\\Program Files\\nodejs\\node.exe',              // 绝对路径 .exe（实测 spawned exit=0）
     'C:\\Windows\\System32\\cmd.exe',
     'node.exe',
   ]) {

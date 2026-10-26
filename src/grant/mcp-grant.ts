@@ -393,6 +393,8 @@ export function isGrantQuestion(question: string): boolean {
  * 给一句话就是"为什么起不来"（那句话直接进卡面）。这里只把结论翻成一句给人看的话。
  *
  * 它同时是**第二次判**的落点之一（见文件头边界 ②）：`applyGrant` 在真写盘之前也会再问一次。
+ *
+ * ⚠ 卡面是**纯文本**（界面不渲染 Markdown，2026-10-22 用户点名）：强调用「」或换行，不用 `**`。
  */
 export function launcherNoteOf(request: GrantRequest): string | null {
   if (request.kind !== 'mcp-add') return null;
@@ -401,9 +403,9 @@ export function launcherNoteOf(request: GrantRequest): string | null {
     [...request.args],
     Object.keys(request.env).length === 0 ? undefined : request.env,
   );
-  if (problem !== null) return `它的启动器**过不了白名单**（${problem}）——批准了也起不来。`;
+  if (problem !== null) return `它的启动器过不了白名单（${problem}）——批准了也起不来。`;
   if (Object.keys(request.env).length > 0) {
-    return '它会拿到单子里写的那几个环境变量，而 MCP 进程**不受 trust.mode 约束**'
+    return '它会拿到单子里写的那几个环境变量，而 MCP 进程不受 trust.mode 约束'
       + '（它可以碰这台机器上任何它有权限碰的东西）。';
   }
   return null;
@@ -535,6 +537,45 @@ export function grantIdsOnDisk(dataDir: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * 盘上**还没进日志、又读不出来**的单子（`GET /api/grants` 的 `malformed`）。
+ *
+ * 为什么必须有这一份（2026-10-22）：一条单子从落到盘上到被 `settleGrants` 拾取之间有一段窗口；
+ * 在窗口里它**没有任何事件**，于是 `listGrants` 只能给出一个只有 id 的占位（`picked:false`），
+ * 界面的"待批"那一条按 `picked === true` 过滤 ⇒ **屏幕上什么都没有**。而如果这张单子还
+ * 恰好解析不过（JSON 坏了 / kind 拼错 / mcp-add 缺 desc），`settleGrants` 会把它当场退回，
+ * 退回也只在它能跑到的时候发生——循环被别的事挡住时，人就永远看不见"有东西在等你"。
+ * 所以管理面必须能说出"有一张单读不出来"，而不是静默丢掉。
+ *
+ * 三条口径：
+ *   · **只报还没进日志的**：已经有 `grant/requested` 的 id 在 `listGrants` 的清单里（含它后来
+ *     被退回的那条 `grant/resolved`），再报一次就是同一件事两处说；
+ *   · **读不出与解析不过分开说**：前者是"文件读不动/JSON 坏了"，后者原样带
+ *     `parseGrantRequest` 的那句话（她写错了哪一格就在那句话里）；
+ *   · **永不抛**：这里只服务"让人看见"，自己失败不该把端点带崩。
+ */
+export function grantFileProblems(
+  dataDir: string,
+  events: readonly AppEvent[],
+): Array<{ id: string; why: string }> {
+  const picked = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'grant/requested') picked.add(event.data.id);
+  }
+  const out: Array<{ id: string; why: string }> = [];
+  for (const id of grantIdsOnDisk(dataDir)) {
+    if (picked.has(id)) continue;
+    const file = readGrantFile(dataDir, id);
+    if (file === null) {
+      out.push({ id, why: '文件读不出来（读不动，或内容不是合法 JSON）' });
+      continue;
+    }
+    const parsed = parseGrantRequest(file.raw);
+    if (!parsed.ok) out.push({ id, why: parsed.detail });
+  }
+  return out;
 }
 
 /**
@@ -928,7 +969,7 @@ export async function applyGrant(input: {
   if (input.requestedHash !== '' && hash !== input.requestedHash) {
     return {
       state: 'skipped-stale',
-      failure: '这份申请单的内容在你看它的期间被改过（内容指纹对不上），所以**没有**落地。'
+      failure: '这份申请单的内容在你看它的期间被改过（内容指纹对不上），所以没有落地。'
         + '如果那份改动是你要的，请让她照现在的样子重发一张单子。',
     };
   }
@@ -964,14 +1005,14 @@ export async function applyGrant(input: {
       if (already === 'exists') {
         return {
           state: 'skipped-invalid',
-          failure: `config.json 的 mcp.servers[] 里**已经有一条**叫「${request.name}」的了：这次批准没有覆盖它`
+          failure: `config.json 的 mcp.servers[] 里已经有一条叫「${request.name}」的了：这次批准没有覆盖它`
             + '（申请单不是编辑通道——覆盖会把它没写进单子里的那几格一起抹掉）。要看现状走界面「扩展 → MCP」。',
         };
       }
       if (already === 'not-found') {
         return {
           state: 'skipped-invalid',
-          failure: `config.json 的 mcp.servers[] 里**没有**叫「${request.name}」的条目了：这次批准没有改任何东西`
+          failure: `config.json 的 mcp.servers[] 里没有叫「${request.name}」的条目了：这次批准没有改任何东西`
             + '（可能已经有人删过，或它本来就不在那份配置里）。',
         };
       }
@@ -990,7 +1031,7 @@ export async function applyGrant(input: {
       return { state: 'failed', failure: `写盘成功但回读时 mcp.servers[] 里没有「${request.name}」——配置可能被并发改过，请重看一眼。` };
     }
     if (request.kind === 'mcp-remove' && present) {
-      return { state: 'failed', failure: `写盘成功但回读时 mcp.servers[] 里**还有**「${request.name}」——配置可能被并发改过，请重看一眼。` };
+      return { state: 'failed', failure: `写盘成功但回读时 mcp.servers[] 里还有「${request.name}」——配置可能被并发改过，请重看一眼。` };
     }
   }
   return { state: 'ok', landed: request.name };
@@ -1075,9 +1116,11 @@ export interface GrantExecFacts {
  *
  * 三个词与界面同一份（「待批」「扩展页」「快速审批卡」）：她要是指路，人得能在界面上找到那两个字。
  * **一句话、不另起一段**：这条正文已经够长，第二段只会被人跳过。
+ *
+ * ⚠ **正文是纯文本**（render 层不认 Markdown，2026-10-22 用户点名）：强调用「」或换行，不用 `**`。
  */
-export const GRANT_WAKE_CARD_SENTENCE = '另外，这类单子摆在他的界面上：**扩展页**里有一张待批卡，'
-  + '右下角还会弹一张**快速审批卡**——他批准或驳回之后都会再叫醒你一次，不用你盯着；'
+export const GRANT_WAKE_CARD_SENTENCE = '另外，这类单子摆在他的界面上：扩展页里有一张待批卡，'
+  + '右下角还会弹一张快速审批卡——他批准或驳回之后都会再叫醒你一次，不用你盯着；'
   + '想让他去看，就提醒他一句「去扩展页或右下角那张卡看一下」。';
 
 /**
@@ -1086,6 +1129,10 @@ export const GRANT_WAKE_CARD_SENTENCE = '另外，这类单子摆在他的界面
  * **两支共用这一个入口**（与 `grantQuestionOfAny` / `grantContextOfAny` 同一手法）：
  * 调用点（`wakeForGrant`）只管"发一条 `wake/manual{via:'grant'}`"，措辞按 `kind` 分派——
  * 这样"技能批准与 MCP 批准是**同一条通知**"不是文档承诺，而是**只有一条路**。
+ *
+ * ⚠ 从这条入口出去的每一个字都会被她在界面上读到——**纯文本、不许 `**`**（渲染层不认
+ * Markdown，星号会原样显示）。`exec.failure` 那几格同样进这条正文（见下面的 `${...}`），
+ * 所以那里也不许带 Markdown 记号。
  */
 export function grantWakeNoteOf(facts: GrantWakeFacts): string {
   if (isSkillKind(facts.kind)) return skillGrantWakeNoteOf(facts);
@@ -1093,9 +1140,9 @@ export function grantWakeNoteOf(facts: GrantWakeFacts): string {
   if (facts.outcome === 'rejected') {
     // 驳回：三件事都要说清（①这是人的决定 ②他没写理由也别当成"没人理" ③下一步怎么做）
     const reason = facts.reason === null || facts.reason === ''
-      ? '他**没有写理由**——这是他的决定，不是没人理你。'
+      ? '他没有写理由——这是他的决定，不是没人理你。'
       : `他写的理由是：「${facts.reason}」。`;
-    return `你那张申请单（${what}，id=${facts.id}）**被驳回了**。${reason}`
+    return `你那张申请单（${what}，id=${facts.id}）被驳回了。${reason}`
       + '这是驳回，不要再自行去做这件事；要再提，先把理由里的问题解决掉，或者换个做法重提一张单子。'
       + GRANT_WAKE_CARD_SENTENCE;
   }
@@ -1104,20 +1151,20 @@ export function grantWakeNoteOf(facts: GrantWakeFacts): string {
     // ——删除根本无描述可写，落地之后它也不会再被拉起。照抄加那一支就是一句假话
     // （与 2026-10-20 修的那三处卡面假话同一个形状：说的事得是这一支真做过的事）。
     if (facts.kind === 'mcp-remove') {
-      return `你那张申请单（${what}，id=${facts.id}）**已被批准并且执行成功**：`
+      return `你那张申请单（${what}，id=${facts.id}）已被批准并且执行成功：`
         + `那一条已经从配置里删掉了（config.json 的 mcp.servers[] 里不再有「${facts.exec.landed ?? facts.name}」）。`
-        + 'MCP 池在启动期建好 ⇒ **下次重启进程之后**它才不会被拉起；在那之前 mcp 工具里还看得到它。'
+        + 'MCP 池在启动期建好 ⇒ 下次重启进程之后它才不会被拉起；在那之前 mcp 工具里还看得到它。'
         + '你的常驻索引不会立刻改字节（索引只在重大变化点归集，加删 server 走的是尾部追加）。'
         + GRANT_WAKE_CARD_SENTENCE;
     }
-    return `你那张申请单（${what}，id=${facts.id}）**已被批准并且执行成功**：`
-      + '那一句"它是干什么的"已经和它一起**写进配置**'
+    return `你那张申请单（${what}，id=${facts.id}）已被批准并且执行成功：`
+      + '那一句"它是干什么的"已经和它一起写进配置'
       + `（config.json 的 mcp.servers[] 里的「${facts.exec.landed ?? facts.name}」）。`
-      + 'MCP 池在启动期建好 ⇒ **下次重启进程之后**它才会被真的拉起；在那之前 mcp 工具里看不到它。'
+      + 'MCP 池在启动期建好 ⇒ 下次重启进程之后它才会被真的拉起；在那之前 mcp 工具里看不到它。'
       + '你的常驻索引不会立刻改字节（索引只在重大变化点归集，加删 server 走的是尾部追加）。'
       + GRANT_WAKE_CARD_SENTENCE;
   }
-  return `你那张申请单（${what}，id=${facts.id}）**已被批准，但执行没有成功**：`
+  return `你那张申请单（${what}，id=${facts.id}）已被批准，但执行没有成功：`
     + `${facts.exec.failure ?? '框架没给出原因。'}`
     + '这不是"被驳回"，也不是"已经落地了"——要接着办就看上面那句原因，改好之后再提一张单子。'
     + GRANT_WAKE_CARD_SENTENCE;

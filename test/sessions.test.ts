@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
-  CHANNEL_LABELS, CHAT_TYPE_LABELS, channelForNamespace, collectSessions,
+  CHANNEL_LABELS, CHAT_TYPE_LABELS, avatarUrlOf, channelForNamespace, collectSessions,
   normalizeSid, parseAliases, parseMemberAliases, resolvePersonNameFromTables, applyAliases, parseSid,
   resolveSessionName, sessionLabelOf, sidLookupKeys, sidOf, upsertSession, type SessionEntry,
 } from '../src/channel/sessions.ts';
@@ -135,6 +135,50 @@ describe('sid · 与回投地址同形', () => {
   });
 });
 
+/**
+ * 会话头像（2026-10 加）—— `GET /api/sessions` 的 `avatarUrl`。
+ *
+ * 这条判据值得单独立案，因为**错的头像看起来是对的**：腾讯那两个地址拿任何一串数字都能换回
+ * 一张 200 的图（默认企鹅），所以"拼得出来"不等于"拼对了"。用户的原话是
+ * 「取不到号就 null，**不许瞎拼**」，于是三种 sid 各钉一条，`qq:*` 那条**必须是 null**。
+ */
+describe('会话头像 · 只有真拿到 QQ 号才拼地址', () => {
+  test('OneBot 群：`onebot:group:<群号>` ⇒ 群头像（两个路径段都是群号）', () => {
+    assert.equal(avatarUrlOf('onebot:group:123456789'), 'https://p.qlogo.cn/gh/123456789/123456789/100');
+    // 归一前的写法（`group-at`）读进来也认：会话身份归一的兼容只走 `sidKindOf` 一处
+    assert.equal(avatarUrlOf('onebot:group-at:123456789'), 'https://p.qlogo.cn/gh/123456789/123456789/100');
+  });
+
+  test('OneBot 私聊：`onebot:c2c:<QQ号>` ⇒ 个人头像', () => {
+    assert.equal(avatarUrlOf('onebot:c2c:10001'), 'https://q.qlogo.cn/g?b=qq&nk=10001&s=100');
+    // 最长的号段（11 位）照拼，一位不丢
+    assert.equal(avatarUrlOf('onebot:c2c:12345678901'), 'https://q.qlogo.cn/g?b=qq&nk=12345678901&s=100');
+  });
+
+  test('QQ 官方 Bot（`qq:*`）**必须 null**：platform 给的是 openid，不是 QQ 号', () => {
+    // 这两条长得最像"能拼出来"的：chatId / person 都是平台给的不透明串
+    assert.equal(avatarUrlOf('qq:group:G001'), null);
+    assert.equal(avatarUrlOf('qq:c2c:OPENID_C'), null);
+    // 就算官方那边恰好给了一串**纯数字**（理论上不该有），也不许拼：
+    // 命名空间是判据的第一道门——`qq:` 里那串不是 QQ 号
+    assert.equal(avatarUrlOf('qq:c2c:10001'), null);
+  });
+
+  test('取不到号 ⇒ null（不猜、不拼）', () => {
+    for (const sid of [
+      'onebot:c2c:ABC123',       // 不是纯数字
+      'onebot:c2c:123',          // 太短，不可能是 QQ 号
+      'onebot:c2c:1234567890123', // 太长
+      'onebot:guild:123456789',  // 认不出的 chatType（频道没有这种头像）
+      'onebot:dm:123456789',
+      '不是 sid',
+      '',
+    ]) {
+      assert.equal(avatarUrlOf(sid), null, `「${sid}」应判为"没有头像"`);
+    }
+  });
+});
+
 describe('会话簿 · 折叠', () => {
   test('按最后说话时间倒序，同一会话累计条数', () => {
     const entries = collectSessions([
@@ -198,14 +242,14 @@ describe('会话簿 · 名字从哪来', () => {
     const aliases = parseAliases([
       '# 身份别名',
       '',
-      '- qq:c2c:X = 用户（OWNER）',
+      '- qq:c2c:X = 用户（阿岚）',
       'qq:group-at:G = 技术群',
       '这不是别名',
       'no-colon = 名字',
       'qq:c2c:Y =',
       '',
     ].join('\n'));
-    assert.deepEqual(aliases.get('qq:c2c:X'), { name: '用户', note: 'OWNER' }, '列表写法也认；括号里是备注');
+    assert.deepEqual(aliases.get('qq:c2c:X'), { name: '用户', note: '阿岚' }, '列表写法也认；括号里是备注');
     assert.deepEqual(aliases.get('qq:group-at:G'), { name: '技术群' });
     assert.equal(aliases.size, 2, '无等号、键不带冒号、名字为空的都跳过');
   });
@@ -230,20 +274,20 @@ describe('会话簿 · 名字从哪来', () => {
  * 发言人（`person`）→ 名字 —— src/channel/sessions.ts 的 `resolvePersonNameFromTables`
  *
  * 这一组锁的是 2026-10-11 修的那处缺口：她在 `aliases.md` 的 `# 群成员` 段里按段头那句
- * "只在认人时用"写下 `1234567890 = OWNER（用户）`，而框架原来只查合成出来的
+ * "只在认人时用"写下 `1234567890 = 阿岚（用户）`，而框架原来只查合成出来的
  * `qq:c2c:<id>` / `onebot:c2c:<id>` 两个键——**她写在正确位置的身份声明一个字都没被看见**，
  * 于是用户第一次在 OneBot 群里露面时，那一行显示成机器发的一次性占位名「群友A（群昵称：用户）」，
  * 她当众回他"这会儿光一串号我还认不了你"（现场见 data/events 的 seq 41686 / 41733）。
  */
 describe('发言人 → 名字 · 人写的三处', () => {
   const QQ = '1234567890';
-  const OWNER = '用户（OWNER）';
+  const OWNER = '用户（阿岚）';
 
   test('只有群成员别名（裸 id）也能认出来：这是原来断掉的那一档', () => {
-    const memberAliases = parseMemberAliases(`# 该群成员\n${QQ} = OWNER（用户）（02:27 GUI 亲口认领）`);
+    const memberAliases = parseMemberAliases(`# 该群成员\n${QQ} = 阿岚（用户）（02:27 GUI 亲口认领）`);
     assert.equal(typeof memberAliases.get(QQ), 'object', '成员那一段进的是**另一张表**，不是会话表');
-    assert.equal(parseAliases(`${QQ} = OWNER（用户）`).size, 0, '同一行不该进会话别名表（键不是 sid）');
-    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, memberAliases), 'OWNER');
+    assert.equal(parseAliases(`${QQ} = 阿岚（用户）`).size, 0, '同一行不该进会话别名表（键不是 sid）');
+    assert.equal(resolvePersonNameFromTables(QQ, undefined, undefined, memberAliases), '阿岚');
   });
 
   test('权威顺序：联系人表 > 她会话别名 > 她群成员别名；查不到就 null（不编名字）', () => {
@@ -274,17 +318,17 @@ describe('发言人 → 名字 · 人写的三处', () => {
   test('成员别名的解析口径与会话别名逐字对称（同一份文件、同一个 `裸 id = 名字`）', () => {
     const text = [
       '# 身份别名',
-      'qq:c2c:0000 = OWNER（用户）',
+      'qq:c2c:0000 = 阿岚（用户）',
       '# 该群成员（openid，不是 sid；只在认人时用）',
-      '- 1234567890 = **OWNER（用户）**——GUI 亲口认领那次',
+      '- 1234567890 = **阿岚（用户）**——GUI 亲口认领那次',
       '00000000000000000000000000000004 = 1 号',
       '这不是别名',
     ].join('\n');
     const members = parseMemberAliases(text);
     // 名字 = 第一个括号之前那一段（`splitAliasNote` 的既有口径，与会话别名**同一个**解析）。
-    // 注意她那种 `**OWNER（用户）**` 的写法：粗体标记夹着括号时，`用户）**` 会落进备注
+    // 注意她那种 `**阿岚（用户）**` 的写法：粗体标记夹着括号时，`用户）**` 会落进备注
     // ——这不是这一版引入的，`parseAliases` 一直如此；两张表口径一致才是这里要钉的事。
-    assert.deepEqual(members.get('1234567890'), { name: 'OWNER', note: '用户）**——GUI 亲口认领那次' });
+    assert.deepEqual(members.get('1234567890'), { name: '阿岚', note: '用户）**——GUI 亲口认领那次' });
     assert.deepEqual(members.get('00000000000000000000000000000004'), { name: '1 号' });
     assert.equal(members.size, 2, 'sid 那类键不进成员表；坏行照旧跳过');
     assert.equal(parseAliases(text).size, 1, '两张表互补：会话表只收 sid 那类键');

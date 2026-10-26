@@ -8,24 +8,35 @@ import 'package:irmia_gui/api.dart';
 import 'package:irmia_gui/app.dart';
 import 'package:irmia_gui/auth_gate.dart';
 import 'package:irmia_gui/home.dart';
+import 'package:irmia_gui/i18n/app_strings.dart';
+import 'package:irmia_gui/instances.dart';
 import 'package:irmia_gui/session_store.dart';
 import 'package:irmia_gui/theme.dart';
 import 'package:irmia_gui/ui_kit.dart';
 import 'package:irmia_gui/ui_state.dart';
 
-/// 设置页上的「账号与安全」分区：**改密码** 与 **登出**（B10）。
+/// 设置页上的「账号与安全」分区：**改密码**、**结束实例**、**退出登录（清除本机凭据）**（B10）。
 ///
-/// 被测的四件事（按重要性）：
+/// 被测的五件事（按重要性）：
 ///   ① 两次输入不一致**一个请求都不发**，当场把话说清楚（本地校验，不是让服务端替我们判）；
-///   ② 登出走项目既有的 `confirm()`：灰取消什么也不做，确认之后**清掉本实例那份凭据**
-///      并且**回到门上**（不是留在壳里对着一片读不到数据的界面）；
-///   ③ 改密码成功之后**本进程就地换上新凭据**（服务端会把全部旧会话作废，不换就是"人刚改完
+///   ② **结束实例**走项目既有的 `confirm()`：确认之后**停掉后端**、回到**实例选择页**，
+///      而**本机那份凭据留着**（`token=kept`，也不发 `/api/auth/logout`）——用户 2026-10-27
+///      的口径：「为什么要作废会话？不能就留在那，如果登回来了就接着吗？」；
+///   ③ **退出登录（清除本机凭据）**是安全出口：作废会话 → 清本机凭据 → 停后端，三件都发生
+///      （顺序断言），日志 `token=cleared`；
+///   ④ 改密码成功之后**本进程就地换上新凭据**（服务端会把全部旧会话作废，不换就是"人刚改完
 ///      密码就被自己的心跳 401 踢回门上"）；
-///   ④ 它是设置页**自己的一个分区**（锚点栏里有一项、正文里有一张卡），不在模型卡里。
+///   ⑤ 它是设置页**自己的一个分区**（锚点栏里有一项、正文里有一张卡），不在模型卡里。
+///
+/// 外加一条**文案一致性**的反向断言（两颗按钮不许互相矛盾：一处说"登录状态保留"、
+/// 另一处说"退出登录"是两件事，边界要逐字说清）。
 ///
 /// 服务端那两条端点的口径（核对过 src/web/server.ts 的 handleAuth，不是照抄任务描述）：
 /// `POST /api/auth/password` 要凭据 + 旧密码，字段是 `password`（新）与 `oldPassword`（旧），
 /// 成功时**签发一条新会话**并把旧的全部作废；`POST /api/auth/logout` 要凭据，撤的就是它自己。
+/// `POST /api/commands/stop-instance` 要**有效 Bearer** + `X-Confirm: stop-instance`
+/// （`handleStopInstance` 里 `auth.authenticate` 一条就够——这也是"关实例不作废会话"的前提：
+/// 凭据留着，这条命令就一直是通的）。
 void main() {
   const instance = '127.0.0.1:7788#aabbccddeeff0011';
 
@@ -33,6 +44,7 @@ void main() {
   late _FakeApi api;
   late AppState state;
   late SessionStore store;
+  late List<String> lifeLines;
 
   /// 用例里已经**显式**收掉的 state。
   ///
@@ -52,11 +64,15 @@ void main() {
     stateFileOverride = '${tmpDir.path}${Platform.pathSeparator}ui-state.json';
     // 老界面那份全局凭据也指向临时文件：默认不存在（等价于"全新机器"），要测半升级态的自己写一份
     legacyGuiTokenOverride = '${tmpDir.path}${Platform.pathSeparator}gui-token';
+    // 实例登记表同理：登出之后画的是**实例选择页**，它读的是这一份（不设的话会读真实 %APPDATA%）
+    instancesFileOverride = '${tmpDir.path}${Platform.pathSeparator}instances.json';
     HttpOverrides.global = null;
 
     api = _FakeApi();
     store = SessionStore();
     state = AppState(api: api, sessions: store);
+    lifeLines = <String>[];
+    state.lifeLogSink = lifeLines.add;
     // 摆在"已经进了壳、手上有一张好票"的位置上：这一组测的是进门之后那两件事
     api.instance = instance;
     api.token = 'good-token';
@@ -71,6 +87,7 @@ void main() {
     sessionsRootOverride = null;
     stateFileOverride = null;
     legacyGuiTokenOverride = null;
+    instancesFileOverride = null;
     try {
       tmpDir.deleteSync(recursive: true);
     } catch (_) {
@@ -94,9 +111,12 @@ void main() {
     expect(tester.getRect(card).top, lessThan(900), reason: '点锚点滚到它那一块');
     expect(tester.getRect(card).top, greaterThan(0), reason: '滚到位（不是滚过头到最底下）');
 
-    // 那两颗按钮 + 实例行都在这一张卡上
+    // 那三颗按钮 + 实例行都在这一张卡上
     expect(find.byKey(const ValueKey('account-change-open')), findsOneWidget);
-    expect(find.byKey(const ValueKey('account-logout')), findsOneWidget);
+    expect(find.byKey(const ValueKey('account-close')), findsOneWidget,
+        reason: '结束实例（停后端、凭据留着）');
+    expect(find.byKey(const ValueKey('account-logout')), findsOneWidget,
+        reason: '退出登录（清除本机凭据）——安全出口');
     expect(find.text('当前实例'), findsOneWidget);
   });
 
@@ -176,55 +196,88 @@ void main() {
     expect(state.ready, isTrue);
   });
 
-  testWidgets('登出：灰取消什么也不做（壳还在、凭据还在、一个请求都没发）', (tester) async {
+  testWidgets('结束实例：灰取消什么也不做（壳还在、凭据还在、一个请求都没发）', (tester) async {
     await _pumpShell(tester, state);
     await _wind(tester);
-    await _tapCard(tester, 'account-logout');
+    await _tapCard(tester, 'account-close');
 
-    expect(find.text('取消'), findsOneWidget, reason: '登出必须先过项目既有的确认框');
+    expect(find.text('取消'), findsOneWidget, reason: '结束实例必须先过项目既有的确认框');
+    // 确认框把"登录状态保留"写在明面上（反向断言在下面那条文案用例里，逐字）
+    expect(find.textContaining('登录状态保留'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await _wind(tester);
 
     expect(api.authCalls, isEmpty, reason: '取消 = 什么都没发生');
+    expect(api.commands, isEmpty, reason: '取消 ⇒ 连停实例的命令都不发');
     expect(state.ready, isTrue, reason: '人还在壳里');
     expect(state.api.token, 'good-token');
     expect(store.read(instance), 'good-token', reason: '取消之后本机那份凭据还在');
-    expect(find.byKey(const ValueKey('account-logout')), findsOneWidget, reason: '人还在那一页上');
+    expect(find.byKey(const ValueKey('account-close')), findsOneWidget, reason: '人还在那一页上');
   });
 
-  testWidgets('登出：确认之后清掉本实例凭据，并回到门上（画的是登录态）', (tester) async {
+  testWidgets('结束实例：确认之后停后端 + 回选择页，而**凭据留着**（不作废会话）', (tester) async {
+    await _pumpShell(tester, state);
+    await _wind(tester);
+    await _tapCard(tester, 'account-close');
+    await tester.tap(find.widgetWithText(FilledButton, '结束实例').hitTestable());
+    await _wind(tester);
+
+    expect(api.commands, ['/api/commands/stop-instance|stop-instance'],
+        reason: '只发这一条：带 X-Confirm 让后端优雅退出');
+    expect(api.authCalls, isEmpty, reason: '反向断言：这条路**不许**调 /api/auth/logout（会话不动）');
+    expect(state.ready, isFalse, reason: '结束实例之后不回壳里，落到门上');
+    expect(state.api.token, isNull, reason: '内存里那张票要清掉');
+    expect(store.read(instance), 'good-token',
+        reason: '而盘上那份**留着**——回来点一下就能进，不用再输密码');
+    expect(state.gate, AuthGateKind.picker, reason: '结束实例 ⇒ 回实例选择页（不是登录页）');
+    expect(find.byType(AuthGate), findsOneWidget);
+    expect(find.text('还没有登记过实例。新建一台开始用。'), findsOneWidget,
+        reason: '登记表这份是空的：选择页如实说，并给"新建实例"');
+    expect(find.byKey(const ValueKey('picker-new')), findsOneWidget);
+    // 设置页整个收起来了（不是留着一页读不到数据的界面）
+    expect(find.text('账号与安全'), findsNothing);
+    // 现场那一行：token=kept 是这条路与"彻底登出"的唯一分别
+    expect(lifeLines.last, matches(RegExp(r'^\[life\] close instance=.* stop=graceful waited=\d+s token=kept$')));
+  });
+
+  testWidgets('退出登录（清除本机凭据）：作废 → 清凭据 → 停实例，三件都发生（顺序断言）', (tester) async {
     await _pumpShell(tester, state);
     await _wind(tester);
     await _tapCard(tester, 'account-logout');
-    await tester.tap(find.widgetWithText(FilledButton, '登出').hitTestable());
+    await tester.tap(find.widgetWithText(FilledButton, '退出登录（清除本机凭据）').hitTestable());
     await _wind(tester);
 
-    expect(api.authCalls, ['/api/auth/logout'], reason: '先让服务端把这条会话撤掉');
-    expect(state.ready, isFalse, reason: '登出就是回到门上，不是留在壳里');
+    expect(api.authCalls, ['/api/auth/logout'], reason: '第一步：先让服务端把这条会话撤掉');
+    expect(api.commands, ['/api/commands/stop-instance|stop-instance'],
+        reason: '第二步：带 X-Confirm 让后端优雅退出（顺序不许换）');
+    expect(api.timeline, <String>['auth /api/auth/logout', 'cmd /api/commands/stop-instance'],
+        reason: '三件事的顺序：作废 → 停实例 → 清凭据（清凭据没有请求，落在盘上）');
+    expect(state.ready, isFalse, reason: '之后不回壳里，落到门上');
     expect(state.api.token, isNull, reason: '内存里那张票要清掉');
     expect(store.read(instance), isNull, reason: '本实例那份凭据要清掉（session_store.clear）');
+    expect(state.gate, AuthGateKind.picker, reason: '落点仍是实例选择页（不是登录页）');
     expect(find.byType(AuthGate), findsOneWidget);
-    expect(find.text('登录'), findsWidgets, reason: '门上画的是登录态（这台实例设过密码）');
-    // 设置页整个收起来了（不是留着一页读不到数据的界面）
-    expect(find.text('账号与安全'), findsNothing);
+    expect(find.byKey(const ValueKey('picker-new')), findsOneWidget);
+    expect(lifeLines.last, matches(RegExp(r'^\[life\] logout instance=.* stop=graceful waited=\d+s token=cleared$')));
   });
 
-  testWidgets('登出：服务端没答理（撤销失败）也照样本地登出——本地那份凭据必须作废', (tester) async {
+  testWidgets('退出登录：服务端没答理（撤销失败）也照样清掉本机凭据', (tester) async {
     api.failLogout = true;
     await _pumpShell(tester, state);
     await _wind(tester);
     await _tapCard(tester, 'account-logout');
-    await tester.tap(find.widgetWithText(FilledButton, '登出').hitTestable());
+    await tester.tap(find.widgetWithText(FilledButton, '退出登录（清除本机凭据）').hitTestable());
     await _wind(tester);
 
     expect(api.authCalls, ['/api/auth/logout']);
     expect(state.ready, isFalse);
     expect(state.api.token, isNull);
+    expect(state.gate, AuthGateKind.picker, reason: '撤销失败不影响"本地登出"这条路');
     expect(store.read(instance), isNull,
         reason: '撤销失败不该把票留在盘上——"登出之后界面还能自己进去"才是真的问题');
   });
 
-  testWidgets('半升级态（凭老共享 token 进来）：卡片说清两条都做不成，出路摆在旁边；登出之后门上画"设置密码"', (tester) async {
+  testWidgets('半升级态（凭老共享 token 进来）：卡片说清两条都做不成，出路摆在旁边；退出登录之后门上画"设置密码"', (tester) async {
     // 走**真实的 bootstrap** 那条路把 onLegacyToken 立起来（界面只有这一条路能变成这个状态）：
     // 空手打一条读端点 → 401 auth-uninitialized（这台实例还没设过密码）→ 读老那份全局凭据 → 进门
     const legacy = 'legacy-ui-token-value';
@@ -262,20 +315,73 @@ void main() {
     expect(find.byKey(const ValueKey('account-setup-password')), findsOneWidget,
         reason: '出路（设置密码）要摆在旁边，不能只留一句"做不成"');
 
-    // 登出：服务端对这条路是拒绝（409 legacy-token），本地照样登出；
-    // 而门上必须画"设置密码"——画"登录"是个死胡同（这台实例还没有密码，输什么都不对）
+    // 退出登录：服务端对这条路是拒绝（409 legacy-token），本地照样登出；
+    // 而 2026-10 之后落点统一是**实例选择页**——"该设密码还是该登录"由**选完实例**、
+    // `bootstrap` 重新问一次服务端之后才决定（那一刻手上已经没有实例了，判不了）。
     api.failLogout = true;
     await _tapCard(tester, 'account-logout');
-    await tester.tap(find.widgetWithText(FilledButton, '登出').hitTestable());
+    await tester.tap(find.widgetWithText(FilledButton, '退出登录（清除本机凭据）').hitTestable());
     await _wind(tester);
 
     expect(state.ready, isFalse);
-    expect(state.gate, AuthGateKind.setup, reason: '没设过密码的实例，门上该画"设置密码"');
-    expect(find.text('设置密码'), findsWidgets);
+    expect(state.gate, AuthGateKind.picker, reason: '退出登录 ⇒ 实例选择页');
+    expect(find.byKey(const ValueKey('picker-new')), findsOneWidget);
     expect(store.read(instance), isNull, reason: '本机那份凭据照样作废');
 
     // 收尾：bootstrap 那条路起了心跳定时器（startPolling），显式收掉它
     closeState(state);
+  });
+
+  // ───────────────────── ⑥ 文案一致性（反向断言） ─────────────────────
+
+  /// 两颗"离开"的按钮不许互相矛盾：
+  ///   · **结束实例**那处只能说"停后端 + 登录状态保留"——出现"已登出 / 退出登录 / 登出"
+  ///     就是把两件事说成了一件事（人看了会以为回来要重新输密码）；
+  ///   · **退出登录（清除本机凭据）**那处必须自己点明与"结束实例"的差别（它才是"要密码"那条）。
+  ///
+  /// 判据落在**文案表**上（页面里一个中文字面量都没有，`copy_coverage_test` 钉着这一条），
+  /// 所以这里读 `ZhStrings` / `EnStrings` 就是读屏上的字。
+  test('文案一致性：关实例只说"结束实例 + 登录状态保留"，一处"登出"字样都不许有', () {
+    const zh = ZhStrings();
+    // 关实例**这一个动作自己那两句**（按钮/标题 + 确认框正文）——这是"一处说保留一处说作废"
+    // 最容易发生的地方，所以逐字反向断言。卡头那句 index（`settingsAccountNote`）不在射程内：
+    // 它的职责是把三颗按钮的名字都列出来（见下面单独那一条）。
+    final closeCopy = <String>[zh.settingsCloseInstance, zh.settingsCloseInstanceBody].join('\n');
+    expect(closeCopy, contains('结束实例'));
+    expect(closeCopy, contains('登录状态保留'), reason: '必须说清凭据留着（回来点一下就能进）');
+    for (final banned in <String>['已登出', '退出登录', '登出']) {
+      expect(closeCopy.contains(banned), isFalse,
+          reason: '关实例那处出现了「$banned」——两件事被说成了一件事：$closeCopy');
+    }
+    // 卡头那句是**索引**：三颗按钮都得点到名（不提"退出登录"的话，安全出口就没人找得到）
+    expect(zh.settingsAccountNote, contains('改密码'));
+    expect(zh.settingsAccountNote, contains('结束实例'));
+    expect(zh.settingsAccountNote, contains('退出登录'));
+    // 关实例的**落点**那一屏（选择页）同样不许自相矛盾
+    final pickerCopy = <String>[
+      zh.pickerBody,
+      zh.pickerEnter,
+      zh.pickerStartEnter,
+      zh.pickerSessionExpired,
+    ].join('\n');
+    expect(pickerCopy, contains('登录状态保留'), reason: '选择页要说清"回来点一下就进"');
+    expect(pickerCopy.contains('作废'), isFalse, reason: '选择页不许再提"会话作废"（那条路已经不作了）');
+    expect(pickerCopy.contains('登出'), isFalse);
+
+    // 安全出口那一处：必须点明差别，而且它自己就是"要密码"那条路
+    expect(zh.settingsLogout, contains('清除本机凭据'));
+    expect(zh.settingsLogoutBody, contains('结束实例'), reason: '要指路到"只是关掉实例"那一颗');
+    expect(zh.settingsLogoutBody, contains('密码'), reason: '说清下次要用密码进来');
+    expect(zh.settingsCloseInstance, isNot(zh.settingsLogout), reason: '两个动作不许同名');
+
+    // 英文那份同形（少了这几句，英文界面就会把两件事说混）
+    const en = EnStrings();
+    final enClose = <String>[en.settingsCloseInstance, en.settingsCloseInstanceBody].join('\n');
+    expect(enClose.toLowerCase(), contains('sign-in is kept'));
+    expect(enClose.toLowerCase().contains('sign out'), isFalse);
+    expect(en.settingsLogoutBody, contains('End instance'));
+    expect(en.settingsLogoutBody, contains('password'));
+    expect(en.pickerBody.toLowerCase(), contains('sign-in is kept'));
   });
 }
 
@@ -351,6 +457,12 @@ class _FakeApi extends IrmiaApi {
   final List<String> authCalls = [];
   final List<Map<String, dynamic>> authBodies = [];
 
+  /// 认证与命令**同一条时间线**（"退出登录三件事的顺序"那条断言比它的下标）。
+  ///
+  /// 为什么要合起来：`规范`要求的是"作废 → 停实例 → 清凭据"这个**顺序**，两个各自
+  /// 独立的列表只能证明"都发生过"，证明不了"先后"。
+  final List<String> timeline = [];
+
   /// 改密码成功时服务端签发的新凭据
   String changedToken = 'changed-token';
 
@@ -365,7 +477,7 @@ class _FakeApi extends IrmiaApi {
   String? legacyToken;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     final legacy = legacyToken;
     if (legacy != null) {
       if (token == null) {
@@ -412,6 +524,7 @@ class _FakeApi extends IrmiaApi {
   Future<dynamic> postAuth(String path, Map<String, dynamic> body) async {
     authCalls.add(path);
     authBodies.add(body);
+    timeline.add('auth $path');
     if (path == '/api/auth/logout') {
       if (failLogout) throw const SocketException('由于目标计算机积极拒绝，无法连接。');
       return <String, dynamic>{'ok': true, 'instance': instance};
@@ -421,6 +534,23 @@ class _FakeApi extends IrmiaApi {
       if (failure != null) throw ApiError(401, failure);
       // 照服务端 sendSession 的形状：token + instance（改了密码签发的就是这一条）
       return <String, dynamic>{'ok': true, 'token': changedToken, 'instance': instance};
+    }
+    return <String, dynamic>{'ok': true};
+  }
+
+  /// 命令端点收到过的 `路径|X-Confirm`（**登出三步的顺序**那几条断言落在这里）。
+  ///
+  /// ⚠ 必须把它挡住：不覆盖的话 `AppState.logout` 的第二步会走**真 HTTP** 打到
+  /// `127.0.0.1:7788` —— 假时钟里那条真连接永远不会完成（用例挂住），而且真机上
+  /// 那个端口上跑着**用户正在用的那个实例**（一次真的 stop-instance 就能把它停掉）。
+  final List<String> commands = [];
+
+  @override
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
+    commands.add('$path|${confirm ?? ''}');
+    timeline.add('cmd $path');
+    if (path == '/api/commands/stop-instance') {
+      return <String, dynamic>{'ok': true, 'stopping': true};
     }
     return <String, dynamic>{'ok': true};
   }

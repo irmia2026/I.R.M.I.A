@@ -29,9 +29,15 @@ class IrmiaTheme {
   /// 发丝影：不是泛光，是纸的厚度（唯一一套阴影，见 [Shape.shadows]）
   static const hairline = Shape.shadows;
 
+  /// 三档圆角（定义与口径在 [Shape]：卡片 16 / 控件 10 / 正圆 999）
   static const radiusCard = Shape.radiusCard;
   static const radiusCtl = Shape.radiusControl;
-  static const radiusAvatar = Shape.radiusAvatar;
+
+  /// 大控件 12（= 控件 + 2）：聊天页的输入框与发送键
+  static const radiusCtlLarge = Shape.radiusControlLarge;
+
+  /// 正圆（只给头像与圆点，不用于按钮）
+  static const radiusPill = Shape.radiusPill;
 
   /// 暗主题那两处白描边的宽度（用户原话："改成白色描边"，要**细**）。
   /// **只有这一处定义宽度**；谁用、什么时候用见 [IrmiaDarkPair]。
@@ -123,8 +129,8 @@ class IrmiaTheme {
         thickness: Shape.hairline,
         space: Shape.hairline,
       ),
-      // 弹窗圆角统一到卡片的 12：M3 默认是 28，与同一屏里的卡片/输入框不是一个形
-      // （用户 ⑧ 的统一令在这一处过去被漏掉了）。
+      // 弹窗圆角统一到卡片那一档（M3 默认是 28，与同一屏里的卡片/输入框不是一个形；
+      // 用户 ⑧ 的统一令在这一处过去被漏掉了）。
       dialogTheme: DialogThemeData(
         backgroundColor: surface,
         shape: RoundedRectangleBorder(borderRadius: Shape.card),
@@ -162,18 +168,28 @@ class IrmiaTheme {
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          // 20/14 → 16/12：与卡片的 16 对齐，按钮不再是"比卡片还胖"的那一个
+          // 20/14 → 16/12：与卡片的内边距同一套栅格，按钮不再是"比卡片还胖"的那一个
           padding: const EdgeInsets.symmetric(horizontal: Space.x4, vertical: Space.x3),
-          // 控件圆角一律走 radiusCtl（用户 ⑧："多处圆角不一致？统一为这种吧"——
-          // 他指的是同一张卡里输入框那种 8）。这里原来是写死的 22：按钮是胶囊、
-          // 挨着它的输入框是 8，一张卡里两种圆角。
+          // 控件圆角一律走 radiusCtl（用户 ⑧："多处圆角不一致？统一为这种吧"）。
+          // 这里原来是写死的 22：按钮是胶囊、挨着它的输入框是圆角小的方框，
+          // 一张卡里两种圆角。2026-10-25 把这一档从 8 收到 10（见 [Shape]）。
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(radiusCtl)),
+          textStyle: buttonText,
+        ),
+      ),
+      // 描边按钮（次级按钮）**也是控件**：M3 默认给它 `StadiumBorder`（胶囊），
+      // 2026-10-25 收口时整族换成 radiusCtl。内边距与主按钮同一套，所以并排的两个按钮
+      // （比如日程页「回到本周」+「＋新建安排」）**同高**——从前一个 40、一个 43，差 3 像素。
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: Space.x4, vertical: Space.x3),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(radiusCtl)),
           textStyle: buttonText,
         ),
       ),
       // 分段控件同理：M3 默认是胶囊（StadiumBorder），与同页的输入框、侧栏选中项都不是一个形。
       // 分段两端的内圆角由这个 shape 裁出来（见 SegmentedButton 的 borderClipPath），
-      // 所以给它 8 就整组一致，段与段之间仍是直线分隔。
+      // 所以给它同一个 radiusCtl 就整组一致，段与段之间仍是直线分隔。
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
           shape: WidgetStatePropertyAll(
@@ -325,8 +341,9 @@ class IrmiaTheme {
 /// 四条边界写在这里，下一个人不要再顺手"优化"：
 ///
 ///   ① **亮主题一个色都不动**。亮模下这两个 getter 给的就是用户原来那两样
-///      （填充 `primary`、前景 `onPrimary`、气泡无描边、按钮 `const CircleBorder()`，
-///      后者的 `side` 本来就是 `BorderSide.none`）——不是"差不多的蓝"，是逐字节相同。
+///      （填充 `primary`、前景 `onPrimary`、气泡无描边、发送键无描边）。
+///      形状这一次由用户 2026-10-25 的「发送按钮改圆角矩形」统一改过：两模都是
+///      **40×40 圆角矩形、半径 12**（见 [sendButtonShape]），颜色仍然一个都没动。
 ///   ② **暗主题只有一圈白描边**：蓝色填充整个去掉，填充与背景一致（[pairFill] 透明），
 ///      字与图标走正常前景（[pairOn]）。**只有这两处**——侧栏选中项与工具行"出错"
 ///      上一轮也被改过，用户一句"改其他的干嘛"已经全部退回原样，别在这里再伸手。
@@ -354,11 +371,20 @@ extension IrmiaDarkPair on ColorScheme {
       ? Border.all(color: pairOn, width: IrmiaTheme.hairlineWidth)
       : null;
 
-  /// 发送键那一圈（圆形按钮的描边长在它自己的形状上）：暗模 = 1px 白描边；
-  /// 亮模 = 用户原来的 `const CircleBorder()`。
-  OutlinedBorder get sendButtonShape => darkPairOutlined
-      ? CircleBorder(side: BorderSide(color: pairOn, width: IrmiaTheme.hairlineWidth))
-      : const CircleBorder();
+  /// 发送键那一圈（描边长在它自己的形状上）：暗模 = 1px 白描边；亮模 = 没有描边。
+  ///
+  /// 形状**不是正圆**（用户 2026-10-25：「发送按钮改圆角矩形」）：40×40 的圆角矩形、
+  /// 半径 [Shape.radiusControlLarge]（12）——与它左边那条输入框同一个数，同色阶。
+  /// 判据与描边的颜色仍然只有这一处：明暗由 [darkPairOutlined] 给。
+  OutlinedBorder get sendButtonShape {
+    final radius = BorderRadius.circular(Shape.radiusControlLarge);
+    return darkPairOutlined
+        ? RoundedRectangleBorder(
+            borderRadius: radius,
+            side: BorderSide(color: pairOn, width: IrmiaTheme.hairlineWidth),
+          )
+        : RoundedRectangleBorder(borderRadius: radius);
+  }
 }
 
 // ──────────────────────────────── 品牌图案 ────────────────────────────────

@@ -1103,11 +1103,12 @@ export interface ReplayReportOptions {
   /** config.json 所在目录（默认 process.cwd()）；**只读**：不存在不创建 */
   cwd?: string;
   /**
-   * 技能根基准目录（`skills/`、`.agents/skills/` 的父目录）；缺省 = `cwd`。
+   * 技能根基准目录（`skills/`、`.agents/skills/` 的父目录）；缺省 = **`dataDir`**。
    *
-   * 为什么缺省是 `cwd`：运行期那份 `SkillManager` 建在 `process.cwd()` 上（`main.ts`），
-   * 而 `cwd` 就是 config.json 所在目录（也是启动时的工作目录）——两边同一个基准，
-   * "CLI 重建看到的技能"才是"她当时看到的技能"（REVIEW P1-16）。
+   * 为什么缺省是 `dataDir`：运行期那份 `SkillManager` 建在数据目录上（v79 起，`main.ts`），
+   * 技能实体住在 `<dataDir>/skills`——重建必须扫同一串根，"CLI 重建看到的技能"才是
+   * "她当时看到的技能"（REVIEW P1-16）。web 侧显式传 `deps.skillsRoot`（生产 = 同一个数据
+   * 目录），CLI 不传即走这里这个缺省。
    */
   skillsRoot?: string;
   /** 技能索引文本覆盖点（测试与嵌入方注入）；缺省按**当前**技能目录 + 到该步为止的信任事件重建 */
@@ -1257,9 +1258,13 @@ export async function buildReplayReport(
 
   // 技能索引（长期记忆层的第一段）：**新日志读快照、老日志退回当时的来源**——
   // 分派判据只写在 `skillCatalogForReplay` 一处（这一版起与 MCP 索引同一套缓存保护）。
+  //
+  // v79：缺省基准是**数据目录**（运行期那份 `SkillManager` 建在 `<dataDir>` 上，技能实体
+  // 住在 `<dataDir>/skills`）——重建必须扫同一串根，否则"CLI 重放看到的技能"与"她当时
+  // 看到的"是两份东西（本次搬迁前缺省是 cwd，那条路只对"技能住在安装目录"的老日志成立）。
   const skillCatalog = options.skillCatalog !== undefined
     ? options.skillCatalog
-    : skillCatalogForReplay(options.skillsRoot ?? cwd, scan.events, stepStart.seq);
+    : skillCatalogForReplay(options.skillsRoot ?? dataDir, scan.events, stepStart.seq);
 
   const request = rebuildRenderedRequest(
     located,

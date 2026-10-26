@@ -3,8 +3,8 @@
 // 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
 // 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
 import 'dart:async';
+import 'dart:io' show Directory;
 import 'shell/tray.dart';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
@@ -15,6 +15,10 @@ import 'package:window_manager/window_manager.dart';
 import 'api.dart';
 import 'ask_card.dart';
 import 'auth_gate.dart';
+// 后端端口的**三级来源**（端口文件 > 环境变量 > 默认 7788）：见那个文件头的事故与取舍
+import 'backend_port.dart';
+// 「后端到哪一步了」那一个读数（`GET /api/health`）：门上三档提示 + 每 2 秒自动重探共用
+import 'backend_probe.dart';
 // 「退出全部」真的停后端那一步（端口 → pid → taskkill 树），判据与代价见那个文件
 import 'backend_stop.dart';
 // 「这次是我主动退的，别把我拉回来」（协议见 docs/gui-guard.md §3）
@@ -23,11 +27,16 @@ import 'gui_quit.dart';
 // （壳一级：左侧「扩展」角标、托盘首项、右侧通知卡读的都在这两份文件里）
 import 'grant_inbox.dart';
 import 'grant_inbox_overlay.dart';
+// 界面自己的运行日志（`%LOCALAPPDATA%\Irmia\gui.log`）：卡死时唯一能回答"卡在哪"的东西
+import 'gui_log.dart';
 import 'her_name.dart';
 import 'home.dart';
 import 'i18n/app_strings.dart';
 import 'i18n/strings_override.dart';
 import 'i18n/strings_scope.dart';
+// 实例登记表（`%APPDATA%\Irmia\instances.json`）与"拉起/停掉一台实例"的外部世界：
+// 选择页的数据层、以及 `AppState` 里「登出 = 结束实例」那三步的判据都在这里。
+import 'instances.dart';
 import 'mention_prompt.dart';
 import 'onboarding.dart';
 import 'pages/channels_page.dart';import 'pages/chat_page.dart';
@@ -42,8 +51,12 @@ import 'password_prompt.dart';
 // 重启那条路：首页那颗按钮与托盘那一项**共用这一个函数**（三态判据只有一份）
 import 'restart_action.dart';
 import 'session_store.dart';
+// 主 isolate 卡顿看门狗：卡住时由另一个 isolate 写 `[stall]` 行（见那个文件的文件头）
+import 'stall_watch.dart';
 import 'theme.dart';
 import 'title_bar.dart';
+// 窗口状态留痕（`[win] focus/visibility/restore`）：与 `[stall]` 拼在一起才说得清现场
+import 'win_trace.dart';
 // 更新检查（2026-10-22）：数据模型与两处界面（顶部提醒条 / 设置页那一块）共用同一份解析
 import 'update_check.dart';
 // toast（托盘那几句的落点）与 confirm（「退出全部」的确认框）
@@ -66,10 +79,11 @@ const String kUpdateDismissedVersionFlag = 'update-dismissed-version';
 /// 再拉起界面，而 node 载入事件日志要几秒到几十秒——界面先起来、服务端还没监听，
 /// 这是**安排好的顺序**，不是故障。停在错误卡上就等于让每次重启都欠人一次按键。
 ///
-/// 为什么这么密（0.3~1 秒）：本地回环上一次连接被拒是几毫秒的事，重启后端口通常几秒内就起来；
+/// 为什么这么密（0.3~2 秒）：本地回环上一次连接被拒是几毫秒的事，重启后端口通常几秒内就起来；
 /// 密一点只是几个毫秒级的本地 syscall，而"她回来了"能早一秒上屏就早一秒。
-/// 上限 1 秒是别再密下去：这个窗口里界面还什么都没画出来，打太快没有收益。
-const List<double> kGateRetryDelays = [0.3, 0.5, 0.8, 1];
+/// 上限 **2 秒**（2026-10-26）：后端冷启动要 35–42 秒（180 MB 事件日志），这条最密到 2 秒
+/// 既够快、又不至于在门前空转着打几十次。
+const List<double> kGateRetryDelays = [0.3, 0.5, 1, 2];
 
 /// 连着重试多久还没连上，才降级成"连不上"那张错误卡（秒）。
 ///
@@ -82,8 +96,11 @@ const int kGateGraceSeconds = 60;
 ///
 /// 为什么降级之后还要继续试：降级只是"改口径"（从"正在启动"改成"可能真的没在跑"），
 /// 不是放弃。主进程晚到两分钟也是常有的事（冷启动 + 事件日志大），它一起来界面就该自己进门，
-/// 而不是等人回来按那颗「重试」。3 秒是慢速与"够快"之间的折中。
-const int kGateSlowRetrySeconds = 3;
+/// 而不是等人回来按那颗「重试」。
+///
+/// **2 秒**（2026-10-26 从 3 秒改）：与 [kGateRetryDelays] 的最后一档同一个节奏
+/// ——"自动每 2 秒重试一次"这句话在门卡上只该有一个数。
+const int kGateSlowRetrySeconds = 2;
 
 /// 宽限窗口的覆盖值（秒）；null = 用 [kGateGraceSeconds]。
 ///
@@ -332,8 +349,26 @@ class _IrmiaAppState extends State<IrmiaApp> {
     super.initState();
     // 入口解析好的语言落进那个全局 notifier（默认中文，见 IrmiaApp.initialLanguage）
     effectiveLanguage.value = widget.initialLanguage;
-    final port = Platform.environment['IRMIA_WEB_PORT'] ?? '7788';
-    state = AppState(api: IrmiaApi(baseUrl: 'http://127.0.0.1:$port'));
+    /**
+     * 端口**三级来源**（2026-10-26）：后端写的端口文件 > 环境变量 > 默认 7788。
+     *
+     * 事故那天这里只读环境变量，父进程塞进来的 `IRMIA_WEB_PORT=1580` 把界面带到了
+     * 一个没人听的端口上（屏幕上只有 `SocketException … port = 1580`）。现在第一档是
+     * **盘上的事实**（后端 bind 成功那一刻写的 `%LOCALAPPDATA%\Irmia\server.json`），
+     * 环境变量降为第二档。判据与取舍见 `backend_port.dart` 的文件头。
+     */
+    final backend = resolveBackendPort();
+    state = AppState(
+      api: IrmiaApi(baseUrl: 'http://127.0.0.1:${backend.port}'),
+      backend: backend,
+      // 每次门前重试都可以再读一次端口文件（后端起来后会写它）：只采纳"文件"这一档，
+      // 绝不在重试中往环境变量/默认值回退——那正是把界面带回错误端口的路。
+      backendPortResolver: resolveBackendPort,
+      // **真机才注入外部世界**（判活 / 探端口 / 拉起后端 / 按端口强停）。
+      // `AppState` 的缺省是一份"什么都问不到"的替身：用例不该因为构造它而去连本机回环
+      // （假时钟里等一条真 socket 会挂住不返回）。见 `instances.dart` 的 InstanceHost.offline。
+      instances: InstanceHost.real(),
+    );
     // **不在这里决定画哪一态**：凭据按实例分文件存，而"我是哪个实例"只有服务端知道。
     // 所以先空手问一次（bootstrap），拿回实例标识与 `code` 之后才知道该弹"设置密码"还是"登录"。
     unawaited(state.bootstrap());
@@ -343,20 +378,37 @@ class _IrmiaAppState extends State<IrmiaApp> {
     // 门还没进的时候它也照装：托盘是窗口的财产，不归"登录了没有"管。
     unawaited(IrmiaTray.instance.install(
       actions: TrayActions(
+        // 托盘那几项都是**关键动作**：每一项先记一条 `[input]`（菜单上的原话），
+        // 再把窗口状态说清（`[win] restore`）——卡死时"人最后点的是托盘哪一项"就在日志里。
         show: () {
+          traceInput(currentStrings.trayShow);
+          WinTrace.instance.noteRestored();
           unawaited(windowManager.show());
           unawaited(windowManager.focus());
         },
-        hide: () => unawaited(windowManager.hide()),
+        hide: () {
+          traceInput(currentStrings.trayHide);
+          WinTrace.instance.noteHidden();
+          unawaited(windowManager.hide());
+        },
         // 与首页那颗「重启前后端」**同一个函数**：请求、三态判据、说的话、等回来的窗口只有一份
+        // （它自己在入口处记 `[input]`，这里不重复记）
         restart: _restartFromTray,
         // 「退出界面」= 老行为：写标记（别让保活把我拉回来）→ 收托盘 → 关窗。后端一个字节都不动
-        quitUi: _quitUi,
+        quitUi: () {
+          traceInput(currentStrings.trayQuitUi);
+          _quitUi();
+        },
         // 「退出全部」= 界面 + 后端（含它拉起的协议端）；确认框把硬杀的代价说清
-        quitAll: () => unawaited(_quitAll()),
+        quitAll: () {
+          traceInput(currentStrings.trayQuitAll);
+          unawaited(_quitAll());
+        },
         // 菜单首项「有 N 条待批」：窗口先摆出来，再落到扩展页（那一页能一次看完并逐条批）。
         // 这是**人自己点的**，所以显示 + 聚焦窗口是对的——与通知卡"不许抢焦点"不冲突。
         openPending: () {
+          traceInput(currentStrings.trayPendingItem(state.pendingGrantCount));
+          WinTrace.instance.noteRestored();
           unawaited(windowManager.show());
           unawaited(windowManager.focus());
           state.setPage('extensions');
@@ -365,6 +417,8 @@ class _IrmiaAppState extends State<IrmiaApp> {
         // **不直接开浏览器**：托盘是原生菜单，点一下就把浏览器拉起来太突然；
         // 真正打开外链只有人工按的那颗「查看」/「检查更新」。
         openUpdate: () {
+          traceInput(currentStrings.trayUpdateItem(state.updateInfo?.latestVersion ?? ''));
+          WinTrace.instance.noteRestored();
           unawaited(windowManager.show());
           unawaited(windowManager.focus());
           state.setPage('settings');
@@ -477,6 +531,7 @@ class _IrmiaAppState extends State<IrmiaApp> {
       return;
     }
     // 确认框必须落在人看得见的地方：托盘点出来时窗口可能收着
+    WinTrace.instance.noteRestored();
     unawaited(windowManager.show());
     unawaited(windowManager.focus());
     final strings = currentStrings;
@@ -507,12 +562,18 @@ class _IrmiaAppState extends State<IrmiaApp> {
 
   /// 退出流程的收尾：先拆托盘、再关窗（顺序反过来会留一个点不动的托盘图标）
   Future<void> _finishQuit() async {
+    guiLog.write('[life] gui quit');
+    // 看门狗先停：它写的是同一个文件，`guiLog.detach()` 之后留下的那个 isolate 不该再写
+    StallWatch.instance.stop();
+    WinTrace.instance.detach();
     await IrmiaTray.instance.remove();
     try {
       await windowManager.destroy();
     } catch (err) {
       debugPrint('关窗失败：$err');
     }
+    // 日志最后关：上面两步任何一步抛异常，前面那些现场已经在盘上了
+    guiLog.detach();
   }
 
   @override
@@ -611,14 +672,78 @@ class _IrmiaAppState extends State<IrmiaApp> {
 
 /// 全局状态：会话凭据、状态句、主题、当前页、徽章、以及"进没进门"
 class AppState extends ChangeNotifier {
-  AppState({required this.api, SessionStore? sessions}) : sessions = sessions ?? SessionStore() {
+  AppState({
+    required this.api,
+    SessionStore? sessions,
+    BackendPort? backend,
+    this.backendPortResolver,
+    InstanceHost? instances,
+  })  : sessions = sessions ?? SessionStore(),
+        instances = instances ?? InstanceHost.offline(),
+        backend = backend ?? BackendPort.fromBaseUrl(api.baseUrl) {
     // **401 自愈的接线点**：服务端说这张票不作数时，重读这个实例的凭据文件再试一次。
     // 为什么值得这么做：改了密码（所有旧会话作废）、或在别处登出过之后，人**不该被要求重启界面**。
     api.onUnauthorized = _rereadCredential;
+    // 排障接线：卡死时日志里那行 `[wait] … page=…` 要能说出"当时在哪一页"。
+    // 传输层不认识页面，所以由这里把读数塞给它（见 gui_log.dart / api.dart 的 `_dumpWaits`）。
+    api.pageProbe = () => pageId;
+    // 同一个读数口再接给 `[input]` 那一层：它没有 `AppState` 在手（见 stall_watch.dart
+    // 的 `guiPageProbe`），而"最后动的是哪个按钮、在哪一页"正是 `[stall]` 行里最要紧的两格。
+    guiPageProbe = () => pageId;
+    // **主 isolate 卡顿看门狗**（stall_watch.dart）：真卡住时唯一还能说话的是另一个 isolate。
+    // 只在日志开着时才起——与 gui_log.dart 的"没打开就什么都不做"是同一条分寸：
+    // 用例会造几百个 AppState，一条 isolate 都不该为它们起。
+    final logPath = guiLog.path;
+    if (guiLog.attached && logPath != null) {
+      unawaited(StallWatch.instance.start(logPath: logPath, snapshot: _stallSnapshot));
+    }
+  }
+
+  /// 心跳快照：**卡住那一刻**"在哪一页、最后一条动作是什么、有没有请求在飞"。
+  ///
+  /// 它在主 isolate 里每 [kStallBeatEvery] 跑一次，拼好之后把字符串拷贝给看门狗；
+  /// 于是卡住时看门狗手上拿的就是"最后一句还活着的话"（见 stall_watch.dart）。
+  String _stallSnapshot() {
+    final oldest = api.oldestPending;
+    return stallSnapshot(
+      page: pageId,
+      last: lastTraceText,
+      inflight: api.inFlightCount,
+      oldest: oldest?.label,
+      oldestAge: oldest?.elapsed,
+    );
   }
 
   final IrmiaApi api;
   final SessionStore sessions;
+
+  /// 外部世界（判活 / 探端口 / 拉起后端 / 按端口强停）——**唯一**一处分装。
+  ///
+  /// 默认 [InstanceHost.offline]：**用例里一个系统调用都不发**。真机装配在
+  /// `_IrmiaAppState.initState` 里显式给 [InstanceHost.real]。这条默认值是刻意的：
+  /// `AppState` 被上百条用例构造，任何一条都不该因为"没注入宿主"而去连本机回环、
+  /// 更不该在假时钟里等一条真 socket（那种等待会让用例挂住不返回）。
+  final InstanceHost instances;
+
+  /// 当前连的是哪个后端端口、这个端口是哪一档来的（`file` / `env` / `default`）。
+  ///
+  /// 它是**可变**的：门前重试的每一拍都可以重读一次端口文件（见 [_adoptPortFromFile]）——
+  /// 后端晚于界面起来、而且不在默认端口时，界面也能自己找过去。
+  BackendPort backend;
+
+  /// 每次重试前重读端口文件的注入口；null = 不重读（用例默认如此）。
+  ///
+  /// 生产装配（`_IrmiaAppState.initState`）传的是 `resolveBackendPort`。**只在"文件"这一档
+  /// 与当前端口不同**时才切换（见 [_adoptPortFromFile]）：重试途中绝不许退到环境变量/默认值
+  /// ——那一条正是事故那天把界面带到 1580 的路。
+  ///
+  /// **可变**（2026-10 多实例）：人从选择页**显式选过一台实例**之后，这一格会被置空
+  /// （见 [_adoptInstance]）——`server.json` 是"默认实例"的提示位，选过第二台之后
+  /// 它就成了错误来源（它会把界面带回默认实例的端口）。
+  BackendPort Function()? backendPortResolver;
+
+  /// 门卡上"正在等 :N"里的 N（与 [api] 的 baseUrl 同源，永远读 [backend]）
+  int get backendPort => backend.port;
 
   /// 已进门了吗。false = 画那道门（见 [AuthGate]）。
   bool ready = false;
@@ -626,6 +751,16 @@ class AppState extends ChangeNotifier {
   AuthGateKind gate = AuthGateKind.checking;
   /// 门上那行错误（密码不对、两次不一致、连不上…）；空 = 没问题
   String gateError = '';
+  /// 门上的**中性提示**（"现在该去哪一扇门、为什么换了门"）；空 = 不显示。
+  ///
+  /// 与 [gateError] 分工：`auth-uninitialized` / `unauthorized` 这两条 401 是**分流信号**，
+  /// 不是错误，不许进红字那一行——2026-10-23 的现场就是探测那一次的 message 被当成错误
+  /// 显示在设置页底部，看着像"这台实例没密码"，而它其实有密码。真正的错误（密码不对、
+  /// 两次输入不一致、连不上、服务端拒绝）才走 [gateError]。
+  ///
+  /// 文案不在这里拼（状态层没有 BuildContext）：这里只记**是哪一种情况**，门那一层
+  /// 用 [AuthGateHint] 去 AppStrings 取这个语言的那一句。
+  AuthGateHint gateHint = AuthGateHint.none;
   /// 门上有请求在飞（按钮显示"正在…"且禁用，防连点）
   bool gateBusy = false;
 
@@ -647,6 +782,43 @@ class AppState extends ChangeNotifier {
   /// 门卡上那句"每 N 秒仍会自动重试"里的 N（口径只有 [kGateSlowRetrySeconds] 一处）
   int get gateSlowRetrySeconds => kGateSlowRetrySeconds;
 
+  // ── 门上那三档：连不上 / 正在启动 / 密码不对（2026-10-28） ──
+  //
+  // 这三档原来是**一句话**：登录页把"后端没起""后端还在启动""密码错"全说成"连不上"。
+  // 后果不是话不好听，而是人对着密码框反复重输——而真正的问题是主进程没在跑；
+  // 更糟的是那时候界面**不会自己再试**（真机读数：16:19:05 起一直报"还在启动（阶段 channels）"，
+  // 16:19:35 后端已经 ready，屏幕上那句错就一直停在那儿）。
+  //
+  // 现在的分工：
+  //   · ①②（连不上 / 正在启动）⇒ [gateWaitingBackend] 为真，话由 [backendReadiness] 决定，
+  //     并且挂上 [kBackendRetrySeconds] 秒一拍的自动重探；**不发登录请求**（密码不许被自动重发）；
+  //   · ③（401）⇒ 仍是服务端那句"密码不对"，一个字都不改（它比任何客户端猜的都准），
+  //     而且不碰输入框、不挂重探。
+
+  /// 后端此刻到哪一步了（[probeBackend] 的读数；`unknown` = 还没探过）
+  BackendReadiness backendReadiness = BackendReadiness.unknown;
+
+  /// 服务端报的启动阶段（`events` / `mcp` / `channels` / `ready`；空 = 这一版不报）
+  String backendPhase = '';
+
+  /// 这一轮等待已经过了几秒（门卡上"第 N 秒"读它）
+  int backendWaitSeconds = 0;
+
+  /// 这一轮等待里自动重探了几次（门卡上"已重试 M 次"读它）
+  int backendRetryCount = 0;
+
+  /// 门上那行话是不是**"后端还没就绪"**这一族（①②两档）。
+  ///
+  /// 它同时是三件事的判据：要不要自动重探、就绪之后要不要把那句话擦掉、
+  /// 以及「设置密码」那颗按钮该不该灰着（③：不能等人点了才报错）。
+  bool gateWaitingBackend = false;
+
+  /// 门前自动重探的节拍器（1 秒一格；每 [kBackendRetrySeconds] 格真去探一次）
+  Timer? _backendRetry;
+
+  /// 门上那颗主按钮**该不该灰着**：后端没起 / 还在启动时，点它没有任何意义。
+  bool get gateBackendBlocked => gateWaitingBackend;
+
   /// 退场之后**一律不再改状态**：重连那一拍可能正好压在退场上。
   ///
   /// 为什么必须有这道闸：`ChangeNotifier.notifyListeners` 在 dispose 之后会 assert，
@@ -658,6 +830,13 @@ class AppState extends ChangeNotifier {
   Timer? _gateRetry;
   /// 服务端给的实例标识（`<host>:<port>#<数据目录哈希>`）：凭据按它分文件存
   String? instance;
+
+  /// 服务端最近一次如实回答的"设过密码没有"（`GET /api/auth/state`）；null = 还不知道
+  /// （老服务端没有这条端点 / 应答读不懂）。
+  ///
+  /// 它只在 401 的 `code` **缺失**时兜底：有 code 的时候，code 就是服务端当场说的那句话。
+  /// 这条字段真正的用处是"界面能复核事实"——见 [bootstrap] 与 [_requireAuth]。
+  bool? authInitialized;
 
   String dotKind = 'loading';
   String stateText = '正在连接…';
@@ -689,6 +868,28 @@ class AppState extends ChangeNotifier {
 
   /// 当前页 id（默认「运行情况」）
   String pageId = defaultPageId;
+
+  /// **当前页的重挂计数**：它进页面的 Key（见 `home.dart` 的 `_PageHost`），一加一就
+  /// 整页重建 —— 等于"重新 initState、重新取数"。
+  ///
+  /// 谁在用：`wait_banner.dart` 那颗「重试」。它要回答的正是"某一页卡在 loading 里、
+  /// 再也不动了怎么办"：页面自己那套 `loading` 标志只有它自己的 `catch` 能放掉，
+  /// 而从外面**唯一**能做的就是把它重新挂一次。比"要求每一页都自己带超时"可靠得多
+  /// ——后者要改六七个页面，而漏掉一页就还是永久转圈。
+  int pageEpoch = 0;
+
+  /// 把当前页整页重挂一次（「这次没回来，点重试」的落点）。
+  ///
+  /// 代价说清楚：页面上没提交的编辑、滚动位置会丢。所以它只挂在**人真的点了**那颗
+  /// 按钮上（见 `wait_banner.dart`），不自动触发。
+  void reloadCurrentPage() {
+    pageEpoch += 1;
+    // 「点重试」也是关键动作：卡在 loading 里时，人最后按的那一下就是这一颗
+    traceInput(currentStrings.retry);
+    guiLog.write('[page] reload $pageId epoch=$pageEpoch');
+    notifyListeners();
+  }
+
   int needsReview = 0;
   bool online = false;
 
@@ -915,9 +1116,17 @@ class AppState extends ChangeNotifier {
   /// 而凭据按实例分文件存（这正是"第二个实例把第一个顶掉"那个坑的根治点）。
   /// 所以第一趟必须空手打，从 401 的响应体里把 `instance` 与 `code` 读回来。
   ///
-  /// 这也解释了为什么服务端**不需要**另开一条公开的"我是谁"端点：
-  /// 「待初始化时只放行设置密码这一条路」那条纪律因此一个字都不用让步。
-  Future<void> bootstrap() async {
+  /// 门该画哪一态，则**先读公开的事实**（`GET /api/auth/state`，不需要凭据），读不到才用
+  /// 401 的 `code` 兜底。2026-10-23 之前只有 code 一条路，于是：探测那一次的 message 会被
+  /// 当成红字显示；服务端状态在别处变了（密码在另一个进程里设上、或凭据文件被重命名重置），
+  /// 界面也没有第二个地方可以复核——它停在一扇"设置密码"门的后面，提交却永远 409。
+  ///
+  /// [fromPicker] 为真 = 这一趟是**选择页那一行按下**发起的（盘上有这一台的票）：
+  /// 那么"票被服务端判了 401"的落点就不是密码门，而是**回到选择页**——那一行的按钮变
+  /// 「登录」，上面留一行"登录状态已失效"（见 [pickerSessionExpired]）。理由：人是点
+  /// 那一行进来的，票不作数这件事属于那一行；把他推到密码门后面，他还会以为"整台界面把
+  /// 我踢出来了"。没有票的那条路（[fromPicker] 为假）照旧进密码门——那本来就是要密码的。
+  Future<void> bootstrap({bool fromPicker = false}) async {
     // 这一趟是谁发起的都无所谓（首屏、重试那一拍、还是人按的那颗「立即重试」），
     // 它只负责把**手上这一拍**打出去：先把待发的那条定时器收掉（这一拍马上就发，
     // 留着它只会多打一次），计数 +1，回到"正在连接"那一屏。
@@ -928,6 +1137,8 @@ class AppState extends ChangeNotifier {
     // 之间来回跳（真机上一条连接失败要一两秒，跳得更明显）。
     _gateRetry?.cancel();
     _gateRetry = null;
+    // 每一拍都先看一眼端口文件（后端起来时会写它）：只采纳"文件"这一档，见 [_adoptPortFromFile]
+    _adoptPortFromFile();
     gateAttempt += 1;
     gate = AuthGateKind.checking;
     ready = false;
@@ -947,9 +1158,12 @@ class AppState extends ChangeNotifier {
       code = err.code;
       instance = err.instance ?? api.instance;
     } on ApiError catch (err) {
-      // 服务端**答了话**（500 之类）：它在那，只是这条路现在不通。这种失败不会随时间自己好，
-      // 所以不当成"还在启动"，当场说话（判据见 _onConnectFailure）
-      _onConnectFailure(err, connection: false);
+      // 服务端**答了话**：分两种。
+      //   · `starting`（503 + `{starting:true,phase}`）——端口在听、重活没干完。**它不是错误**：
+      //     后端现在先 bind 再折事件（35–42 秒），这一档恰恰说明"它正在起"，所以按连接类
+      //     失败处理（中性话 + 自动重试），别把"还在启动"画成一张红卡；
+      //   · 其余 4xx/5xx——它在那并且说不行，不会随时间自己好，当场说话。
+      _onConnectFailure(err, connection: err.starting);
       return;
     } catch (err) {
       _onConnectFailure(err, connection: true);
@@ -966,7 +1180,9 @@ class AppState extends ChangeNotifier {
         _markGateOpen();
         ready = true;
         gateError = '';
+        gateHint = AuthGateHint.none;
         _onLegacyToken = false;
+        authInitialized = true;
         startPolling();
         notifyListeners();
         return;
@@ -974,7 +1190,8 @@ class AppState extends ChangeNotifier {
         code = err.code;
         instance = err.instance ?? instance;
       } on ApiError catch (err) {
-        _onConnectFailure(err, connection: false);
+        // `starting` 与"连接类"同一条处置（后端在起，不是这条路坏了），其余照旧当场说话
+        _onConnectFailure(err, connection: err.starting);
         return;
       } catch (err) {
         _onConnectFailure(err, connection: true);
@@ -984,13 +1201,49 @@ class AppState extends ChangeNotifier {
       // 也让下面的"自愈重读"每次都拿到同一张废票。
       final current = instance;
       if (current != null) sessions.clear(current);
+      if (fromPicker) {
+        // 选择页那行进来的：**留在选择页**（该行按钮变「登录」+ 一行轻提示），
+        // 不把人推到密码门后面——票不作数这件事属于那一行（见 [bootstrap] 的文档）。
+        _resetForGate(withToken: true);
+        gate = AuthGateKind.picker;
+        pickerSessionExpired = current ?? key ?? '';
+        pickerProblem = InstanceGateProblem.none;
+        pickerProblemDetail = '';
+        stateText = '';
+        notifyListeners();
+        // 那一行的按钮要跟着变（这一份 token 已经不在盘上了）
+        unawaited(refreshInstances());
+        return;
+      }
     }
+
+    // ②.5 问一次**公开的事实**：这台实例到底设过密码没有（`GET /api/auth/state`）。
+    //
+    // 这是 2026-10-23 那场死锁的修复点：门的判据不能再只靠 401 的 `code`。两条理由——
+    //   · 那条通道把"分流信号"与"错误播报"混在一起，探测结果会被当红字显示；
+    //   · 它没有复核通道。服务端的状态可能在别处变了（密码在另一个进程里设上、`.auth.json`
+    //     被重命名做重置），而界面若已经停在某一扇门上，就再没有任何机会发现判据过期了。
+    //     现场就是：门上是"设置密码"，实例其实有密码 ⇒ 提交 409 ⇒ 表单永远失败 ⇒ 进不去。
+    //
+    // 读不到（老服务端没有这条端点）时 [authState] 回 null，此时**才**退回 401 的 code 分流。
+    bool? serverInitialized;
+    try {
+      serverInitialized = await api.authState();
+    } catch (err) {
+      // 连接类失败：服务端不在。与前面几次探测同一条处置（门前那套自动重连）
+      _onConnectFailure(err, connection: true);
+      return;
+    }
+    authInitialized = serverInitialized;
+    // 判据只认事实：state 说"没有密码"才算待初始化；问不出来时才看 401 的 code。
+    final uninitialized = serverInitialized == false
+        || (serverInitialized == null && code == 'auth-uninitialized');
 
     // ③ 还没设密码：先试一次**老界面那份全局凭据**（升级期的兜底，见 session_store.dart）。
     // 为什么值得留着这条路：后端口径换了、界面也换了的时候，人手上唯一还有效的东西就是它；
     // 没有它，界面会停在"设置密码"那一屏——设一个当然也能进，但那等于用升级把人挡在门外一次。
     // 它只在"服务端说还没设密码"时才有意义：设过密码之后旧 token 当场作废，试也白试。
-    if (code == 'auth-uninitialized') {
+    if (uninitialized) {
       final legacy = readLegacyGuiToken();
       if (legacy != null) {
         api.token = legacy;
@@ -999,7 +1252,10 @@ class AppState extends ChangeNotifier {
           _markGateOpen();
           ready = true;
           gateError = '';
+          gateHint = AuthGateHint.none;
           _onLegacyToken = true;
+          // 旧 token 只在还没设密码时有效：这条事实同时是"以后该补设一个密码"的判据
+          authInitialized = false;
           // 提醒一次"该设密码了"（按过「以后再说」就不再打扰）。
           // `loadFlag` 是三态：这里**未知也要提醒**（读不到状态文件时，提醒一次是安全的一侧；
           // 与引导判据"未知不弹"相反，因为"提醒设密码"漏掉比多提醒一次代价大）。
@@ -1010,7 +1266,7 @@ class AppState extends ChangeNotifier {
         } on ApiAuthError {
           // 旧凭据也不作数了（或本来就是坏的）：继续走"设置密码"，这不是错误
         } on ApiError catch (err) {
-          _onConnectFailure(err, connection: false);
+          _onConnectFailure(err, connection: err.starting);
           return;
         } catch (err) {
           _onConnectFailure(err, connection: true);
@@ -1025,9 +1281,13 @@ class AppState extends ChangeNotifier {
     // 走到这里说明**服务端答话了**（要么"还没设密码"、要么"这张票不作数"）：
     // 门前那套"等它起来"的重连该收掉了（门现在是登录/设密码态，不再是等待态）
     _markGateOpen();
-    // `auth-uninitialized` = 这台实例从来没设过密码 → 弹"设置密码"；其余一律登录态。
-    gate = code == 'auth-uninitialized' ? AuthGateKind.setup : AuthGateKind.login;
+    // 门只按**事实**画：待初始化 → "设置密码"；其余一律登录态。判据见上面 `uninitialized`
+    // （公开的 state 优先，老服务端才退回 401 的 code）。
+    gate = uninitialized ? AuthGateKind.setup : AuthGateKind.login;
+    // 探测用的那条 401 是**分流信号，不是错误**：它不进红字那一行（本来就是清的，
+    // 写出来是为了把这条纪律钉在代码里）。
     gateError = '';
+    gateHint = AuthGateHint.none;
     notifyListeners();
   }
 
@@ -1039,10 +1299,56 @@ class AppState extends ChangeNotifier {
   void _markGateOpen() {
     _gateRetry?.cancel();
     _gateRetry = null;
+    // 门前那条"等后端就绪"的节拍器同一条命：进了壳就没有"门上的提示"可言了
+    _clearBackendWait();
+    // **恢复的那一行**（2026-10-26）：排障时要能从日志里读出"等的是哪个端口、等了多久才通"。
+    // 验收那一趟用的就是这两行：`[net] waiting backend port=… source=…` → 这一行。
+    if (gateRetrying || gateAttempt > 0) {
+      _netLog('[net] backend ready port=$backendPort source=${backend.sourceLabel}'
+          ' attempts=$gateAttempt waited=${gateWaited}s');
+    }
     gateAttempt = 0;
     gateWaited = 0;
     gateRetrying = false;
     gateUnreachable = false;
+    guiLog.write('[gate] open (shell)');
+  }
+
+  /// 写一行 `[net]` 日志（真机进 `%LOCALAPPDATA%\Irmia\gui.log`；用例里也能接走，见 [netLogSink]）
+  void _netLog(String line) {
+    guiLog.write(line);
+    netLogSink?.call(line);
+  }
+
+  /// **测试注入点**：把 `[net]` 那几行也递给用例（真机上没人设它，日志仍走 `gui.log`）。
+  ///
+  /// 为什么需要：`guiLog` 是全局单例、要在用例里 attach 才写盘，而 attach 会顺带把
+  /// 卡顿看门狗那条 isolate 也拉起来（见构造函数）——为了一行日志把 isolate 起起来不划算。
+  @visibleForTesting
+  void Function(String line)? netLogSink;
+
+  /// 重试前重读一次端口文件：**只采纳"文件"这一档**（后端 bind 成功那一刻写的那个端口）。
+  ///
+  /// 三条分寸：
+  ///   · 只在解析结果是 `file` 且端口与当前不同时才切换——重试途中绝不退回环境变量/默认值
+  ///     （那正是事故那天把界面带到 1580 的路）；后端退出时文件被删掉，这里读到 null，
+  ///     于是**继续等原来那个端口**，行为不变；
+  ///   · 切换时同步改 `api.baseUrl`（下一条请求立刻打到新端口）；
+  ///   · 记一行日志：`[net] port switched …`——"界面自己换了端口"这种事事后必须查得到。
+  void _adoptPortFromFile() {
+    final resolver = backendPortResolver;
+    if (resolver == null) return;
+    final fresh = resolver();
+    if (fresh.source != BackendPortSource.file) return;
+    if (fresh.port == backend.port) {
+      backend = fresh; // 端口没变，但 pid/since 可能是新的一份（换实例了）
+      return;
+    }
+    final previous = backend.port;
+    backend = fresh;
+    api.baseUrl = 'http://127.0.0.1:${fresh.port}';
+    _netLog('[net] port switched from=$previous to=${fresh.port} source=file'
+        '${fresh.pid == null ? '' : ' pid=${fresh.pid}'}');
   }
 
   /// 这次是**凭老凭据**进来的（服务端还没设密码）。
@@ -1071,7 +1377,10 @@ class AppState extends ChangeNotifier {
     needsPasswordPrompt = false;
     ready = false;
     gate = AuthGateKind.setup;
+    // 这条路的唯一入口是"凭老 token 进来的"（那台实例确实还没有密码），顺手把事实记准
+    authInitialized = false;
     gateError = '';
+    gateHint = AuthGateHint.none;
     notifyListeners();
   }
 
@@ -1129,46 +1438,767 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// 登出：撤掉服务端那条会话、清掉**本实例**那份凭据、回到门上。
+  /// **关掉这个实例**（用户 2026-10-27 的口径：「为什么要作废会话？不能就留在那，
+  /// 如果登回来了就接着吗？」）。
   ///
-  /// 顺序有讲究：撤销请求要用手上那张票，所以**先发请求、再清票**——反了就只能本地登出，
-  /// 服务端那条会话还活着（那张票被别人捡到照样能用）。
+  /// 三步，**顺序不许换**：
+  ///   ① `POST /api/commands/stop-instance`（`X-Confirm: stop-instance`）—— 让后端
+  ///      **优雅退出**（停源 → 关 web → `session/end` → 放锁，**不重启**）；
+  ///      这一步失败 ⇒ **退化为按端口强停**（`backend_stop.dart` 那一套），并如实记
+  ///      `stop=killed`——硬杀丢什么写在那个文件头里，日志必须看得出来这次是硬杀；
+  ///   ② 等端口消失（≤ [kInstanceStopTimeoutSeconds] 秒）——"真的停了"的唯一读数；
+  ///   ③ 回**实例选择页**，而**本机那份会话凭据留在原处**
+  ///      （`%APPDATA%\Irmia\sessions\<实例标识>`，跨界面重启也在）。
   ///
-  /// 但撤销失败**也照样登出**：本机这份凭据已经没人再用了，把它留在盘上才是真的问题
-  /// （"登出之后界面还能自己进去"）。失败静默，因为此刻壳正在收起来——弹什么都挂不住；
-  /// 而且这件事的后果是明确的：那张票在本地已经不存在了，人下次要用密码重新登录。
+  /// 与 [logout] 的差别只有一件事——**谁动凭据**：这条路**不作废、不清**。
+  /// 为什么不作废：那张票是"这台实例认得出我"的唯一凭据，而关掉实例只是让它**别跑了**。
+  /// 作废掉的话，从选择页点回来必然要重新输密码——而人能证明自己是同一个人（盘上那张票
+  /// 与关掉之前一模一样）。"保留"也不引入新的暴露面：它本来就存在那儿（[SessionStore]）。
   ///
-  /// 回到门上的哪一态按**这次是怎么进来的**定：凭老 token（没设过密码）进来的话，
-  /// 服务端根本不认这条注销请求（它会回 409 legacy-token：那串东西没有会话可撤），
-  /// 这时候画"登录"是个死胡同——那台实例还没有密码，得画"设置密码"。
+  /// 留一行现场：`[life] close instance=<名字> stop=graceful|killed waited=Ns token=kept`。
+  /// `token=kept` 是**反向**的那一格：见到 `token=cleared` 才是 [logout]（凭据没了）。
+  Future<void> closeInstance() async {
+    final port = backendPort;
+    final name = _instanceNameForLog();
+    // 这一台的实例标识与数据目录：凭据文件**不碰**，但数据目录要记住
+    // （关掉之后"新建实例"的默认目录按它的父目录算，见 [defaultInstanceDir]）
+    final known = instance == null ? null : InstanceBook.load().byId(instance);
+    if (known != null) _lastKnownDataDir = known.dataDir;
+    // ① 优雅停机；失败就退化为按端口强停（并如实记下来）
+    final stop = await _stopBackendNow(port);
+    // ② 等端口消失（≤20 秒）
+    final waited = await _awaitPortGone(port);
+    _lifeLog('[life] close instance=$name stop=$stop waited=${waited}s token=kept');
+    // ③ 回选择页。只清**内存**里那张票与壳里的状态；盘上那一份是这条路的全部意义，留着。
+    _resetForGate(withToken: true);
+    gate = AuthGateKind.picker;
+    // 状态词只在壳里显示；选择页那一屏不读它（那一页的话全在 `instance_picker.dart`）
+    stateText = '';
+    pickerSessionExpired = '';
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    notifyListeners();
+    // 列表要现读一次：刚停掉的那台现在显示"未运行"（有票 ⇒ 按钮变「启动并进入」），
+    // 别的实例的活/死也可能变了
+    unawaited(refreshInstances());
+  }
+
+  /// 停掉这一台的后端（[closeInstance] 与 [logout] 共用那两步，顺序与退化路径只有一份）。
+  ///
+  /// 返回 `graceful` / `killed`——它进 `[life]` 那行日志，是"这次停得干不干净"的唯一读数。
+  /// 两条路失败都**不抛**：停不干净这件事必须如实记下来，但它不该挡住"回选择页"这一步
+  /// （停在壳里是对着一片已经死掉的数据，比看见"未运行"糟得多）。
+  Future<String> _stopBackendNow(int port) async {
+    try {
+      await api.post(
+        kStopInstancePath,
+        const <String, dynamic>{},
+        confirm: kStopInstanceCommand,
+      );
+      return 'graceful';
+    } catch (err) {
+      guiLog.write('[life] stop-instance failed port=$port error=$err -- falling back to kill-by-port');
+      try {
+        await instances.killPort(port);
+      } catch (killErr) {
+        guiLog.write('[life] kill-by-port failed port=$port error=$killErr');
+      }
+      return 'killed';
+    }
+  }
+
+  /// **彻底登出**（安全出口：换机器、借人用过、怀疑票泄露时走它）。
+  ///
+  /// 三步，**顺序不许换**：
+  ///   ① `POST /api/auth/logout` —— 作废这个实例的会话（票在服务端真的不认了；
+  ///      这一步失败也继续走：一张废票不该挡住"停掉它"）；
+  ///   ② `POST /api/commands/stop-instance`（`X-Confirm: stop-instance`）—— 同 [closeInstance]；
+  ///   ③ 等端口消失（≤20 秒）→ **清掉本地那份会话 token** → 进**实例选择页**。
+  ///
+  /// 为什么②能拿到凭据：①刚把这张票作废，而②仍接受"本实例刚刚自己注销的那张票"
+  /// （服务端 60 秒宽限，见 `src/web/server.ts` 的 `recentlyLoggedOut`）。没有那一条，
+  /// "优雅结束实例"永远只能退化成硬杀。
+  ///
+  /// 与 [closeInstance] 的唯一差别就是**第③步清不清凭据**：这里清（`token=cleared`），
+  /// 那里留（`token=kept`）。两条路的日志逐格同形，排障时一眼分得清是哪一次。
   Future<void> logout() async {
+    final port = backendPort;
+    final name = _instanceNameForLog();
+    // 这一台的实例标识与数据目录：下面要清**它自己**那份凭据文件，也要记住数据目录
+    // （登出之后"新建实例"的默认目录要按它的父目录算，见 [defaultInstanceDir]）
+    final key = instance;
+    final known = key == null ? null : InstanceBook.load().byId(key);
+    if (known != null) _lastKnownDataDir = known.dataDir;
+    // ① 作废会话（失败静默：本地登出照样成立，见上）
     try {
       await api.postAuth('/api/auth/logout', {'label': 'gui'});
     } catch (_) {
-      // 见上：撤销没成功也不影响"本地登出"这件事，如实继续
+      // 撤销没成功也不影响"本地登出"这件事——票已经没人再用了
     }
+    // ② 优雅停机；失败就退化为按 pid 强停（并如实记下来）
+    final stop = await _stopBackendNow(port);
+    // ③ 等端口消失（≤20 秒），再清本地凭据
+    final waited = await _awaitPortGone(port);
+    _lifeLog('[life] logout instance=$name stop=$stop waited=${waited}s token=cleared');
+    // 盘上那一份**这一台**的凭据要清掉（"登出之后界面还能自己进去"才是真的问题）。
+    // 先清文件、再清内存：反过来的话上面那次 `sessions.clear(key)` 就找不到 id 了。
+    if (key != null) sessions.clear(key);
+    _resetForGate(withToken: true);
+    // 回到**实例选择页**（不是登录页：登出之后要选一台实例，或者新建一台）
+    gate = AuthGateKind.picker;
+    // 状态词只在壳里显示；选择页那一屏不读它（那一页的话全在 `instance_picker.dart`）
+    stateText = '';
+    pickerSessionExpired = '';
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    notifyListeners();
+    // 列表要现读一次：刚停掉的那台现在显示"未运行"，别的实例的活/死也可能变了
+    unawaited(refreshInstances());
+  }
+
+  /// 「忘记凭据」（选择页每行那行小字）：**只清本机这一份 token**。
+  ///
+  /// 三个动作的分界（各自独立，别混）：
+  ///   · **关掉实例**（[closeInstance]）—— 后端停，凭据**留着**；
+  ///   · **忘记凭据**（这里）—— 凭据清掉，后端**照跑**、登记表条目照留（下次进来要密码）；
+  ///   · **彻底登出**（[logout]）—— 作废 + 清凭据 + 停后端，三件一起（安全出口）。
+  ///
+  /// 返回 false = 本来就没有这一份（没什么可忘的）；页面据此决定要不要报一句话。
+  Future<bool> forgetCredential(InstanceEntry entry) async {
+    final had = sessions.read(entry.id) != null;
+    sessions.clear(entry.id);
+    if (pickerSessionExpired == entry.id) pickerSessionExpired = '';
+    _lifeLog('[life] forget instance=${entry.name} token=cleared stop=none');
+    notifyListeners();
+    await refreshInstances();
+    return had;
+  }
+
+  // ─────────────────────────── 实例：登记表 / 选择页 ───────────────────────────
+
+  /// 登记表读出来的条目（选择页的全部内容）
+  List<InstanceEntry> instancesList = const <InstanceEntry>[];
+
+  /// 读盘/判活在飞（页面显示"正在读实例…"并禁用按钮）
+  bool instancesLoading = false;
+
+  /// 登记表读得出来吗（false = 文件不在 / 坏了：页面照实说，不假装"一个实例都没有"）
+  bool instancesReadable = false;
+
+  /// 登记表文件**根本不在**（"第一次用"那一档；与"有文件但读坏了"分开说）
+  bool instancesMissing = false;
+
+  /// 逐条判活的结果（id → 在跑吗）。**问得通才算在跑**（见 `instances.dart` 的 InstanceProbe）
+  Map<String, bool> instancesRunning = const <String, bool>{};
+
+  /// 逐条"本机有没有这一台的凭据"（id → 盘上那份 token 在不在）。
+  ///
+  /// 选择页那几种按钮的**唯一判据**（2026-10-27）：有票 ⇒ 点一下直接进（「进入」/「启动并进入」）；
+  /// 没票 ⇒ 走密码门（「登录」/「启动并登录」）。为什么把它算成一份快照（而不是每次 build
+  /// 现读盘）：按钮的含义必须与"点下去会发生什么"一致，而一次重建去读 N 个文件是白花的 I/O。
+  /// 刷新点只有一处（[refreshInstances]，它本来就在每次回到选择页 / 每个动作之后跑）。
+  Map<String, bool> instancesToken = const <String, bool>{};
+
+  /// 这一台在本机**有没有登录凭据**（选择页按钮的判据，见 [instancesToken]）
+  bool hasTokenFor(InstanceEntry entry) => instancesToken[entry.id] == true;
+
+  /// 上一次「进入」被服务端判了 401 的那一台（id）；空 = 没有这回事。
+  ///
+  /// 选择页据此留一行轻提示（"登录状态已失效，需要重新登录"）——它不是错误卡：
+  /// 票过期是**正常会发生的**事（改过密码、在别处退出登录、清了 %APPDATA% 的那一份），
+  /// 该做的是把那一行的按钮换成「登录」，而不是弹一句红字让人猜。
+  String pickerSessionExpired = '';
+
+  /// 选择页正在忙的那一台（`''` = 新建流程；null = 空闲）
+  String? pickerBusyId;
+
+  /// 选择页上一次失败的**种类**（页面按它取这个语言的那句话；句子不在状态层拼）
+  InstanceGateProblem pickerProblem = InstanceGateProblem.none;
+
+  /// 上一次失败的**细节**（端口号 / 服务端原文）——它是数据，不是句子
+  String pickerProblemDetail = '';
+
+  /// 新建表单："这个目录已存在且非空"的那条路径（空 = 没有冲突）。
+  ///
+  /// 页面据此显示两个动作：换一个名字，或者「用这个目录」。**不自动覆盖**任何目录。
+  String createDirConflict = '';
+
+  /// 这一趟新建/启动选中的端口（页面上那句 `127.0.0.1:7789` 读它）
+  int? pickerPort;
+
+  // ── 选择页那次「启动并进入」正在等它就绪（2026-10-28） ──
+  //
+  // 原来只有一句"正在启动…"加一个 180 秒的死等：**不说等了多少、不说它到哪一步**，
+  // 超时之后也只说"超时"。人既没法判断"它是不是卡住了"，也没法叫停。
+  // 现在这三格撑起那一行读数与那颗「停止等待」。
+
+  /// 正在等一台实例就绪（选择页那一行在转，旁边有一颗「停止等待」）
+  bool pickerWaiting = false;
+
+  /// 这一趟已经等了多久（秒）
+  int pickerWaitSeconds = 0;
+
+  /// 后端自己报的阶段（`/api/health` 的 phase，原样；空 = 这一版不报 / 问不到）
+  String pickerWaitPhase = '';
+
+  /// 人按了「停止等待」（[cancelPickerWait]）：那一趟循环下一次醒来就收工
+  bool _pickerWaitCancelled = false;
+
+  /// 最近一次见到的**数据目录**（当前实例那条 / 上一条登出的那条）。
+  ///
+  /// 只用一件事：给"新建实例"算默认目录——`<它>\..\instances\<名字>`（见 [defaultInstanceDir]）。
+  /// 它不是凭据、不是配置，丢了也只是让人手填一次路径。
+  String? _lastKnownDataDir;
+
+  /// 一个已知的数据目录（当前实例 → 上次见过的那条 → 默认实例 → 任意一条）；都没有 ⇒ ''
+  String get knownDataDir {
+    final id = instance;
+    if (id != null) {
+      final current = InstanceBook.load().byId(id);
+      if (current != null && current.dataDir.trim().isNotEmpty) return current.dataDir;
+    }
+    final remembered = _lastKnownDataDir;
+    if (remembered != null && remembered.trim().isNotEmpty) return remembered;
+    final book = InstanceBook.load();
+    for (final entry in book.entries) {
+      if (entry.isDefault) return entry.dataDir;
+    }
+    if (book.entries.isNotEmpty) return book.entries.first.dataDir;
+    return '';
+  }
+
+  /// 新建实例的**默认数据目录**（页面那个输入框的初值）
+  String defaultInstanceDir(String name) {
+    final root = instancesRootOf(knownDataDir);
+    return instanceDirUnder(name, root: root);
+  }
+
+  /// 日志里的实例名字：登记表里当前那台 → 列表里那台 → 她的名字 → 端口
+  String _instanceNameForLog() {
+    final id = instance;
+    if (id != null) {
+      final entry = InstanceBook.load().byId(id);
+      if (entry != null) return entry.name;
+      for (final row in instancesList) {
+        if (row.id == id) return row.name;
+      }
+    }
+    final name = herName;
+    if (name != null && name.trim().isNotEmpty) return name.trim();
+    return 'port$backendPort';
+  }
+
+  /// `[life]` 那一族日志（真机进 gui.log；用例里也能接走，见 [lifeLogSink]）
+  void _lifeLog(String line) {
+    guiLog.write(line);
+    lifeLogSink?.call(line);
+  }
+
+  /// **测试注入点**：把 `[life]` 那几行也递给用例（真机上没人设它，日志仍走 `gui.log`）。
+  @visibleForTesting
+  void Function(String line)? lifeLogSink;
+
+  /// 现读一次登记表 + 逐条判活。**绝不抛**（读不到就是"读不到"，见 [instancesReadable]）。
+  ///
+  /// 判活是**并行**的（每台 2 秒上限）：一台卡住不该让别的等它；六台实例串行最坏 12 秒，
+  /// 而选择页是"人登出之后马上要看的东西"。
+  Future<void> refreshInstances() async {
+    instancesLoading = true;
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    // 先把通知推到这个 build 之后：选择页在 `initState` 里就调它，而 `initState` 里
+    // `notifyListeners()` 会撞上 "setState() called during build"（那一帧还没画完）。
+    // 一个 microtask 就够：build 是同步的，它跑完才会回到事件循环。
+    await Future<void>.microtask(() {});
+    if (_disposed) return;
+    notifyListeners();
+    final book = InstanceBook.load();
+    final entries = book.entries;
+    final running = <String, bool>{};
+    // 逐条"本机有没有这一台的票"：与判活一起算完，页面那一帧就拿得到全部判据
+    final tokens = <String, bool>{};
+    for (final entry in entries) {
+      tokens[entry.id] = sessions.read(entry.id) != null;
+    }
+    if (entries.isNotEmpty) {
+      final probes = await Future.wait(entries.map((entry) async {
+        if (!entry.hasPort) return null;
+        final probe = await instances.probe(entry.host, entry.port);
+        // id 对不上 = 那个端口上是**另一台**实例（换过数据目录、或端口被占）：按没在跑处理
+        return probe != null && probe.matches(entry) ? probe : null;
+      }));
+      for (var i = 0; i < entries.length; i += 1) {
+        running[entries[i].id] = probes[i] != null;
+      }
+    }
+    instancesLoading = false;
+    instancesReadable = book.readable;
+    instancesMissing = book.missing;
+    instancesList = List<InstanceEntry>.unmodifiable(entries);
+    instancesRunning = Map<String, bool>.unmodifiable(running);
+    instancesToken = Map<String, bool>.unmodifiable(tokens);
+    notifyListeners();
+  }
+
+  /// 选一台实例：没在跑就先**拉起来**，然后切过去、进它的门（有票就直接进壳 / 没票就登录）。
+  ///
+  /// "切过去"这一下是本功能的**隔离判据**（[ _adoptInstance ]）：换 baseUrl、换凭据文件、
+  /// **清掉内存里的会话 token 与整份 AppState**——绝不许把 A 的票带去 B。
+  ///
+  /// 后面那一步分两条路（2026-10-27，用户："如果登回来了就接着吗？"）：
+  ///   · 盘上**有这一台的票** ⇒ `bootstrap(fromPicker: true)`：票有效就当场进壳（不打密码门），
+  ///     票被服务端判 401 就**留在选择页**（那一行变「登录」+ 一行轻提示）；
+  ///   · 盘上**没有票** ⇒ `bootstrap()`：照旧进密码门（设密码 / 登录，由服务端的事实决定）。
+  Future<void> openInstance(InstanceEntry entry) async {
+    if (pickerBusyId != null) return;
+    pickerBusyId = entry.id;
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    // 新的动作开始：上一次那条"登录状态已失效"的提示到此为止（它是上一个按键的回执）
+    pickerSessionExpired = '';
+    pickerPort = entry.port;
+    // 上一趟等就绪留下的秒数/阶段也是"上一个按键的回执"，别让它挂在新的一行上
+    pickerWaitSeconds = 0;
+    pickerWaitPhase = '';
+    _pickerWaitCancelled = false;
+    notifyListeners();
+    try {
+      if (!entry.hasPort) {
+        pickerProblem = InstanceGateProblem.noPort;
+        return;
+      }
+      var probe = await instances.probe(entry.host, entry.port);
+      if (probe != null && !probe.matches(entry)) {
+        // 端口上住着**另一台**实例：不许"连上去看看"（那就是跨实例）
+        pickerProblem = InstanceGateProblem.portTaken;
+        pickerProblemDetail = probe.id;
+        return;
+      }
+      if (probe == null) {
+        if (!await _startInstance(entry)) return;
+        probe = await _awaitInstanceReady(entry);
+        if (probe == null) {
+          pickerProblem = InstanceGateProblem.notReady;
+          pickerProblemDetail = '${entry.port}';
+          return;
+        }
+      }
+      _adoptInstance(entry);
+      // 现读一次（不用 [instancesToken] 那份快照）：接下来这一趟要怎么走，取决于**此刻**
+      // 盘上那份票在不在——而判据只有一处（这里），快照只服务按钮上的字。
+      final hasToken = sessions.read(entry.id) != null;
+      await bootstrap(fromPicker: hasToken);
+    } finally {
+      pickerBusyId = null;
+      notifyListeners();
+    }
+  }
+
+  /// 拉起一台已登记的实例（用**它自己**记着的 node/entry/dataDir）
+  Future<bool> _startInstance(InstanceEntry entry) async {
+    if (entry.nodeExe.trim().isEmpty || entry.entry.trim().isEmpty) {
+      pickerProblem = InstanceGateProblem.noLauncher;
+      return false;
+    }
+    final ok = await instances.launch(
+      nodeExe: entry.nodeExe,
+      entry: entry.entry,
+      dataDir: entry.dataDir,
+      // 用它自己记着的那个端口：这台实例上次听的就是它（登记表里那一格）
+      port: entry.port,
+    );
+    if (!ok) {
+      pickerProblem = InstanceGateProblem.launchFailed;
+      pickerProblemDetail = entry.nodeExe;
+    }
+    return ok;
+  }
+
+  /// 等这一台**真的能干活**（`GET /api/instance` 答得出、且 id 对得上），最多 180 秒。
+  ///
+  /// 为什么以 `/api/instance` 为准而不是"端口能连上"：端口先 bind、重活后干（本机实测
+  /// 35–42 秒），能连上的那一刻它还没就绪。**启动期那一层只放行 `/api/health` 与
+  /// `/api/auth/state`，其余一律 503** ⇒ 这条端点答得出就等于**它已经就绪**——这正是
+  /// "启动并登录"要等的那个时刻（判据见 `src/web/preflight.ts` 的文件头）。
+  ///
+  /// ## 等的时候要说话（2026-10-28）
+  ///
+  /// 原来这 180 秒里界面上只有一句"正在启动…"：**不说等了多少秒、不说它卡在哪一步**，
+  /// 超时之后也只说"超时"。现在每一拍都把读数摆出去（[pickerWaitSeconds] /
+  /// [pickerWaitPhase]，页面拿它显示"已经等了 N 秒，它还在启动（阶段 …）"），
+  /// 而且人可以随时按「停止等待」（[cancelPickerWait]）叫停——实例照跑，只是界面不再等。
+  Future<InstanceProbe?> _awaitInstanceReady(InstanceEntry entry,
+      {int maxSeconds = kInstanceReadyTimeoutSeconds}) async {
+    _pickerWaitCancelled = false;
+    pickerWaiting = true;
+    pickerWaitSeconds = 0;
+    pickerWaitPhase = '';
+    notifyListeners();
+    try {
+      for (var second = 0; second < maxSeconds; second += 1) {
+        await Future<void>.delayed(const Duration(seconds: 1));
+        if (_disposed || _pickerWaitCancelled) return null;
+        final probe = await instances.probe(entry.host, entry.port);
+        if (probe != null && probe.matches(entry)) return probe;
+        if (_disposed || _pickerWaitCancelled) return null;
+        pickerWaitSeconds = second + 1;
+        pickerWaitPhase = await _readWaitPhase(entry.host, entry.port);
+        if (_disposed) return null;
+        notifyListeners();
+      }
+      return null;
+    } finally {
+      pickerWaiting = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  /// 问一次那台实例"到哪一步了"（`/api/health` 的 phase）。
+  ///
+  /// **问不到就回空串**：这一句是给人看的进度，不是判据——判据永远是 `/api/instance`
+  /// 答不答得出来。宿主没接这条读口（用例、老装机）时一个请求都不发。
+  Future<String> _readWaitPhase(String host, int port) async {
+    final reader = instances.health;
+    if (reader == null) return '';
+    try {
+      final reading = await reader(host, port);
+      return reading.phase;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 「停止等待」：不再等这一台就绪。
+  ///
+  /// 边上那颗按钮存在的理由：180 秒是一段很长的时间，而人有时候**已经知道**这台起不来了
+  /// （端口选错、配置写坏）。让他能叫停，比让他盯着一个只会往前爬的秒数好。
+  /// 它**不停实例**（实例照跑，人随时可以再点一次那一行）。
+  void cancelPickerWait() {
+    if (!pickerWaiting) return;
+    _pickerWaitCancelled = true;
+    _lifeLog('[life] wait cancelled port=$pickerPort waited=${pickerWaitSeconds}s');
+    notifyListeners();
+  }
+
+  /// 新建一台实例：选端口 → 拉起 → 等就绪 → 写登记（**后端自己写**）→ 切过去进首次设密码。
+  ///
+  /// 三条边界（用户确认过）：
+  ///   · 目录**已存在且非空** ⇒ 不覆盖，回 [InstanceGateProblem.dirNotEmpty]（页面给两条出路）；
+  ///   · 端口**从 7788 起向上找第一个空闲**（探测 TCP，不用系统随机端口）；
+  ///   · 登记表由**后端启动时自己写**——界面只负责拉起（见 `instances.dart` 的文件头）。
+  Future<void> createInstance({
+    required String name,
+    String dir = '',
+    bool useExistingDir = false,
+  }) async {
+    if (pickerBusyId != null) return;
+    pickerBusyId = '';
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    createDirConflict = '';
+    notifyListeners();
+    try {
+      final cleanName = name.trim();
+      if (cleanName.isEmpty) {
+        pickerProblem = InstanceGateProblem.nameRequired;
+        return;
+      }
+      final targetDir = dir.trim().isEmpty ? defaultInstanceDir(cleanName) : dir.trim();
+      final folder = Directory(targetDir);
+      final exists = folder.existsSync();
+      var nonEmpty = false;
+      if (exists) {
+        try {
+          nonEmpty = folder.listSync().isNotEmpty;
+        } catch (_) {
+          nonEmpty = true; // 读不动就按"有东西"处理：绝不往一个看不见内容的目录里写
+        }
+      }
+      if (nonEmpty && !useExistingDir) {
+        createDirConflict = targetDir;
+        pickerProblem = InstanceGateProblem.dirNotEmpty;
+        pickerProblemDetail = targetDir;
+        return;
+      }
+      final launcher = InstanceBook.load().launcherFor(instance);
+      if (launcher == null) {
+        pickerProblem = InstanceGateProblem.noLauncher;
+        return;
+      }
+      final port = await instances.freePort(kFirstInstancePort, '127.0.0.1');
+      if (port == null) {
+        pickerProblem = InstanceGateProblem.portUnavailable;
+        return;
+      }
+      pickerPort = port;
+      notifyListeners();
+      final ok = await instances.launch(
+        nodeExe: launcher.nodeExe,
+        entry: launcher.entry,
+        dataDir: targetDir,
+        // 刚选好的空闲端口：**必须当场交给进程**（安装根的 config.json 只有一个 7788）
+        port: port,
+      );
+      if (!ok) {
+        pickerProblem = InstanceGateProblem.launchFailed;
+        pickerProblemDetail = launcher.nodeExe;
+        return;
+      }
+      // 新实例的 id 里含数据目录哈希（只有它自己算得出来）：等它登记上来再认领。
+      // 等待期间的读数与「停止等待」跟「启动并进入」同一条口径（见 [_awaitInstanceReady]）：
+      // 这一趟也是一段几十秒的死等，人也该看得见"等了多久、它到哪一步"。
+      final deadline = DateTime.now().add(const Duration(seconds: kInstanceReadyTimeoutSeconds));
+      InstanceEntry? created;
+      _pickerWaitCancelled = false;
+      pickerWaiting = true;
+      pickerWaitSeconds = 0;
+      pickerWaitPhase = '';
+      var elapsed = 0;
+      try {
+        while (DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(seconds: 1));
+          if (_disposed || _pickerWaitCancelled) break;
+          elapsed += 1;
+          final probe = await instances.probe('127.0.0.1', port);
+          if (probe != null && _sameDir(probe.dataDir, targetDir)) {
+            created = _entryFor(probe, fallbackName: cleanName, nodeExe: launcher.nodeExe, entry: launcher.entry);
+            break;
+          }
+          pickerWaitSeconds = elapsed;
+          pickerWaitPhase = await _readWaitPhase('127.0.0.1', port);
+          if (_disposed) break;
+          notifyListeners();
+        }
+      } finally {
+        pickerWaiting = false;
+        if (!_disposed) notifyListeners();
+      }
+      if (created == null) {
+        pickerProblem = InstanceGateProblem.notReady;
+        pickerProblemDetail = '$port';
+        return;
+      }
+      // 切过去：**首次设密码**那扇门由 bootstrap 按服务端的事实决定
+      _adoptInstance(created);
+      await refreshInstances();
+      await bootstrap();
+    } finally {
+      pickerBusyId = null;
+      notifyListeners();
+    }
+  }
+
+  /// 给一台实例**改名**：写成 `nameSource: "manual"`（后端此后永不覆盖它）。
+  ///
+  /// 为什么这件事在界面这一半：改名只动登记表，而目标那台**可能根本没在跑**——没有进程
+  /// 可以接一条"改名"命令。写盘细节（只改目标那条、其余字段原样保留、原子写）在
+  /// `InstanceBook.renameById`。
+  ///
+  /// 空名字**当场拒**（不写盘）：名字是选择页上唯一认得出来的标签，空串等于让它变回"目录末段"，
+  /// 而那是用户刚刚明确不要的东西。
+  Future<bool> renameInstance(InstanceEntry entry, String name) async {
+    final clean = name.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (clean.isEmpty) {
+      pickerProblem = InstanceGateProblem.nameRequired;
+      pickerProblemDetail = '';
+      notifyListeners();
+      return false;
+    }
+    if (pickerBusyId != null) return false;
+    pickerBusyId = entry.id;
+    pickerProblem = InstanceGateProblem.none;
+    pickerProblemDetail = '';
+    notifyListeners();
+    try {
+      final ok = await InstanceBook.load().renameById(entry.id, clean);
+      if (!ok) {
+        pickerProblem = InstanceGateProblem.renameFailed;
+        return false;
+      }
+      _lifeLog('[life] rename instance=${entry.name}->$clean id=${entry.id}');
+      await refreshInstances();
+      return true;
+    } finally {
+      pickerBusyId = null;
+      notifyListeners();
+    }
+  }
+
+  /// 删除一台实例：**只允许未运行且非默认**（判据在 `InstanceEntry.canDelete`，只有一份）。
+  ///
+  /// [deleteDir] 为真时连数据目录一起删——**页面默认不删**（"目录还在，要不要一并删？"），
+  /// 因为那里面有她的记忆与人格。
+  Future<bool> deleteInstance(InstanceEntry entry, {bool deleteDir = false}) async {
+    if (pickerBusyId != null) return false;
+    pickerBusyId = entry.id;
+    pickerProblem = InstanceGateProblem.none;
+    notifyListeners();
+    try {
+      final probe = entry.hasPort ? await instances.probe(entry.host, entry.port) : null;
+      final running = probe != null && probe.matches(entry);
+      if (!InstanceEntry.canDelete(entry: entry, running: running)) {
+        pickerProblem = entry.isDefault
+            ? InstanceGateProblem.cannotDeleteDefault
+            : InstanceGateProblem.cannotDeleteRunning;
+        return false;
+      }
+      final ok = await InstanceBook.load().removeById(entry.id);
+      if (!ok) {
+        pickerProblem = InstanceGateProblem.removeFailed;
+        return false;
+      }
+      if (deleteDir) {
+        try {
+          // **最后一道闸**：绝不往"根目录"上递归删。数据目录是登记表里读来的字符串，
+          // 一条被手改坏的记录（`D:\`）在这里就是一场灾难——宁可少删，不可多删。
+          if (_isDeletableInstanceDir(entry.dataDir)) {
+            final folder = Directory(entry.dataDir);
+            if (folder.existsSync()) folder.deleteSync(recursive: true);
+          } else {
+            guiLog.write('[life] delete instance dir refused (looks like a root): ${entry.dataDir}');
+          }
+        } catch (err) {
+          guiLog.write('[life] delete instance dir failed dir=${entry.dataDir} error=$err');
+        }
+      }
+      _lifeLog('[life] delete instance=${entry.name} dir=${deleteDir ? 'removed' : 'kept'}');
+      await refreshInstances();
+      return true;
+    } finally {
+      pickerBusyId = null;
+      notifyListeners();
+    }
+  }
+
+  /// 把界面切到这一台：换 baseUrl、**清掉内存里的票与整份 AppState**。
+  ///
+  /// 这是"实例之间完全隔离"的落点。三件事一件都不能少：
+  ///   ① 收掉所有**属于上一台**的活链路（心跳、事件流、待批轮询、门前重连）；
+  ///   ② `api.token = null` + `instance = null`：票从内存里消失（盘上那份属于**那一台**，
+  ///      由 `SessionStore` 按实例标识分文件存；这里连 id 都清掉，bootstrap 会从服务端重新学）；
+  ///   ③ `backendPortResolver = null`：**显式选过实例之后，端口文件不许再把界面带走**
+  ///      （`server.json` 是"默认实例"的提示位；选过第二台之后它就是个错误来源）。
+  void _adoptInstance(InstanceEntry entry) {
+    _resetForGate(withToken: true);
+    backend = BackendPort(port: entry.port, source: BackendPortSource.defaultPort);
+    backendPortResolver = null;
+    api.baseUrl = 'http://127.0.0.1:${entry.port}';
+    api.instance = null;
+    pickerPort = entry.port;
+    guiLog.write('[life] switch instance=${entry.name} port=${entry.port} dir=${entry.dataDir}');
+    notifyListeners();
+  }
+
+  /// 把壳里的东西清干净（回门之前那一下）：心跳、事件流、待批、状态句、页面停留位置。
+  ///
+  /// [withToken] 为真时连**内存里那张票**一起清掉——[closeInstance] / [logout] / "切实例"
+  /// 都要清（注意：清的是**内存**那份；盘上那份只有 [logout] 才清）；
+  /// 401 自愈那一类（`_requireAuth`）自己有一条更窄的路（它要留着 id 去清盘上那份）。
+  void _resetForGate({required bool withToken}) {
     _dashboardTick?.cancel();
     _dashboardTick = null;
     _dropEventsFeed();
     _gateRetry?.cancel();
     _gateRetry = null;
-    // 待批那份清单属于"这一次登录"，回门就一起收掉（不然重新进门时会先闪一下旧单子）
+    // 门上"等后端就绪"那一条（门上的三档提示）：回门之前一律停掉，计数器归零
+    _clearBackendWait();
+    backendReadiness = BackendReadiness.unknown;
     _stopGrantPolling();
-    api.token = null;
-    final key = instance;
-    if (key != null) sessions.clear(key);
+    if (withToken) {
+      api.token = null;
+      instance = null;
+    }
     ready = false;
     _thinking = false;
-    gate = _onLegacyToken ? AuthGateKind.setup : AuthGateKind.login;
+    _openTurn = null;
+    online = false;
+    dotKind = 'offline';
+    stateText = '';
+    stateNote = '';
+    subText = '';
+    askCards = const <AskCardData>[];
+    askTotal = 0;
+    pendingGrants = const <Map<String, dynamic>>[];
+    malformedGrants = const <Map<String, dynamic>>[];
+    updateInfo = null;
+    herName = null;
+    needsPasswordPrompt = false;
+    _onLegacyToken = false;
     gateError = '';
+    gateHint = AuthGateHint.none;
     gateAttempt = 0;
     gateWaited = 0;
     gateRetrying = false;
     gateUnreachable = false;
-    online = false;
-    dotKind = 'offline';
-    stateText = '已登出';
-    notifyListeners();
+    pageId = defaultPageId;
+    pageEpoch += 1;
+  }
+
+  /// 等 [port] 不再应答（≤ [kInstanceStopTimeoutSeconds] 秒），返回**实际等了几秒**。
+  ///
+  /// 每 250ms 探一次（TCP，不需要凭据）。这个秒数会进 `[life]` 那行日志：它是"这次停得
+  /// 干不干净"的唯一读数——真机上一个优雅退出的后端通常 1~3 秒内端口就没了。
+  Future<int> _awaitPortGone(int port, {int timeoutSeconds = kInstanceStopTimeoutSeconds}) async {
+    const tickMs = 250;
+    final maxTicks = timeoutSeconds * 1000 ~/ tickMs;
+    for (var i = 0; i < maxTicks; i += 1) {
+      if (!await instances.portAlive('127.0.0.1', port)) {
+        return (i * tickMs / 1000).round();
+      }
+      await Future<void>.delayed(const Duration(milliseconds: tickMs));
+      if (_disposed) return (i * tickMs / 1000).round();
+    }
+    return timeoutSeconds;
+  }
+
+  /// 把一条 `/api/instance` 的应答收成登记表条目（新建流程用；后端此刻**可能还没写盘**）
+  InstanceEntry _entryFor(
+    InstanceProbe probe, {
+    required String fallbackName,
+    required String nodeExe,
+    required String entry,
+  }) {
+    return InstanceEntry(
+      id: probe.id,
+      name: probe.name.trim().isEmpty ? fallbackName : probe.name.trim(),
+      dataDir: probe.dataDir,
+      host: '127.0.0.1',
+      port: probe.port,
+      pid: probe.pid,
+      nodeExe: nodeExe,
+      entry: entry,
+      isDefault: probe.isDefault,
+      lastStartedAt: DateTime.now().toUtc().toIso8601String(),
+    );
+  }
+
+  /// 两个数据目录是不是同一个（大小写 / 尾部分隔符 / 斜杠写法归一）
+  bool _sameDir(String a, String b) {
+    String key(String value) {
+      var text = value.trim().replaceAll('/', '\\');
+      while (text.endsWith('\\')) {
+        text = text.substring(0, text.length - 1);
+      }
+      return text.toLowerCase();
+    }
+
+    return key(a) == key(b);
+  }
+
+  /// 这个路径像不像"一台实例的数据目录"（"删除实例 → 连目录一起删"的**最后一道闸**）。
+  ///
+  /// 判据只有两条，都是"明显不是根"的形状：
+  ///   · 归一之后至少还有三级（`D:\` / `D:` / `/` 这些一眼就出局）；
+  ///   · 不以分隔符结尾（`C:\instances\` 那种写法去掉尾分隔符之后同上一条）。
+  /// 它**不判**"是不是真的实例目录"——那做不到也不该做；它只保证"绝不会递归删到一个根"。
+  bool _isDeletableInstanceDir(String path) {
+    var text = path.trim().replaceAll('/', '\\');
+    while (text.endsWith('\\')) {
+      text = text.substring(0, text.length - 1);
+    }
+    if (text.length < 4) return false;
+    final separators = text.split('\\').where((part) => part.isNotEmpty).length;
+    return separators >= 2;
   }
 
   /// 启动握手连不上本地服务：**先当成"正在启动"，退避重试，别停在终态**。
@@ -1225,6 +2255,17 @@ class AppState extends ChangeNotifier {
       gateWaited = 0;
       gateUnreachable = false;
       gateError = '';
+      /**
+       * **等待的那一行日志**（2026-10-26 的事故要求）：
+       * `[net] waiting backend port=7788 source=file|env|default`
+       *
+       * 三样都要有：端口、来源、"在等"这件事。事故那天日志里只有
+       * `SocketException … port = 1580`——看得出连不上，看不出**这个端口是从哪来的**，
+       * 于是"父进程环境变量被污染"这条根因只能靠猜。来源进日志之后一眼可判：
+       * `source=file` 是后端自己写的、`source=env` 是继承来的、`source=default` 是兜底。
+       */
+      _netLog('[net] waiting backend port=$backendPort source=${backend.sourceLabel}'
+          '${backend.pid == null ? '' : ' pid=${backend.pid}'}');
     }
     // 不管是不是新的一轮都要**排下一拍**：这一拍（如果是重试发起的）已经被它自己消费掉了，
     // 不重排就是"只试一次就再也不试"——降级之后那条慢速重试永远等不到。
@@ -1286,6 +2327,127 @@ class AppState extends ChangeNotifier {
   /// 一个"我确认过了、现在就再来一次"的动作——比如他刚手动把主进程拉起来。
   Future<void> retryBootstrap() => bootstrap();
 
+  // ──────────────── 门上那三档：谁在计时、何时停（2026-10-28） ────────────────
+
+  /// 门上的设密码/登录页**进场时**问一次"后端现在能不能干活"。
+  ///
+  /// 为什么要它（③）：那颗「设置密码」不能等人点了才报错——后端没起 / 还在启动时，
+  /// 它本来就该是灰的，旁边摆的是同一套三档提示。登录页同样先问一次：
+  /// 人站在那儿看到的应当是"后端还没起来，正在重试"，而不是一个看起来很正常的密码框。
+  ///
+  /// 只在 [gateWaitingBackend] 为假时探（已经在等的那一轮自己会重探，别叠第二条链）。
+  Future<void> watchBackend() async {
+    if (_disposed || ready || gateWaitingBackend) return;
+    final reading = await probeBackend(api);
+    if (_disposed || ready) return;
+    if (reading.isReady) {
+      backendReadiness = BackendReadiness.ready;
+      backendPhase = '';
+      notifyListeners();
+      return;
+    }
+    _holdForBackend(reading);
+    notifyListeners();
+  }
+
+  /// 把"后端还没就绪"这一档摆上：读数、话、以及**每 [kBackendRetrySeconds] 秒一拍的重探**。
+  ///
+  /// 谁在计时：只有这里挂上的那条 1 秒节拍器（[_backendRetry]）；每满 2 秒真去打一次
+  /// `/api/health`（见 [_retryBackendProbe]）。
+  ///
+  /// 何时停：①探到就绪（[_clearBackendWait]）；②进门成功（[_markGateOpen]）；
+  /// ③回到"还没进门"的初始态（[_resetForGate]）；④页面退场（[dispose]）。
+  ///
+  /// **它不发登录请求**：密码不该被自动重发（重试的只是"后端起来了没有"那次探测）。
+  void _holdForBackend(BackendReading reading) {
+    final already = gateWaitingBackend;
+    backendReadiness = reading.readiness;
+    if (reading.phase.isNotEmpty) backendPhase = reading.phase;
+    gateWaitingBackend = true;
+    if (!already) {
+      // 新的一轮等待：秒数与次数从 0 数起
+      backendWaitSeconds = 0;
+      backendRetryCount = 0;
+      _netLog('[net] gate backend=${reading.readiness.name} port=$backendPort'
+          '${reading.phase.isEmpty ? '' : ' phase=${reading.phase}'}'
+          ' retry=${kBackendRetrySeconds}s');
+    }
+    _refreshBackendMessage();
+    _startBackendRetry();
+  }
+
+  /// 把那句话按**当前读数 + 已经等了多久**重新算一遍（语言换了、阶段变了、过 60 秒了都要重算）。
+  void _refreshBackendMessage() {
+    if (!gateWaitingBackend) return;
+    final s = currentStrings;
+    final main = backendReadiness == BackendReadiness.starting
+        ? s.gateBackendStarting(s.backendPhaseLabel(backendPhase))
+        : s.gateBackendDown('127.0.0.1:$backendPort');
+    // 60 秒还没就绪：加一句去处（不然人只能对着"正在重试…"干等）
+    gateError = backendWaitSeconds >= kBackendLogHintSeconds
+        ? '$main\n${s.gateBackendLogHint}'
+        : main;
+  }
+
+  /// 挂上那一条 1 秒节拍器（已经在跑就不重复挂）。
+  ///
+  /// 为什么是 1 秒一格而不是"2 秒一条 Timer"：界面要显示"第 N 秒"，那就得每秒动一下；
+  /// 而重探本身每 2 秒才发一次（[kBackendRetrySeconds]）——两个数在这一条链上各自清楚。
+  void _startBackendRetry() {
+    if (_backendRetry != null) return;
+    _backendRetry = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_disposed || !gateWaitingBackend) {
+        timer.cancel();
+        _backendRetry = null;
+        return;
+      }
+      backendWaitSeconds += 1;
+      if (backendWaitSeconds % kBackendRetrySeconds == 0) {
+        backendRetryCount += 1;
+        unawaited(_retryBackendProbe());
+      }
+      // 每 1 秒都要重算：到 60 秒那一刻那句话要自己长出"看 gui.log"那一行
+      _refreshBackendMessage();
+      notifyListeners();
+    });
+  }
+
+  /// 自动重探的那一拍：探到就绪就把提示**自动解除**；还没就绪就更新读数（秒数照走）。
+  ///
+  /// 探到就绪之后**什么都不做**：不发登录请求。人自己点那颗按钮——密码不该被自动重发。
+  Future<void> _retryBackendProbe() async {
+    final reading = await probeBackend(api);
+    if (_disposed || !gateWaitingBackend) return;
+    if (reading.isReady) {
+      _clearBackendWait();
+      notifyListeners();
+      return;
+    }
+    backendReadiness = reading.readiness;
+    if (reading.phase.isNotEmpty) backendPhase = reading.phase;
+    _refreshBackendMessage();
+    notifyListeners();
+  }
+
+  /// 收掉门前那一套等待：定时器停、计数归零、**那行提示自己消失**（后端好了就不再吓人）。
+  void _clearBackendWait() {
+    _backendRetry?.cancel();
+    _backendRetry = null;
+    final waited = backendWaitSeconds;
+    final retries = backendRetryCount;
+    final wasWaiting = gateWaitingBackend;
+    gateWaitingBackend = false;
+    backendReadiness = BackendReadiness.ready;
+    backendPhase = '';
+    backendWaitSeconds = 0;
+    backendRetryCount = 0;
+    if (wasWaiting) {
+      // 那行红字是这一族自己写上去的，收的时候也只收自己写的那一句
+      gateError = '';
+      _netLog('[net] gate backend ready port=$backendPort waited=${waited}s retries=$retries');
+    }
+  }
+
   /// 首次设密码：服务端成功后**当场就是登录态**，人不必再输一遍。
   Future<void> setupPassword(String password, String confirmation) async {
     if (password.isEmpty) {
@@ -1317,11 +2479,41 @@ class AppState extends ChangeNotifier {
 
   /// 设密码与登录走的是同一条路（两个端点、同样一份响应、同样一次进门）：
   /// 分开写两份的话，"设完密码没进主界面"这类差异迟早出现。
+  ///
+  /// 失败里有两类是**"你站错门了"**，不是"这次没成"（2026-10-23 的死锁现场）：
+  ///   · 设置端点回 409 `already-initialized` —— 这台实例已经有密码 ⇒ 当场切到登录页；
+  ///   · 登录端点回 401 `auth-uninitialized` —— 这台实例其实还没设密码 ⇒ 当场切到设置页。
+  /// 留在原地就是让人对着一张永远失败的表单，所以这两条**换门**，并把原因写在中性提示行里。
+  ///
+  /// ## 先探一次后端，再发登录请求（2026-10-28）
+  ///
+  /// 这一趟的**第一件事**是探"后端能不能干活"（[probeBackend]）——那正是用户说的
+  /// "登录请求之前的那次探测"。理由只有一条：后端没起 / 还在启动时，这条登录请求
+  /// 既发不出去也证明不了密码；它失败之后界面却只能拿到一句"连不上"，
+  /// 于是三种完全不同的事被说成了同一句（真机现场）。
+  ///
+  /// 探到 ①② 两档 ⇒ **不发登录请求**，把话说成对应的那一档并挂上每 2 秒一拍的自动重探
+  /// （[AppState._holdForBackend]）。探到就绪 ⇒ 才真的发。
+  ///
+  /// 三档的落点：
+  ///   · ①连不上 / ②正在启动：`gateError` = 那两句话之一（+ 60 秒后的去处提示）；
+  ///   · ③401：`gateError` = 服务端原话（"密码不对。…"），**不碰输入框、不挂重探**。
   Future<void> _enter(String path, String password) async {
     gateBusy = true;
     gateError = '';
+    gateHint = AuthGateHint.none;
     notifyListeners();
     try {
+      final reading = await probeBackend(api);
+      if (_disposed) return;
+      if (!reading.isReady) {
+        gateBusy = false;
+        _holdForBackend(reading);
+        notifyListeners();
+        return;
+      }
+      // 后端好了：门前那一套等待到此为止（它只关于"起没起"，与这次密码对不对无关）
+      _clearBackendWait();
       final result = await api.postAuth(path, {'password': password, 'label': 'gui'});
       final token = result is Map ? result['token'] : null;
       final reported = result is Map ? result['instance'] : null;
@@ -1337,20 +2529,46 @@ class AppState extends ChangeNotifier {
         _markGateOpen();
         ready = true;
         gateError = '';
+        gateHint = AuthGateHint.none;
         _onLegacyToken = false;
+        authInitialized = true;
         needsPasswordPrompt = false;
         notifyListeners();
         startPolling();
         return;
       }
     } on ApiAuthError catch (err) {
-      // 服务端的话就是最准的话（"密码至少 6 位…"、"密码不对。"），照原样显示
       if (err.instance != null) instance = err.instance;
-      gateError = err.message;
+      // 401 = **密码**的事，不是后端的事：把"等待"那一族彻底收掉，
+      // 否则就绪之后它会把"密码不对"这行字自己擦掉（那比不说更糟）。
+      _clearBackendWait();
+      if (err.code == 'already-initialized') {
+        // 设置页收到的 409：实例已经有密码。留着这扇门 = 永远失败，所以换门。
+        authInitialized = true;
+        gate = AuthGateKind.login;
+        gateError = '';
+        gateHint = AuthGateHint.alreadyInitialized;
+      } else if (err.code == 'auth-uninitialized') {
+        // 反方向（登录页收到"还没设密码"）：同样换门，不让表单白转
+        authInitialized = false;
+        gate = AuthGateKind.setup;
+        gateError = '';
+        gateHint = AuthGateHint.setupNeeded;
+      } else {
+        // 其余才是真错误，服务端那句话最准（"密码不对。"、"密码至少 6 位…"），照原样显示
+        gateError = err.message;
+      }
     } on ApiError catch (err) {
-      gateError = err.message;
-    } catch (err) {
-      gateError = '连不上本地服务：$err';
+      // 探测与登录之间后端可能又变了（重启中）：这一档仍是"正在启动"，照 ② 说
+      if (err.starting) {
+        _holdForBackend(BackendReading(BackendReadiness.starting, phase: err.phase));
+      } else {
+        _clearBackendWait();
+        gateError = err.message;
+      }
+    } catch (_) {
+      // 连接类失败（SocketException / 超时）：③ 之外唯一会自己好的那一档
+      _holdForBackend(BackendReading.down);
     }
     gateBusy = false;
     notifyListeners();
@@ -1371,6 +2589,11 @@ class AppState extends ChangeNotifier {
   ///
   /// 这是这轮修的另一半：过去这里只是把 token 清掉、写一句"认证失败（token 无效）"，
   /// 于是界面留在壳里、所有页面都读不到数据——人看到的是一片空白，只能自己去猜要重启。
+  ///
+  /// 2026-10-23 起它**不再往红字那一行写话**：这条 401 是分流信号（去哪一扇门），不是
+  /// "刚才那个动作失败了"。现场证据：探测/心跳收到 `auth-uninitialized` 之后，界面上真的
+  /// 出现了红字"这台实例还没设密码。请先在界面里设置一个密码。"，而实例其实有密码。
+  /// 换门的原因写在 [gateHint]（中性提示），真正的错误留给 [gateError]。
   void _requireAuth(ApiAuthError err) {
     // 快档那一拍与事件流同一条命：凭据都不作数了，它们再打也只是白挨 401
     _dashboardTick?.cancel();
@@ -1385,8 +2608,11 @@ class AppState extends ChangeNotifier {
     if (key != null) sessions.clear(key);
     online = false;
     dotKind = 'offline';
-    gate = err.needsSetup ? AuthGateKind.setup : AuthGateKind.login;
-    gateError = err.message;
+    // 判据优先用服务端当场的 code；code 缺失（老服务端）时才看上次问到的公开事实
+    final toSetup = err.needsSetup || (err.code == null && authInitialized == false);
+    gate = toSetup ? AuthGateKind.setup : AuthGateKind.login;
+    gateError = '';
+    gateHint = toSetup ? AuthGateHint.setupNeeded : AuthGateHint.sessionExpired;
     stateText = err.needsSetup ? '还没设置密码' : '会话已失效，请重新登录';
     notifyListeners();
   }
@@ -1414,14 +2640,21 @@ class AppState extends ChangeNotifier {
   /// （见 [kTurnReadMs]），把一条只为了"有没有新单子"的读也按 250ms 打出去纯属浪费——
   /// 而 10 秒对"通知"这件事足够快（与慢档心跳同一档，见 [kGrantPollSeconds] 的理由）。
   void _startGrantPolling() {
-    final poller = _grantPoller ??= PendingGrantPoller(api: api, onPending: applyPendingGrants);
+    final poller = _grantPoller ??= PendingGrantPoller(
+      api: api,
+      onPending: applyPendingGrants,
+      onMalformed: applyMalformedGrants,
+    );
     poller.start();
   }
 
   /// 收掉那条轮询（回门 / 退场）。[clear] 为真时连手上那份清单一起清掉。
   void _stopGrantPolling({bool clear = true}) {
     _grantPoller?.stop();
-    if (clear) pendingGrants = const <Map<String, dynamic>>[];
+    if (clear) {
+      pendingGrants = const <Map<String, dynamic>>[];
+      malformedGrants = const <Map<String, dynamic>>[];
+    }
   }
 
   /// 把刚读到的一份待批清单收下（轮询回调的入口；用例也用它摆数据）。
@@ -1432,6 +2665,20 @@ class AppState extends ChangeNotifier {
   void applyPendingGrants(List<Map<String, dynamic>> pending) {
     if (_disposed) return;
     pendingGrants = List<Map<String, dynamic>>.unmodifiable(pendingGrantsNewestFirst(pending));
+    notifyListeners();
+  }
+
+  /// **读不出来的那些申请单**（`GET /api/grants.malformed`，2026-10-22 加）。
+  ///
+  /// 它是独立的一格、**不进 [pendingGrants]**：那一档没有可点的卡（`picked:false` 且解析不过），
+  /// 混进待批队列只会让人点出一句错。界面据它显示一句「有一张单读不出来」——
+  /// 那张单在"待批"判据里两样都不满足，过去就是这么消失的。
+  List<Map<String, dynamic>> malformedGrants = const <Map<String, dynamic>>[];
+
+  /// 收下一份"读不出来的单子"清单（轮询回调的入口；用例也用它摆数据）。
+  void applyMalformedGrants(List<Map<String, dynamic>> malformed) {
+    if (_disposed) return;
+    malformedGrants = List<Map<String, dynamic>>.unmodifiable(malformedGrantsOf(malformed));
     notifyListeners();
   }
 
@@ -1476,6 +2723,32 @@ class AppState extends ChangeNotifier {
 
   /// 上一拍读还在路上（见 [_dashboardTickOnce] 的防重入）
   bool _readingDashboard = false;
+
+  /// 这一拍是**什么时候**开始的（[kReadLatchMax] 那道第二道锁的年龄判据）
+  DateTime? _readingSince;
+
+  /// 防重入闸**最多**能关多久（`_readingDashboard` 的年龄上限）。
+  ///
+  /// 为什么需要一道年龄锁：这道闸是 2026-10-23「用久了卡死」的一个**放大器**——
+  /// `_readingDashboard` 一旦卡在 true，[_readDashboardSoon] 与 [_dashboardTickOnce]
+  /// 都会在门口直接 return，而"排下一拍"在 tick 的**末尾**（`_scheduleDashboardTick`）
+  /// ⇒ 心跳**再也不排下一拍**，界面读数就冻在最后一刻，而且再也没有任何一次请求会
+  /// 去撞开它。请求现在自带时限（[kApiRequestTimeout]），`finally` 理论上一定能放掉它；
+  /// 这一道是"万一那个 future 连时限都没走到"时的兜底——45 秒 = 时限的 3 倍，
+  /// 正常路径永远碰不到它。
+  static const Duration kReadLatchMax = Duration(seconds: 45);
+
+  /// 这一拍还能不能再进（[true] = 上一拍还在路上，让位）。
+  bool get _dashboardReadBusy {
+    if (!_readingDashboard) return false;
+    final since = _readingSince;
+    if (since != null && DateTime.now().difference(since) <= kReadLatchMax) return true;
+    // 年龄超了：当成"那一拍已经死了"，放行并留一笔（这条日志本身就是现场证据）
+    guiLog.write('[wait] dashboard latch stale ${secsOf(DateTime.now().difference(since ?? DateTime.now()))}');
+    _readingDashboard = false;
+    _readingSince = null;
+    return false;
+  }
 
   /// 当前那两档节奏里的"慢档"取值（秒）：连得上 → [kOnlinePollSeconds]，断线 → [kOfflinePollSeconds]。
   /// 快档（[kTurnReadMs]）不在这里——它由 [_sleepAfterRead] 按当刻那一拍的结果算。
@@ -1548,13 +2821,15 @@ class AppState extends ChangeNotifier {
   /// 不重排的后果是实测出来的：她开始想之后，界面仍旧要等满 10 秒才动第二下
   /// （见 `test/brand_status_test.dart` 的"思考期按快档走"）。
   Future<void> _readDashboardSoon() async {
-    if (_disposed || !ready || _readingDashboard) return;
+    if (_disposed || !ready || _dashboardReadBusy) return;
     _readingDashboard = true;
+    _readingSince = DateTime.now();
     bool changed;
     try {
       changed = await _readDashboard();
     } finally {
       _readingDashboard = false;
+      _readingSince = null;
     }
     if (_disposed || !ready) return;
     if (changed) notifyListeners();
@@ -1668,13 +2943,16 @@ class AppState extends ChangeNotifier {
     // 防重入：事件成串来时 `_readDashboardSoon` 与这一拍可能撞在一起，
     // 而"同一份响应读两遍"没有任何用处（服务端那一份构造是真的要花 5ms 的）。
     // 让位的那一拍不补读：还在路上的那一拍回来时会照常排下一拍。
-    if (_readingDashboard) return;
+    // （`_dashboardReadBusy` 带年龄锁，见 [kReadLatchMax]：这道闸不许变成永久关死的那一扇门。）
+    if (_dashboardReadBusy) return;
     _readingDashboard = true;
+    _readingSince = DateTime.now();
     bool changed;
     try {
       changed = await _readDashboard();
     } finally {
       _readingDashboard = false;
+      _readingSince = null;
     }
     if (_disposed || !ready) return;
     if (changed) notifyListeners();
@@ -1838,6 +3116,9 @@ class AppState extends ChangeNotifier {
       return;
     }
     pageId = id;
+    // 排障留痕：卡死时日志里最后一页是哪个页面（`[wait] … page=` 那行读的是同一个值）。
+    // `tracePage` 顺带把"切页 <这一页叫什么>"记成 `last`，供 `[stall]` 那行引用。
+    tracePage(id, label: pageEntryById(id)?.label);
     notifyListeners();
   }
 
@@ -1917,6 +3198,11 @@ class AppState extends ChangeNotifier {
     _grantPoller = null;
     // 门前那条重连定时器也是活的：不收掉的话，退场之后它还打服务端（测试里表现为 pending timer）
     _gateRetry?.cancel();
+    // 门上"等后端就绪"那一条节拍器同理（1 秒一格，不收掉就是退场之后还在探）
+    _backendRetry?.cancel();
+    _backendRetry = null;
+    // 看门狗是进程级的，但它读的是这个 AppState（页面/在飞清单）：这个对象退场之后就不该再读
+    StallWatch.instance.stop();
     super.dispose();
   }
 }

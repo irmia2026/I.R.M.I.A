@@ -145,7 +145,7 @@ describe('read_channel · 她自己说过的话', () => {
   });
 
   test('标记是 `（我）`：不是发言人昵称的样子，也不会被当成某个群友', async () => {
-    // 用户自己叫"用户（OWNER）"，群友的群名片什么都能改——标记必须只由"这是她"决定。
+    // 用户自己叫"用户（阿岚）"，群友的群名片什么都能改——标记必须只由"这是她"决定。
     assert.equal(SELF_SPEAK_LABEL, '（我）');
     const rec = recorder();
     const tk = toolkit(
@@ -469,6 +469,8 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
      * v74（用户 2026-10-20 的**最终口径**）：回执压成三态（`发送成功` / `成功，但超25字限制（N 字）`
      * / `失败，<原因>`），**一个字都不多印**——"不必重复发送"这条**规矩搬进 `SELF_BRIEF` §2.1**
      * （她发之前就读得到；回执是最高频、后续 160 多个请求反复读回的一行，规矩不该每条回执付一遍）。
+     * 2026-10-21 补：三态里那条"超 25 字"只属于 `speak`——`report` 是发长文的那一件，
+     * 它**没有** 25 字建议线，成功回执固定 `发送成功`（长短一个样）。
      */
     assert.deepEqual(reportOut.split('\n').filter(line => line !== ''), ['- 发送成功'], reportOut);
     assert.deepEqual(speakOut.split('\n').filter(line => line !== ''), ['- 发送成功'], speakOut);

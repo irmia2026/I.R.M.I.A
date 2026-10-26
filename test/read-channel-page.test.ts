@@ -4,6 +4,8 @@
  *
  * 用户原话：「**read_channel 提供一下翻页吧**」「read_channel 默认行为应该是读到未读消息。
  * 因为之前的已经读过，进入上下文了。**如果开启翻页模式，就可以读到全部消息。每页 50 条**」
+ * ⚠ 那句里的页大小**v80（2026-10-23）起改成 15 条**（她的原话：「50 条太多了」）——
+ * 原话照抄不改，读到的页大小一律以 `READ_CHANNEL_PAGE_SIZE` 为准（⑨ 钉的就是它）。
  * 「**未读也是只读提及和之前十条**」「**不视作已处理。提示她还有没看到的，往上翻页**」。
  *
  * 两条路径、两套判据，这一份把两条都钉住：
@@ -11,7 +13,10 @@
  *      是"未读里点了她的那些 + 每条之前十条"，那版已废——见下面 `默认：只给"上次查看之后的"那一窗`
  *      那一条与 `read-channel-incremental.test.ts`）；已读的旧消息不再倒一遍。
  *      已读**只推进到"确实给她看过的那几条"**（没给她的保持未读，下次仍然会被告诉"还有没看到"）。
- *   ② **翻页（给 `before` 游标）= 读全部历史，每页 50 条、一个字都不动已读**。
+ *   ② **翻页（给 `before` 游标）= 读全部历史，一页 15 条、一个字都不动已读**。
+ *   ③ **缺省 `limit` 按分支给**（⑩）：有游标 ⇒ 一页 `READ_CHANNEL_PAGE_SIZE`（15），
+ *      无游标 ⇒ 默认那一屏 `READ_CHANNEL_DEFAULT_LIMIT`（20）——**页脚上那个数必须等于
+ *      下一页真的发多少行**，否则她照页脚算翻页节奏就会算错。
  *
  * 走**真链路**（真 EventLog → 真 RealLoop 的两个读取口 → 真 read_channel）：游标这件事的价值
  * 全在"日志里那个 seq 真的能当游标用"，替身会把这层抹掉。
@@ -29,7 +34,7 @@ import { EventLog } from '../src/log/event-log.ts';
 import { defaultVisibility, type AppEvent } from '../src/log/types.ts';
 import { fold, applyOne } from '../src/state/fold.ts';
 import { RealLoop } from '../src/runtime/real-loop.ts';
-import { createAdminTools, READ_CHANNEL_PAGE_SIZE } from '../src/tools/admin.ts';
+import { createAdminTools, READ_CHANNEL_DEFAULT_LIMIT, READ_CHANNEL_PAGE_SIZE } from '../src/tools/admin.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import type { DsClient } from '../src/model/ds-client.ts';
@@ -353,7 +358,8 @@ test('默认：只给"上次查看之后的"那一窗，不为提及单独开前
   assert.equal(out.isError, undefined, out.content);
   const rows = rowNos(out.content);
   // **2026-10-17 用户的第一条口径**：「默认只展示上次查看以来的新消息」。
-  // 取数窗口就是"最近 50 条"，而它们**全都是**上次查看之后的新消息 ⇒ 一条不少地摆出来。
+  // 取数窗口就是"最近 50 条"（这里是**显式传的 `limit: 50`**，与翻页那个页大小无关——
+  // 页大小是 `READ_CHANNEL_PAGE_SIZE`，⑨ 钉它），而它们**全都是**上次查看之后的新消息 ⇒ 一条不少地摆出来。
   // （旧口径在这里给的是"提及 + 它之前十条"＝第 185..195 句，其余新话一个字都看不到。）
   assert.deepEqual(rows, Array.from({ length: 50 }, (_, i) => i + 151),
     `新消息都要看得见（不是只给提及那一窗）：${out.content}`);
@@ -545,7 +551,12 @@ test('游标非法：明确的参数错 + 出路（不静默给空）', async (t
   // 页脚那个形态（数字、以及它的字符串形态）必须收：她原样抄回来是最自然的动作
   assert.equal((await rig.read({ sid: SID, before: 2 })).isError, undefined);
   assert.equal((await rig.read({ sid: SID, before: '2' })).isError, undefined);
-  assert.equal(rig.readEvents().length, 0, '翻页一笔已读都不写');
+  // **2026-10-24 改准**：这两次翻页的游标都落在**最新那条之后**，所以这一页里摆着的就是
+  // "该会话最新一条"——按新口径那就是读过了（未读该清零），记**一笔**已读位；同一个位置
+  // 不写第二笔。"纯往回翻旧话（游标指在更早处）一笔都不写"是另一条口径，钉在 ① 那条用例里
+  //（`往回翻**不改已读位置**`）——两条一起才是完整判据：翻旧的不算读过，翻到最新算。
+  assert.deepEqual(rig.readEvents(), [{ sid: SID, upToSeq: 1 }],
+    '翻页翻到了最新 ⇒ 记一笔（同一个位置只记一次）');
 });
 
 test('游标过期/不属于这个会话：如实说"没有比它更早的了"，并给一条回现在的路', async (t) => {
@@ -560,19 +571,71 @@ test('游标过期/不属于这个会话：如实说"没有比它更早的了"�
   assert.equal(rig.readEvents().length, 0, '翻页一个已读都不写（空的更没有）');
 });
 
-// ──────────────────────────────── ⑨ 每页 50 条 ────────────────────────────────
+// ──────────────────────────────── ⑨ 每页 15 条 ────────────────────────────────
 
-test('每页 50 条：常量写在实现里，页脚照它指路', async (t) => {
-  assert.equal(READ_CHANNEL_PAGE_SIZE, 50, '每页 50 条是用户定的口径，改它要先说');
+test('每页 15 条：常量写在实现里，页脚照它指路', async (t) => {
+  assert.equal(READ_CHANNEL_PAGE_SIZE, 15,
+    '一页 15 条是用户 2026-10-23 定的口径（「50 条太多了」），改它要先说');
   const rig = await makeRig(t);
   for (let no = 1; no <= 60; no += 1) rig.write(no);
-  // 60 条、从第 56 句往前翻：取数窗口是第 1..55 句，一页 50 行 ⇒ 装不下第 1..5 句，页脚如实说"接着往回翻"
+  // 60 条、从第 56 句往前翻：取数窗口是第 1..55 句，一页 15 行 ⇒ 装不下第 1..40 句，页脚如实说"接着往回翻"
   const page = await rig.read({ sid: SID, before: rig.seqOf(56), limit: READ_CHANNEL_PAGE_SIZE });
-  assert.deepEqual(rowNos(page.content), Array.from({ length: 50 }, (_, i) => i + 6), '一页就是 50 行（第 6..55 句）');
+  assert.deepEqual(rowNos(page.content), Array.from({ length: 15 }, (_, i) => i + 41), '一页就是 15 行（第 41..55 句）');
   // 2026-10-20（R2 复核）：这一条与 ⑦ 的 `一页 7 条` 一起钉的其实是**同一件事**——
   // 页脚报的是"本页实际用的行数"，不是那个默认常量。所以 R2 里"删掉页脚这一格"没有做：
-  // 对默认 50 它确实与参数描述重复，但对 `limit:7` 那种调用它是**唯一**说清本页几行的地方。
-  assert.match(page.content, /一页 50 条/u, `页脚照 50 条这个口径指路：\n${page.content}`);
-  assert.match(page.content, /想接着往回翻/u, '还有没摆出来的（第 1..5 句）⇒ 要说"接着往回翻"');
+  // 对默认 15 它确实与参数描述重复，但对 `limit:7` 那种调用它是**唯一**说清本页几行的地方。
+  assert.match(page.content, /一页 15 条/u, `页脚照 15 条这个口径指路：\n${page.content}`);
+  assert.match(page.content, /想接着往回翻/u, '还有没摆出来的（第 1..40 句）⇒ 要说"接着往回翻"');
 });
 
+// ──────────────────────── ⑩ 缺省 limit 按分支给：翻页 15 / 默认那一屏 20 ────────────────────────
+//
+// 为什么单独立两条：⑨ 里是**显式**传 `limit: READ_CHANNEL_PAGE_SIZE` 的（那时它钉的是常量与
+// 页脚），而"**不给** limit"这条路原来回的是 `READ_CHANNEL_DEFAULT_LIMIT`（20）——页脚说
+// 「一页 15 条」、实发 20 行。她照页脚算翻页节奏（第 N 页从哪句开始）就会每页差 5 条，
+// 所以这两条钉的不是"常量是多少"，而是**页脚上那个数 == 下一页真的发多少行**。
+
+test('翻页模式不给 limit：一页就是 READ_CHANNEL_PAGE_SIZE，且页脚那个数 == 实发行数', async (t) => {
+  const rig = await makeRig(t);
+  for (let no = 1; no <= 41; no += 1) rig.write(no);
+  // 只给 `before`、**不给 `limit`**：取数窗口是第 1..40 句，一页必须正好是一页
+  const page = await rig.read({ sid: SID, before: rig.seqOf(41) });
+  assert.equal(page.isError, undefined, page.content);
+  const rows = rowNos(page.content);
+  assert.equal(rows.length, READ_CHANNEL_PAGE_SIZE,
+    `不给 limit 时一页就是 READ_CHANNEL_PAGE_SIZE = ${READ_CHANNEL_PAGE_SIZE} 行`
+    + `（不是默认那一屏的 ${READ_CHANNEL_DEFAULT_LIMIT}）：\n${page.content}`);
+  assert.deepEqual(rows, Array.from({ length: READ_CHANNEL_PAGE_SIZE }, (_, i) => i + 26),
+    '一页 = 第 26..40 句（窗口第 1..40 句的最后 15 条）');
+  // 页脚上那个数**必须等于实发行数**（两处都等于常量）——这就是"她照页脚算翻页节奏"的判据
+  const footer = /一页 (\d+) 条/u.exec(page.content);
+  assert.ok(footer !== null, `页脚要报本页实际用的行数：\n${page.content}`);
+  assert.equal(Number(footer[1]), rows.length,
+    `页脚上的数字（${footer[1]}）必须等于实发行数（${rows.length}）——别一个说 15、一个发 20`);
+  assert.equal(Number(footer[1]), READ_CHANNEL_PAGE_SIZE,
+    `页脚那格是 ${footer[1]}，一页是 ${READ_CHANNEL_PAGE_SIZE}`);
+});
+
+test('默认那一屏不给 limit：仍是 READ_CHANNEL_DEFAULT_LIMIT 行，照页脚翻一页也正好是它说的行数', async (t) => {
+  const rig = await makeRig(t);
+  for (let no = 1; no <= 40; no += 1) rig.write(no);
+  // 无 `before`、无 `limit`：这一屏还是 20 行（翻页那个 15 不许漏到默认这一支）
+  const first = await rig.read({ sid: SID });
+  assert.equal(first.isError, undefined, first.content);
+  const rows = rowNos(first.content);
+  assert.equal(rows.length, READ_CHANNEL_DEFAULT_LIMIT,
+    `默认那一屏不给 limit 就是 READ_CHANNEL_DEFAULT_LIMIT = ${READ_CHANNEL_DEFAULT_LIMIT} 行`
+    + `（翻页那个 ${READ_CHANNEL_PAGE_SIZE} 是另一档）：\n${first.content}`);
+  assert.deepEqual(rows, Array.from({ length: READ_CHANNEL_DEFAULT_LIMIT }, (_, i) => i + 21),
+    '最近 20 条 = 第 21..40 句');
+  // 页脚那格说的是"**下一页会发多少行**"⇒ 照它翻一页（同样不给 limit），实发条数必须与它相等
+  const footer = /一页 (\d+) 条/u.exec(first.content);
+  assert.ok(footer !== null, `默认那一屏也要给"下一页怎么翻"：\n${first.content}`);
+  assert.equal(Number(footer[1]), READ_CHANNEL_PAGE_SIZE, '页脚报的下一页大小 = 翻页模式的缺省值');
+  const flip = await rig.read({ sid: SID, before: cursorOf(first.content) });
+  const flipRows = rowNos(flip.content);
+  assert.equal(flipRows.length, Number(footer[1]),
+    `照页脚翻一页：实发 ${flipRows.length} 行，页脚说的是 ${footer[1]} 行`);
+  assert.deepEqual(flipRows, Array.from({ length: READ_CHANNEL_PAGE_SIZE }, (_, i) => i + 6),
+    '翻过来那一屏 = 第 6..20 句（窗口第 1..20 句的最后 15 条）');
+});

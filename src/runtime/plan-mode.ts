@@ -372,14 +372,19 @@ export function scanSuspension(events: readonly AppEvent[]): SuspensionScan {
         break;
       }
       case 'human/answered': {
-        const head = queue[0];
-        // 答复必须打在这条队列的头上：给了 askSeq 就只认它（答的可能是她问的那条，与挂起无关）；
-        // 没给就按 FIFO 认队首（旧日志与 CLI 简写答复的唯一情形）
-        const matches = head !== undefined
-          && (event.data.askSeq === undefined || event.data.askSeq === head.askSeq);
-        if (!matches) break;
-        queue.shift();
-        answered = { suspension: head, answer: event.data.answer, at: event.ts };
+        // **配对只认 askSeq 指出的那一条**（2026-10-22 修的真 bug）：过去的写法只允许
+        // "答队首"——`askSeq` 指的不是队首就当没配上。而人完全可能**倒着答**：
+        // 实测 2026-10-20 17:51 那一批两张单子（`add playwright` / `remove playwright`），
+        // 人先批准后递的那张（202194），再批准先递的那张（202192）⇒ 前一条答复被当成
+        // "与挂起无关"丢掉，202194 永远留在队列里。24 小时之后 `maybeTimeoutHuman` 就按它
+        // 落了`budget/exhausted{layer:'task'}`，把整台机器停到第二天（现场 2026-10-21 17:51）。
+        // 现在：给了 askSeq 就精确删那一条（与 fold 的 `human/answered` 同一条口径）。
+        const index = event.data.askSeq === undefined
+          ? (queue.length > 0 ? 0 : -1)
+          : queue.findIndex(item => item.askSeq === event.data.askSeq);
+        if (index < 0) break;
+        const [answeredAsk] = queue.splice(index, 1);
+        answered = { suspension: answeredAsk!, answer: event.data.answer, at: event.ts };
         break;
       }
       case 'input/requeued': {

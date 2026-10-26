@@ -63,10 +63,12 @@ const DEFAULT_READ_ONLY_HINTS: Readonly<Record<string, string>> = {
 };
 
 /**
- * 记忆与人格资产的目录名（别名表用）。三个名字都必须与真实布局一致：
+ * 记忆与人格资产的目录名（别名表用）。四个名字都必须与真实布局一致：
  *   · `<dataDir>/workspace/MEMORIES/`——`persona/memory-injection.ts` 的记忆根；
  *   · `<dataDir>/workspace/diary/`——与它平级的日记；
- *   · `<dataDir>/persona/`——人格资产根（`catalog.ts` 传给 admin 工具的 personaRoot）。
+ *   · `<dataDir>/persona/`——人格资产根（`catalog.ts` 传给 admin 工具的 personaRoot）；
+ *   · `<dataDir>/skills/`——**技能实体的家**（v79，与 persona/ 同级；仓库/安装目录里的
+ *     `skills/` 只是出厂种子，见 `skill/seed.ts`）。
  *
  * **刻意不含 `workspace/`**：仓库根真的有一个同名目录（`http_download` 的落点），
  * 别名它会在两处同名目录之间制造歧义——那个问题归"描述说清根在哪"，不归别名表。
@@ -74,6 +76,12 @@ const DEFAULT_READ_ONLY_HINTS: Readonly<Record<string, string>> = {
 export const MEMORY_DIR_NAME = 'MEMORIES';
 export const DIARY_DIR_NAME = 'diary';
 export const PERSONA_DIR_NAME = 'persona';
+/**
+ * 技能根目录名。**与 `skill/skills.ts` 的 `SKILLS_DIR_NAME` / `DEFAULT_READ_ONLY_PREFIXES`
+ * 的第一段是同一个词**——fs 包刻意不 import 技能域模块（依赖方向是"技能读文件系统"），
+ * 所以这里是那份字面量的**第二处**，改名字时一起改（三处：本常量、只读区前缀、技能域）。
+ */
+export const SKILLS_DIR_NAME = 'skills';
 
 function killTree(child: ChildProcess): void {
   const pid = child.pid;
@@ -243,6 +251,16 @@ export function pathAliasesFor(
     { prefix: MEMORY_DIR_NAME, root: join(data, 'workspace', MEMORY_DIR_NAME) },
     { prefix: DIARY_DIR_NAME, root: join(data, 'workspace', DIARY_DIR_NAME) },
     { prefix: PERSONA_DIR_NAME, root: join(data, PERSONA_DIR_NAME) },
+    /**
+     * 技能目录（v79）：模型读正文的写法一个字节都没变，还是 `skills/<name>/SKILL.md`，
+     * 但它现在解析到**数据目录**里的那一份——技能实体住在那里（与 persona/ 同级）。
+     *
+     * 为什么这一条是 `alias-first` 而不是沿用 `primary-first`：安装目录/仓库里的 `skills/`
+     * 只是**出厂种子**。若主根优先，模型读到的永远是种子那份，而信任门绑的内容哈希是
+     * 数据目录那份——人改过并重新确认之后，读到的还是旧正文（下一版安装包的内容）。
+     * 数据目录里没有这一份时照旧退回主根，所以"开发目录里 data 被清过"仍然读得到。
+     */
+    { prefix: SKILLS_DIR_NAME, root: join(data, SKILLS_DIR_NAME), mode: 'alias-first' },
   ];
 }
 
@@ -309,19 +327,23 @@ export function createEnv(options: FsToolOptions = {}, overrides: Partial<FsTool
  * 前缀靠它），后者是**允许活动的范围**。`full` 模式下边界为 `null`，基准照旧——相对路径
  * 仍相对工作根解析，只是不再有"必须在根内"这一条。
  */
-export function resolveGuarded(
+export async function resolveGuarded(
   env: FsEnv,
   ctx: { workspaceRoot: string; boundaryRoot?: string | null },
   input: string,
   options: GuardOptions,
 ): Promise<GuardResult> {
-  return resolveInsideRoot(
+  const expanded = expandAliases(input, env.pathAliases(ctx), ctx.workspaceRoot);
+  const result = await resolveInsideRoot(
     ctx.workspaceRoot,
-    expandAliases(input, env.pathAliases(ctx), ctx.workspaceRoot),
+    expanded,
     {
       ...options,
       access: options.access,
       ...(ctx.boundaryRoot === undefined ? {} : { boundaryRoot: ctx.boundaryRoot }),
     },
   );
+  // `inputPath` 交回**别名改写前**的原样输入：写入口的只读区判定要看模型写下的那个前缀
+  // （`skills/x` 被改写到数据目录之后，`skills` 这个只读前缀已经不在 relPath 里了）。
+  return result.ok ? { ...result, inputPath: input } : result;
 }

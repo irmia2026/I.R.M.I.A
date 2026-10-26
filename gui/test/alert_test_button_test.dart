@@ -49,13 +49,13 @@ class _FakeApi extends IrmiaApi {
   Object? failWith;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (path.startsWith('/api/events')) return routes['/api/events'];
     return routes[path];
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add(_Post(path, body, confirm));
     final failure = failWith;
     if (failure != null) throw failure;

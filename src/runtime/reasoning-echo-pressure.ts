@@ -309,13 +309,16 @@ export function echoPressureDoctorDetail(
  *   · **该停什么**：别起长任务，因为长任务 = 几十笔请求，每笔都在挤；
  *   · **该做什么**：压一次上下文（把遮蔽点推过去）——那是当天真正让它恢复的动作；
  *   · 用户那句"可以说一句"的原话照给，再补一条自己能查的路。
+ *
+ * ⚠ **正文里不许出现 Markdown 记号**（2026-10-22 用户点名的硬性要求）：它是在界面上读的
+ * 纯文本，渲染层不认 Markdown——要强调用「」或换行。
  */
 export function echoPressureWakeNote(signals: EchoPressureSignals, ratio: number): string {
   return `【框架通报 · 思维链回传压力】会回传的思维链已经有 ${formatCompact(signals.echoChars)} 字符，`
     + `上限 ${formatCompact(signals.cap ?? 0)}（${formatPercent(ratio)}）`
     + `，当前已经挤掉 ${signals.droppedGroups} 组 / ${formatCompact(signals.droppedChars)} 字符。
-- **先别做长任务**：长任务要发几十笔请求，每一笔都会再挤掉最老的一个 assistant 组，**历史头部因此每笔都在位移**——那之后每一笔都要把整段前缀重新编码一遍，当天的开销会翻 3 倍以上。
-- 现在真的有用的一步是**压一次上下文**（\`/compact\`，或让一轮正常收尾触发自动压缩）：遮蔽点推过去，被挤的那一段就不再进请求，压力随之清零。
+- 先别做长任务：长任务要发几十笔请求，每一笔都会再挤掉最老的一个 assistant 组，历史头部因此每笔都在位移——那之后每一笔都要把整段前缀重新编码一遍，当天的开销会翻 3 倍以上。
+- 现在真的有用的一步是压一次上下文（\`/compact\`，或让一轮正常收尾触发自动压缩）：遮蔽点推过去，被挤的那一段就不再进请求，压力随之清零。
 - 可以跟用户说一句：最近缓存命中低，我少绕两圈。
 - 想自己核对就去看 \`model/reasoning-echo\`（\`kind:'reasoning_echo_prune'\` 是已经挤掉的账，\`kind:'reasoning_echo_pressure'\` 是这条读数）。`;
 }

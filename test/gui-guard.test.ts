@@ -23,7 +23,7 @@ import {
 } from '../src/runtime/gui-guard.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
-const EXE = 'D:\\IrmiaAgent\\agent\\gui\\build\\windows\\x64\\runner\\Release\\irmia_gui.exe';
+const EXE = 'D:\\irmia\\agent\\gui\\build\\windows\\x64\\runner\\Release\\irmia_gui.exe';
 const BASE_MS = Date.parse('2026-10-11T00:00:00.000Z');
 
 function makeDir(t: TestContext): string {

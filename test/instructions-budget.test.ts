@@ -72,6 +72,22 @@
  *   · `SELF_BRIEF` 字符数 **9646 → 9913**（+267，一段；H2/H3/空行结构一个都没动，
  *     `test/self-brief.test.ts` 的结构锁照旧全绿）。`RENDER_VERSION` **75 → 76**。
  *
+ * **v78（2026-10-22，关系档案改索引）——`SELF_BRIEF` 一个字节没动（读数回到 v76 那一组）**：
+ *   · 缘起：用户「改为类同记忆索引吧」⇒ 固定块里关系档案只留索引（路径 / 字数 / 小节名），
+ *     正文不进上下文。这一批只改 `input` 的固定块。
+ *   · 中间有一笔**已撤回**：v78 首版曾给 `SELF_BRIEF` §6 那条 RELATIONSHIPS 补一句
+ *     （"固定块里只给索引（路径与字数），正文要你自己 safe_read"，+17 token / +79 字节）。
+ *     用户随后裁定「你这个提示词会导致反复读啊。不要给指令。」⇒ 那句话删掉，`instructions`
+ *     逐字节回到 v76。
+ *   · 读数（同一把 `estimateTokens` / `segmentOfText`，与下面三条用例同一个口径）：
+ *     · ② 自述段 **5840 / 26254 / `ff003fd6807f4047`**（= v76，未变）；
+ *     · ② 确定性分量合计 **5873**（余量 427；参考线 6300 不变）；
+ *     · ① 整段 **7052 / 31826 / `d3738e093b9bf40a`**（余量 348，硬门 7400 不变）；
+ *     · 人格三层 **1179**（人格文件一个字没动；7052 − 5873 = 1179）。
+ *   · 换来的是**每轮少背一份档案正文**（只在 `input` 的固定块里）：阿岚那一段
+ *     **1,181 → 166 字节**（−85.9%）、测试群 **2,586 → 133 字节**（−94.9%）。
+ *   · `RENDER_VERSION` **77 → 78**（78 从未上生产；同代内改措辞不重复递增）。
+ *
  * ⚠ **下面是 v65 那一代的读数，而它到 v68 仍然逐字成立**（件数与 token 从 v65 到 v68 没动过）：
  *   · **v66**（此刻层结构压缩 + 会话清单窗口 + `read_channel` 列会话簿）动的是 `input` 与
  *     `tools`，`instructions` 那一段一个字节没改（`render.ts` 的 v66 那一篇）；
@@ -132,8 +148,8 @@
  *     v64 `7058 / 31822 / 2f75ea4aef859556` → v65 `6674 / 30138 / 44b45472504fa2ec`
  *     ⇒ 净 **−384 token / −1684 字节**（与 `heartbeat-real-wake.test.ts` 记的 −384 逐字吻合）。
  *     （v65 那个 hash 后来被脱敏那一笔换掉了，当前值见上面"① 整段"那一行：`7fa46e52ad55c504`。）
- *   探针：`_research/_tmp-v65-instructions-truth.mts`（量当前代）、
- *         `_research/_tmp-v65-vs-v64-delta.mts`（两代对照，不 checkout、不动工作区）。
+ *   探针（2026-10-23 从归档搬回仓库）：`tools/measure/instructions-truth.mts`（量当前代）、
+ *         `tools/measure/v65-vs-v64-delta.mts`（两代对照，不 checkout、不动工作区）。
  *
  * ──────────────────────── 上界取值与依据 ────────────────────────
  *
@@ -164,7 +180,10 @@
  *
  * **改 `SELF_BRIEF`（或四条分割线常量）⇒ 必须同批复量本文件下面三组常量**，
  * 否则第三条用例当场红在"基线常量与当前代不一致"上——那正是它的用途。
- * 复量方式：跑文件头记的那两条探针，把打出来的数逐字抄进常量，并**在下面注明是哪一代**。
+ * 复量方式：跑文件头记的那两条探针（**2026-10-23 起它们就在仓库里**：
+ * `tools/measure/instructions-truth.mts` 量当前代、
+ * `tools/measure/v65-vs-v64-delta.mts` 做两代对照，不 checkout、不动工作区），
+ * 把打出来的数逐字抄进常量，并**在下面注明是哪一代**。
  */
 
 import assert from 'node:assert/strict';
@@ -200,19 +219,22 @@ const TOOLS_TOKEN_CEILING = 5500;
 // 因脱敏那一笔（`cdc6b92`）复量——长度没变、内容变了，见文件头那一段。
 // ⚠ 注释里的"线上值"是**v64**，别混（见文件头）。
 
-/** v76 · ② 四条分割线常量按 `\n\n` 相连（不依赖 `data/`）——v76 没碰它，未复量 */
+/** v76 · ② 四条分割线常量按 `\n\n` 相连（不依赖 `data/`）——v78 没碰它，未复量 */
 const HEADER_RULES = { tokens: 44, bytes: 378, hash: 'bbe1674eb8a77743' } as const;
 /**
- * v76 · ② 自述那一段（不依赖 `data/`）：v72 整段置换之后是 5712 / 25684 / `b051f01fa99ec325`；
- * v76 加了**一段回执说明**（`send_media` 的样板搬进 §2.1，见 render.ts 的 v76 篇）⇒ 复量。
+ * v78 · ② 自述那一段（不依赖 `data/`）：v72 整段置换之后是 5712 / 25684 / `b051f01fa99ec325`；
+ * v76 加了一段回执说明 ⇒ 5840 / 26254 / `ff003fd6807f4047`。
+ * **v78 没碰 `SELF_BRIEF`**（首版补的那一句"正文要你自己 safe_read"已撤回——它也是"给指令"）
+ * ⇒ 读数就是 v76 那一组，未复量、也不许改。
  */
 const HEADER_BRIEF = { tokens: 5840, bytes: 26254, hash: 'ff003fd6807f4047' } as const;
-/** v76 · ② 确定性分量合计（= 人格全空时 `renderInstructions` 的逐字节输出）：5746 → 5873（+127） */
+/** v76 · ② 确定性分量合计（= 人格全空时 `renderInstructions` 的逐字节输出）：5873 */
 const HEADER_TOTAL_TOKENS = 5873;
 /**
  * v76 · ① `renderInstructions` 整段（含**本机**人格三层）。
- * ⚠ 线上此刻（v75）跑的是旧一代，别抄线上那个 hash（见文件头）。
+ * ⚠ 线上此刻（未部署 v78）跑的是旧一代，别抄线上那个 hash（见文件头）。
  * ⚠ hash 只认字节内容：`tokens` / `bytes` 相同**不**代表这一串没变（v71 那 4 个字符就是这种形状）。
+ * v78 没碰 `instructions` ⇒ 仍是 v76 的 **7052 / 31826 / `d3738e093b9bf40a`**。
  */
 const FULL_INSTRUCTIONS = { tokens: 7052, bytes: 31826, hash: 'd3738e093b9bf40a' } as const;
 /**
@@ -263,7 +285,7 @@ function overBudgetMessage(label: string, now: number, ceiling: number): string 
     + `（余量 ${ceiling - now > 0 ? ceiling - now : 0}）`
     + '：这一段是**最大公共前缀**，改胖了每一轮请求都多付一份，而且它一变整段前缀失配'
     + '（缓存全 miss）。'
-    + '⇒ 别直接把这个上界改大：先用 `_research/_tmp-v65-instructions-truth.mts` 复测当前真值，'
+    + '⇒ 别直接把这个上界改大：先用 `tools/measure/instructions-truth.mts` 复测当前真值，'
     + '把 `test/instructions-budget.test.ts` 文件头与常量改准，再决定要不要接受这笔常驻开销';
 }
 
@@ -471,12 +493,23 @@ test('instructions 预算：撑过界的是**确定性分量**时同样被拦（
   assert.match(toolText, /现在 5517 token、上界 5500、超出 17/u, '两条预算线的文案形状必须同形');
 });
 
-test('instructions 预算：探针文件在位（下一个人要知道去哪儿复量）', () => {
+test('instructions 预算：探针文件在位（下一个人要知道去哪儿复量）', {
+  // `tools/measure/` **不进公开副本**（内部度量工具，见 tools/publish-oss.mjs 的排除表）：
+  // 公开副本里这两个文件本来就不在 ⇒ 没有前提可判，跳过。仓库侧照旧是一条硬门。
+  skip: existsSync(resolve(join('tools', 'measure')))
+    ? false
+    : '公开副本里没有 tools/measure/（内部度量探针不外发）—— 这条判据只在仓库侧跑',
+}, () => {
   // 基线复量靠探针，探针被删掉的话"改代即复量"这条规矩就落不了地 ⇒ 这里钉一下它的存在。
   // 只判存在、不读内容：这两个文件是**工具**，它们的正文不参与任何判据。
+  //
+  // 2026-10-23 这笔的来历（别再把它们移出去）：`_research/` 整个搬出仓库时，这条用例连同
+  // 它的前提一起被删过——**代价是"改代即复量"在仓库内没有可跑的入口了**（当时只如实写下了代价）。
+  // 现在两个探针从归档搬回了 `tools/measure/`（去掉 `_tmp-` 前缀），这条用例随之**恢复**，
+  // 路径改到新位置。仓库里有工具、有判据，才叫规矩落地；只写"该复量"而没入口，等于没有规矩。
   const probes = [
-    join('_research', '_tmp-v65-instructions-truth.mts'),
-    join('_research', '_tmp-v65-vs-v64-delta.mts'),
+    join('tools', 'measure', 'instructions-truth.mts'),
+    join('tools', 'measure', 'v65-vs-v64-delta.mts'),
   ];
   for (const probe of probes) {
     assert.ok(

@@ -79,7 +79,7 @@ pwsh -File tools/stop-agent.ps1 -DataDir D:\IrmiaAgent\data
 
 param(
   # 仓库根（= 启动 node 时的工作目录；也与 restart-agent.ps1 的默认值一致）
-  [string]$Repo = '<repo>',
+  [string]$Repo = '',
   # 数据目录（读 lock.json、报锁状态用）。默认 <Repo>\data
   [string]$DataDir = '',
   # 界面可执行文件（可空）。给了且 -IncludeGui 时才动它
@@ -92,6 +92,12 @@ param(
   [int]$WaitSeconds = 20
 )
 
+# ── 默认值推导：脚本只认「自己在哪」，不写死任何机器路径 ──
+if ($Repo -eq '') {
+  if ([string]::IsNullOrEmpty($PSScriptRoot)) { throw '无法从脚本位置推断项目根：请显式传 -Repo <项目根>' }
+  $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+}
+
 $ErrorActionPreference = 'Continue'
 if ($DataDir -eq '') { $DataDir = Join-Path $Repo 'data' }
 $lockPath = Join-Path $DataDir 'lock.json'
@@ -100,10 +106,22 @@ $lockPath = Join-Path $DataDir 'lock.json'
 $guiName = 'irmia_gui'
 if ($GuiExe -ne '') { $guiName = [System.IO.Path]::GetFileNameWithoutExtension($GuiExe) }
 
+function ConvertTo-MatchForm([string]$Text) {
+  # ⚠️ 与 `restart-agent.ps1` 的 `ConvertTo-MatchForm` **逐字同源**：比较之前把两边都规整成
+  # "正斜杠 + 小写"。2026-10-23 实测的毛病就出在这里：她是由 WMI 用**绝对入口**拉起的，
+  # 命令行里因此是 `<仓库>distmain.js`（**反斜杠**），而下面那根针写的是正斜杠
+  # ⇒ `-like` 是字面匹配、一个主进程都找不到 ⇒ 脚本报"不需要停"、锁里的 pid 还活着，
+  # 人却以为停掉了（同一类事故在 restart 那边 2026-10-07 ④ 已经踩过一次）。
+  # 规整只改**分隔符与大小写**，匹配语义不变（`snowluma` 那条命令行里没有 dist/main.js）。
+  if ($null -eq $Text) { return '' }
+  return $Text.Replace('\', '/').ToLowerInvariant()
+}
+
 function Get-AgentProcesses {
   # ⚠️ 与 restart-agent.ps1 的判据**必须一致**（见文件头那段）。SnowLuma 一律不匹配。
+  $needle = ConvertTo-MatchForm 'dist/main.js'
   Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
-    Where-Object { $_.CommandLine -like '*dist/main.js*' }
+    Where-Object { (ConvertTo-MatchForm $_.CommandLine) -like ('*' + $needle + '*') }
 }
 
 function Get-LockRecord {
@@ -234,7 +252,8 @@ if ($guiNow.Count -gt 0) {
 
 # 日志里的停机痕迹：硬杀**不会**有 session/end，所以这里找的是"进程日志的最后几行"——
 # 报出来是为了让人一眼看到"她是在哪一步被掐掉的"，而不是把"没有 session/end"当成异常。
-$outLog = Join-Path 'D:\irmia' 'agent-console.out.log'
+# 落点与 restart-agent.ps1 的后端日志默认值同一个：安装根（= 仓库根的上一级）。
+$outLog = Join-Path (Split-Path -Parent $Repo) 'agent-console.out.log'
 if (Test-Path $outLog) {
   Write-Host ''
   Write-Host "[停] 进程日志尾部（$outLog）："

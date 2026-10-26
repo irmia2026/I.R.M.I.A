@@ -501,7 +501,7 @@ test('① 被豁免的单聊：索取式的话一条警告都不产生——事�
 
   // 出口②的另一半，**正是用户现场走的那条**：那条消息已经成了历史。
   // （现场它是中途到达的，所以没有落库的结论可读，只剩渲染层现算这一支。）
-  write('wake/manual', { note: '看一眼日志', person: 'OWNER' });
+  write('wake/manual', { note: '看一眼日志', person: '阿岚' });
   await real.tickOnce();
   assert.equal(model.requests.length, 2, '第二轮真的起了（否则下面那句断言是空转）');
   const second = inputTextOf(model.requests[1]!);
@@ -1260,9 +1260,10 @@ test('report 带 to 成功：凭据落进她自己的那条折法 —— 下一�
   const body = '# 进度\n\n- 42 个文件已处理\n- 剩下 3 个在排队';
   const out = await rig.report({ text: body, to: 'qq:group:G1' }, { callId: 'call_report', turn: 9 });
   assert.equal(out.isError, undefined, out.content);
-  // v74（用户 2026-10-20）：`report` 与 `speak` 同一三态——正文 29 字（>25）⇒ 超限提示；
-  // 不印坐标、不回显正文、"不必重复发送"搬进 SELF_BRIEF（回执不再逐条付）。
-  assert.match(out.content, /成功，但超25字限制（29 字）/u, out.content);
+  // report 的回执**不判长度**（2026-10-21，用户截图实证）：正文 29 字照样逐字 `发送成功`。
+  // v74 那句"report 照 speak 一样"只管**回执格式**（短、不印坐标、不回显正文、不印"不必重复发送"）；
+  // 25 字是 `speak` 的聊天风格目标，report 没有这条线（它本来就是发长文的那一件）。
+  assert.deepEqual(out.content.split('\n').filter(line => line !== ''), ['- 发送成功'], out.content);
 
   // ① 凭据的形状与 `speak` 同一件事：带 sid + **带 text** + callId/turn。
   //    （这里不直接断言事件本身——下面的真链路断言"她读得到"，那才是这一条要锁的东西）

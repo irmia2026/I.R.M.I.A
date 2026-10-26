@@ -143,7 +143,7 @@ export const GUI_APP_DIR_NAME = 'Irmia';
  * **第二个落点**：`%APPDATA%\Irmia\gui-quit.marker`。为什么要第二个（2026-10-11）：
  *
  * 界面**不知道后端的 dataDir**（它只知道本地服务地址；而这次部署里后端跑在开发仓库
- * `<repo>\data`，界面却在 `D:\IrmiaAgent\agent\...`）。要它写
+ * `<仓库>\data`，界面却在 `<安装根>\agent\...`）。要它写
  * `<dataDir>/gui-quit.marker`，就得先把 dataDir 铺到它手里——那要么改拉起的形状
  * （用户刚把 `Start-Process -FilePath <exe> -WorkingDirectory <目录>` 这条钉死，不该动），
  * 要么让界面去猜。而 `%APPDATA%\Irmia\` 是**两端都算得出来**的同一个目录

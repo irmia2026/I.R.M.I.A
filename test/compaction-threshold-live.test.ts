@@ -276,12 +276,12 @@ test('出厂默认 = 200000：空目录与"老配置缺这一格"都吃新默认
   // ② 老配置：有 persona 这一节、但**没有这一格** ⇒ 吃新默认（不是 0、也不是旧的 100000）
   writeFileSync(join(dirOld, 'config.json'), `${JSON.stringify({
     schemaVersion: 1,
-    persona: { owner: 'OWNER' },
+    persona: { owner: '阿岚' },
     budget: { softRatio: 0.8 },
   }, null, 2)}\n`, 'utf8');
   const old = await loadConfig(dirOld);
   assert.equal(old.config.persona.compactionThresholdTokens, 200_000, '缺这一格 ⇒ 新默认');
-  assert.equal(old.config.persona.owner, 'OWNER', '同一节里别的格照旧');
+  assert.equal(old.config.persona.owner, '阿岚', '同一节里别的格照旧');
   assert.equal(old.config.budget.softRatio, 0.8, '别的节也没被牵连');
 
   // ③ 现场那份显式写了这一格 ⇒ 按它（出厂默认**不动运行期值**）

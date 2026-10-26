@@ -571,7 +571,7 @@ function esItemPath(item: EsCsvItem, root: string): string {
  * handler 直接照 `gate` 分派、不再探第二次：注册结论与运行行为必须一致，
  * 否则会出现"注册时说有、执行时说没有"的自相矛盾两句话。
  *
- * 参数面按用户的验收口径**对齐 devkit 那一件**（那边还叫 `es_search`：`D:\IrmiaAgent\_devkit-open\tools\es_search.py`）：
+ * 参数面按用户的验收口径**对齐 devkit 那一件**（那边还叫 `es_search`：`_devkit-open\tools\es_search.py`）：
  * `regex` / `whole_word` / `file_type` / `ext` / `sort_by` / `detail` 六项补齐后，
  * 这边能拿到的信息**不低于**那边（那边一次调用固定回结构化条目 name/path/full/size/date_modified
  * + count + total_size；这边 `detail:'full'` 同样给全，`detail:'paths'` 是省上下文的默认档）。

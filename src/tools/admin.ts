@@ -32,7 +32,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
 import { mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
 
@@ -68,6 +67,9 @@ import { expandAliases } from './fs/path-guard.ts';
 import { pathAliasesFor } from './fs/env.ts';
 import { toErrorMessage } from './fs/types.ts';
 import { boundaryDecision, boundaryRootFor, outsideBoundaryReason } from './boundary.ts';
+// 「内核真正会访问的那个路径」只有一处实现（`util/real-path.ts`）：persona 边界判定、
+// 版本库的工作区映射都用同一把尺子——两处各写一份 realpath 展开，迟早一个展开一个不展开。
+import { expandRealPath } from '../util/real-path.ts';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from './types.js';
 import {
   TOOL_ERROR_CODES,
@@ -1258,6 +1260,26 @@ export function watermarkSeqOf(pool: readonly ReadChannelItem[], mark: number): 
 }
 
 /**
+ * "这一批让她读到了哪一条" → `channel/read.upToSeq`（**那个数的唯一算法**，2026-10-24）。
+ *
+ * 判据一句话：**外部消息里最大的平台序号**（`msgSeq`）。只数外部消息的理由与 `watermarkSeqOf`
+ * 那条纪律同源：她自己的行（`speak/sent`）、群里的动静（`channel/notice`）、她做过的动作
+ * （`channel/self-action`）都没有"这个会话里第几条"的语义——拿它们去比水位是把两种量纲混起来。
+ *
+ * 为什么必须收成一处：这个 bug（用户报的"读过的群未读标签不消失"）的机械原因正是"写入点只有一个
+ * 分支有"。现在三处都会写（默认那一屏摆出了东西 / 没有新消息 / 翻页翻到最新），口径必须逐字节
+ * 相同，否则"读了却没清"会从其中一处原样漏回来。
+ */
+export function readMarkOf(items: readonly ReadChannelItem[]): number {
+  return items.reduce(
+    (max, item) => (isExternalMessage(item) && Number.isFinite(item.msgSeq)
+      ? Math.max(max, item.msgSeq)
+      : max),
+    0,
+  );
+}
+
+/**
  * 她自己的行首标记（占"谁"那一格）。
  *
  * 措辞的三个约束：① 不能长（每行都是常驻开销，行数才是这个工具的硬预算）；
@@ -1815,17 +1837,19 @@ export const READ_CHANNEL_DEFAULT_LIMIT = 20;
 export const READ_CHANNEL_MAX_LIMIT = 100;
 
 /**
- * 翻页模式**一页 50 条**（用户 2026-10-08 的口径：「如果开启翻页模式，就可以读到全部消息。
- * 每页 50 条」）。
+ * 翻页模式**一页 15 条**（用户 2026-10-08 定了"翻页模式能读到全部消息"这条能力，当时的页大小
+ * 是 50 条；2026-10-23 她一句「50 条太多了」把它改成 15 条——见 `model/render.ts` 的 v80）。
  *
  * 它与 `limit` 的分工（别把两个数混起来）：
  *   • `READ_CHANNEL_MAX_LIMIT` 是**硬上限**（100）——她显式要更多的行时夹到它，防的是
  *     "一次拉几千条回来把上下文撑爆"；
- *   • 这个 50 是**一页的默认与建议**（`limit` 缺省时就用它，页脚也照它指路）：翻页是
- *     "一屏一屏往回走"，50 行是用户定的一屏；她要更窄（只看几句）或更宽（最多 100）都由
- *     `limit` 说了算，而**页脚永远照本页实际用的那个数**告诉她下一页怎么翻（口径只有一处）。
+ *   • 这个 15 是**一页的默认与建议**（**翻页模式下** `limit` 缺省时就用它，页脚也照它指路）：
+ *     翻页是"一屏一屏往回走"，15 行是用户定的一屏；她要更窄（只看几句）或更宽（最多 100）
+ *     都由 `limit` 说了算，而**页脚永远照本页实际用的那个数**告诉她下一页怎么翻（口径只有一处）。
+ *     ⚠ 缺省的这一档由调用点传进 `readLimit(raw, fallback)`（见那里的说明）：有游标 ⇒ 这个 15，
+ *     无游标 ⇒ `READ_CHANNEL_DEFAULT_LIMIT`（20）——两档混用会让页脚说的数与实发条数对不上。
  */
-export const READ_CHANNEL_PAGE_SIZE = 50;
+export const READ_CHANNEL_PAGE_SIZE = 15;
 
 /**
  * 往回翻页的游标：**事件 seq**（`ChannelMessageView.seq` / `ChannelSpoken.seq`，
@@ -1878,7 +1902,25 @@ function isInside(root: string, target: string): boolean {
 /**
  * 把相对路径解析到 personaRoot 之内，越界一律拒绝。
  * 三层校验对应 design.md §4.10 第 1 条：①拒绝绝对路径/盘符；②拒绝 `..` 段；
- * ③resolve 后前缀比较，并在父目录已存在时再用 realpath 复核，堵住符号链接逃逸。
+ * ③resolve 后前缀比较，再对**两边都展开**后的真实路径比一次，堵住符号链接逃逸。
+ *
+ * ── 第三层为什么必须"两边都展开"（2026-10-23 修，现场：`file 的父目录经符号链接指向
+ * persona/ 之外：STATE.md`，同一条路径此前一直是能写的）──
+ *
+ * 原来的写法是 `realpath(parent)` 与**没展开的** `root` 字符串比：persona 根自己经
+ * junction 到达时（她的 `data` 根是 `<cwd>/data` → `<安装根>/data` 的链接），
+ * parent 的真值是 `<安装根>/data/persona`、root 还是字面的 `<cwd>/data/persona` ⇒
+ * **每一次都判成越界**。错的不是"要 realpath"，而是"只 realpath 了一边"。
+ *
+ * 现在两边走同一把尺子（`util/real-path.ts` 的 `expandRealPath`：最近的存在祖先展开 +
+ * 不存在的尾段原样拼回）。**守卫一条都没削弱**：
+ *   · 绝对路径 / 盘符 / `..` 上升段 / 空段：上面三条先拦（判据没动）；
+ *   · 字面 resolve 后仍在根外：`isInside(root, absolute)` 照旧拦；
+ *   · **真逃逸**（`personaRoot/子目录` 是指向 persona 之外的 junction、或目标文件本身
+ *     是指向别处的符号链接）：展开后落在 `root` 的真值之外 ⇒ 照旧拦，措辞不变；
+ *   · 目标还不存在（新建 STATE.md / 新建 RELATIONSHIPS/*.md）：对最近的存在祖先展开，
+ *     "还不存在"不算越界——这一条与原来"父目录不存在 ⇒ 返回 null 放过"同义，只是
+ *     现在连"祖先里有链接"也一并看穿了。
  */
 function resolvePersonaPath(root: string, relative: string): { absolute: string; display: string } {
   const normalized = normalizeRelative(relative.trim());
@@ -1904,22 +1946,14 @@ function resolvePersonaPath(root: string, relative: string): { absolute: string;
     throw new ToolArgumentError('file', `file 解析后落在 persona/ 之外：${relative}`);
   }
 
-  // 父目录已存在时复核真实路径：符号链接/junction 可以把"看起来在根内"的路径指到根外
-  const parent = dirname(absolute);
-  const real = realpathOrNull(parent);
-  if (real !== null && !isInside(root, real)) {
+  // 真实路径复核（**基准根与目标都展开**）：符号链接/junction 可以把"看起来在根内"的路径
+  // 指到根外，也可以把"看起来在根外"的根指回根内——两个方向都只有比真值才判得出来。
+  const rootReal = expandRealPath(root);
+  const targetReal = expandRealPath(absolute);
+  if (!isInside(rootReal, targetReal)) {
     throw new ToolArgumentError('file', `file 的父目录经符号链接指向 persona/ 之外：${relative}`);
   }
   return { absolute, display: segments.join('/') };
-}
-
-/** 父目录不存在（新建目标）时 realpath 会抛错，那不是越界，返回 null 交回给前缀校验 */
-function realpathOrNull(path: string): string | null {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return null;
-  }
 }
 
 /** 按需层判定：STATE.md 与 RELATIONSHIPS/ 下的资产是"情景层"，大小直接换算成上下文成本 */
@@ -3109,12 +3143,16 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
               // 给不出时这一格缺席（`deliverToSession` 兜空串，理由见它那段注释）。
               ...(outcome.messageId === undefined ? {} : { messageId: outcome.messageId }),
             }) satisfies SpeakSentPayload);
-            // v74（与 `speak` 同一口径，用户点名"report 照 speak 一样"）：成功回执按**正文长度**
-            // 分两态，除此之外一个多余字都不印（不印坐标、不回显正文、不印"不必重复发送"）。
-            const bodyChars = [...text].length;
-            lines.push(bodyChars <= SPEAK_TEXT_SUGGESTED_MAX
-              ? '发送成功'
-              : `成功，但超${SPEAK_TEXT_SUGGESTED_MAX}字限制（${bodyChars} 字）`);
+            // v74 那句「`report` 照 `speak` 一样」指的是**回执格式与 `speak` 同口径**——短、
+            // 不印坐标、不回显正文、不印"不必重复发送"——**不是数值也一样**。
+            // `report` **没有 25 字这条建议线**：25 字（`SPEAK_TEXT_SUGGESTED_MAX`）是 `speak` 的
+            // **聊天风格目标**（一次说话该多短，像打字聊天），只属于 `speak`；`report` 是发长文的
+            // 那一件（`REPORT_TEXT_MAX` 六万四、描述写着"不限长"），对它判长度没有意义。
+            // 所以成功回执**固定就是 `发送成功`**：不判长度、不数字数。
+            // ⚠ 这里曾经照搬 `speak` 的两态（>25 字 ⇒ `成功，但超25字限制（N 字）`），那是**假话**：
+            // 用户截图实证一篇 1293 字的报告被回执判成"超限"，而回执会被后续每个请求读回
+            // ⇒ 等于每轮都告诉她"你的报告超限了"。降级 note 仍单独一行（它说的是形态，不是长短）。
+            lines.push('发送成功');
             const note = degradeLineOf(outcome.note);
             if (note !== null) lines.push(note);
           } else {
@@ -3315,6 +3353,17 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     pageBelow: number;
   }>();
   /**
+   * 本进程里"上一次为她写下的已读位"（`sid → upToSeq`）——**只用来挡住同值的重复写入**。
+   *
+   * 为什么除了会话簿那一格还要这一格（2026-10-24）：`channel/read` 的语义是"她读到哪了"的
+   * **事实**，不是草稿纸。而"这个位置已经记过了"的判据来自**宿主**（`durableReadMark`：会话簿
+   * 每拍折一次，CLI 与一部分用例里甚至没接线）。宿主的节奏不该决定日志里会不会多出一串同值记录
+   * ——一次"没有新消息"的复读、或者翻页抄了同一个游标，都会往日志里落一条一模一样的账。
+   *
+   * 它是缓存，不是账：账仍在日志里（重启后靠 `durableReadMark` 那条路兜住）。
+   */
+  const writtenReadMarks = new Map<string, number>();
+  /**
    * 「上次查看读到哪」——**从日志读回来的那一份**（v67，跨重启的唯一来源）。
    *
    * 为什么它必须存在（2026-10-17 用户的第一条口径）：默认那一屏要"只给上次查看之后的新消息"，
@@ -3425,7 +3474,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     /**
      * notice 那一行里的名字（**与消息那一行共用同一个别名器**）。
      *
-     * 为什么共用：同一个 openid 在同一屏里只能有一种写法——消息行给 `OWNER`、
+     * 为什么共用：同一个 openid 在同一屏里只能有一种写法——消息行给 `阿岚`、
      * 而下面那件"他开了全员禁言"写成 `…0006`，读起来就是两个人。notice 不带昵称，
      * 所以第二个入参永远是 undefined（那个口留着只为形状一致）。
      */
@@ -3538,7 +3587,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
          * 操作者，也可能说的不是"谁说了什么"），整件事由 `noticeLineText` 逐字写成方括号里那句。
          *
          * 为什么"谁"那一格留空而不是塞个名字：notice 的行文里**本来就带着人**
-         *（"OWNER 开启了全员禁言"），再在前面摆一个 `OWNER：` 就成了同一件事说两遍，
+         *（"阿岚 开启了全员禁言"），再在前面摆一个 `阿岚：` 就成了同一件事说两遍，
          * 而这一屏每一行都是常驻开销。
          *
          * 认不出来的 `notice_type` ⇒ `noticeLineText` 返回 null ⇒ **整行不摆**
@@ -3725,7 +3774,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     //     和之前十条」）——描述里只说结论（"只给点你的那些和它们之前十条"），
     //     "之前十条""未读装得下就全给""她自己发的那条也带上下文"这三条边界跟着回执与代码注释走
     //     （判据在 handler 里那份"五个分支"上，逐条写清了为什么）；
-    //   • 往回翻页 = 给 `before` 游标、每页 50 条、**不改已读位**——细节全在 `before` 的参数描述里。
+    //   • 往回翻页 = 给 `before` 游标、每页 15 条、**不改已读位**——细节全在 `before` 的参数描述里。
     // 留在描述里的每一句都仍然是**她据此决定行为**的：读什么、含她自己的话（怎么认）、
     // 已读只按她真看过的那些推进、没有新消息时回什么（并给她出路）。
     //
@@ -3749,7 +3798,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     //   (d) **看过的标已读**（原句保留）。
     // 代价如实说：**84 → 90 token**（硬门 100，余量 10 = `test/tool-catalog.test.ts` 那条
     // "距硬门不足 10 token 就红"的线本身，判据是 `MAX − tokens < 10` ⇒ 10 正好不红）。
-    // 腾出来的是"每页 50 条"那半句——它本来就逐字写在 `before` 的参数描述里
+    // 腾出来的是"每页 15 条"那半句——它本来就逐字写在 `before` 的参数描述里
     //（参数不进 `MAX_DESCRIPTION_TOKENS` 那份预算，而她两个都看得到）。
     description:
       '看某个会话的消息（**也包括你自己说过的**，行首 `（我）`）。'
@@ -3809,8 +3858,52 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             TOOL_ERROR_CODES.invalidArgs,
           );
         }
-        const limit = readLimit(args['limit']);
-        // ── ① 翻页模式：给游标 ⇒ 读**全部历史**，一页 50 条、**一个字都不动已读** ──
+        // 缺省值**按分支给**（2026-10-23，v80 同代补的那一笔）：翻页模式一页 = `READ_CHANNEL_PAGE_SIZE`，
+        // 默认那一屏 = `READ_CHANNEL_DEFAULT_LIMIT`。为什么必须分开：默认那一屏的页脚报的就是
+        // `READ_CHANNEL_PAGE_SIZE`（"下一页会发多少行"），若这里仍回 20，页脚说 15、实发 20
+        // ——她照页脚算翻页节奏就会算错。判据由 `test/read-channel-page.test.ts` ⑩ 钉住
+        // （页脚上的数字 == 实发行数）。
+        const limit = readLimit(
+          args['limit'],
+          cursor === null ? READ_CHANNEL_DEFAULT_LIMIT : READ_CHANNEL_PAGE_SIZE,
+        );
+        /**
+         * 写一笔已读位——**这个工具里唯一的写入处**（2026-10-24）。
+         *
+         * 为什么收成一处：用户报的 bug 原话是「一旦 `read_channel` 过对应的群聊之后，就不把未读
+         * 标签取消掉了」。查下来的机械原因是**写入点只有一个分支有**（默认那一屏摆出了东西时），
+         * 而另外两条"她同样读过了"的路一笔都不写：
+         *   · **没有新消息**那一条（她刚确认过"这儿没有新东西"——这条确认本身就是已读）；
+         *   · **翻页翻到了最新**那一页（翻旧话不该动已读，但翻到最新就是读过了）。
+         * 界面那一栏算的是 `msgSeq > readUpToSeq` 的条数（`channel/sessions.ts`），已读位不动它
+         * 就永远停在旧水位上——实测用户截图上 418 / 1151 / 510 / 392 那几个群全是这个形状。
+         *
+         * 两条纪律：
+         *   • **只增不减**（`applyChannelRead` 同一条）：已读位是一个位置，"推进"只有一种写法；
+         *   • **只推到她确实看过的那一段**（各调用点自己算，见 `readMarkOf`）：翻旧话、没摆下的
+         *     那些都不许被这一笔顺手标成已读。
+         */
+        const markReadUpTo = (upToSeq: number): void => {
+          if (!(upToSeq > 0)) return;
+          writtenReadMarks.set(sid, Math.max(writtenReadMarks.get(sid) ?? 0, upToSeq));
+          emit('channel/read', { sid, upToSeq } satisfies ChannelReadPayload);
+        };
+        /**
+         * 同上，但**只在它比已知水位更新时才写**——给两条"她确认过、但可能什么都没推进"的路用
+         * （没有新消息 / 翻页翻到最新）。同一个位置不写第二笔：那是事实，不是草稿纸。
+         *
+         * 已知水位取"会话簿"与"本进程写过"里更高的那个：前者是**账**（跨重启），后者补上
+         * 宿主那一拍还没折到的空档（CLI 与一部分用例里会话簿甚至没接线）。
+         *
+         * 为什么默认那一屏不走这一支：c2c 的平台序号**恒为 1**，那里的"摆出了新消息"与
+         * "位置推进了"本来就是两件事（`msgSeq` 推不动，但那一屏确实给过她）。它照旧每次都记。
+         */
+        const advanceReadUpTo = (upToSeq: number): void => {
+          if (!(upToSeq > 0)) return;
+          if (upToSeq <= Math.max(durableReadMark(sid), writtenReadMarks.get(sid) ?? 0)) return;
+          markReadUpTo(upToSeq);
+        };
+        // ── ① 翻页模式：给游标 ⇒ 读**全部历史**，一页 15 条；**只翻旧话时一个字都不动已读** ──
         if (cursor !== null) {
           const messages = await channelReader(sid, limit, cursor.before);
           // 游标是**记在日志里的事实**（事件 seq），但"这个会话里没有比它更早的了"与
@@ -3847,16 +3940,36 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             pool.filter(isChannelSpoken),
             limit,
           );
-          // ⚠️ **这里不 emit `channel/read`、也不动 readState**：往回翻旧消息既不能把已读位置
+          // ⚠️ **翻旧话不 emit `channel/read`、也不动 readState**：往回翻旧消息既不能把已读位置
           // 退回去、也不能把旧消息重新标成未读（"已读"只按"读到最新"推进，见 sessions.ts 的
-          // applyChannelRead）。这是用户 2026-10-08 那条口径的落点，也是本工具唯一的"只读"路径。
+          // applyChannelRead）。这是用户 2026-10-08 那条口径的落点。
+          //
+          // **但"翻到了最新"是例外**（2026-10-24 用户报的那个 bug）：原来这一支一刀切"一个字都
+          // 不动已读"，于是「她手里那个游标已经指在最新之后（比如抄了上一屏页脚、而那一屏就是
+          // 最近的一屏）」时，这一页明明把最新一条摆给她看了，未读标签照旧不退——直到又有新消息
+          // 来才跟着动（用户原话：「直到再次有未读消息」）。判据只有一个：
+          // **这一页里有没有"该会话最新一条"**。有 ⇒ 推已读位；没有（纯往回翻旧话）⇒ 照旧不推。
+          //
+          // 判"最新"为什么要再取一次（`limit=1`）：游标是事件 seq，"比游标更早"与"是不是最新"
+          // 是两个问题——`before` 只答前一个。这一取只在翻页这一支发生（实测两个月里 23 次），
+          // 默认那一屏一次都不多花。
+          const newest = await channelReader(sid, 1);
+          const newestSeq = newest.length === 0 ? 0 : eventSeqOf(newest[newest.length - 1]!);
+          const coversLatest = newestSeq > 0
+            && batch.some((item) => isExternalMessage(item) && eventSeqOf(item) >= newestSeq);
+          const pagedUpTo = coversLatest ? readMarkOf(batch) : 0;
+          if (pagedUpTo > 0) advanceReadUpTo(pagedUpTo);
           //
           // 点名例外**两条路都适用**：翻页看到的那几条里点了她的，图同样按现有准入装配
           // （一次翻页最多带几张由宿主按这次读的名额定，见 real-loop 的 contextImageBudget）。
           attachAimedImages(batch);
           return okResult([
             `${sid} 从 ${cursorText(cursor.before)} 往前 ${batch.length} 条`
-            + `（本机时间，正序；**翻页不改已读**）· ${whereOf(messages[0]!)}`,
+            // 回执要如实说这一次到底动没动已读位：动了却说"翻页不改已读"是骗她，
+            // 她会据此以为自己还得再读一次（这正是"反复核对"那条路的起点）
+            + (pagedUpTo > 0
+              ? `（本机时间，正序；**这一页到最新了，已读位已推到 seq=${pagedUpTo}**）· ${whereOf(messages[0]!)}`
+              : `（本机时间，正序；**翻页不改已读**）· ${whereOf(messages[0]!)}`),
             // 翻页那一屏**不加提及标记**（`mentioned` 缺席 = 空集）：往回翻是"她主动去看一段历史"，
             // 那一屏里点了她的话不构成"现在有人在叫她"——加了标记反而会把旧 @ 说成新的。
             // 所以年龄格在这里也不出现（`watermark: 0` 让"哪条算旧"这个判据无事可做）。
@@ -3871,7 +3984,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             pagingFooter({
               nextBefore: eventSeqOf(batch[0]!),
               more: pool.length >= limit,
-              // "装不下了"就如实提醒她把 limit 调大——一页 50 条是**默认**，上限是 100
+              // "装不下了"就如实提醒她把 limit 调大——一页 15 条是**默认**，上限是 100
               truncated: pool.length > limit,
               limit,
             }),
@@ -4062,6 +4175,17 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
               + `不必再翻一遍——${way}想接着说就直接 speak，回不回、说什么都由你。`
             : `没有新消息：${sid} 这一轮你已经读过它 ${times} 次，再读返回的还是同一段`
               + `（停在 seq=${newestSeq}${mine}）。${way}想说话直接 speak 就行。`;
+          // **她刚刚确认过"这儿没有新东西"——这条确认本身就是已读**（2026-10-24 修的 bug：
+          // 用户原话「一旦 read_channel 过对应的群聊之后，就不把未读标签取消掉了。直到再次有
+          // 未读消息」）。原实现只有"摆出了东西"才写已读位，于是这里的一句话回执什么也不留：
+          // 界面那一栏算的是 `msgSeq > readUpToSeq` 的条数，已读位不动它就永远停在旧水位上
+          // ——实测用户截图上 418 / 1151 / 510 / 392 那几个群全是这个形状。
+          //
+          // 推到哪：**这一屏取数窗口里最新那条消息的平台序号**（`readMarkOf(pool)`；窗口就是
+          // "最近 limit 条"，所以它就是此刻这个会话的最新）。为什么是安全的：走到这里说明
+          // `unread` 一条都没有（＝没有任何东西比她的水位更新），窗口里那些她要么已经看过、
+          // 要么本来就压在已读位之内，推到一个她够得着的位置不会把任何一条没给她的话标成已读。
+          advanceReadUpTo(readMarkOf(pool));
           return okResult(head);
         }
         /**
@@ -4127,13 +4251,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // **只推到"这一屏里真的出现过的那几条"**：没给她的那些保持未读（用户 2026-10-08 的
           // 第二条口径）。她自己的行不参与（`isChannelSpoken` 那一支直接跳过）——那从来不是"未读"。
           // 群里动静同样不参与：它没有"这个会话里第几条"的语义（未读只数别人的话）。
-          const upToSeq = display.reduce(
-            (max, item) => (isChannelSpoken(item) || isChannelNotice(item) || isChannelSelfAction(item)
-              ? max
-              : Math.max(max, item.msgSeq)),
-            0,
-          );
-          if (upToSeq > 0) emit('channel/read', { sid, upToSeq } satisfies ChannelReadPayload);
+          // 这条判据收在 `readMarkOf` 里（另外两条会写已读的路也走它）——一份口径，不是三份。
+          markReadUpTo(readMarkOf(display));
         }
         readState.set(sid, {
           seq: Math.max(shownUpTo, prevSeq),
@@ -4546,19 +4665,25 @@ interface ChannelReadPayload {
 }
 
 /**
- * `read_channel` 的 limit：缺省 20（`READ_CHANNEL_DEFAULT_LIMIT`）、上限 100。
+ * `read_channel` 的 limit：缺省值**按分支给**——默认那一屏 20（`READ_CHANNEL_DEFAULT_LIMIT`）、
+ * 翻页模式（给了 `before`）15（`READ_CHANNEL_PAGE_SIZE`）；上限一律 100。
  *
- * **两个数各管一件事**（2026-10-08 的补充，别把它们混起来）：
+ * **两个数各管一件事**（2026-10-08 的补充，别把它们混起来；2026-10-23 把缺省这一半补齐）：
  *   • 这里的 20 是**默认那一屏**的行数（v67 起那一屏是"上次查看之后"的增量，再压到 20 行）；
- *   • 翻页那一页是 `READ_CHANNEL_PAGE_SIZE`（50）——**缺省值只有一个**，翻页那页也走这里，
+ *   • 翻页那一页是 `READ_CHANNEL_PAGE_SIZE`（15）——**缺省值有两档，由调用点按"有没有游标"选**，
  *     由页脚照本页实际的行数告诉她下一页怎么翻（口径只有一处，见 `pagingFooter`）。
+ *
+ * ⚠ **缺省值不许一处通用**（v80 那一批修的洞）：原来这里只有 20 一个缺省，于是"给 `before`
+ * 不给 `limit`"实发 20 行，而默认那一屏的页脚照 `READ_CHANNEL_PAGE_SIZE` 说"一页 15 条"
+ * ——她照页脚算翻页节奏就会算错（每页差 5 条），"页脚上的数字 == 实发行数"这条口径也破了一边。
+ * 现在两档分开：无游标 20、有游标 15，页脚说什么、下一屏就真的发多少行。
  *
  * 上限不是"省 token"那么简单：她要是给个 100000，这一条工具结果就会把整段上下文挤掉——
  * 而工具结果是要**逐轮重发**的（不像日志读一次就完了）。宁可让她多调几次，
  * 也不要一次塞进来一份读不完的清单。
  */
-function readLimit(raw: unknown): number {
-  if (raw === undefined) return READ_CHANNEL_DEFAULT_LIMIT;
+function readLimit(raw: unknown, fallback: number = READ_CHANNEL_DEFAULT_LIMIT): number {
+  if (raw === undefined) return fallback;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) {
     throw new ToolArgumentError('limit', `limit 必须是数字，收到 ${JSON.stringify(raw)}`);
   }
@@ -4765,11 +4890,11 @@ function pagingFooter(input: {
     return `（本机时间；已经翻到头了——${cursorText(input.nextBefore)} 之前没有更早的消息。`
       + '想回到现在就不带 before 读一次。）';
   }
-  // ⚠ 2026-10-20（R2 的复核结论）：`，一页 ${input.limit} 条`**不能删**，尽管"一页 50 条"这个
+  // ⚠ 2026-10-20（R2 的复核结论）：`，一页 ${input.limit} 条`**不能删**，尽管"一页 15 条"这个
   // 默认值逐字写在 `before` / `limit` 的参数描述里。理由：这一格报的是**本页实际用的行数**
   // （她可以传 `limit:7`，那时"一页 7 条"在参数描述里根本没有），而"页脚照本页实际用的行数
   // 指路（口径只有一处）"有两条用例钉着（`test/read-channel-page.test.ts` ⑦ 的 limit:7 那条、
-  // ⑨ 的 50 条那条）。审计把它归成"纯重复"，只对**默认值**成立，对非默认 limit 不成立——
+  // ⑨ 的 15 条那条）。审计把它归成"纯重复"，只对**默认值**成立，对非默认 limit 不成立——
   // 删了会让"这一页到底几行"从回执里消失，属判据而不是样板。
   const wider = input.truncated ? `，或者 limit 更大再看远一点（上限 ${READ_CHANNEL_MAX_LIMIT}）` : '';
   return `（想接着往回翻就带上 ${cursorText(input.nextBefore)} 重读一次，一页 ${input.limit} 条${wider}）`;

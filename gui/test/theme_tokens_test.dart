@@ -8,6 +8,7 @@ import 'package:irmia_gui/api.dart';
 import 'package:irmia_gui/app.dart';
 import 'package:irmia_gui/home.dart';
 import 'package:irmia_gui/theme.dart';
+import 'package:irmia_gui/theme/design_tokens.dart';
 import 'package:irmia_gui/ui_state.dart';
 
 /// **暗主题那两处**——用户 2026-10-05 圈的范围（两句，第二句把范围又收了一格）：
@@ -85,17 +86,24 @@ void main() {
           reason: '亮主题一个像素都不加——用户原来的气泡就是没有描边的');
     });
 
-    test('发送键那一圈：1px、圆形，只在暗模出现', () {
+    test('发送键那一圈：1px、圆角矩形（半径 12），只在暗模出现', () {
       final shape = dark.sendButtonShape;
-      expect(shape, isA<CircleBorder>(), reason: '发送键是圆的，描边长在形状自己身上');
-      final side = (shape as CircleBorder).side;
+      expect(shape, isA<RoundedRectangleBorder>(),
+          reason: '用户 2026-10-25：「发送按钮改圆角矩形」——不再是正圆');
+      final rounded = shape as RoundedRectangleBorder;
+      expect(rounded.borderRadius, BorderRadius.circular(Shape.radiusControlLarge));
+      expect(Shape.radiusControlLarge, 12);
+      final side = rounded.side;
       expect(side.color, dark.pairOn);
       expect(side.width, IrmiaTheme.hairlineWidth);
       expect(side.width, 1.0);
 
-      expect(light.sendButtonShape, const CircleBorder(),
-          reason: '亮主题就是用户原来那个 `const CircleBorder()`');
-      expect((light.sendButtonShape as CircleBorder).side, BorderSide.none,
+      final lightShape = light.sendButtonShape;
+      expect(lightShape, isA<RoundedRectangleBorder>(),
+          reason: '亮主题同一个形状，只是没有描边');
+      expect((lightShape as RoundedRectangleBorder).borderRadius,
+          BorderRadius.circular(Shape.radiusControlLarge));
+      expect(lightShape.side, BorderSide.none,
           reason: '亮主题的 side 必须是 none——不是"淡淡的边"，是压根没有');
     });
 

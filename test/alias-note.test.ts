@@ -26,7 +26,7 @@ const SID = 'qq:group:00000000000000000000000000000002';
 const TABLE = [
   '# 身份别名',
   '',
-  'qq:c2c:00000000000000000000000000000001 = OWNER（用户）',
+  'qq:c2c:00000000000000000000000000000001 = 阿岚（用户）',
   `${SID} = IRMIA框架测试群（口径：看情况淡着）`,
   '# 群成员（openid，不是 sid；只在认人时用）',
   '00000000000000000000000000000005 = 甲（群里发过"guodie"那位；**别当用户**）',
@@ -47,7 +47,7 @@ describe('别名 · 名字与备注怎么切', () => {
 
   test('没有备注：整串就是名字，`note` 不出现（不是空串）', () => {
     assert.deepEqual(splitAliasNote('技术群'), { name: '技术群' });
-    assert.deepEqual(splitAliasNote('  OWNER  '), { name: 'OWNER' }, '首尾空白不算名字');
+    assert.deepEqual(splitAliasNote('  阿岚  '), { name: '阿岚' }, '首尾空白不算名字');
   });
 
   test('半角括号同样认（她两种都写过）', () => {
@@ -153,6 +153,6 @@ describe('别名 · 群成员段（裸 openid 键不进会话表）', () => {
     assert.equal(aliases.has('00000000000000000000000000000005'), false);
     assert.equal(aliases.has('00000000000000000000000000000004'), false);
     assert.equal(aliases.get(SID)?.name, 'IRMIA框架测试群');
-    assert.equal(aliases.get('qq:c2c:00000000000000000000000000000001')?.name, 'OWNER');
+    assert.equal(aliases.get('qq:c2c:00000000000000000000000000000001')?.name, '阿岚');
   });
 });

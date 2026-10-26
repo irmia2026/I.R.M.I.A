@@ -23,10 +23,21 @@
 param(
   [string]$Root = 'C:\irmia-verify',
   [int]$Port = 7799,
-  [string]$Repo = '<repo>',
-  [string]$NodeExe = 'D:\IrmiaAgent\tools\node\node.exe',
+  [string]$Repo = '',
+  [string]$NodeExe = '',
   [int]$TimeoutSeconds = 120
 )
+
+# ── 默认值推导：脚本只认「自己在哪」，不写死任何机器路径 ──
+if ($Repo -eq '') {
+  if ([string]::IsNullOrEmpty($PSScriptRoot)) { throw '无法从脚本位置推断项目根：请显式传 -Repo <项目根>' }
+  $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+}
+if ($NodeExe -eq '') {
+  $found = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+  if ($null -eq $found) { throw 'PATH 上找不到 node.exe：请用 -NodeExe 指定绝对路径' }
+  $NodeExe = $found.Source
+}
 
 $ErrorActionPreference = 'Stop'
 $fail = @()

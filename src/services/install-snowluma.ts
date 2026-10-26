@@ -4,21 +4,19 @@
  * 用户拍板："**框架需要引导客户安装 snowluma，并且尽量少让对方配置**。"
  * 所以这一步的目标是把"找 release → 下 zip → 解压 → 填路径"四步手工，压成**一次点击**。
  *
- * **为什么框架能代下载**：我们只是替他点了一下下载——包从**官方 Releases** 拿，
- * 不随框架分发、不改它一个字节。
- *
- * SnowLuma 的许可（LICENSE §3）**允许再分发**，条件是：非商业、附完整许可文本、
- * 不改动声明、公开修改版要事先授权。我们连"再分发"都算不上（没有随框架分发任何东西），
- * 只是把人本来要手动做的三步代劳了；包里自带 `LICENSE`/`EULA.md`/`PRIVACY.md`，
- * 随包落地，正好满足"附完整许可文本"。
- *
- * 真正需要避开的是另外两条：**§4(b)**（不得基于它开发、发布或分发另一个项目——
- * 所以我们只做进程托管，不包装它的 API、不基于它写衍生品）与 **§5**（原生件专有，
- * 不授予**单独**再分发——所以我们从不把 `native/*.node` 拆出来单独给谁）。
+ * **授权口径（2026-10-23 改准——这里以前写的是"许可允许再分发"，别写回去）**：我们
+ * **不再分发**任何东西，只从**官方 Releases** 取到用户本机、只解压、不改它一个字节
+ * （包里的 `LICENSE`/`EULA.md`/`PRIVACY.md` 随包原样落地，`native/*` 也从不拆出去单独给谁）。
+ * 这件事的依据是 **SnowLumaDevs 的书面授权**（`docs/third-party-authorizations.md`），
+ * 不是"我们自认有再分发权"；授权范围与三项义务一律以那份凭证为准，本文件不重述。
  *
  * **装到哪**：`<dataDir>/services/snowluma/`。不放进 `tools/`（那是 pwsh/rg/es 那些
  * 一次性小工具的家）：这是长驻服务，探测方式、升级方式、生命周期都不一样，
  * 混在一起将来会互相绊。
+ *
+ * **重装保住它的运行期目录**：见 [SNOWLUMA_PRESERVED_ON_REINSTALL]——`config/`（OneBot 的 token）、
+ * `logs/`、`data/`（消息库与身份库）都是它自己写的，清空重解压会把它们一起抹掉，
+ * 代价是用户重装要重新扫码、聊天记录也没了。
  */
 
 import { existsSync } from 'node:fs';
@@ -35,6 +33,27 @@ export const SERVICES_DIR_NAME = 'services';
 export const SERVICE_CACHE_DIR_NAME = '.cache';
 /** 官方仓库（release 从这儿拿，不从任何镜像） */
 export const SNOWLUMA_REPO = 'SnowLuma/SnowLuma';
+
+/**
+ * 重装/升级时**原地保住**的运行期目录（相对安装根，`/` 分隔）。
+ *
+ * 机制与 `deps/install.ts` 的 `PRESERVED_ON_REINSTALL` 同一套：先把这几棵子树挪到同卷暂存，
+ * 清空目标目录、解压，再迁回来——新包自带同名文件时**新包优先**（绝不拿旧字节盖新版本）。
+ *
+ * **这三个名字不是猜的**，是本机真装过的那份目录（`data/services/snowluma/`）顶层清单里的：
+ *   · `config/`：`consent.json`、`notifications.json`、`onebot_<uin>.json`、`runtime.json`、
+ *     `ui.json`、`webui.json`——OneBot 的 ws 端口与 access_token 就在 `onebot_<uin>.json` 里；
+ *   · `logs/`：`snowluma-<date>.log`——排障唯一的历史；
+ *   · `data/`：`<uin>/messages.db`（36 MB 消息库）、`media.db`（9.4 MB）、`reactions.db`、
+ *     `snowluma_identity.db`（725 KB **身份库**）、`sys-face-catalog.json`
+ *     ——**这是运行期数据库，重装必须保**：清掉就是替用户删消息与登录身份。
+ * 它们**都不在任何发行包里**（两版夹具 zip 解出来都没有这三个目录，是它登录/运行之后自己物化的），
+ * 所以清空重解压等于替用户丢登录、日志与消息：重装一次就要重新扫码，聊天记录与头像表情素材也没了。
+ *
+ * 反过来 `client/`、`native/`、`*.js`/`*.mjs`/`package.json` 是**发行包自带的**，必须让新版覆盖
+ * ——所以它们绝不能进这张名单（`test/install-snowluma.test.ts` 有用例钉住"名单里的前缀不在包里"）。
+ */
+export const SNOWLUMA_PRESERVED_ON_REINSTALL: readonly string[] = ['config', 'logs', 'data'];
 
 export interface SnowLumaAsset {
   name: string;
@@ -202,15 +221,26 @@ export async function installSnowLuma(input: SnowLumaInstallInput): Promise<Snow
   const bytes = (await stat(zipPath).catch(() => null))?.size ?? 0;
   say(`下载完成（${(bytes / 1024 / 1024).toFixed(1)} MB）`);
 
-  // ③ 解压到它的家。`extractZipToDirectory` 会先清空目标目录——这里是有意的：
-  //    重装/升级都该是一次干净落地，而不是把新版本盖在旧的文件堆上。
+  // ③ 解压到它的家。`extractZipToDirectory` 会先清空目标目录——重装/升级该是一次干净落地，
+  //    而不是把新版本盖在旧的文件堆上。**唯一的例外**是它自己物化的运行期目录
+  //    （`config/`、`logs/`、`data/`，见 SNOWLUMA_PRESERVED_ON_REINSTALL）：那几棵子树先挪到同卷暂存、
+  //    解压完再迁回，所以重装不会让用户重新扫码、也不会把日志与聊天记录一起抹掉。
   say('正在解压…');
   const { readFile } = await import('node:fs/promises');
   const entries = readZipEntries(await readFile(zipPath));
   if (!entries.ok) return { ok: false, detail: `这个包不是有效的 zip：${entries.error ?? '解析失败'}`, log };
-  const extracted = await extractZipToDirectory(entries.entries, dir);
+  const extracted = await extractZipToDirectory(entries.entries, dir, {
+    preserve: SNOWLUMA_PRESERVED_ON_REINSTALL,
+  });
   if (!extracted.ok) return { ok: false, detail: `解压失败：${extracted.error}`, log };
   say(`解压完成（${extracted.written} 个文件）`);
+  // 保住了什么要**说出来**：这些文件是用户的登录态与排障历史，不说一句，
+  // 人就不知道自己刚才那次"重装"其实什么都没丢（deps 那条路也是同样的回执口径）。
+  for (const tree of extracted.preserved) {
+    say(`重装保留了 ${tree.path}（${tree.files} 个文件、${tree.bytes} 字节）：`
+      + '那是它自己写的运行期目录，发行包里没有，所以原样留着');
+  }
+  for (const note of extracted.notes) say(`注意：${note}`);
 
   // ④ 复检：解压成功不等于能跑（这正是 deps 那边学到的教训——装完不验就报"已装好"，
   //    用户会在很久以后才发现没生效）。这里验最要紧的一条：入口文件在不在。

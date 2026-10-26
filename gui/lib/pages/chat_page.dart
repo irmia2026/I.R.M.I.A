@@ -16,7 +16,10 @@ import '../app.dart';
 import '../i18n/app_strings.dart';
 import '../i18n/strings_scope.dart';
 import '../markdown.dart';
+// 关键动作留痕（`[input] tap=… page=…`）：卡死时"人最后按的是不是发送键"要能看见
+import '../stall_watch.dart';
 import '../theme.dart';
+import '../theme/design_tokens.dart';
 import '../ui_kit.dart';
 import 'page_chrome.dart';
 
@@ -464,9 +467,17 @@ class ChatPageState extends State<ChatPage> {
     connectStream();
     // 滚到顶就自动往前翻一页（见 [_onScroll]）
     scroll.addListener(_onScroll);
+    // 输入框聚焦时那圈描边要换成主色（见 [_composer]）：FocusNode 的变化**不进** setState
+    // 的常规路径，必须自己挂一个监听。只重画这一页（页面本来就随输入重建）。
+    inputFocus.addListener(_onFocusChange);
     // 断线时不发请求（后端没起来，问了也是白问），恢复连接那一刻补一次：
     // 人在离线期间去「会话联系人」填了名字，回来就能看到。
     widget.state.addListener(_onStateChange);
+  }
+
+  /// 输入框聚焦态变了 ⇒ 重画一次（那一圈描边是"当前焦点"的直接读数，见 [_composer]）
+  void _onFocusChange() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -478,6 +489,7 @@ class ChatPageState extends State<ChatPage> {
     thinkingNow.dispose();
     scroll.removeListener(_onScroll);    scroll.dispose();
     input.dispose();
+    inputFocus.removeListener(_onFocusChange);
     inputFocus.dispose();
     super.dispose();
   }
@@ -1521,6 +1533,9 @@ class ChatPageState extends State<ChatPage> {
   Future<void> send() async {
     final text = input.text.trim();
     if (text.isEmpty) return;
+    // 关键动作留痕：**在 await 之前**记（卡死正好发生在这条请求上时，日志里要有这一行；
+    // 等它回来再记就晚了——那正是"卡在哪"最需要的那一笔）
+    traceInput('发送消息');
     input.clear();
     // 斜杠命令：/reset 清空上下文（日志不动，只把遮蔽点推到当前水位）
     if (text == '/reset') {
@@ -1570,7 +1585,14 @@ class ChatPageState extends State<ChatPage> {
               // 读失败 ≠ 没有历史：**只有在真的读成功之后**才允许说「会话尚未开始」
               // （见 [ChatPageState._historyError] 与 [_HistoryErrorState]）
               : _historyError != null && items.isEmpty
-                  ? _HistoryErrorState(error: _historyError!, onRetry: loadHistory)
+                  ? _HistoryErrorState(
+                      error: _historyError!,
+                      // 「点重试」是关键动作：卡在错误态里时，人最后按的就是这一颗
+                      onRetry: () {
+                        traceInput(s.retry);
+                        unawaited(loadHistory());
+                      },
+                    )
                   : items.isEmpty
                       ? _EmptyGuide(onCompose: inputFocus.requestFocus)
                       : CustomScrollView(
@@ -1650,59 +1672,115 @@ class ChatPageState extends State<ChatPage> {
             ),
           ),
         ),
-        Container(
-          padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: input,
-                  focusNode: inputFocus,
-                  onSubmitted: (_) => unawaited(send()),
-                  decoration: InputDecoration(
-                    hintText: s.composerHint,
-                    filled: true,
-                    fillColor: scheme.surface,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide(color: scheme.outlineVariant),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide(color: scheme.outlineVariant),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide(color: scheme.primary, width: 1.4),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 44,
-                height: 44,
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    padding: EdgeInsets.zero,
-                    // 暗主题下：填充与背景相同（透明）+ 一圈白描边；亮主题下：原来那个
-                    // `const CircleBorder()` + primary 填充。判据与取值都在 theme.dart 的
-                    // IrmiaDarkPair 里，这里不判明暗、也不挑色。
-                    shape: scheme.sendButtonShape,
-                    backgroundColor: scheme.pairFill,
-                  ),
-                  onPressed: () => unawaited(send()),
-                  child: Icon(Icons.arrow_upward_rounded, size: 20, color: scheme.pairOn),
-                ),
-              ),
-            ],
-          ),
-        ),
+        _composer(scheme),
       ],
     );
   }
+
+  /// 输入条的几何（2026-10-25 用户：「输入框和发送按钮做得更好看一点。圆角不要那么大了。」
+  /// 紧接一句「发送按钮改圆角矩形。」）
+  ///
+  /// 三档圆角见 `theme/design_tokens.dart` 的 [Shape]；这一条用的是**大控件档**
+  /// [Shape.radiusControlLarge]（= 控件 10 + 2 = 12），输入框与发送键同一个数：
+  ///   · 输入框：**高 52**、左右内边距 16、圆角 12；底色 `surfaceContainerLowest`、
+  ///     边框 `outlineVariant` 1px，**聚焦时换主色**（1.4px，见 [Shape.focusWidth]）；
+  ///     占位文案不动（`s.composerHint`），空串时 `send()` 自己忽略，所以没有禁用态要画；
+  ///   · 发送键：**40×40 圆角矩形、半径 12**（从前是 44 的正圆），与输入框垂直居中对齐；
+  ///     填充/前景仍走 [IrmiaDarkPair]（亮模蓝底白箭、暗模透明底 + 一圈白描边）——
+  ///     形状变了，那一套取色口径一个字都没动。
+  ///
+  /// 为什么描边/底色画在**外面这层 `BoxDecoration`** 而不是 `InputDecoration`：
+  /// 用例要按渲染矩形与 `BoxDecoration` 直接量"圆角 12 / 高 52"（`InputDecoration` 里那份
+  /// `OutlineInputBorder` 与真实画出来的框不是同一个对象），
+  /// 而且聚焦色只需要改这一层。`TextField` 自己的 decoration 因此是**无边框 + 不填充**。
+  Widget _composer(ColorScheme scheme) {
+    final s = IrmiaStrings.of(context);
+    final radius = BorderRadius.circular(IrmiaTheme.radiusCtlLarge);
+    final focused = inputFocus.hasFocus;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              key: const ValueKey('chat-composer-field'),
+              height: _kComposerFieldHeight,
+              padding: const EdgeInsets.symmetric(horizontal: Space.x4),
+              alignment: Alignment.centerLeft,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerLowest,
+                borderRadius: radius,
+                border: Border.all(
+                  color: focused ? scheme.primary : scheme.outlineVariant,
+                  width: focused ? Shape.focusWidth : Shape.hairline,
+                ),
+              ),
+              child: TextField(
+                controller: input,
+                focusNode: inputFocus,
+                onSubmitted: (_) => unawaited(send()),
+                decoration: InputDecoration(
+                  hintText: s.composerHint,
+                  filled: false,
+                  isDense: true,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          _sendButton(scheme, radius),
+        ],
+      ),
+    );
+  }
+
+  /// 发送键：40×40 的圆角矩形（半径 12），填充/前景/描边全部来自 [IrmiaDarkPair]。
+  ///
+  /// 描边那一圈**不在这里判明暗**：`scheme.sendButtonShape` 是"暗模白描边 / 亮模不描边"的
+  /// 唯一判据（见 theme.dart 的四条边界），这里只把它翻成 `BoxDecoration` 好让用例按渲染矩形
+  /// 与装饰直接量。
+  Widget _sendButton(ColorScheme scheme, BorderRadius radius) {
+    final shape = scheme.sendButtonShape;
+    final side = shape is RoundedRectangleBorder ? shape.side : BorderSide.none;
+    final border = side.style == BorderStyle.none || side.width == 0
+        ? null
+        : Border.fromBorderSide(side);
+    return Semantics(
+      // 与从前那颗 FilledButton 同一层语义：它是个按钮（读屏与键盘焦点要用）
+      button: true,
+      child: Material(
+        type: MaterialType.transparency,
+        child: Ink(
+          key: const ValueKey('chat-send'),
+          width: _kSendButtonSize,
+          height: _kSendButtonSize,
+          decoration: BoxDecoration(
+            color: scheme.pairFill,
+            borderRadius: radius,
+            border: border,
+          ),
+          child: InkWell(
+            onTap: () => unawaited(send()),
+            borderRadius: radius,
+            child: Center(
+              child: Icon(Icons.arrow_upward_rounded, size: 20, color: scheme.pairOn),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
+
+/// 输入框那一格的定高（52）：比普通按钮高一档，所以它的圆角用大控件档 12。
+const double _kComposerFieldHeight = 52;
+
+/// 发送键的边长（40×40，圆角矩形）
+const double _kSendButtonSize = 40;
 
 /// 她这一轮跑到哪儿了——喂「思考中 · 第 N 步 · 已想 X 字 · 用时 M:SS」那一行。
 ///

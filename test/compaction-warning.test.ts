@@ -10,20 +10,19 @@
  * 这一份钉七件事（正反两面都要）：
  *   ① **线下不动**：历史没到 80% ⇒ 一个字都不发；
  *   ② **越线就发**（在被闸门拦下、压不动的那一拍）；
- *   ③ **同档不刷屏**：同一档在 **30 分钟冷却**内不重复（`cooldown`；2026-10-21 起，
- *      替换原来"上一次压缩之后报过就永久静默"的 `already-warned` 一刀切）；
- *   ④ **分档都报**：**80 → 90 → 95 连续跨档三次都报**（跨新档不受冷却约束）；
+ *   ③ **同一档不重报**：同一档报过一次之后**永久**不再报（2026-10-22 起没有冷却——
+ *      隔一分钟还是隔一天都一样；上一版的 `cooldown` 出口不再产生）；
+ *   ④ **分档都报**：**80 → 95 跨档两次都报**（90 那一档 2026-10-22 删掉了）；
  *   ⑤ **重置**：压缩过（`wrote`）或可见历史回落到**阈值 50% 以下** ⇒ 分档状态归零，
  *      下一次跨 80% 照样报；
  *   ⑥ **阈值随配置走**：同一份历史、两个阈值、两种结论（排除"写死 160k"的实现）；
  *   ⑦ **判据同源**：预警用的 `historyTokens` 就是压缩判定刚算出来的那个数。
  *
- * ★ **2026-10-21 的病根与修法**（读懂这几条用例的前提）：原来判据只有"上一次压缩之后提醒过
- * 没有"这一面旗，报过一次之后**无论历史涨到多高都永久静默**——现场连续 6 条
- * `warning.fired=false, why:"already-warned"`，其中 histTok 170,207 / 175,379 / 179,777
- * 三笔已经贴着 200k 的线（用户 14:33 那次"突然被压缩、之前没预警"）。
- * 现在改成**分档 + 同档冷却 + 压缩/回落重置**，并且把状态与参数（`tier` / `lastTier` /
- * `lastAtMs` / `cooldownMs`）一起落账，事后能从日志复算出"那一拍为什么没报"。
+ * ★ **2026-10-22 的病根与修法**（读懂这几条用例的前提）：上一版是"分档 + 同档 30 分钟冷却"，
+ * 现场同一档 80 在 07:34 / 08:25 / 09:09 各报一次（隔 51 / 44 分钟）——冷却挡不住一小时。
+ * 用户原话：「**压缩临近变成了每次唤醒都有**。80% 提醒一次、95% 提醒一次就行了。」
+ * 所以这一版：两档、每档每周期**只报一次**、判据里**没有时钟**；重报的唯一条件是
+ * **换了一档**或**开了新周期**（压缩 / 回落到 <50%）。用例 ⑩-b 就是用户点名的那条曲线。
  *
  * ★ **本文件的配法为什么长这样**（读懂它才读得懂这几条用例）：
  *   压缩线在 **100%**、预警线在 **80%**，而"越线"与"能压"并不总是同时成立——
@@ -52,6 +51,8 @@ import {
   COMPACTION_WARNING_COOLDOWN_MS,
   COMPACTION_WARNING_RATIO,
   COMPACTION_WARNING_RESET_RATIO,
+  COMPACTION_WARNING_TIER_LINES,
+  COMPACTION_WARNING_TIER_RATIOS,
   compactionWarningRowsOf,
   compactionWarningStateOf,
   planCompactionWarning,
@@ -291,7 +292,8 @@ test('① 线下不动：历史没到 80% ⇒ 一个字都不发，留痕说清�
   assert.equal(w?.['tier'], 0, '线下 ⇒ 第 0 档');
   assert.equal(w?.['lastTier'], 0, '还没报过 ⇒ 最高档 0');
   assert.equal(w?.['lastAtMs'], null, '还没报过 ⇒ 上次时刻 null');
-  assert.equal(w?.['cooldownMs'], COMPACTION_WARNING_COOLDOWN_MS, '冷却 30 分钟（判据模块里那一个常量）');
+  assert.equal(w?.['cooldownMs'], 0, '冷却已废弃（2026-10-22）：这一格恒为 0');
+  assert.equal(COMPACTION_WARNING_COOLDOWN_MS, 0, '同档冷却整条删掉——常量恒为 0，判据不读时钟');
 });
 
 // ──────────────────────── ② 越线就发 ────────────────────────
@@ -341,23 +343,23 @@ test('③ 只发一次：同一条越线状态**不许每拍各发一条**', asy
     `越线多拍只许一条（实测 ${soonWakes(events).length} 条）：`
     + `${JSON.stringify(decisions(events).map(r => `${r.data.turn}:${r.data.reason}/${(r.data.warning as {why?:string})?.why}`))}`);
   const whys = decisions(events).map(r => (r.data.warning as { why?: string } | undefined)?.why);
-  assert.ok(whys.includes('cooldown'),
-    `留痕要说清"为什么不发第二条"（**同档冷却**，2026-10-21 起不再是 already-warned）：${JSON.stringify(whys)}`);
+  assert.ok(whys.includes('already-warned'),
+    `留痕要说清"为什么不发第二条"（**这一档报过了**，2026-10-22 起没有 cooldown）：${JSON.stringify(whys)}`);
 
-  // 冷却那一行的四格必须**足以复算**：同档、上次时刻就是"报过"那一行、冷却 30 分钟
+  // 那一行的四格必须**足以复算**：同档、上次时刻就是"报过"那一行、冷却已废弃（0）
   const firedRow = decisions(events).find(r => (r.data.warning as { why?: string } | undefined)?.why === 'fired')!;
-  const coolingRows = decisions(events).filter(
-    r => (r.data.warning as { why?: string } | undefined)?.why === 'cooldown',
+  const repeatRows = decisions(events).filter(
+    r => (r.data.warning as { why?: string } | undefined)?.why === 'already-warned',
   );
-  const coolingRow = coolingRows[coolingRows.length - 1]!;
+  const repeatRow = repeatRows[repeatRows.length - 1]!;
   const firedTier = (firedRow.data.warning as { tier?: number }).tier;
-  const cw = coolingRow.data.warning as {
+  const cw = repeatRow.data.warning as {
     tier?: number; lastTier?: number; lastAtMs?: number | null; cooldownMs?: number;
   };
   assert.equal(cw.tier, firedTier, '同一档（tier 相同）');
   assert.equal(cw.lastTier, firedTier, 'lastTier = 本周期已经报过的那一档');
   assert.equal(cw.lastAtMs, Date.parse(firedRow.ts), 'lastAtMs = 报过那一行的 ts（同一把钟）');
-  assert.equal(cw.cooldownMs, COMPACTION_WARNING_COOLDOWN_MS);
+  assert.equal(cw.cooldownMs, 0, '冷却已废弃：这一格恒为 0');
 });
 
 // ──────────────────────── ④ 压缩复位 ────────────────────────
@@ -505,22 +507,28 @@ test('⑧ 重启后不补发：日志里已有预警、其后没有 `wrote` ⇒ 
   assert.equal(soonWakes(after).length, 1,
     `重启**不许**补发（实测 ${soonWakes(after).length} 条）：判据必须从日志读回来，不能靠队列`);
   const why = (decisions(after)[decisions(after).length - 1]?.data.warning as { why?: string } | undefined)?.why;
-  assert.equal(why, 'cooldown',
-    `留痕要说清"为什么不补发"（同一档、冷却未到；收到 ${String(why)}）`);
+  assert.equal(why, 'already-warned',
+    `留痕要说清"为什么不补发"（这一档本周期报过了；收到 ${String(why)}）`);
 });
 
-// ═══════════════════ ⑨–⑬ 纯判据：分档 / 冷却 / 重置 / 从日志复算（2026-10-21） ═══════════════════
+// ═══════════ ⑨–⑬ 纯判据：两档 / 每档一次 / 重置 / 从日志复算（2026-10-22） ═══════════
 //
-// 上面 ①–⑧ 走真链路（真 EventLog + 真 RealLoop），钉"接通"与"不刷屏"；
-// 下面这几条只调纯函数，钉**判据的形状**（档位、冷却、重置、复算材料）。
+// 上面 ①–⑧ 走真链路（真 EventLog + 真 RealLoop），钉"接通"与"不重报"；
+// 下面这几条只调纯函数，钉**判据的形状**（档位、每档一次的永久性、重置、复算材料）。
 // 分开的理由：真链路夹具里"越线"往往一口气越过 100%（于是永远落在 95 档），
-// 用它的落点去测 80→90→95 三连会变成在测"我猜的那一支"——判据该由显式输入钉。
+// 用它的落点去测 80 → 95 两档会变成在测"我猜的那一支"——判据该由显式输入钉。
 
-/** 纯判据用的阈值（只服务下面五条用例；与真链路的 THRESHOLD 无关） */
+/** 纯判据用的阈值（只服务下面几条用例；与真链路的 THRESHOLD 无关） */
 const TIER_THRESHOLD = 200_000;
 const NOW_MS = Date.parse('2026-10-21T14:00:00.000+08:00');
+const HOUR_MS = 60 * 60 * 1000;
 
-/** 纯判据调用（缺省：本周期还没报过、结论是"越线但压不动"的那一拍） */
+/**
+ * 纯判据调用（缺省：本周期还没报过、结论是"越线但压不动"的那一拍）。
+ *
+ * ⚠ 不传 `nowMs` / `cooldownMs`：2026-10-22 起判据**不读时钟**（那两个参数已从
+ * `CompactionWarningSignals` 删掉）；传了也只是被类型忽略。
+ */
 function planPure(
   historyTokens: number | null,
   options: {
@@ -528,8 +536,6 @@ function planPure(
     reason?: string;
     lastTier?: CompactionWarningTier;
     lastAtMs?: number | null;
-    nowMs?: number;
-    cooldownMs?: number;
   } = {},
 ): ReturnType<typeof planCompactionWarning> {
   return planCompactionWarning({
@@ -538,66 +544,100 @@ function planPure(
     reason: options.reason ?? 'gate',
     lastTier: options.lastTier ?? 0,
     lastAtMs: options.lastAtMs ?? null,
-    nowMs: options.nowMs ?? NOW_MS,
-    ...(options.cooldownMs === undefined ? {} : { cooldownMs: options.cooldownMs }),
   });
 }
 
-test('⑨ 分档：80 → 90 → 95 连续跨档三次都报（跨新档不受冷却约束）', () => {
+test('⑨ 两档：80% 与 95% 各报一次；90% 落在 80 档（90 那一档删了）', () => {
   const at80 = planPure(0.80 * TIER_THRESHOLD);
   assert.equal(at80.fired, true, '跨 80% ⇒ 报');
   assert.equal(at80.why, 'fired');
   assert.equal(at80.tier, 80);
   assert.equal(at80.lastTier, 0, '这是本周期第一次');
   assert.equal(at80.lastAtMs, null);
-  assert.equal(at80.cooldownMs, COMPACTION_WARNING_COOLDOWN_MS);
+  assert.equal(at80.cooldownMs, 0, '冷却已废弃：落账恒为 0');
 
-  // 才过一分钟就跨到 90 ⇒ **仍然要报**（新档不被同档冷却挡住）
-  const at90 = planPure(0.92 * TIER_THRESHOLD, { lastTier: 80, lastAtMs: NOW_MS - 60_000 });
-  assert.equal(at90.fired, true, '跨到 90 档必须报（才过 1 分钟也要报）');
-  assert.equal(at90.tier, 90);
-  assert.equal(at90.lastTier, 80);
-
-  const at95 = planPure(0.96 * TIER_THRESHOLD, { lastTier: 90, lastAtMs: NOW_MS - 60_000 });
-  assert.equal(at95.fired, true, '跨到 95 档必须报');
+  const at95 = planPure(0.96 * TIER_THRESHOLD, { lastTier: 80, lastAtMs: NOW_MS - 60_000 });
+  assert.equal(at95.fired, true, '跨到 95 档必须报（才过 1 分钟也要报）');
   assert.equal(at95.tier, 95);
+  assert.equal(at95.lastTier, 80);
 
-  // 档位刻度只有一处（`warningTierOf`）：边界值按它判
+  // 档位刻度只有一处（`warningTierOf`）：边界值按它判——90% 现在只是"还在 80 档"
   assert.equal(warningTierOf(0.7999), 0);
   assert.equal(warningTierOf(0.8), 80);
   assert.equal(warningTierOf(0.8999), 80);
-  assert.equal(warningTierOf(0.9), 90);
-  assert.equal(warningTierOf(0.9499), 90);
+  assert.equal(warningTierOf(0.9), 80, '90% 落在 80 档：90 那一档 2026-10-22 删了');
+  assert.equal(warningTierOf(0.9499), 80);
   assert.equal(warningTierOf(0.95), 95);
   assert.equal(warningTierOf(Number.NaN), 0);
+  // 刻度表本身只有两档（判据、事件、doctor 读数都从这一份来）
+  assert.deepEqual([...COMPACTION_WARNING_TIER_RATIOS], [0.8, 0.95]);
+  assert.deepEqual([...COMPACTION_WARNING_TIER_LINES], [80, 95]);
 });
 
-test('⑩ 同档 30 分钟冷却：冷却内不报、到期再报；不回头补报更低档', () => {
-  const cooling = planPure(0.92 * TIER_THRESHOLD, { lastTier: 90, lastAtMs: NOW_MS - 5 * 60_000 });
-  assert.equal(cooling.fired, false, '同档 + 冷却内 ⇒ 不报');
-  assert.equal(cooling.why, 'cooldown');
-  assert.equal(cooling.tier, 90);
-  assert.equal(cooling.lastTier, 90);
-  assert.equal(cooling.lastAtMs, NOW_MS - 5 * 60_000, '把读到的状态一起落账（便于复算）');
+test('⑩ 同一档报过就永久不再报：隔一小时 / 一天 / 时钟回拨都不重报；不回头补报更低档', () => {
+  for (const [label, lastAtMs] of [
+    ['5 分钟', NOW_MS - 5 * 60_000],
+    ['整一小时', NOW_MS - HOUR_MS],
+    ['一天', NOW_MS - 24 * HOUR_MS],
+    ['时钟回拨（lastAtMs 在未来）', NOW_MS + 60_000],
+  ] as const) {
+    const repeat = planPure(0.92 * TIER_THRESHOLD, { lastTier: 80, lastAtMs });
+    assert.equal(repeat.fired, false, `同一档报过之后不重报（${label}）`);
+    assert.equal(repeat.why, 'already-warned', `出口是 already-warned，不是已删掉的 cooldown（${label}）`);
+    assert.equal(repeat.tier, 80);
+    assert.equal(repeat.lastTier, 80);
+    assert.equal(repeat.lastAtMs, lastAtMs, '把读到的状态一起落账（便于复算）');
+  }
 
-  const expired = planPure(0.92 * TIER_THRESHOLD, {
-    lastTier: 90,
-    lastAtMs: NOW_MS - COMPACTION_WARNING_COOLDOWN_MS,
-  });
-  assert.equal(expired.fired, true, '整 30 分钟 ⇒ 冷却到期，同档可以再叫一次');
-  assert.equal(expired.why, 'fired');
-
-  const lower = planPure(0.85 * TIER_THRESHOLD, {
-    lastTier: 95,
-    lastAtMs: NOW_MS - COMPACTION_WARNING_COOLDOWN_MS,
-  });
+  const lower = planPure(0.85 * TIER_THRESHOLD, { lastTier: 95, lastAtMs: NOW_MS - 24 * HOUR_MS });
   assert.equal(lower.fired, false, '本周期已经报过更高一档 ⇒ 不回头补报低档');
   assert.equal(lower.why, 'already-warned');
+});
 
-  // 时钟回拨（now < lastAtMs）按"冷却中"处理：负数差值不许被当成"过了一整天"
-  const skewed = planPure(0.92 * TIER_THRESHOLD, { lastTier: 90, lastAtMs: NOW_MS + 60_000 });
-  assert.equal(skewed.fired, false);
-  assert.equal(skewed.why, 'cooldown');
+test('⑩-b 用户点名的那条曲线：同一档跨 5 次只报 1 次；压到 95 再报 1 次；压缩后回落再跨 80 又报 1 次', () => {
+  // ① 同一档 80 连跨 5 次，每次隔一小时 ⇒ 只有第一次报
+  let lastTier: CompactionWarningTier = 0;
+  let lastAtMs: number | null = null;
+  let fired = 0;
+  for (let i = 0; i < 5; i += 1) {
+    const plan = planPure(0.82 * TIER_THRESHOLD, { lastTier, lastAtMs });
+    if (plan.fired) {
+      fired += 1;
+      lastTier = plan.tier as CompactionWarningTier;
+      lastAtMs = NOW_MS + i * HOUR_MS;
+    }
+  }
+  assert.equal(fired, 1, `同一档连续跨 5 次（每次隔一小时）⇒ 只报 1 次（实测 ${fired} 次）`);
+
+  // ② 压到 95 ⇒ 再报 1 次（换了一档）
+  const at95 = planPure(0.96 * TIER_THRESHOLD, { lastTier, lastAtMs });
+  assert.equal(at95.fired, true, '95 是新档 ⇒ 必须报');
+  assert.equal(at95.tier, 95);
+
+  // ③ 压缩 ⇒ 分档状态归零（用**复算**这一条真判据，不手写 0）
+  const reset = compactionWarningStateOf([
+    {
+      seq: 1, ts: new Date(NOW_MS).toISOString(), turn: 1,
+      historyTokens: 0.82 * TIER_THRESHOLD, thresholdTokens: TIER_THRESHOLD, reason: 'gate',
+      tier: 80, firedTier: 80, atMs: NOW_MS, real: null,
+    },
+    {
+      seq: 2, ts: new Date(NOW_MS + HOUR_MS).toISOString(), turn: 2,
+      historyTokens: 0.96 * TIER_THRESHOLD, thresholdTokens: TIER_THRESHOLD, reason: 'gate',
+      tier: 95, firedTier: 95, atMs: NOW_MS + HOUR_MS, real: null,
+    },
+    {
+      seq: 3, ts: new Date(NOW_MS + 2 * HOUR_MS).toISOString(), turn: 3,
+      historyTokens: 0.10 * TIER_THRESHOLD, thresholdTokens: TIER_THRESHOLD, reason: 'wrote',
+      tier: 0, firedTier: null, atMs: NOW_MS + 2 * HOUR_MS, real: null,
+    },
+  ]);
+  assert.deepEqual(reset, { lastTier: 0, lastAtMs: null }, '压缩那一行把分档状态归零');
+
+  // ④ 下个周期再跨 80 ⇒ 又报 1 次
+  const again = planPure(0.82 * TIER_THRESHOLD, reset);
+  assert.equal(again.fired, true, '压缩后回落再跨 80% ⇒ 又报 1 次');
+  assert.equal(again.tier, 80);
 });
 
 test('⑪ 压缩 / 回落到低位 ⇒ 分档状态归零，下次跨 80 仍报（两个重置点）', () => {
@@ -640,7 +680,7 @@ test('⑫ 从日志复算：wrote 与 <50% 都是重置点；报过的最高档�
     real: null,
   });
 
-  // 80 → 90 → 95 三行都报过 ⇒ 最高 95、上次时刻 = 第三行
+  // 三行都报过（中间那一行是 2026-10-21 老日志里的 90 档）⇒ 最高 95、上次时刻 = 第三行
   const three = [
     row(0.80 * TIER_THRESHOLD, 'gate', 80, NOW_MS - 3_000),
     row(0.90 * TIER_THRESHOLD, 'gate', 90, NOW_MS - 2_000),
@@ -692,8 +732,9 @@ test('⑬ 老日志兼容：没有 tier 那一格的旧行按同一把尺补算�
   assert.equal(readout.state.lastTier, 80);
   assert.equal(readout.lastReal, null, '旧行没有真实读数 ⇒ 不编一个 0');
 
-  // 新形状：真实读数两格原样进复算（`readCompactionWarnings.lastReal`）
-  const newRow = decisionEvent(2, '2026-10-21T06:10:00.000Z', {
+  // 2026-10-21 那一版写下的形状：真实读数两格原样进复算（`readCompactionWarnings.lastReal`），
+  // 而 `tier: 90` / `cooldownMs: 1800000` 这两个**老档位与老冷却**也必须读得回来
+  const legacyTiered = decisionEvent(2, '2026-10-21T06:10:00.000Z', {
     turn: 4,
     historyTokens: 180_000,
     thresholdTokens: 200_000,
@@ -703,11 +744,11 @@ test('⑬ 老日志兼容：没有 tier 那一格的旧行按同一把尺补算�
     warning: {
       fired: true, why: 'fired', historyTokens: 180_000, thresholdTokens: 200_000, ratio: COMPACTION_WARNING_RATIO,
       tier: 90, lastTier: 80, lastAtMs: Date.parse('2026-10-21T06:00:00.000Z'),
-      cooldownMs: COMPACTION_WARNING_COOLDOWN_MS,
+      cooldownMs: 30 * 60 * 1000,
     },
   });
-  const readout2 = readCompactionWarnings([oldRow, newRow]);
+  const readout2 = readCompactionWarnings([oldRow, legacyTiered]);
   assert.deepEqual(readout2.lastReal?.real, { inputTokens: 151_204, estimatedInputTokens: 180_000 });
-  assert.equal(readout2.state.lastTier, 90);
+  assert.equal(readout2.state.lastTier, 90, '老日志里的 90 档照样复算出来（本版判据不再产生它）');
   assert.equal(readout2.state.lastAtMs, Date.parse('2026-10-21T06:10:00.000Z'));
 });

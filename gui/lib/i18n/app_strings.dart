@@ -156,6 +156,25 @@ abstract class AppStrings {
   /// 配置读取失败：<原因>
   String configReadFailed(String reason);
 
+  // ── 等待与超时（2026-10-24，「GUI 用久了会卡死」那一批）──────────────
+  //
+  // 这一组回答的是"卡住了"这件事本身：**在等哪条请求、等了多久、等不到了怎么办**。
+  // 它们必须落在文案表里（而不是 `api.dart` 里拼字符串），因为它们是给人读的界面话，
+  // 而 `api.dart` 是传输层——那一层连"现在是什么语言"都不该知道，它只把
+  // [request] 这样的原样串（`GET /api/stats/dashboard`）交过来，语序由这里定。
+  //
+  // ⚠ 这一族会原样显示在界面 chrome 上（红字/状态条），所以**不许带 Markdown 记号**
+  // （`copy_rules_test.dart` 钉着）；要强调就靠语序，不靠星号。
+
+  /// 状态条那行小字：正在等 [request]（已 [seconds] 秒）
+  String requestWaiting(String request, int seconds);
+
+  /// 这条请求自己的时限到了、没回来。[maybeDone] = 写操作，**可能已经生效**
+  String requestTimeout(String request, int seconds, bool maybeDone);
+
+  /// 事件流（长连接）连续 [seconds] 秒一个字节都没有：按断线处理，正在重连
+  String requestStreamStalled(int seconds);
+
   // ── 壳 / 侧栏 ──────────────────────────────────────────────────────
   /// 页面名：聊天
   String get navChat;
@@ -216,6 +235,10 @@ abstract class AppStrings {
 
   /// 重启：没读到任何一种结论时的一句兜底
   String get restartNoConclusion;
+
+  /// 重启：请求发出去了，可是**没等到回执**（超时）。它不是"没发出"——
+  /// 那台机器可能已经在重启了，所以说的话必须往"先去看看"那一侧倒。
+  String restartNoReceipt(String reason);
 
   /// 等后端回来：回来了
   String get restartBackReady;
@@ -351,6 +374,67 @@ abstract class AppStrings {
   /// 凭据那两格下面的说明（填完会自动勾上 QQ 官方 Bot）
   String get onboardingQqCredentialsNote;
 
+  // ── 第 3 步：扫码创建 QQ 官方 Bot（2026-10-23）──────────────────
+  //
+  // 两个并列入口：**扫码创建（推荐）** 与 **填写凭据**。扫码那一支走
+  // `POST /api/channels/qq-official/bind/start` → 系统浏览器打开二维码页 →
+  // 每 2 秒查一次 `/bind/status`；成功即「绑定成功」+ AppID，过期则重新生成。
+  // 这里只有界面话；二维码、AppID、服务端给的原因都是**数据**，不进文案表。
+
+  /// 入口一：扫码创建（推荐）
+  String get onboardingQqEntryScan;
+
+  /// 入口二：填写凭据（原有的 AppID / AppSecret 表单）
+  String get onboardingQqEntryManual;
+
+  /// 扫码面板的说明：扫完会自动创建并落盘
+  String get onboardingQqBindIntro;
+
+  /// 那颗「扫码创建」按钮
+  String get onboardingQqBindStart;
+
+  /// 正在向 QQ 申请二维码（进行中的第一态）
+  String get onboardingQqBindStarting;
+
+  /// 二维码已经在浏览器里打开：请在浏览器里用手机 QQ 扫码
+  String get onboardingQqBindWaitScan;
+
+  /// 等待中（下方那行小字：每 2 秒查一次）
+  String get onboardingQqBindWaiting;
+
+  /// 成功那一句（官方 UI 文案照抄：「绑定成功」）
+  String get onboardingQqBindSuccess;
+
+  /// 成功下面那行：AppID 与 AppSecret 已保存并启用（secret 只显示"已保存"）
+  String get onboardingQqBindSavedNote;
+
+  /// 过期/超时那颗按钮
+  String get onboardingQqBindRegenerate;
+
+  /// 「测试连接」按钮
+  String get onboardingQqBindTestConnection;
+
+  /// 「测试连接」进行中
+  String get onboardingQqBindTokenTesting;
+
+  /// 绑定成功之后显示 AppID
+  String onboardingQqBindAppId(String appId);
+
+  /// 连接测试通过（[expiresIn] 秒）
+  String onboardingQqBindTokenOk(int expiresIn);
+
+  /// 连接测试没通过（[reason] 是服务端/网络给的原因）
+  String onboardingQqBindTokenFailed(String reason);
+
+  /// 发起扫码失败（[reason] 是服务端/网络给的原因）
+  String onboardingQqBindStartFailed(String reason);
+
+  /// 查扫码状态失败（[reason] 是服务端/网络给的原因）
+  String onboardingQqBindStatusFailed(String reason);
+
+  /// 第 3 步 OneBot 那一项的那**一句**（用户 2026-10-23：只写这一句，不做任何自动流程）
+  String get onboardingOnebotDetail;
+
   /// 第 1 步名字框**下面**那一行（写哪儿 / 快照能回滚 / 界面上的称呼就是它）
   String get onboardingStepNameHint;
 
@@ -454,6 +538,97 @@ abstract class AppStrings {
 
   /// 配置里有这条路由，但密钥文件里没有它的格子（今天只有 degraded）：只能用环境变量给
   String onboardingApiKeyNoSlot(String routes, String envNames);
+
+  // ── 第 2 步：模型探测 / 协议三档 / 密钥状态（2026-10-26）─────────────
+  //
+  // 这一组是「探测」按钮那一屏的全部界面话。**分档文案必须各自独立**：不可达、密钥无效、
+  // 没有 /models 是三件不同的事，合成一句"探测失败"人就不知道该改哪里。
+  // 服务端回来的 warnings / message 是**数据**，不进这里；页面只负责按 `code` 选一句。
+
+  /// 模型名输入框上方的标签
+  String get onboardingModelLabel;
+
+  /// 模型名为空时点「继续」：这一格不能空
+  String get onboardingModelRequired;
+
+  /// Base URL 输入框上方的标签
+  String get onboardingBaseUrlLabel;
+
+  /// Base URL 为空时点「继续」：这一格不能空
+  String get onboardingBaseUrlRequired;
+
+  /// Base URL 下面那行说明（API 根地址，不含 /responses）
+  String get onboardingBaseUrlNote;
+
+  /// API Key 输入框上方的标签
+  String get onboardingApiKeyLabel;
+
+  /// API Key 的状态：一格都没有
+  String get onboardingApiKeyStatusMissing;
+
+  /// API Key 的状态：已经写到这几格（[gates] 例如 `heavy / light`）
+  String onboardingApiKeyStatusWritten(String gates);
+
+  /// API Key 的状态：只有这几格有（老用户只配过 heavy 的现场）
+  String onboardingApiKeyStatusPartial(String have);
+
+  /// 「探测」按钮
+  String get onboardingProbeButton;
+
+  /// 探测中（结果区那一行；按钮同时转圈）
+  String get onboardingProbeRunning;
+
+  /// 探测前 Base URL 空着：就地红字，不发请求
+  String get onboardingProbeBaseRequired;
+
+  /// 探测完成那一行。`count` 个模型；两套协议各自 supported/latency；`recommended` 可为 null。
+  ///
+  /// 为什么把四个读数一起传进来而不是让页面拼：中英文的语序不同（"23 个模型" vs
+  /// "23 models"），页面拼字符串就会把某一种语言拼成翻译腔。
+  String onboardingProbeDone({
+    required int count,
+    required bool responsesOk,
+    required int? responsesMs,
+    required bool chatOk,
+    required int? chatMs,
+    String? recommended,
+  });
+
+  /// 搜索模型输入框的提示
+  String get onboardingProbeSearchHint;
+
+  /// 搜不到任何模型
+  String get onboardingProbeNoMatch;
+
+  /// 端点通了，但 `/models` 是空列表（与"搜索没命中"分开说）
+  String get onboardingProbeEmptyList;
+
+  /// 每个模型行右侧的协议徽章（[protocol] = `Responses` / `Chat`）
+  String onboardingProbeBadge(String protocol, bool supported);
+
+  /// 失败分档：网络不可达 / DNS / 超时
+  String get onboardingProbeUnreachable;
+
+  /// 失败分档：401 / 403（密钥无效）
+  String get onboardingProbeUnauthorized;
+
+  /// 失败分档：404 / 不是 JSON / 没有 data[]（只能手填模型名）
+  String get onboardingProbeNoModels;
+
+  /// 失败分档：还没有可用的 API Key
+  String get onboardingProbeNoKey;
+
+  /// 失败兜底（服务端给了别的 code / 请求本身失败）
+  String onboardingProbeFailed(String reason);
+
+  /// 探测结论：这个端点**只**支持一种协议（[protocol] = `Responses` / `Chat Completions`）。
+  ///
+  /// 一句**事实陈述**，不是"建议去选某一档"：引导页 2026-10-26 起不再问协议
+  /// （那三档留在设置页），所以这里只报实测结果，不给选择建议。
+  String onboardingProbeOnlyProtocol(String protocol);
+
+  /// 服务端 warnings 那一行（橙色小字；[warning] 是服务端原话）
+  String onboardingProbeWarning(String warning);
 
   // ── 聊天页 ────────────────────────────────────────────────────────
   /// 页头标题
@@ -966,6 +1141,25 @@ abstract class AppStrings {
   /// 返回的数据不是提示清单
   String get overviewNotesNotList;
 
+  /// 「当前上下文构成」那块看板的标题
+  String get overviewContextTitle;
+
+  /// 那块看板的加载态（骨架条旁边的一行灰字）
+  String get overviewContextLoading;
+
+  /// 那块看板读不到时的下半句：影响 / 下一步
+  String get overviewContextErrorHint;
+
+  /// 一次请求都还没有时的空态（"没有数"与"数是 0"是两件事）
+  String get overviewContextEmpty;
+
+  /// 返回的数据不是上下文构成（读失败，而不是"没有数"）
+  String get overviewContextNotObject;
+
+  /// 「保留历史思维链」的两格：开 / 关
+  String get overviewContextKeepOn;
+  String get overviewContextKeepOff;
+
   /// 建议卡的一行：`标题：细节`
   String overviewAdviceLine(String title, String body);
 
@@ -1052,6 +1246,32 @@ abstract class AppStrings {
 
   /// `框架提示读取失败：<原因>`
   String overviewFrameworkNotesError(String reason);
+
+  /// 看板右上那一格：`<已用> / <压缩线> tok`
+  String overviewContextTokens(String used, String budget);
+
+  /// 看板的副行：`占预算 <p>% · 保留历史思维链：<开/关> · 取自 <时刻> 那一拍`
+  String overviewContextSubline(int percent, String keep, String stamp);
+
+  /// 图例每一片右侧的占比：`<占比>%`
+  ///
+  /// 2026-10-25 夜里用户把图例改成"三片并排一行"：组名、tokens、占比各是一段文字
+  /// （`overviewContextLegend` 那条"拼成一句"的 key 随之删掉——它的分隔符 `·` 正是
+  /// 竖排/换行时最难看的那个字符）。
+  String overviewContextShare(int share);
+
+  /// 图例一片里那两个数：`<tokens> · <占比>%`
+  ///
+  /// 2026-10-25 夜里第二次改版：那张卡从"占一整行"变成"跟用量、命中率同一排"——先是
+  /// 1:1:2 里的 2/4（约 660px），当夜用户又说「改成三个卡片等宽吧」，于是收成 1:1:1 的
+  /// 一格（内容宽 1348 时约 441px）。三片各约 130，片里放不下这一整条时按既有规矩退到
+  /// 只留占比（[AppStrings.overviewContextShare]）——所以这条文案是"够宽才出现"的那一档。
+  /// 中间那个分隔符归文案管（英文可能不是 `·`），所以不在页面里拼。
+  String overviewContextLegendNumbers(String tokens, int share);
+
+  /// `上下文构成读取失败：<原因>`
+  String overviewContextError(String reason);
+
   /// 主循环（heavy）
   String get settingsLaneHeavyLabel;
   /// 轻量（light）
@@ -1430,6 +1650,16 @@ abstract class AppStrings {
   String get settingsCopyCredential;
   /// 也可以自己来：从 $protocolDownloadUrl 下载发行包解压，把那个目录填在上面。这条路在一键安装失败、或者你想自己控制版本时用；框架也从同一个地址代下载，不随框架分发它（许可是"源码可见非商业"，自用没问题）。
   String settingsManualDownloadGuide(String protocolDownloadUrl);
+  /// 第三方组件：SnowLuma
+  String get settingsProtocolThirdPartyTitle;
+  /// SnowLuma 是独立第三方项目，由 SnowLumaDevs 开发与维护：本项目只是代为从官方 Releases 下载、解压并托管它的进程，不修改它的任何文件。使用须遵守其 EULA 与 LICENSE，且仅限非商业用途。
+  String get settingsProtocolThirdPartyNote;
+  /// 官方项目
+  String get settingsProtocolOfficialProject;
+  /// 官方站点
+  String get settingsProtocolOfficialSite;
+  /// 许可（EULA / LICENSE）
+  String get settingsProtocolLicenseRow;
   /// 改动已写入 config.json，但要重启进程才接管：运行中的协议端实例是按启动时那份配置建的。重启之前，这里显示的状态仍是本次启动的那一个。
   String get settingsProtocolRestartNote;
   /// 安装目录不能为空
@@ -1564,18 +1794,140 @@ abstract class AppStrings {
   String get settingsAccountInstance;
   /// 凭据按实例分文件存（%APPDATA%\\Irmia\\sessions）：同一台机器上开第二个实例不会把这一份顶掉。
   String get settingsAccountInstanceNote;
-  /// 这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与登出都做不成。先设置一个密码，之后按会话登录/登出。
+  /// 这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与退出登录都做不成（结束实例不受影响）。先设置一个密码，之后按会话登录/退出登录。
   String get settingsAccountLegacyNote;
   /// 改密码
   String get settingsChangePassword;
-  /// 登出
+  /// 退出登录（清除本机凭据）
   String get settingsLogout;
   /// 先去设置密码
   String get settingsSetPasswordFirst;
   /// 密码已改；这台界面已经换上新凭据
   String get settingsPasswordChanged;
-  /// 退出这个界面并回到门上；本机这份会话凭据会被清掉——下次要用密码进来。
+  /// 退出登录这条路（与「结束实例」的区别写在这里）：作废会话、清本机凭据、停后端——下次要用密码进来。
   String get settingsLogoutBody;
+  /// 结束实例（设置页那颗按钮 / 它的确认框标题）
+  String get settingsCloseInstance;
+  /// 结束实例的确认框正文：停后端、回选择页，**登录状态保留**——回来点「进入」就能进。
+  String get settingsCloseInstanceBody;
+  /// 门上那句中性提示：会话凭据失效了，请重新登录（不是错误，是"该走哪一扇门"）。
+  String get gateHintSessionExpired;
+  /// 门上那句中性提示：这台实例还没有密码，先设一个。
+  String get gateHintSetupNeeded;
+  /// 门前等待那一屏的第二半句："后端还没起来（正在等 :7788）"（2026-10-26）。
+  String gateWaitingBackend(int port);
+  // ── 门上那三档（2026-10-28：连不上 / 正在启动 / 密码不对，各说各的）──
+  /// ①「连不上」那一档：后端还没起来（[address] 形如 `127.0.0.1:7788`），界面会自动重探。
+  String gateBackendDown(String address);
+  /// ②「正在启动」那一档：端口在听、重活没干完。[phase] 是 [backendPhaseLabel] 翻过的人话
+  /// （空串 = 这一版后端不报阶段）。
+  String gateBackendStarting(String phase);
+  /// 服务端报的启动阶段 → 人话：`events` 事件回放 · `mcp` 外部工具 · `channels` 消息通道 ·
+  /// `ready` 就绪；认不出的原样显示（将来后端加了新阶段，界面不该吞掉它）。
+  String backendPhaseLabel(String phase);
+  /// 门前那行小字：`第 N 秒 · 已重试 M 次`（别再让人猜"它到底还在试没有"）。
+  String gateBackendProgress(int seconds, int retries);
+  /// 60 秒仍未就绪时追加的那一句（给一条去处的线索）。
+  String get gateBackendLogHint;
+  // ── 实例选择页（2026-10，多实例：结束实例 → 回到这里选一台 / 新建一台）──
+  /// 页标题
+  String get pickerTitle;
+  /// 页说明（上一台实例已经结束：后端停了，但登录状态保留——点「进入」就直接回来；实例之间完全隔离）
+  String get pickerBody;
+  /// 正在读实例列表…
+  String get pickerLoading;
+  /// 还没有登记过实例（空表）
+  String get pickerEmpty;
+  /// 读不出实例列表（文件不在或已损坏）——只能新建
+  String get pickerUnreadable;
+  /// 列表里那一行的状态词：运行中
+  String get pickerRunning;
+  /// 列表里那一行的状态词：未运行
+  String get pickerStopped;
+  /// 默认实例的徽章
+  String get pickerDefaultBadge;
+  /// 没票（或票已失效）那台的按钮：要走密码门
+  String get pickerLogin;
+  /// 没票且未运行那台的按钮：先拉起，再走密码门
+  String get pickerStart;
+  /// 正在启动…
+  String get pickerStarting;
+  /// 有票且运行中那台的按钮：点一下直接进壳（不打密码门）
+  String get pickerEnter;
+  /// 有票但未运行那台的按钮：先拉起，再拿票直接进
+  String get pickerStartEnter;
+  /// 正在进入…（有票、正在验票那一拍）
+  String get pickerEntering;
+  /// 忘记凭据（每行的小字动作 / 它的确认框标题）：只清本机 token，不停实例
+  String get pickerForget;
+  /// 「登录状态已失效，需要重新登录」那一行轻提示（票被服务端判了 401 之后）
+  String get pickerSessionExpired;
+  /// 新建实例（按钮 / 表单标题）
+  String get pickerNew;
+  /// 删除（按钮）
+  String get pickerDelete;
+  /// 新建表单：名字
+  String get pickerNewNameLabel;
+  /// 新建表单：数据目录
+  String get pickerNewDirLabel;
+  /// 新建表单：创建
+  String get pickerNewCreate;
+  /// 「目录已存在且非空」那条路上的第二个动作
+  String get pickerNewUseDir;
+  /// 删除确认框标题
+  String get pickerDeleteTitle;
+  /// 删除确认框正文（带参数：要删的那台的名字）
+  String pickerDeleteBody(String name);
+  /// 「忘记凭据」的确认框正文（带参数：那台实例的名字）——只清本机 token 这一条边界
+  String pickerForgetBody(String name);
+  /// 删除确认框里的说明（只删条目 vs 连目录一起删，后者不可恢复）
+  String get pickerDeleteNote;
+  /// 删除确认框：只删条目（默认，目录留着）
+  String get pickerDeleteKeepDir;
+  /// 删除确认框：连数据目录一起删
+  String get pickerDeleteWithDir;
+  /// 改名（名字旁那个小铅笔的提示 / 按钮）
+  String get pickerRename;
+  /// 改名对话框标题
+  String get pickerRenameTitle;
+  /// 改名对话框正文（说清"改过之后后端不再覆盖"这条语义）
+  String get pickerRenameBody;
+  /// 改名对话框：保存
+  String get pickerRenameSave;
+  /// 出错：名字空着
+  String get pickerProblemNameRequired;
+  /// 出错：登记表里没有可用的启动路径（node / 入口）
+  String get pickerProblemNoLauncher;
+  /// 出错：后端没能启动
+  String get pickerProblemLaunchFailed;
+  /// 出错：7788 起找不到空闲端口
+  String get pickerProblemPortUnavailable;
+  /// 出错：删不掉（实例列表文件写不进去）
+  String get pickerProblemRemoveFailed;
+  /// 出错：改不了名（实例列表文件写不进去）
+  String get pickerProblemRenameFailed;
+  /// 出错（带参数）：目录已存在且非空
+  String pickerProblemDirNotEmpty(String dir);
+  /// 出错（带参数）：等就绪超时——说清"等了多久、它到哪一步"，而不是只说"超时"
+  String pickerProblemNotReady(int seconds, String phase, String port);
+  /// 出错（带参数）：那个端口上住着另一台实例
+  String pickerProblemPortTaken(String id);
+  /// 出错（带参数）：它在跑，先结束它再删
+  String pickerProblemCannotDeleteRunning(String name);
+  /// 出错（带参数）：默认实例不能删
+  String pickerProblemCannotDeleteDefault(String name);
+  /// 正在启动某台实例（带参数：它的名字）
+  String pickerStartingNamed(String name);
+  /// 「将使用端口 :7789」（新建表单里那行读数）
+  String pickerNewPort(String port);
+  /// 删除按钮为什么是灰的（带参数：运行中 / 默认）
+  String pickerDeleteDisabled(String reason);
+  /// 选择页正在等一台实例就绪（带参数：已等秒数 / 阶段人话；phase 空串 = 不报阶段）
+  String pickerWaitingReady(int seconds, String phase);
+  /// 等待期间那颗按钮：「停止等待」
+  String get pickerStopWaiting;
+  /// 门上那句中性提示：这台实例已设过密码，请用密码登录（设置页收到 409 之后换门）。
+  String get gateHintAlreadyInitialized;
   /// 界面版本与运行期投影数据。
   String get settingsAboutNote;
   /// Flutter 原生界面
@@ -2094,9 +2446,6 @@ abstract class AppStrings {
   /// 返回的数据不是投影
   String get schedNotProjection;
 
-  /// 记忆清单里没有 facts 这一段
-  String get schedMemoryFactsMissing;
-
   /// 取消这条安排？
   String get schedCancelTitle;
 
@@ -2157,9 +2506,6 @@ abstract class AppStrings {
   /// 这一页读的是投影 /api/projection 里的 timers：刷新一次试试；一直读不到说明主进程那边有问题。
   String get schedLoadHint;
 
-  /// 安排只是一个行动机会 · 到点后$name会先确认事情是否仍然值得做
-  String schedFooter(String name);
-
   /// 本周安排
   String get schedStatThisWeek;
 
@@ -2187,9 +2533,6 @@ abstract class AppStrings {
   /// 周历
   String get schedCalendarTitle;
 
-  /// 选择一个条目，查看具体安排
-  String get schedCalendarHint;
-
   /// 上一周
   String get schedPrevWeek;
 
@@ -2201,9 +2544,6 @@ abstract class AppStrings {
 
   /// 画不出这一周的周期条目：$count 条（在清单里）
   String schedUnplaceable(int count);
-
-  /// 不在 08:00–21:00 这一格里：$count 条（在清单里）
-  String schedOutOfRange(int count);
 
   /// $hour:$minute · 周期
   String schedTimeRecurring(String hour, String minute);
@@ -2222,9 +2562,6 @@ abstract class AppStrings {
 
   /// 安排清单
   String get schedListTitle;
-
-  /// 接下来要发生的事
-  String get schedListSubtitle;
 
   /// 只看 $day
   String schedFilterDay(String day);
@@ -2255,9 +2592,6 @@ abstract class AppStrings {
 
   /// 选择一个安排
   String get schedDetailPlaceholder;
-
-  /// 点清单或周历里的任意一条，看她为什么排它、到点做什么、到哪儿说。这两格是只读的：它们是她排的时候写进日志里的原话。
-  String get schedDetailEmptyHint;
 
   /// 执行时间
   String get schedFieldWhen;
@@ -2291,24 +2625,6 @@ abstract class AppStrings {
 
   /// 未写
   String get schedUnwritten;
-
-  /// 长期计划
-  String get schedPlanTitle;
-
-  /// 她单开的那一格（这里只读）
-  String get schedPlanNote;
-
-  /// 去记忆页
-  String get schedGoMemory;
-
-  /// 暂未接入：读不到她的记忆（$err）。
-  String schedPlanUnavailable(String err);
-
-  /// 她还没有单开这一格 · 去记忆页
-  String get schedPlanEmpty;
-
-  /// 还有 $more 行，去记忆页
-  String schedPlanMore(int more);
 
   /// 已经跟她说了一句：『$text』
   String schedWakeReceipt(String text);
@@ -2885,6 +3201,17 @@ abstract class AppStrings {
   /// 没记下这个决定：$reason（卡留在原地，原因写在卡里）
   String grantInboxFailed(String reason);
 
+  /// **有一张申请单读不出来**（2026-10-22）：那一档在"待批"判据里两样都不满足
+  /// （没有 `grant/requested` 事件 ⇒ `picked:false`；解析不过 ⇒ 连卡都挂不出来）。
+  /// 它是唯一会在"一条待批都没有"时也显示出来的那一行——"有东西等你"不许静默。
+  String get grantUnreadableTitle;
+
+  /// 那句话的正文：哪一张、为什么读不出来（原因原样来自服务端的 `grantFileProblems`）
+  String grantUnreadableBody(String id, String why);
+
+  /// 读不出来的还有几张（跟在正文后面；语序因语言而异，所以整句归文案表）
+  String grantUnreadableMore(int count);
+
   // ── 托盘上的待批提示（2026-10-21）──────────────────────────────
   //
   // 托盘是**关窗之后唯一还看得见的东西**：有待批时悬停提示与菜单首项都要写出来，
@@ -3460,6 +3787,15 @@ class ZhStrings extends AppStrings {
   String get settingsLoadingConfig => '正在读取配置…';
   @override
   String configReadFailed(String reason) => '配置读取失败：$reason';
+  @override
+  String requestWaiting(String request, int seconds) => '正在等 $request（已 $seconds 秒）';
+  @override
+  String requestTimeout(String request, int seconds, bool maybeDone) => maybeDone
+      ? '$request 等了 $seconds 秒没有回执。这次动作可能已经生效——先去那一页看看，再决定要不要重试。'
+      : '$request 等了 $seconds 秒没有回音。这次没回来，点「重试」再来一次。';
+  @override
+  String requestStreamStalled(int seconds) =>
+      '事件流 $seconds 秒一个字节都没有，按断线处理（正在重连，断线期间的事件会补回来）。';
 
   @override
   String get navChat => '聊天';
@@ -3508,6 +3844,10 @@ class ZhStrings extends AppStrings {
   String restartRefused(String reason) => '重启没能发出：$reason';
   @override
   String get restartNoConclusion => '重启已发出，但服务端没有给出结论';
+  @override
+  String restartNoReceipt(String reason) =>
+      '重启请求已经发出去了，但没等到回执（$reason）。先别急着再点一次：那台机器可能正在重启，'
+      '界面会自己重连回来说它好没好。';
   @override
   String get restartBackReady => '已就绪：后端回来了';
   @override
@@ -3598,7 +3938,7 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingChannelRecommendTail => ' 作为消息适配器';
   @override
-  String get onboardingQqTileDetail => '官方开放平台那条通道；AppID 与 AppSecret 就填在下面（只写不读）。';
+  String get onboardingQqTileDetail => '官方开放平台那条通道：可以扫码创建，也可以直接填 AppID / AppSecret（只写不读）。';
   @override
   String get onboardingQqCredentialsTitle => 'QQ 官方 Bot 凭据（存在本机 data/.keys.json，不进 config.json）';
   @override
@@ -3614,6 +3954,42 @@ class ZhStrings extends AppStrings {
       mask == null || mask.isEmpty ? '已配置；粘贴新值可覆盖' : '已配置（$mask）；粘贴新值可覆盖';
   @override
   String get onboardingQqCredentialsNote => '填完两个凭据会自动勾上 QQ 官方 Bot；也可以先跳过，之后在「消息适配器」页里补。';
+  @override
+  String get onboardingQqEntryScan => '扫码创建（推荐）';
+  @override
+  String get onboardingQqEntryManual => '填写凭据';
+  @override
+  String get onboardingQqBindIntro => '用手机 QQ 扫码：会自动创建官方 Bot，并把 AppID / AppSecret 写进本机。';
+  @override
+  String get onboardingQqBindStart => '扫码创建';
+  @override
+  String get onboardingQqBindStarting => '正在向 QQ 申请二维码…';
+  @override
+  String get onboardingQqBindWaitScan => '请在浏览器里用手机 QQ 扫码。';
+  @override
+  String get onboardingQqBindWaiting => '等待扫码…（每 2 秒查一次，可以取消）';
+  @override
+  String get onboardingQqBindSuccess => '绑定成功';
+  @override
+  String get onboardingQqBindSavedNote => 'AppID 与 AppSecret 已保存并启用（写入 data/.keys.json；通道配置重启后生效）。';
+  @override
+  String get onboardingQqBindRegenerate => '二维码过期了，重新生成';
+  @override
+  String get onboardingQqBindTestConnection => '测试连接';
+  @override
+  String get onboardingQqBindTokenTesting => '正在测试连接…';
+  @override
+  String onboardingQqBindAppId(String appId) => 'AppID：$appId';
+  @override
+  String onboardingQqBindTokenOk(int expiresIn) => '连接测试通过：access_token 已换取（有效期 $expiresIn 秒）。';
+  @override
+  String onboardingQqBindTokenFailed(String reason) => '连接测试没通过：$reason';
+  @override
+  String onboardingQqBindStartFailed(String reason) => '扫码创建没发起成功：$reason';
+  @override
+  String onboardingQqBindStatusFailed(String reason) => '查扫码状态失败：$reason';
+  @override
+  String get onboardingOnebotDetail => '配置完成后可自行另行设置。';
   @override
   String get onboardingPersonaHint =>
       '写上去 = 替换整份文件（服务端留快照，人格配置页能回滚）；开头「名字：」那行别删，留空或没改动就不写。';
@@ -3679,6 +4055,71 @@ class ZhStrings extends AppStrings {
   @override
   String onboardingApiKeyNoSlot(String routes, String envNames) =>
       '$routes 没有自己的密钥格（data/.keys.json 只认 heavy / light）：要用它请设环境变量 $envNames';
+
+  // ── 第 2 步：模型探测 / 协议三档 / 密钥状态（2026-10-26）─────────────
+
+  @override
+  String get onboardingModelLabel => '模型名';
+  @override
+  String get onboardingModelRequired => '模型名不能为空，未保存';
+  @override
+  String get onboardingBaseUrlLabel => 'Base URL';
+  @override
+  String get onboardingBaseUrlRequired => 'Base URL 不能为空，未保存';
+  @override
+  String get onboardingBaseUrlNote => 'API 根地址，不含 /responses。';
+  @override
+  String get onboardingApiKeyLabel => 'API Key';
+  @override
+  String get onboardingApiKeyStatusMissing => '未配置';
+  @override
+  String onboardingApiKeyStatusWritten(String gates) => '已写入 $gates';
+  @override
+  String onboardingApiKeyStatusPartial(String have) => '只写入 $have';
+  @override
+  String get onboardingProbeButton => '探测';
+  @override
+  String get onboardingProbeRunning => '正在探测…';
+  @override
+  String get onboardingProbeBaseRequired => '先填 Base URL';
+  @override
+  String onboardingProbeDone({
+    required int count,
+    required bool responsesOk,
+    required int? responsesMs,
+    required bool chatOk,
+    required int? chatMs,
+    String? recommended,
+  }) {
+    String segment(String name, bool ok, int? ms) =>
+        '$name ${ms == null ? '—' : '${ms}ms'} ${ok ? '✓' : '✗'}';
+    final tail = recommended == null ? '' : ' · 推荐 $recommended';
+    return '探测完成：$count 个模型 · ${segment('Responses', responsesOk, responsesMs)}'
+        ' · ${segment('Chat', chatOk, chatMs)}$tail';
+  }
+
+  @override
+  String get onboardingProbeSearchHint => '搜索模型…';
+  @override
+  String get onboardingProbeNoMatch => '没有匹配的模型';
+  @override
+  String get onboardingProbeEmptyList => '这个端点没有返回模型；模型名只能手填。';
+  @override
+  String onboardingProbeBadge(String protocol, bool supported) => '$protocol ${supported ? '✓' : '✗'}';
+  @override
+  String get onboardingProbeUnreachable => '探测失败：连不上这个端点（网络不可达或超时）。可以继续手填模型名。';
+  @override
+  String get onboardingProbeUnauthorized => '探测失败：密钥无效（401/403）。检查 API Key 后重试，或继续手填模型名。';
+  @override
+  String get onboardingProbeNoModels => '探测失败：该端点没有 /models，只能手填模型名。';
+  @override
+  String get onboardingProbeNoKey => '探测失败：还没有可用的 API Key。先填上密钥再探测，或继续手填模型名。';
+  @override
+  String onboardingProbeFailed(String reason) => '探测失败：$reason';
+  @override
+  String onboardingProbeOnlyProtocol(String protocol) => '该端点只支持 $protocol';
+  @override
+  String onboardingProbeWarning(String warning) => '注意：$warning';
 
   @override
   String get chatTitle => '聊天';
@@ -4030,6 +4471,20 @@ class ZhStrings extends AppStrings {
   @override
   String get overviewNotesNotList => '返回的数据不是提示清单';
   @override
+  String get overviewContextTitle => '当前上下文构成';
+  @override
+  String get overviewContextLoading => '正在读上下文构成…';
+  @override
+  String get overviewContextErrorHint => '状态与用量不受影响；读到数据后这块会自己出现。';
+  @override
+  String get overviewContextEmpty => '还没有请求过 —— 她下一次开口后这里会有数';
+  @override
+  String get overviewContextNotObject => '返回的数据不是上下文构成';
+  @override
+  String get overviewContextKeepOn => '开';
+  @override
+  String get overviewContextKeepOff => '关';
+  @override
   String overviewAdviceLine(String title, String body) => '$title：$body';
   @override
   String overviewDeadLetterLine(int seq, int claimCount, String? stamp) =>
@@ -4094,6 +4549,17 @@ class ZhStrings extends AppStrings {
   String overviewExternalSessionsError(String reason) => '外部会话读取失败：$reason';
   @override
   String overviewFrameworkNotesError(String reason) => '框架提示读取失败：$reason';
+  @override
+  String overviewContextTokens(String used, String budget) => '$used / $budget tok';
+  @override
+  String overviewContextSubline(int percent, String keep, String stamp) =>
+      '占预算 $percent% · 保留历史思维链：$keep · 取自 $stamp 那一拍';
+  @override
+  String overviewContextShare(int share) => '$share%';
+  @override
+  String overviewContextLegendNumbers(String tokens, int share) => '$tokens · $share%';
+  @override
+  String overviewContextError(String reason) => '上下文构成读取失败：$reason';
   @override
   String get settingsLaneHeavyLabel => '主循环（heavy）';
   @override
@@ -4486,6 +4952,19 @@ class ZhStrings extends AppStrings {
       '这条路在一键安装失败、或者你想自己控制版本时用；框架也从同一个地址代下载，不随框架分发它'
       '（许可是"源码可见非商业"，自用没问题）。';
   @override
+  String get settingsProtocolThirdPartyTitle => '第三方组件：SnowLuma';
+  @override
+  String get settingsProtocolThirdPartyNote =>
+      'SnowLuma 是独立第三方项目，由 SnowLumaDevs 开发与维护：本项目只是代为从官方 Releases 下载、'
+      '解压并托管它的进程，不修改它的任何文件。'
+      '使用须遵守其 EULA 与 LICENSE，且仅限非商业用途。';
+  @override
+  String get settingsProtocolOfficialProject => '官方项目';
+  @override
+  String get settingsProtocolOfficialSite => '官方站点';
+  @override
+  String get settingsProtocolLicenseRow => '许可（EULA / LICENSE）';
+  @override
   String get settingsProtocolRestartNote => '改动已写入 config.json，但要重启进程才接管：运行中的协议端实例是按启动时那份配置建的。重启之前，这里显示的状态仍是本次启动的那一个。';
   @override
   String get settingsInstallDirRequired => '安装目录不能为空';
@@ -4621,7 +5100,7 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsEdit => '编辑';
   @override
-  String get settingsAccountNote => '进来这个界面用的凭据：改密码与登出。';
+  String get settingsAccountNote => '进来这个界面用的凭据：改密码、结束实例、退出登录（清除本机凭据）。';
   @override
   String get settingsAccountLegacyBadge => '旧的共享 token';
   @override
@@ -4631,17 +5110,156 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsAccountInstanceNote => '凭据按实例分文件存（%APPDATA%\\Irmia\\sessions）：同一台机器上开第二个实例不会把这一份顶掉。';
   @override
-  String get settingsAccountLegacyNote => '这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与登出都做不成。先设置一个密码，之后按会话登录/登出。';
+  String get settingsAccountLegacyNote =>
+      '这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与退出登录都做不成（结束实例不受影响）。'
+      '先设置一个密码，之后按会话登录/退出登录。';
   @override
   String get settingsChangePassword => '改密码';
   @override
-  String get settingsLogout => '登出';
+  String get settingsLogout => '退出登录（清除本机凭据）';
   @override
   String get settingsSetPasswordFirst => '先去设置密码';
   @override
   String get settingsPasswordChanged => '密码已改；这台界面已经换上新凭据';
   @override
-  String get settingsLogoutBody => '退出这个界面并回到门上；本机这份会话凭据会被清掉——下次要用密码进来。';
+    String get settingsLogoutBody => '退出登录：清掉本机保存的凭据、停掉它的后端进程，然后回到实例选择页'
+        '——下次进来要重新登录（用密码）。只是关掉实例、保留登录状态的话，用「结束实例」。';
+  @override
+  String get settingsCloseInstance => '结束实例';
+  @override
+  String get settingsCloseInstanceBody => '结束实例：停掉它的后端进程（不再跑心跳、不再收消息），回到实例选择页。'
+      '登录状态保留——下次从选择页点「进入」就直接回来，不用输密码。';
+  @override
+  String get gateHintSessionExpired => '会话凭据已失效，请重新登录。';
+  @override
+  String get gateHintSetupNeeded => '这台实例还没有密码，先设一个。';
+  @override
+  String get gateHintAlreadyInitialized => '这台实例已设过密码，请用密码登录。';
+  @override
+  String gateWaitingBackend(int port) => '后端还没起来（正在等 :$port）';
+  @override
+  String gateBackendDown(String address) => '后端还没起来（$address）。正在重试…';
+  @override
+  String gateBackendStarting(String phase) => phase.trim().isEmpty
+      ? '后端正在启动。正在重试…'
+      : '后端正在启动（阶段：${phase.trim()}）。正在重试…';
+  @override
+  String backendPhaseLabel(String phase) => switch (phase.trim()) {
+        'events' => '事件回放',
+        'mcp' => '外部工具',
+        'channels' => '消息通道',
+        'ready' => '就绪',
+        final other => other,
+      };
+  @override
+  String gateBackendProgress(int seconds, int retries) => '第 $seconds 秒 · 已重试 $retries 次';
+  @override
+  String get gateBackendLogHint => '后端一直没就绪：看 %LOCALAPPDATA%\\Irmia\\gui.log';
+  // ── 实例选择页（2026-10）──
+  @override
+  String get pickerTitle => '选择实例';
+  @override
+  String get pickerBody => '上一台实例已经结束：后端进程停了（不再跑心跳、不再收消息），登录状态保留——点「进入」就直接回来。'
+      '在这里选一台继续，或者新建一台。实例之间完全隔离：各自的数据、各自的密码、各自的编辑权限。';
+  @override
+  String get pickerLoading => '正在读实例列表…';
+  @override
+  String get pickerEmpty => '还没有登记过实例。新建一台开始用。';
+  @override
+  String get pickerUnreadable => '读不出实例列表（文件不在或已损坏）：可以新建一台，其余实例不受影响。';
+  @override
+  String get pickerRunning => '运行中';
+  @override
+  String get pickerStopped => '未运行';
+  @override
+  String get pickerDefaultBadge => '默认';
+  @override
+  String get pickerLogin => '登录';
+  @override
+  String get pickerStart => '启动并登录';
+  @override
+  String get pickerStarting => '正在启动…';
+  @override
+  String get pickerEnter => '进入';
+  @override
+  String get pickerStartEnter => '启动并进入';
+  @override
+  String get pickerEntering => '正在进入…';
+  @override
+  String get pickerForget => '忘记凭据';
+  @override
+  String get pickerSessionExpired => '登录状态已失效，需要重新登录。';
+  @override
+  String get pickerNew => '新建实例';
+  @override
+  String get pickerDelete => '删除';
+  @override
+  String get pickerNewNameLabel => '名字';
+  @override
+  String get pickerNewDirLabel => '数据目录';
+  @override
+  String get pickerNewCreate => '创建';
+  @override
+  String get pickerNewUseDir => '用这个目录';
+  @override
+  String get pickerDeleteTitle => '删除实例';
+  @override
+  String pickerDeleteBody(String name) => '删除「$name」？';
+  @override
+  String pickerForgetBody(String name) => '忘记「$name」的凭据？只清掉这台机器上保存的那一份登录凭据：'
+      '实例还在跑，登记表里的条目也不动。下次进来要用密码。';
+  @override
+  String get pickerDeleteNote =>
+      '默认只删登记表里的这一条，数据目录留在盘上。连目录一起删会把里面的记忆与人格一起删掉，不能恢复。';
+  @override
+  String get pickerDeleteKeepDir => '只删条目';
+  @override
+  String get pickerDeleteWithDir => '连目录一起删';
+  @override
+  String get pickerRename => '改名';
+  @override
+  String get pickerRenameTitle => '给实例改名';
+  @override
+  String get pickerRenameBody =>
+      '这是选择页上显示的名字。改过之后它就算人工改的：后端启动时不会再拿人格文件里的名字覆盖它。';
+  @override
+  String get pickerRenameSave => '保存';
+  @override
+  String get pickerProblemNameRequired => '请给实例起个名字。';
+  @override
+  String get pickerProblemNoLauncher =>
+      '实例列表里没有可用的启动路径（node 与入口脚本）：没法拉起后端——先把那台实例启动一次，它会自己把路径写进登记表。';
+  @override
+  String get pickerProblemLaunchFailed => '后端没能启动：进程没起来（检查 node 与入口脚本的路径）。';
+  @override
+  String get pickerProblemPortUnavailable => '从 7788 起找不到空闲端口：先停掉别的实例再试。';
+  @override
+  String get pickerProblemRemoveFailed => '删不掉：实例列表文件写不进去（可能被占用）。再试一次。';
+  @override
+  String get pickerProblemRenameFailed => '改不了名：实例列表文件写不进去（可能被占用）。名字还是原来那个，再试一次。';
+  @override
+  String pickerProblemDirNotEmpty(String dir) => '目录已存在且非空：$dir。换个名字，或者选择「用这个目录」。';
+  @override
+  String pickerProblemNotReady(int seconds, String phase, String port) =>
+      '已经等了 $seconds 秒，它还在启动${phase.trim().isEmpty ? '' : '（阶段：${phase.trim()}）'}：'
+      '不再等了（:$port）——看它的日志。';
+  @override
+  String pickerWaitingReady(int seconds, String phase) =>
+      '已经等了 $seconds 秒，它还在启动${phase.trim().isEmpty ? '' : '（阶段：${phase.trim()}）'}';
+  @override
+  String get pickerStopWaiting => '停止等待';
+  @override
+  String pickerProblemPortTaken(String id) => '那个端口上住着另一台实例（$id）：没有连它——实例之间不许串。';
+  @override
+  String pickerProblemCannotDeleteRunning(String name) => '「$name」正在运行：先登录进去结束它，再回来删。';
+  @override
+  String pickerProblemCannotDeleteDefault(String name) => '「$name」是默认实例：不能删（数据目录还在用）。';
+  @override
+  String pickerStartingNamed(String name) => '正在启动「$name」…（首次启动要几十秒）';
+  @override
+  String pickerNewPort(String port) => '将使用端口 :$port';
+  @override
+  String pickerDeleteDisabled(String reason) => '不能删：$reason';
   @override
   String get settingsAboutNote => '界面版本与运行期投影数据。';
   @override
@@ -5044,8 +5662,6 @@ class ZhStrings extends AppStrings {
   @override
   String get schedNotProjection => '返回的数据不是投影';
   @override
-  String get schedMemoryFactsMissing => '记忆清单里没有 facts 这一段';
-  @override
   String get schedCancelTitle => '取消这条安排？';
   @override
   String schedCancelBody(String timerId) =>
@@ -5094,9 +5710,6 @@ class ZhStrings extends AppStrings {
   @override
   String get schedLoadHint => '这一页读的是投影 /api/projection 里的 timers：刷新一次试试；一直读不到说明主进程那边有问题。';
   @override
-  String schedFooter(String name) =>
-      '安排只是一个行动机会 · 到点后$name会先确认事情是否仍然值得做';
-  @override
   String get schedStatThisWeek => '本周安排';
   @override
   String get schedStatThisWeekNote => '一次性与周期任务';
@@ -5115,8 +5728,6 @@ class ZhStrings extends AppStrings {
   @override
   String get schedCalendarTitle => '周历';
   @override
-  String get schedCalendarHint => '选择一个条目，查看具体安排';
-  @override
   String get schedPrevWeek => '上一周';
   @override
   String schedWeekRange(int month, int day, int endDay) =>
@@ -5126,9 +5737,6 @@ class ZhStrings extends AppStrings {
   @override
   String schedUnplaceable(int count) =>
       '画不出这一周的周期条目：$count 条（在清单里）';
-  @override
-  String schedOutOfRange(int count) =>
-      '不在 08:00–21:00 这一格里：$count 条（在清单里）';
   @override
   String schedTimeRecurring(String hour, String minute) =>
       '$hour:$minute · 周期';
@@ -5144,8 +5752,6 @@ class ZhStrings extends AppStrings {
       '这一周还有 $hidden 条没摆下，看右边的清单';
   @override
   String get schedListTitle => '安排清单';
-  @override
-  String get schedListSubtitle => '接下来要发生的事';
   @override
   String schedFilterDay(String day) =>
       '只看 $day';
@@ -5169,8 +5775,6 @@ class ZhStrings extends AppStrings {
   String get schedListEmptyHint => '安排只是一次机会——到点她会先确认还值不值得做，不值得就跳过。';
   @override
   String get schedDetailPlaceholder => '选择一个安排';
-  @override
-  String get schedDetailEmptyHint => '点清单或周历里的任意一条，看她为什么排它、到点做什么、到哪儿说。这两格是只读的：它们是她排的时候写进日志里的原话。';
   @override
   String get schedFieldWhen => '执行时间';
   @override
@@ -5197,20 +5801,6 @@ class ZhStrings extends AppStrings {
   String get schedFieldAfter => '到点后';
   @override
   String get schedUnwritten => '未写';
-  @override
-  String get schedPlanTitle => '长期计划';
-  @override
-  String get schedPlanNote => '她单开的那一格（这里只读）';
-  @override
-  String get schedGoMemory => '去记忆页';
-  @override
-  String schedPlanUnavailable(String err) =>
-      '暂未接入：读不到她的记忆（$err）。';
-  @override
-  String get schedPlanEmpty => '她还没有单开这一格 · 去记忆页';
-  @override
-  String schedPlanMore(int more) =>
-      '还有 $more 行，去记忆页';
   @override
   String schedWakeReceipt(String text) =>
       '已经跟她说了一句：『$text』';
@@ -5623,6 +6213,12 @@ class ZhStrings extends AppStrings {
   String grantInboxCollapsed(int count) => '$count 条待批';
   @override
   String grantInboxFailed(String reason) => '没记下这个决定：$reason';
+  @override
+  String get grantUnreadableTitle => '有一张申请单读不出来';
+  @override
+  String grantUnreadableBody(String id, String why) => '$id：$why';
+  @override
+  String grantUnreadableMore(int count) => '（还有 $count 张）';
   @override
   String trayPendingItem(int count) => '有 $count 条待批';
   @override
@@ -6084,6 +6680,17 @@ class EnStrings extends AppStrings {
   String get settingsLoadingConfig => 'Loading config…';
   @override
   String configReadFailed(String reason) => 'Failed to read config: $reason';
+  @override
+  String requestWaiting(String request, int seconds) => 'Waiting on $request ($seconds s)';
+  @override
+  String requestTimeout(String request, int seconds, bool maybeDone) => maybeDone
+      ? '$request got no answer for $seconds s. This action may already have taken effect — '
+          'check that page first, then decide whether to retry.'
+      : '$request got no answer for $seconds s. This one did not come back — press Retry.';
+  @override
+  String requestStreamStalled(int seconds) =>
+      'The event stream has been silent for $seconds s; treating it as disconnected '
+      '(reconnecting, and events sent meanwhile are replayed).';
 
   @override
   String get navChat => 'Chat';
@@ -6132,6 +6739,11 @@ class EnStrings extends AppStrings {
   String restartFailed(String reason) => 'Restart failed: $reason';
   @override
   String restartRefused(String reason) => 'Restart was not dispatched: $reason';
+  @override
+  String restartNoReceipt(String reason) =>
+      'The restart request was dispatched, but no receipt came back ($reason). '
+      'Do not press it again just yet: the machine may already be restarting, and the UI will '
+      'reconnect on its own and tell you how it went.';
   @override
   String get restartNoConclusion => 'Restart dispatched, but the server returned no verdict';
   @override
@@ -6234,7 +6846,8 @@ class EnStrings extends AppStrings {
   String get onboardingChannelRecommendTail => ' as the message adapter';
   @override
   String get onboardingQqTileDetail =>
-      'The official open-platform channel; fill in the AppID and AppSecret below (write-only).';
+      'The official open-platform channel: create it by scanning, or fill in the AppID / AppSecret below '
+      '(write-only).';
   @override
   String get onboardingQqCredentialsTitle =>
       'QQ Official Bot credentials (stored in data/.keys.json, never in config.json)';
@@ -6254,6 +6867,46 @@ class EnStrings extends AppStrings {
   String get onboardingQqCredentialsNote =>
       'Filling in both enables the QQ Official Bot automatically; you can also skip this and add them '
       'later on the Channels page.';
+  @override
+  String get onboardingQqEntryScan => 'Scan to create (recommended)';
+  @override
+  String get onboardingQqEntryManual => 'Enter credentials';
+  @override
+  String get onboardingQqBindIntro =>
+      'Scan with mobile QQ: it creates the official bot and stores the AppID / AppSecret on this machine.';
+  @override
+  String get onboardingQqBindStart => 'Scan to create';
+  @override
+  String get onboardingQqBindStarting => 'Requesting a QR code from QQ…';
+  @override
+  String get onboardingQqBindWaitScan => 'Scan the QR code in the browser with mobile QQ.';
+  @override
+  String get onboardingQqBindWaiting => 'Waiting for the scan… (checking every 2 seconds; you can cancel)';
+  @override
+  String get onboardingQqBindSuccess => 'Bound successfully';
+  @override
+  String get onboardingQqBindSavedNote =>
+      'The AppID and AppSecret are saved and enabled (written to data/.keys.json; the channel configuration '
+      'takes effect after a restart).';
+  @override
+  String get onboardingQqBindRegenerate => 'The QR code expired — generate a new one';
+  @override
+  String get onboardingQqBindTestConnection => 'Test connection';
+  @override
+  String get onboardingQqBindTokenTesting => 'Testing the connection…';
+  @override
+  String onboardingQqBindAppId(String appId) => 'AppID: $appId';
+  @override
+  String onboardingQqBindTokenOk(int expiresIn) =>
+      'Connection test passed: access_token obtained (valid for $expiresIn s).';
+  @override
+  String onboardingQqBindTokenFailed(String reason) => 'Connection test failed: $reason';
+  @override
+  String onboardingQqBindStartFailed(String reason) => 'Could not start the QR binding: $reason';
+  @override
+  String onboardingQqBindStatusFailed(String reason) => 'Could not read the QR status: $reason';
+  @override
+  String get onboardingOnebotDetail => 'You can configure it separately after setup.';
   // 英文那份里那个 `名字：` 是 IDENTITY.md 里**真的那一行**（数据，不是界面词），不能翻。
   @override
   String get onboardingPersonaHint =>
@@ -6329,6 +6982,75 @@ class EnStrings extends AppStrings {
   String onboardingApiKeyNoSlot(String routes, String envNames) =>
       '$routes has no key slot of its own (data/.keys.json only knows heavy / light): '
       'set the $envNames environment variable for it';
+
+  // ── Step 2: model probe / protocol / key status (2026-10-26) ─────────
+
+  @override
+  String get onboardingModelLabel => 'Model';
+  @override
+  String get onboardingModelRequired => 'The model name cannot be empty; nothing was saved';
+  @override
+  String get onboardingBaseUrlLabel => 'Base URL';
+  @override
+  String get onboardingBaseUrlRequired => 'The Base URL cannot be empty; nothing was saved';
+  @override
+  String get onboardingBaseUrlNote => 'API root URL, without the /responses suffix.';
+  @override
+  String get onboardingApiKeyLabel => 'API key';
+  @override
+  String get onboardingApiKeyStatusMissing => 'Not configured';
+  @override
+  String onboardingApiKeyStatusWritten(String gates) => 'Written to $gates';
+  @override
+  String onboardingApiKeyStatusPartial(String have) => 'Only written to $have';
+  @override
+  String get onboardingProbeButton => 'Probe';
+  @override
+  String get onboardingProbeRunning => 'Probing…';
+  @override
+  String get onboardingProbeBaseRequired => 'Fill in the Base URL first';
+  @override
+  String onboardingProbeDone({
+    required int count,
+    required bool responsesOk,
+    required int? responsesMs,
+    required bool chatOk,
+    required int? chatMs,
+    String? recommended,
+  }) {
+    String segment(String name, bool ok, int? ms) =>
+        '$name ${ms == null ? '—' : '${ms}ms'} ${ok ? '✓' : '✗'}';
+    final tail = recommended == null ? '' : ' · recommended $recommended';
+    return 'Probe complete: $count models · ${segment('Responses', responsesOk, responsesMs)}'
+        ' · ${segment('Chat', chatOk, chatMs)}$tail';
+  }
+
+  @override
+  String get onboardingProbeSearchHint => 'Search models…';
+  @override
+  String get onboardingProbeNoMatch => 'No matching models';
+  @override
+  String get onboardingProbeEmptyList => 'This endpoint returned no models; type the model name manually.';
+  @override
+  String onboardingProbeBadge(String protocol, bool supported) => '$protocol ${supported ? '✓' : '✗'}';
+  @override
+  String get onboardingProbeUnreachable =>
+      'Probe failed: cannot reach this endpoint (network unreachable or timed out). You can still type the model name manually.';
+  @override
+  String get onboardingProbeUnauthorized =>
+      'Probe failed: the key was rejected (401/403). Check the API key and retry, or type the model name manually.';
+  @override
+  String get onboardingProbeNoModels =>
+      'Probe failed: this endpoint has no /models, so the model name must be typed manually.';
+  @override
+  String get onboardingProbeNoKey =>
+      'Probe failed: no API key is available yet. Fill one in and probe again, or type the model name manually.';
+  @override
+  String onboardingProbeFailed(String reason) => 'Probe failed: $reason';
+  @override
+  String onboardingProbeOnlyProtocol(String protocol) => 'This endpoint only supports $protocol';
+  @override
+  String onboardingProbeWarning(String warning) => 'Note: $warning';
 
   @override
   String get chatTitle => 'Chat';
@@ -6695,6 +7417,21 @@ class EnStrings extends AppStrings {
   @override
   String get overviewNotesNotList => 'The response was not a note list';
   @override
+  String get overviewContextTitle => 'Current context composition';
+  @override
+  String get overviewContextLoading => 'Reading the context breakdown…';
+  @override
+  String get overviewContextErrorHint =>
+      'Status and usage are unaffected; this block returns once the data is readable.';
+  @override
+  String get overviewContextEmpty => 'No requests yet — numbers appear after her next turn';
+  @override
+  String get overviewContextNotObject => 'The response was not a context breakdown';
+  @override
+  String get overviewContextKeepOn => 'on';
+  @override
+  String get overviewContextKeepOff => 'off';
+  @override
   String overviewAdviceLine(String title, String body) => '$title: $body';
   @override
   String overviewDeadLetterLine(int seq, int claimCount, String? stamp) =>
@@ -6771,6 +7508,17 @@ class EnStrings extends AppStrings {
   @override
   String overviewFrameworkNotesError(String reason) =>
       'Could not read framework notes: $reason';
+  @override
+  String overviewContextTokens(String used, String budget) => '$used / $budget tok';
+  @override
+  String overviewContextSubline(int percent, String keep, String stamp) =>
+      '$percent% of budget · keep historical reasoning: $keep · from the $stamp step';
+  @override
+  String overviewContextShare(int share) => '$share%';
+  @override
+  String overviewContextLegendNumbers(String tokens, int share) => '$tokens · $share%';
+  @override
+  String overviewContextError(String reason) => 'Could not read the context breakdown: $reason';
   @override
   String get settingsLaneHeavyLabel => 'Main loop (heavy)';
   @override
@@ -7149,6 +7897,20 @@ class EnStrings extends AppStrings {
   @override
   String settingsManualDownloadGuide(String protocolDownloadUrl) => 'You can also do it yourself: download the release package from $protocolDownloadUrl, unpack it, and fill that directory in above. This route is for when one-click install fails or you want to control the version yourself; the framework also downloads from the same address and does not distribute the package with itself (the licence is "source-visible, non-commercial", fine for personal use).';
   @override
+  String get settingsProtocolThirdPartyTitle => 'Third-party component: SnowLuma';
+  @override
+  String get settingsProtocolThirdPartyNote =>
+      'SnowLuma is an independent third-party project, developed and maintained by SnowLumaDevs: '
+      'this project only downloads it from the official Releases, unpacks it and hosts its process on your behalf, '
+      'and never modifies any of its files. '
+      'Use is subject to its EULA and LICENSE and is limited to non-commercial purposes.';
+  @override
+  String get settingsProtocolOfficialProject => 'Official project';
+  @override
+  String get settingsProtocolOfficialSite => 'Official site';
+  @override
+  String get settingsProtocolLicenseRow => 'License (EULA / LICENSE)';
+  @override
   String get settingsProtocolRestartNote => 'The change is written to config.json, but it takes effect only after the process restarts: the running protocol-side instance was built from the config at startup. Until the restart, the state shown here is still the one from this startup.';
   @override
   String get settingsInstallDirRequired => 'Install directory cannot be empty';
@@ -7274,7 +8036,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsEdit => 'Edit';
   @override
-  String get settingsAccountNote => 'The credential used to get into this UI: change password and sign out.';
+  String get settingsAccountNote =>
+      'The credential used to get into this UI: change password, end instance, sign out (clear credentials on this machine).';
   @override
   String get settingsAccountLegacyBadge => 'legacy shared token';
   @override
@@ -7284,17 +8047,173 @@ class EnStrings extends AppStrings {
   @override
   String get settingsAccountInstanceNote => 'Credentials are stored per instance in separate files (%APPDATA%\\Irmia\\sessions): opening a second instance on the same machine will not replace this one.';
   @override
-  String get settingsAccountLegacyNote => 'This one uses the legacy shared token (this instance has never had a password), and the server does not accept the "session" it produces: neither changing the password nor signing out can work. Set a password first, then sign in and out by session.';
+  String get settingsAccountLegacyNote => 'This one uses the legacy shared token (this instance has never had a password), and the server does not accept the "session" it produces: neither changing the password nor signing out can work (ending the instance is unaffected). Set a password first, then sign in and out by session.';
   @override
   String get settingsChangePassword => 'Change password';
   @override
-  String get settingsLogout => 'Sign out';
+  String get settingsLogout => 'Sign out (clear credentials on this machine)';
   @override
   String get settingsSetPasswordFirst => 'Set a password first';
   @override
   String get settingsPasswordChanged => 'Password changed; this UI is now using the new credential';
   @override
-  String get settingsLogoutBody => 'Leave this UI and go back to the gate; the session credential on this machine will be cleared — next time you will need the password.';
+  String get settingsLogoutBody =>
+        'Sign out: clear the credential saved on this machine, stop its backend process, then return to the '
+        'instance picker — you will have to log in again with your password. To only stop the instance and '
+        'keep your sign-in, use "End instance".';
+  @override
+  String get settingsCloseInstance => 'End instance';
+  @override
+  String get settingsCloseInstanceBody => 'End instance: stop its backend process (no more heartbeat, no more '
+      'incoming messages) and return to the instance picker. Your sign-in is kept — pick "Open" there and you '
+      'are straight back in, no password needed.';
+  @override
+  String get gateHintSessionExpired => 'Your session credential is no longer valid. Please log in again.';
+  @override
+  String get gateHintSetupNeeded => 'This instance has no password yet. Set one first.';
+  @override
+  String get gateHintAlreadyInitialized => 'This instance already has a password. Please log in with it.';
+  @override
+  String gateWaitingBackend(int port) => 'backend is not up yet (waiting on :$port)';
+  @override
+  String gateBackendDown(String address) => 'The backend is not up yet ($address). Retrying…';
+  @override
+  String gateBackendStarting(String phase) => phase.trim().isEmpty
+      ? 'The backend is still starting. Retrying…'
+      : 'The backend is still starting (phase: ${phase.trim()}). Retrying…';
+  @override
+  String backendPhaseLabel(String phase) => switch (phase.trim()) {
+        'events' => 'replaying events',
+        'mcp' => 'external tools',
+        'channels' => 'message channels',
+        'ready' => 'ready',
+        final other => other,
+      };
+  @override
+  String gateBackendProgress(int seconds, int retries) =>
+      '${seconds}s elapsed · $retries retries so far';
+  @override
+  String get gateBackendLogHint => 'The backend never became ready: see %LOCALAPPDATA%\\Irmia\\gui.log';
+  // ── Instance picker (2026-10) ──
+  @override
+  String get pickerTitle => 'Choose an instance';
+  @override
+  String get pickerBody => 'The previous instance has ended: its backend process is stopped (no more heartbeat, '
+      'no more incoming messages), but your sign-in is kept — pick "Open" to come straight back. Choose an '
+      'instance here, or create a new one. Instances are fully isolated: their own data, their own password, '
+      'their own edit rights.';
+  @override
+  String get pickerLoading => 'Reading the instance list…';
+  @override
+  String get pickerEmpty => 'No instances registered yet. Create one to get started.';
+  @override
+  String get pickerUnreadable =>
+      'The instance list could not be read (missing or corrupt): you can still create a new one — other instances are unaffected.';
+  @override
+  String get pickerRunning => 'Running';
+  @override
+  String get pickerStopped => 'Stopped';
+  @override
+  String get pickerDefaultBadge => 'Default';
+  @override
+  String get pickerLogin => 'Sign in';
+  @override
+  String get pickerStart => 'Start and sign in';
+  @override
+  String get pickerStarting => 'Starting…';
+  @override
+  String get pickerEnter => 'Open';
+  @override
+  String get pickerStartEnter => 'Start and open';
+  @override
+  String get pickerEntering => 'Opening…';
+  @override
+  String get pickerForget => 'Forget credential';
+  @override
+  String get pickerSessionExpired => 'Sign-in has expired. Please sign in again.';
+  @override
+  String get pickerNew => 'New instance';
+  @override
+  String get pickerDelete => 'Delete';
+  @override
+  String get pickerNewNameLabel => 'Name';
+  @override
+  String get pickerNewDirLabel => 'Data folder';
+  @override
+  String get pickerNewCreate => 'Create';
+  @override
+  String get pickerNewUseDir => 'Use this folder';
+  @override
+  String get pickerDeleteTitle => 'Delete instance';
+  @override
+  String pickerDeleteBody(String name) => 'Delete "$name"?';
+  @override
+  String pickerForgetBody(String name) => 'Forget the credential for "$name"? This only clears the sign-in '
+      'credential stored on this machine: the instance keeps running and its registry entry stays. '
+      'You will need the password next time.';
+  @override
+  String get pickerDeleteNote =>
+      'By default only the entry in the instance list is removed; the data folder stays on disk. '
+      'Deleting the folder too removes the memory and persona inside it — that cannot be undone.';
+  @override
+  String get pickerDeleteKeepDir => 'Remove entry only';
+  @override
+  String get pickerDeleteWithDir => 'Remove entry and folder';
+  @override
+  String get pickerRename => 'Rename';
+  @override
+  String get pickerRenameTitle => 'Rename instance';
+  @override
+  String get pickerRenameBody =>
+      'This is the name shown on the picker. Once renamed it counts as manually set: starting the backend '
+      'will not overwrite it with the name from the persona file.';
+  @override
+  String get pickerRenameSave => 'Save';
+  @override
+  String get pickerProblemNameRequired => 'Please give the instance a name.';
+  @override
+  String get pickerProblemNoLauncher =>
+      'The instance list has no usable launch path (node and entry script): the backend cannot be started — '
+      'start that instance once and it will write its paths into the list itself.';
+  @override
+  String get pickerProblemLaunchFailed => 'The backend did not start (check the node and entry script paths).';
+  @override
+  String get pickerProblemPortUnavailable => 'No free port from 7788 upwards: stop another instance first.';
+  @override
+  String get pickerProblemRemoveFailed =>
+      'Could not delete: the instance list file is not writable (it may be locked). Try again.';
+  @override
+  String get pickerProblemRenameFailed =>
+      'Could not rename: the instance list file is not writable (it may be locked). '
+      'The name is unchanged — try again.';
+  @override
+  String pickerProblemDirNotEmpty(String dir) =>
+      'The folder already exists and is not empty: $dir. Choose another name, or pick "Use this folder".';
+  @override
+  String pickerProblemNotReady(int seconds, String phase, String port) =>
+      'Waited $seconds s and it is still starting'
+      '${phase.trim().isEmpty ? '' : ' (phase: ${phase.trim()})'}: stopped waiting'
+      ' (port :$port) — check its log.';
+  @override
+  String pickerWaitingReady(int seconds, String phase) => 'Waited $seconds s and it is still starting'
+      '${phase.trim().isEmpty ? '' : ' (phase: ${phase.trim()})'}';
+  @override
+  String get pickerStopWaiting => 'Stop waiting';
+  @override
+  String pickerProblemPortTaken(String id) =>
+      'Another instance is already on that port ($id): not connecting — instances must not cross.';
+  @override
+  String pickerProblemCannotDeleteRunning(String name) =>
+      '"$name" is running: sign in and end it first, then come back to delete it.';
+  @override
+  String pickerProblemCannotDeleteDefault(String name) =>
+      '"$name" is the default instance and cannot be deleted (its data folder is in use).';
+  @override
+  String pickerStartingNamed(String name) => 'Starting "$name"… (the first start takes a while)';
+  @override
+  String pickerNewPort(String port) => 'Will use port :$port';
+  @override
+  String pickerDeleteDisabled(String reason) => 'Cannot delete: $reason';
   @override
   String get settingsAboutNote => 'UI version and runtime projection data.';
   @override
@@ -7710,8 +8629,6 @@ class EnStrings extends AppStrings {
   @override
   String get schedNotProjection => 'The response is not a projection';
   @override
-  String get schedMemoryFactsMissing => 'The memory index has no facts section';
-  @override
   String get schedCancelTitle => 'Cancel this plan?';
   @override
   String schedCancelBody(String timerId) =>
@@ -7763,10 +8680,6 @@ class EnStrings extends AppStrings {
   String get schedLoadHint => 'This page reads the timers in the /api/projection payload: try refreshing; if it never loads, the '
       'main process has a problem.';
   @override
-  String schedFooter(String name) =>
-      'A plan is only a chance to act · when the time comes $name first checks whether it is still worth '
-      'doing';
-  @override
   String get schedStatThisWeek => 'This week';
   @override
   String get schedStatThisWeekNote => 'One-off and recurring';
@@ -7785,8 +8698,6 @@ class EnStrings extends AppStrings {
   @override
   String get schedCalendarTitle => 'Week';
   @override
-  String get schedCalendarHint => 'Pick an entry to see what is planned';
-  @override
   String get schedPrevWeek => 'Previous week';
   @override
   String schedWeekRange(int month, int day, int endDay) =>
@@ -7796,9 +8707,6 @@ class EnStrings extends AppStrings {
   @override
   String schedUnplaceable(int count) =>
       '$count recurring entries cannot be drawn this week (they are in the list)';
-  @override
-  String schedOutOfRange(int count) =>
-      '$count entries fall outside 08:00–21:00 (they are in the list)';
   @override
   String schedTimeRecurring(String hour, String minute) =>
       '$hour:$minute · recurring';
@@ -7814,8 +8722,6 @@ class EnStrings extends AppStrings {
       '$hidden more this week do not fit — see the list on the right';
   @override
   String get schedListTitle => 'Plan list';
-  @override
-  String get schedListSubtitle => 'What happens next';
   @override
   String schedFilterDay(String day) =>
       'Only $day';
@@ -7840,10 +8746,6 @@ class EnStrings extends AppStrings {
       'skips it if not.';
   @override
   String get schedDetailPlaceholder => 'Pick a plan';
-  @override
-  String get schedDetailEmptyHint => 'Click any row in the list or the calendar to see why she planned it, what to do when the time '
-      'comes, and where she will say it. These two fields are read-only: they are her own words, written '
-      'into the log when she planned it.';
   @override
   String get schedFieldWhen => 'When';
   @override
@@ -7870,20 +8772,6 @@ class EnStrings extends AppStrings {
   String get schedFieldAfter => 'After it fires';
   @override
   String get schedUnwritten => 'Not set';
-  @override
-  String get schedPlanTitle => 'Long-term plans';
-  @override
-  String get schedPlanNote => 'The section she keeps for this (read-only here)';
-  @override
-  String get schedGoMemory => 'Go to memory';
-  @override
-  String schedPlanUnavailable(String err) =>
-      'Not connected yet: her memory cannot be read ($err).';
-  @override
-  String get schedPlanEmpty => 'She has not opened this section yet · go to memory';
-  @override
-  String schedPlanMore(int more) =>
-      '$more more lines — go to memory';
   @override
   String schedWakeReceipt(String text) =>
       'Said one line to her: "$text"';
@@ -8322,6 +9210,12 @@ class EnStrings extends AppStrings {
   String grantInboxCollapsed(int count) => '$count waiting for you';
   @override
   String grantInboxFailed(String reason) => 'Could not record that decision: $reason';
+  @override
+  String get grantUnreadableTitle => 'One request cannot be read';
+  @override
+  String grantUnreadableBody(String id, String why) => '$id: $why';
+  @override
+  String grantUnreadableMore(int count) => ' ($count more)';
   @override
   String trayPendingItem(int count) => '$count waiting for approval';
   @override
@@ -8823,9 +9717,6 @@ const Map<String, String> kScheduleActionAliases = {
   '存草稿': 'draft',
 };
 
-/// 记忆文件里允许上日程页的那几个分区标题（含匹配；其余分区的标题连读都不读）
-const List<String> kSchedulePlanSectionTitles = ['长期计划', '我提过的', '未认可', '提议'];
-
 /// 「日期」那一格认的相对日子（值 = 相对今天几天）。
 ///
 /// 英文那两条是给**英文界面**的人用的（提示里说的就是它们）：认不出来的写法一律报那句
@@ -8856,3 +9747,5 @@ const List<String> kScheduleWeekdayShort = ['日', '一', '二', '三', '四', '
 /// 页面拿它**判断**这次保存要不要用提醒色（`descNote.contains(...)`）：上屏的是服务端那句话
 /// 本身，不是这一串。它是**回执的词汇**（换英文界面服务端照旧写中文），所以不翻译。
 const String kExtDescNoteMarker = '只会有这个名字';
+
+

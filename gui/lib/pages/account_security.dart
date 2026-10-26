@@ -107,7 +107,7 @@ class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
     final go = await confirm(
       context,
       title: '改密码',
-      body: '改掉之后，其它已经登录的界面/设备都会退出（旧会话全部作废）；'
+      body: '改掉之后，其它已经登录的界面/设备都会退出（都需要重新登录）；'
           '这一份会当场换成新凭据，不用重新登录。',
       confirmLabel: '改密码',
       danger: true,
@@ -139,7 +139,7 @@ class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              '旧密码验证通过才改得动。改掉之后，其它已经登录的地方会退出（旧会话全部作废）；'
+              '旧密码验证通过才改得动。改掉之后，其它已经登录的地方会退出（都需要重新登录）；'
               '这一份当场换成新凭据，不用重新登录。',
               style: TextStyle(fontSize: 12.5, height: 1.7, color: scheme.onSurfaceVariant),
             ),
@@ -235,3 +235,4 @@ class _PasswordField extends StatelessWidget {
     );
   }
 }
+

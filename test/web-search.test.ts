@@ -86,7 +86,7 @@ const sampleSearch = {
   message: 'ok',
   data: {
     results: [
-      { title: '滚木与棍木的来历', url: 'https://example.com/a', content: '清漪群里那个梗的源头在这里。' },
+      { title: '滚木与棍木的来历', url: 'https://example.com/a', content: '测试群里那个梗的源头在这里。' },
       { title: '第二条', url: 'https://example.com/b', snippet: '换了 snippet 这个字段名也要认。', date: '2026-10-12' },
     ],
     metadata: { total_results: 42, search_time_ms: 137 },
@@ -117,7 +117,7 @@ test('web_search：拿回标题+链接+摘要的 Markdown，头一行给条数�
   assert.match(result.content, /^## 搜索「滚木 棍木」：返回 2 条，共 42 条命中，137ms/u);
   assert.match(result.content, /### 1\. 滚木与棍木的来历/);
   assert.match(result.content, /https:\/\/example\.com\/a/);
-  assert.match(result.content, /清漪群里那个梗的源头在这里。/);
+  assert.match(result.content, /测试群里那个梗的源头在这里。/);
   // `snippet` 这个别名也认（CLI 的格式化器自己就写了 content or snippet 的回退）
   assert.match(result.content, /### 2\. 第二条（2026-10-12）/);
   assert.match(result.content, /换了 snippet 这个字段名也要认。/);

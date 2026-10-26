@@ -30,6 +30,7 @@ import {
   sliceChars,
   type NetDeps,
 } from '../src/tools/net.ts';
+import { htmlToMarkdown } from '../src/tools/html-to-md.ts';
 import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_VISION_MODEL,
@@ -321,7 +322,7 @@ test('重定向超出跳数上限时报错而不是无限跟', async () => {
 
 // ──────────────────────────── http_get 正文与分页 ────────────────────────────
 
-test('http_get 提取正文并按 max_chars/offset 分页续读', async () => {
+test('http_get 提取正文并按 max_chars/offset 分页续读（回执报真实总量 + 两条路）', async () => {
   const payload = `起始标记${'甲'.repeat(300)}结束标记`;
   const server = await startServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -334,24 +335,45 @@ test('http_get 提取正文并按 max_chars/offset 分页续读', async () => {
 
     const first = await get.handler({ url: server.origin, max_chars: 100 }, ctx);
     assert.match(first.content, /起始标记/);
-    assert.match(first.content, /\[续读\] 已返回字符 \[0, 100\)/);
-    const nextOffset = /offset=(\d+)/.exec(first.content)?.[1];
-    assert.ok(nextOffset !== undefined, '截断响应必须给出续读方法');
+    // S3：截断回执必须报**真实总量**（共 N 字节 / 已给 M / 还有 K），不是只说"继续用 offset=N"
+    const trunc = /\[续读\] 共 (\d+) 字节 \/ 正文 (\d+) 字 \/ 已给 (\d+) 字 \/ 还有 (\d+) 字未读/.exec(first.content);
+    assert.ok(trunc !== null, `截断回执的格式不对：${first.content}`);
+    const totalBytes = Number(trunc[1]);
+    const totalChars = Number(trunc[2]);
+    const given = Number(trunc[3]);
+    const rest = Number(trunc[4]);
+    assert.equal(given, 100, '本次给到的是 max_chars');
+    assert.equal(given + rest, totalChars, '已给 + 还有 = 正文总量（三格必须自洽）');
+    assert.ok(totalBytes > totalChars, `字节数应是响应体真实字节（${totalBytes}）`);
+    // 两条路都要给她：① offset 续读 ② 把 max_chars 提上去一次取完（并印出上限）
+    const routes = /\[怎么继续\] ① offset=(\d+) 接着读；② 把 max_chars 提到 (\d+) 一次取完（上限 (\d+)/.exec(first.content);
+    assert.ok(routes !== null, `续读的两条路都要写清楚：${first.content}`);
+    assert.equal(Number(routes[1]), 100);
+    assert.equal(Number(routes[2]), totalChars);
+    assert.equal(Number(routes[3]), 500_000);
 
-    const rest: string[] = [];
-    let offset = Number(nextOffset);
+    const rest2: string[] = [];
+    let offset = Number(routes[1]);
     for (let i = 0; i < 6; i += 1) {
       const page = await get.handler({ url: server.origin, max_chars: 100, offset }, ctx);
       const body = page.content.split('[正文]\n')[1] ?? '';
-      const moved = /offset=(\d+)/.exec(page.content);
-      rest.push(body.split('\n[续读]')[0] ?? '');
+      rest2.push(body.split('\n[续读]')[0] ?? '');
+      const moved = /offset=(\d+) 接着读/.exec(page.content);
       if (moved === null) break;
       offset = Number(moved[1]);
     }
-    assert.match(rest.join(''), /结束标记/, '续读应能取到正文结尾');
+    assert.match(rest2.join(''), /结束标记/, '续读应能取到正文结尾');
   } finally {
     await server.close();
   }
+});
+
+test('max_chars 硬上限仍在：要超过上限直接报参数错（一次给太多打爆上下文的那条顾虑）', async () => {
+  const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+  const get = toolOf(tools, 'http_get');
+  const result = await get.handler({ url: 'http://127.0.0.1:1/', max_chars: 600_000 }, makeCtx(await makeTempDir()));
+  assert.equal(result.isError, true);
+  assert.match(result.content, /500000|500_000/u);
 });
 
 test('http_get 对 4xx 记为工具错误但保留正文信息', async () => {
@@ -384,6 +406,342 @@ test('http_get 对二进制响应只回元信息，不把字节灌进上下文',
     assert.match(result.content, /http_download/);
   } finally {
     await server.close();
+  }
+});
+
+// ──────────────────────────── http_get 抽取器接线（v79） ────────────────────────────
+
+test('http_get 走 Markdown 抽取：行内标签不被拆成空格（asyncio.sleep 抓得到）', async () => {
+  // docs.python.org 的真实形状：python 把函数名切成多个 <span>
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(
+      '<html><head><title>asyncio 文档</title></head><body><h1>Sleeping</h1>'
+      + '<p>协程用 <span>asyncio.</span><span>sleep</span>(delay, result=None) 睡一会儿。</p>'
+      + '<pre class="language-python"><code>await asyncio.sleep(1)</code></pre></body></html>',
+    );
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /asyncio\.sleep\(delay, result=None\)/u, '行内 token 必须原样连在一起');
+    assert.doesNotMatch(result.content, /asyncio\.\s+sleep/u, '这正是旧 htmlToText 的致命缺陷（标签换成空格）');
+    assert.match(result.content, /^# Sleeping$/mu, 'Markdown 结构（标题）要留着');
+    assert.match(result.content, /```python\nawait asyncio\.sleep\(1\)\n```/u, '代码块要留着');
+  } finally {
+    await server.close();
+  }
+});
+
+test('抽取器抽空时回落到 htmlToText（那条 20 行老路径还在，不许被删掉）', async () => {
+  // 整页唯一的文字落在一个被判为样板的块里：新抽取器给空 ⇒ 必须回落老路径，否则她什么也拿不到
+  const html = '<html><head><title>只有评论</title></head><body><div class="comment">评论区里的文字</div></body></html>';
+  assert.equal(htmlToMarkdown(html), '', '夹具前提：新抽取器在这一页上确实返回空');
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(html);
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /评论区里的文字/, '抽空必须回落 htmlToText，而不是回一个空正文');
+    assert.match(result.content, /\[标题\] 只有评论/u);
+  } finally {
+    await server.close();
+  }
+});
+
+test('诊断 ①：正文为空但页面是 SPA 壳 ⇒ 说清"要 JS"并点名 obscura.browser_markdown / playwright.browser_snapshot', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<html><head><title>单页应用</title></head><body><div id="root"></div>'
+      + '<script src="/assets/app.js"></script></body></html>');
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /\[诊断\]/u);
+    assert.match(result.content, /JavaScript/u);
+    assert.match(result.content, /`obscura` 的 `browser_markdown`/u, '下一步必须点名到真实注册名');
+    assert.match(result.content, /`playwright` 的 `browser_snapshot`/u);
+    assert.doesNotMatch(result.content, /浏览器工具/u, '不许再写"浏览器工具"这种模糊说法（等于把选哪件丢回给她）');
+    assert.doesNotMatch(result.content, /（正文为空）/u, '不许再只回「（正文为空）」');
+  } finally {
+    await server.close();
+  }
+});
+
+test('诊断 ②：空正文（不是 SPA）⇒ 一句人话 + 下一步，仍点名两件真实工具', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<html><head><title>空</title></head><body><p></p><div></div></body></html>');
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /\[诊断\] 抽取后正文为空/u);
+    assert.match(result.content, /`obscura` 的 `browser_markdown`/u);
+    assert.match(result.content, /`playwright` 的 `browser_snapshot`/u);
+    assert.doesNotMatch(result.content, /浏览器工具/u);
+    assert.match(result.content, /http_download/u, '先核对原始字节这一条也要给她');
+    assert.doesNotMatch(result.content, /（正文为空）/u);
+  } finally {
+    await server.close();
+  }
+});
+
+test('诊断 ③：403 ⇒ 说清是站点拒绝、给出 referer/cookie 与两件真实浏览器工具', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<html><head><title>Forbidden</title><body><h1>Forbidden</h1><p>拒绝访问</p></body></html>');
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.equal(result.error?.code, 'HTTP_403');
+    assert.match(result.content, /\[诊断\] 站点回了 403/u);
+    assert.match(result.content, /headers/u, '先给"用 headers 带 referer/cookie 再试一次"这条路');
+    assert.match(result.content, /`obscura` 的 `browser_markdown`/u);
+    assert.match(result.content, /`playwright` 的 `browser_snapshot`/u);
+    assert.doesNotMatch(result.content, /浏览器工具/u);
+  } finally {
+    await server.close();
+  }
+});
+
+// ──────────────────────────── http_get 编码：读 <meta charset>、有损必须承认 ────────────────────────────
+
+/** 用 ASCII 外壳包一段**原始字节**（模拟站点按 big5/shift_jis 直出，响应头里没写 charset） */
+function encodedPage(metaCharset: string, payload: Buffer): Buffer {
+  return Buffer.concat([
+    Buffer.from(`<html><head><meta charset="${metaCharset}"><title>enc</title></head><body><p>`, 'latin1'),
+    payload,
+    Buffer.from('</p></body></html>', 'latin1'),
+  ]);
+}
+
+/** Big5「中文」；Shift_JIS「中文」 */
+const BIG5_ZHONGWEN = Buffer.from([0xa4, 0xa4, 0xa4, 0xe5]);
+const SJIS_ZHONGWEN = Buffer.from([0x92, 0x86, 0x95, 0xb6]);
+/** 0x81 在两套编码里都是非法字节 ⇒ 宽松解码会出替换字符（有损） */
+const INVALID_BYTE = Buffer.from([0x81]);
+
+test('读 HTML 的 <meta charset>：头里没写 charset 时按 big5 解出中文，且不谎报有损', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(encodedPage('big5', BIG5_ZHONGWEN));
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /中文/u, '按 <meta charset> 解出的中文要正确');
+    assert.match(result.content, /\[编码\] 按 HTML `<meta charset>` 声明的 big5 解码，无替换字符/u);
+    assert.doesNotMatch(result.content, /可能有损/u, '无损时不许乱写有损');
+  } finally {
+    await server.close();
+  }
+});
+
+test('编码有损必须承认：声明 big5 却解出替换字符 ⇒ 回执写「可能有损」，不许替它背书', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(encodedPage('big5', Buffer.concat([BIG5_ZHONGWEN, INVALID_BYTE])));
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /\[编码\] .*big5.*解码/u);
+    assert.match(result.content, /可能有损/u, '出现替换字符就必须承认可能有损');
+    assert.match(result.content, /1 处无法映射/u);
+  } finally {
+    await server.close();
+  }
+});
+
+test('编码有损（Shift_JIS 夹具）：同一判据在另一套编码上也成立', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(encodedPage('shift_jis', Buffer.concat([SJIS_ZHONGWEN, INVALID_BYTE])));
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const result = await get.handler({ url: server.origin }, makeCtx(await makeTempDir()));
+    assert.match(result.content, /可能有损/u);
+    assert.match(result.content, /shift_jis/u);
+  } finally {
+    await server.close();
+  }
+});
+
+// ──────────────────────────── http_get 请求头：正常浏览器风格 ────────────────────────────
+
+test('默认请求头是正常浏览器风格（UA + accept-language），headers 参数可逐项覆盖', async () => {
+  const seen: Record<string, string | string[] | undefined>[] = [];
+  const server = await startServer((req, res) => {
+    seen.push({ ...req.headers });
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<html><body><p>ok</p></body></html>');
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const ctx = makeCtx(await makeTempDir());
+    await get.handler({ url: server.origin }, ctx);
+    await get.handler({ url: server.origin, headers: { 'user-agent': 'custom/1.0', referer: 'https://ref.example/' } }, ctx);
+
+    assert.match(String(seen[0]?.['user-agent']), /^Mozilla\/5\.0 /u, '旧的自报名 IrmiaAgent/0.1 自己在招 403');
+    assert.equal(seen[0]?.['accept-language'], 'zh-CN,zh;q=0.9,en;q=0.8');
+    assert.equal(seen[1]?.['user-agent'], 'custom/1.0', 'headers 参数优先');
+    assert.equal(seen[1]?.['referer'], 'https://ref.example/');
+  } finally {
+    await server.close();
+  }
+});
+
+test('JSON / 纯文本原样返回，不做 Markdown 改写（也不压空白：JSON 是要被解析的）', async () => {
+  const server = await startServer((req, res) => {
+    if (req.url === '/json') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end('{"ok":true,"name":"中文","n":1,"spaced":"x  y"}');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('第一行\n第二行  with   spaces\n');
+  });
+  try {
+    const tools = createNetTools({ allowedHosts: ['127.0.0.1'] });
+    const get = toolOf(tools, 'http_get');
+    const ctx = makeCtx(await makeTempDir());
+    const json = await get.handler({ url: `${server.origin}/json` }, ctx);
+    assert.match(json.content, /\{"ok":true,"name":"中文","n":1,"spaced":"x  y"\}/u, 'JSON 一个字节都不该被动');
+    const text = await get.handler({ url: `${server.origin}/text` }, ctx);
+    assert.match(text.content, /第一行\n第二行  with   spaces/u, '纯文本的连续空格也是内容');
+  } finally {
+    await server.close();
+  }
+});
+
+// ──────────────────────────── 诊断里的工具名：必须真实存在（防名字漂） ────────────────────────────
+
+/**
+ * 这一条守的是"**回执点名的工具真的存在**"。
+ *
+ * 为什么需要它（2026-10-23 用户核出来的）：三段 `[诊断]` 里原先写「`playwright` 的浏览器工具」——
+ * 而 `playwright` 的 25 件里**没有**名叫"浏览器工具"的那一件，宿主真正该调的是 `browser_snapshot`
+ * （`obscura` 那侧则是 `browser_markdown`）。文案里指一件**不存在**的工具，比不指更糟：
+ * 她会照着名字去找、找不到，然后回到重试的老路——那正是这三句要治的病。
+ *
+ * 判据**不抄名字**（抄一份就又多一个会漂的地方）：直接读 `data/mcp-cache/<server>.json` 的
+ * `tools[].name` 作为权威名字集合，然后把回执里 `[诊断]` 那一行的两件事都核一遍：
+ *   ① 每个「\`<server>\` 的 \`<tool>\`」配对 ⇒ `<tool>` 必须在该 server 的名字集合里；
+ *   ② 任何 `` `browser_*` `` 反引号 token ⇒ 必须在**全体**名字集合里。
+ * 名字改了、或谁记错了 ⇒ 当场红。⚠ 这条用例读的是本机缓存（`data/` 不入库）：缓存缺失时
+ * **红**是**前提不成立**的信号（读不到名字集合就无法核对），不是文案坏了。
+ */
+test('三段诊断点名的 MCP 工具必须真实存在（拿 data/mcp-cache 的名字集合核，防名字漂）', async () => {
+  const cacheDir = join('data', 'mcp-cache');
+  const files = (await readdir(cacheDir).catch(() => [] as string[])).filter((name) => name.endsWith('.json'));
+  assert.ok(
+    files.length > 0,
+    `读不到 ${cacheDir}/*.json —— 这条用例的前提是"MCP 缓存里有真实工具名"。`
+    + '先让至少一个 MCP server 起过一次（缓存由宿主写），再跑这条；不要改成"读不到就跳过"。',
+  );
+  const namesOf = new Map<string, Set<string>>();
+  const allNames = new Set<string>();
+  for (const file of files) {
+    const doc = JSON.parse(await readFile(join(cacheDir, file), 'utf8')) as {
+      server?: string;
+      tools?: { name?: unknown }[];
+    };
+    const server = (doc.server ?? file.replace(/\.json$/u, '')).toLowerCase();
+    const names = new Set(
+      (doc.tools ?? []).map((tool) => tool.name).filter((name): name is string => typeof name === 'string'),
+    );
+    namesOf.set(server, names);
+    for (const name of names) allNames.add(name);
+  }
+
+  // 三段诊断的真身：照 ①②③ 的夹具各取一份回执，再从回执里切出 `[诊断]` 那一行
+  const cases: { key: string; make: (get: ToolDefinition) => Promise<string> }[] = [
+    {
+      key: '403',
+      make: async (get) => {
+        const server = await startServer((_req, res) => {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+          res.end('<html><body><h1>Forbidden</h1></body></html>');
+        });
+        try {
+          return (await get.handler({ url: server.origin }, makeCtx(await makeTempDir()))).content;
+        } finally {
+          await server.close();
+        }
+      },
+    },
+    {
+      key: 'SPA 壳',
+      make: async (get) => {
+        const server = await startServer((_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end('<html><body><div id="root"></div><script src="/a.js"></script></body></html>');
+        });
+        try {
+          return (await get.handler({ url: server.origin }, makeCtx(await makeTempDir()))).content;
+        } finally {
+          await server.close();
+        }
+      },
+    },
+    {
+      key: '空正文',
+      make: async (get) => {
+        const server = await startServer((_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end('<html><body><p></p><div></div></body></html>');
+        });
+        try {
+          return (await get.handler({ url: server.origin }, makeCtx(await makeTempDir()))).content;
+        } finally {
+          await server.close();
+        }
+      },
+    },
+  ];
+
+  const get = toolOf(createNetTools({ allowedHosts: ['127.0.0.1'] }), 'http_get');
+  for (const item of cases) {
+    const receipt = await item.make(get);
+    const diagnosis = receipt.split('\n').find((line) => line.startsWith('[诊断]'));
+    assert.ok(diagnosis !== undefined, `${item.key} 的回执里没有 [诊断] 那一行：${receipt}`);
+
+    // ① 「`server` 的 `tool`」配对：tool 必须在该 server 的名字集合里
+    const pairs = [...diagnosis.matchAll(/`([a-z0-9._-]+)` 的 `([a-z0-9_]+)`/gu)];
+    assert.ok(pairs.length >= 2, `${item.key} 的诊断要点名两件真实工具（obscura / playwright 各一件）：${diagnosis}`);
+    for (const [, server = '', tool = ''] of pairs) {
+      const names = namesOf.get(server.toLowerCase());
+      assert.ok(names !== undefined, `${item.key} 的诊断点名了 server "${server}"，但 data/mcp-cache 里没有它的缓存`);
+      assert.ok(
+        names.has(tool),
+        `${item.key} 的诊断点名 \`${server}\` 的 \`${tool}\`，但该 server 的 ${names.size} 件里没有这个名字`
+        + `（真名见 data/mcp-cache/${server}.json 的 tools[].name）`,
+      );
+    }
+
+    // ② 任何 `browser_*` 反引号 token 都必须是真实的 MCP 工具名
+    for (const [, token = ''] of diagnosis.matchAll(/`(browser_[a-z0-9_]+)`/gu)) {
+      assert.ok(
+        allNames.has(token),
+        `${item.key} 的诊断写了 \`${token}\`，但 data/mcp-cache 的全部 ${allNames.size} 个工具名里没有它`,
+      );
+    }
+    assert.doesNotMatch(diagnosis, /浏览器工具/u, `${item.key} 的诊断不许写"浏览器工具"（模糊说法等于没指名）`);
   }
 });
 

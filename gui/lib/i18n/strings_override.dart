@@ -390,6 +390,19 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'onboardingQqAppSecretLabel': s.onboardingQqAppSecretLabel,
     'onboardingQqAppSecretHint': s.onboardingQqAppSecretHint,
     'onboardingQqCredentialsNote': s.onboardingQqCredentialsNote,
+    'onboardingQqEntryScan': s.onboardingQqEntryScan,
+    'onboardingQqEntryManual': s.onboardingQqEntryManual,
+    'onboardingQqBindIntro': s.onboardingQqBindIntro,
+    'onboardingQqBindStart': s.onboardingQqBindStart,
+    'onboardingQqBindStarting': s.onboardingQqBindStarting,
+    'onboardingQqBindWaitScan': s.onboardingQqBindWaitScan,
+    'onboardingQqBindWaiting': s.onboardingQqBindWaiting,
+    'onboardingQqBindSuccess': s.onboardingQqBindSuccess,
+    'onboardingQqBindSavedNote': s.onboardingQqBindSavedNote,
+    'onboardingQqBindRegenerate': s.onboardingQqBindRegenerate,
+    'onboardingQqBindTestConnection': s.onboardingQqBindTestConnection,
+    'onboardingQqBindTokenTesting': s.onboardingQqBindTokenTesting,
+    'onboardingOnebotDetail': s.onboardingOnebotDetail,
     'onboardingStepNameHint': s.onboardingStepNameHint,
     'onboardingKeywordsHint': s.onboardingKeywordsHint,
     'onboardingPersonaHint': s.onboardingPersonaHint,
@@ -409,6 +422,24 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'onboardingRestartBody': s.onboardingRestartBody,
     'onboardingRestartNow': s.onboardingRestartNow,
     'onboardingRestartLater': s.onboardingRestartLater,
+    // 第 2 步：模型探测 / 密钥状态（2026-10-26；协议三档同日撤出引导页）
+    'onboardingModelLabel': s.onboardingModelLabel,
+    'onboardingModelRequired': s.onboardingModelRequired,
+    'onboardingBaseUrlLabel': s.onboardingBaseUrlLabel,
+    'onboardingBaseUrlRequired': s.onboardingBaseUrlRequired,
+    'onboardingBaseUrlNote': s.onboardingBaseUrlNote,
+    'onboardingApiKeyLabel': s.onboardingApiKeyLabel,
+    'onboardingApiKeyStatusMissing': s.onboardingApiKeyStatusMissing,
+    'onboardingProbeButton': s.onboardingProbeButton,
+    'onboardingProbeRunning': s.onboardingProbeRunning,
+    'onboardingProbeBaseRequired': s.onboardingProbeBaseRequired,
+    'onboardingProbeSearchHint': s.onboardingProbeSearchHint,
+    'onboardingProbeNoMatch': s.onboardingProbeNoMatch,
+    'onboardingProbeEmptyList': s.onboardingProbeEmptyList,
+    'onboardingProbeUnreachable': s.onboardingProbeUnreachable,
+    'onboardingProbeUnauthorized': s.onboardingProbeUnauthorized,
+    'onboardingProbeNoModels': s.onboardingProbeNoModels,
+    'onboardingProbeNoKey': s.onboardingProbeNoKey,
     'chatTitle': s.chatTitle,
     'chatSubtitle': s.chatSubtitle,
     'composerHint': s.composerHint,
@@ -555,6 +586,13 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'overviewJudgedByModel': s.overviewJudgedByModel,
     'overviewSessionsNotList': s.overviewSessionsNotList,
     'overviewNotesNotList': s.overviewNotesNotList,
+    'overviewContextTitle': s.overviewContextTitle,
+    'overviewContextLoading': s.overviewContextLoading,
+    'overviewContextErrorHint': s.overviewContextErrorHint,
+    'overviewContextEmpty': s.overviewContextEmpty,
+    'overviewContextNotObject': s.overviewContextNotObject,
+    'overviewContextKeepOn': s.overviewContextKeepOn,
+    'overviewContextKeepOff': s.overviewContextKeepOff,
     'settingsLaneHeavyLabel': s.settingsLaneHeavyLabel,
     'settingsLaneLightLabel': s.settingsLaneLightLabel,
     'settingsLaneHeavyNote': s.settingsLaneHeavyNote,
@@ -779,6 +817,53 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'settingsSetPasswordFirst': s.settingsSetPasswordFirst,
     'settingsPasswordChanged': s.settingsPasswordChanged,
     'settingsLogoutBody': s.settingsLogoutBody,
+    'settingsCloseInstance': s.settingsCloseInstance,
+    'settingsCloseInstanceBody': s.settingsCloseInstanceBody,
+    'gateHintSessionExpired': s.gateHintSessionExpired,
+    'gateHintSetupNeeded': s.gateHintSetupNeeded,
+    'gateHintAlreadyInitialized': s.gateHintAlreadyInitialized,
+    // 门上那三档里只有"看 gui.log"那一句是无参的（①②两档自带端口/阶段，是带参句子）
+    'gateBackendLogHint': s.gateBackendLogHint,
+    // 实例选择页（2026-10）：无参的那几条可覆盖；带参的（pickerProblemDirNotEmpty 那一族）
+    // 与其它带参句子同一条边界——参数没有可填的位置，见文件头第 1 条。
+    'pickerTitle': s.pickerTitle,
+    'pickerBody': s.pickerBody,
+    'pickerLoading': s.pickerLoading,
+    'pickerEmpty': s.pickerEmpty,
+    'pickerUnreadable': s.pickerUnreadable,
+    'pickerRunning': s.pickerRunning,
+    'pickerStopped': s.pickerStopped,
+    'pickerDefaultBadge': s.pickerDefaultBadge,
+    'pickerLogin': s.pickerLogin,
+    'pickerStart': s.pickerStart,
+    'pickerStarting': s.pickerStarting,
+    'pickerEnter': s.pickerEnter,
+    'pickerStartEnter': s.pickerStartEnter,
+    'pickerEntering': s.pickerEntering,
+    'pickerForget': s.pickerForget,
+    'pickerSessionExpired': s.pickerSessionExpired,
+    'pickerNew': s.pickerNew,
+    'pickerDelete': s.pickerDelete,
+    'pickerNewNameLabel': s.pickerNewNameLabel,
+    'pickerNewDirLabel': s.pickerNewDirLabel,
+    'pickerNewCreate': s.pickerNewCreate,
+    'pickerNewUseDir': s.pickerNewUseDir,
+    'pickerDeleteTitle': s.pickerDeleteTitle,
+    'pickerDeleteNote': s.pickerDeleteNote,
+    'pickerDeleteKeepDir': s.pickerDeleteKeepDir,
+    'pickerDeleteWithDir': s.pickerDeleteWithDir,
+    'pickerRename': s.pickerRename,
+    'pickerRenameTitle': s.pickerRenameTitle,
+    'pickerRenameBody': s.pickerRenameBody,
+    'pickerRenameSave': s.pickerRenameSave,
+    'pickerProblemNameRequired': s.pickerProblemNameRequired,
+    'pickerProblemNoLauncher': s.pickerProblemNoLauncher,
+    'pickerProblemLaunchFailed': s.pickerProblemLaunchFailed,
+    'pickerProblemPortUnavailable': s.pickerProblemPortUnavailable,
+    'pickerProblemRemoveFailed': s.pickerProblemRemoveFailed,
+    'pickerProblemRenameFailed': s.pickerProblemRenameFailed,
+    // 等就绪那一行是带参句子（秒数 + 阶段），按同一条边界不进这张表；那颗按钮是无参的
+    'pickerStopWaiting': s.pickerStopWaiting,
     'settingsAboutNote': s.settingsAboutNote,
     'settingsAboutBadge': s.settingsAboutBadge,
     'settingsVersionLabel': s.settingsVersionLabel,
@@ -902,7 +987,6 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'chanSourceExternal': s.chanSourceExternal,
     'chanEventGeneric': s.chanEventGeneric,
     'chanJoinWords': s.chanJoinWords,    'schedNotProjection': s.schedNotProjection,
-    'schedMemoryFactsMissing': s.schedMemoryFactsMissing,
     'schedCancelTitle': s.schedCancelTitle,
     'schedCancelPlan': s.schedCancelPlan,
     'schedBuiltToast': s.schedBuiltToast,
@@ -925,13 +1009,11 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'schedStatDrafts': s.schedStatDrafts,
     'schedStatDraftsNote': s.schedStatDraftsNote,
     'schedCalendarTitle': s.schedCalendarTitle,
-    'schedCalendarHint': s.schedCalendarHint,
     'schedPrevWeek': s.schedPrevWeek,
     'schedNextWeek': s.schedNextWeek,
     'schedRecurringPill': s.schedRecurringPill,
     'schedWeekEmpty': s.schedWeekEmpty,
     'schedListTitle': s.schedListTitle,
-    'schedListSubtitle': s.schedListSubtitle,
     'schedShowAll': s.schedShowAll,
     'schedClearSearch': s.schedClearSearch,
     'schedActionGoneHint': s.schedActionGoneHint,
@@ -939,7 +1021,6 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'schedListEmpty': s.schedListEmpty,
     'schedListEmptyHint': s.schedListEmptyHint,
     'schedDetailPlaceholder': s.schedDetailPlaceholder,
-    'schedDetailEmptyHint': s.schedDetailEmptyHint,
     'schedFieldWhen': s.schedFieldWhen,
     'schedFieldWhy': s.schedFieldWhy,
     'schedFieldWhat': s.schedFieldWhat,
@@ -947,10 +1028,6 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'schedFieldDuration': s.schedFieldDuration,
     'schedFieldAfter': s.schedFieldAfter,
     'schedUnwritten': s.schedUnwritten,
-    'schedPlanTitle': s.schedPlanTitle,
-    'schedPlanNote': s.schedPlanNote,
-    'schedGoMemory': s.schedGoMemory,
-    'schedPlanEmpty': s.schedPlanEmpty,
     'schedSeeChat': s.schedSeeChat,
     'schedChoiceNotify': s.schedChoiceNotify,
     'schedChoiceSelf': s.schedChoiceSelf,
@@ -1092,6 +1169,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'grantInboxExpandTooltip': s.grantInboxExpandTooltip,
     'grantInboxOpenExtensions': s.grantInboxOpenExtensions,
     'grantInboxDetailsClose': s.grantInboxDetailsClose,
+    'grantUnreadableTitle': s.grantUnreadableTitle,
     'extNoServers': s.extNoServers,
     'extNoServersHint1': s.extNoServersHint1,
     'extNoServersHint2': s.extNoServersHint2,
@@ -1209,6 +1287,11 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'updateCopied': s.updateCopied,
     'updateReleasePage': s.updateReleasePage,
     'updateChannelSwitchNote': s.updateChannelSwitchNote,
+    'settingsProtocolThirdPartyTitle': s.settingsProtocolThirdPartyTitle,
+    'settingsProtocolThirdPartyNote': s.settingsProtocolThirdPartyNote,
+    'settingsProtocolOfficialProject': s.settingsProtocolOfficialProject,
+    'settingsProtocolOfficialSite': s.settingsProtocolOfficialSite,
+    'settingsProtocolLicenseRow': s.settingsProtocolLicenseRow,
 };
 
 /// 可覆盖的键（懒加载一次：= [AppStrings] 的全部无参 getter）
@@ -1411,6 +1494,34 @@ class OverriddenStrings extends AppStrings {
   String get onboardingQqAppSecretHint => overrides['onboardingQqAppSecretHint'] ?? base.onboardingQqAppSecretHint;
   @override
   String get onboardingQqCredentialsNote => overrides['onboardingQqCredentialsNote'] ?? base.onboardingQqCredentialsNote;
+  @override
+  String get onboardingQqEntryScan => overrides['onboardingQqEntryScan'] ?? base.onboardingQqEntryScan;
+  @override
+  String get onboardingQqEntryManual => overrides['onboardingQqEntryManual'] ?? base.onboardingQqEntryManual;
+  @override
+  String get onboardingQqBindIntro => overrides['onboardingQqBindIntro'] ?? base.onboardingQqBindIntro;
+  @override
+  String get onboardingQqBindStart => overrides['onboardingQqBindStart'] ?? base.onboardingQqBindStart;
+  @override
+  String get onboardingQqBindStarting => overrides['onboardingQqBindStarting'] ?? base.onboardingQqBindStarting;
+  @override
+  String get onboardingQqBindWaitScan => overrides['onboardingQqBindWaitScan'] ?? base.onboardingQqBindWaitScan;
+  @override
+  String get onboardingQqBindWaiting => overrides['onboardingQqBindWaiting'] ?? base.onboardingQqBindWaiting;
+  @override
+  String get onboardingQqBindSuccess => overrides['onboardingQqBindSuccess'] ?? base.onboardingQqBindSuccess;
+  @override
+  String get onboardingQqBindSavedNote => overrides['onboardingQqBindSavedNote'] ?? base.onboardingQqBindSavedNote;
+  @override
+  String get onboardingQqBindRegenerate => overrides['onboardingQqBindRegenerate'] ?? base.onboardingQqBindRegenerate;
+  @override
+  String get onboardingQqBindTestConnection =>
+      overrides['onboardingQqBindTestConnection'] ?? base.onboardingQqBindTestConnection;
+  @override
+  String get onboardingQqBindTokenTesting =>
+      overrides['onboardingQqBindTokenTesting'] ?? base.onboardingQqBindTokenTesting;
+  @override
+  String get onboardingOnebotDetail => overrides['onboardingOnebotDetail'] ?? base.onboardingOnebotDetail;
   @override
   String get onboardingStepNameHint => overrides['onboardingStepNameHint'] ?? base.onboardingStepNameHint;
   @override
@@ -1742,6 +1853,22 @@ class OverriddenStrings extends AppStrings {
   @override
   String get overviewNotesNotList => overrides['overviewNotesNotList'] ?? base.overviewNotesNotList;
   @override
+  String get overviewContextTitle => overrides['overviewContextTitle'] ?? base.overviewContextTitle;
+  @override
+  String get overviewContextLoading => overrides['overviewContextLoading'] ?? base.overviewContextLoading;
+  @override
+  String get overviewContextErrorHint =>
+      overrides['overviewContextErrorHint'] ?? base.overviewContextErrorHint;
+  @override
+  String get overviewContextEmpty => overrides['overviewContextEmpty'] ?? base.overviewContextEmpty;
+  @override
+  String get overviewContextNotObject =>
+      overrides['overviewContextNotObject'] ?? base.overviewContextNotObject;
+  @override
+  String get overviewContextKeepOn => overrides['overviewContextKeepOn'] ?? base.overviewContextKeepOn;
+  @override
+  String get overviewContextKeepOff => overrides['overviewContextKeepOff'] ?? base.overviewContextKeepOff;
+  @override
   String get settingsLaneHeavyLabel => overrides['settingsLaneHeavyLabel'] ?? base.settingsLaneHeavyLabel;
   @override
   String get settingsLaneLightLabel => overrides['settingsLaneLightLabel'] ?? base.settingsLaneLightLabel;
@@ -1929,6 +2056,21 @@ class OverriddenStrings extends AppStrings {
   String get settingsDownloadPage => overrides['settingsDownloadPage'] ?? base.settingsDownloadPage;
   @override
   String get settingsOpenDownloadPage => overrides['settingsOpenDownloadPage'] ?? base.settingsOpenDownloadPage;
+  @override
+  String get settingsProtocolThirdPartyTitle =>
+      overrides['settingsProtocolThirdPartyTitle'] ?? base.settingsProtocolThirdPartyTitle;
+  @override
+  String get settingsProtocolThirdPartyNote =>
+      overrides['settingsProtocolThirdPartyNote'] ?? base.settingsProtocolThirdPartyNote;
+  @override
+  String get settingsProtocolOfficialProject =>
+      overrides['settingsProtocolOfficialProject'] ?? base.settingsProtocolOfficialProject;
+  @override
+  String get settingsProtocolOfficialSite =>
+      overrides['settingsProtocolOfficialSite'] ?? base.settingsProtocolOfficialSite;
+  @override
+  String get settingsProtocolLicenseRow =>
+      overrides['settingsProtocolLicenseRow'] ?? base.settingsProtocolLicenseRow;
   @override
   String get settingsDownloadAndInstall => overrides['settingsDownloadAndInstall'] ?? base.settingsDownloadAndInstall;
   @override
@@ -2194,6 +2336,116 @@ class OverriddenStrings extends AppStrings {
   @override
   String get settingsLogoutBody => overrides['settingsLogoutBody'] ?? base.settingsLogoutBody;
   @override
+  String get settingsCloseInstance => overrides['settingsCloseInstance'] ?? base.settingsCloseInstance;
+  @override
+  String get settingsCloseInstanceBody =>
+      overrides['settingsCloseInstanceBody'] ?? base.settingsCloseInstanceBody;
+  @override
+  String get gateHintSessionExpired => overrides['gateHintSessionExpired'] ?? base.gateHintSessionExpired;
+  @override
+  String get gateHintSetupNeeded => overrides['gateHintSetupNeeded'] ?? base.gateHintSetupNeeded;
+  @override
+  String get gateHintAlreadyInitialized => overrides['gateHintAlreadyInitialized'] ?? base.gateHintAlreadyInitialized;
+  // ── 实例选择页（2026-10）：无参的可覆盖，带参的只转发（见 stringsAsMap 里那段注释）──
+  @override
+  String get pickerTitle => overrides['pickerTitle'] ?? base.pickerTitle;
+  @override
+  String get pickerBody => overrides['pickerBody'] ?? base.pickerBody;
+  @override
+  String get pickerLoading => overrides['pickerLoading'] ?? base.pickerLoading;
+  @override
+  String get pickerEmpty => overrides['pickerEmpty'] ?? base.pickerEmpty;
+  @override
+  String get pickerUnreadable => overrides['pickerUnreadable'] ?? base.pickerUnreadable;
+  @override
+  String get pickerRunning => overrides['pickerRunning'] ?? base.pickerRunning;
+  @override
+  String get pickerStopped => overrides['pickerStopped'] ?? base.pickerStopped;
+  @override
+  String get pickerDefaultBadge => overrides['pickerDefaultBadge'] ?? base.pickerDefaultBadge;
+  @override
+  String get pickerLogin => overrides['pickerLogin'] ?? base.pickerLogin;
+  @override
+  String get pickerStart => overrides['pickerStart'] ?? base.pickerStart;
+  @override
+  String get pickerStarting => overrides['pickerStarting'] ?? base.pickerStarting;
+  @override
+  String get pickerEnter => overrides['pickerEnter'] ?? base.pickerEnter;
+  @override
+  String get pickerStartEnter => overrides['pickerStartEnter'] ?? base.pickerStartEnter;
+  @override
+  String get pickerEntering => overrides['pickerEntering'] ?? base.pickerEntering;
+  @override
+  String get pickerForget => overrides['pickerForget'] ?? base.pickerForget;
+  @override
+  String get pickerSessionExpired => overrides['pickerSessionExpired'] ?? base.pickerSessionExpired;
+  @override
+  String get pickerNew => overrides['pickerNew'] ?? base.pickerNew;
+  @override
+  String get pickerDelete => overrides['pickerDelete'] ?? base.pickerDelete;
+  @override
+  String get pickerNewNameLabel => overrides['pickerNewNameLabel'] ?? base.pickerNewNameLabel;
+  @override
+  String get pickerNewDirLabel => overrides['pickerNewDirLabel'] ?? base.pickerNewDirLabel;
+  @override
+  String get pickerNewCreate => overrides['pickerNewCreate'] ?? base.pickerNewCreate;
+  @override
+  String get pickerNewUseDir => overrides['pickerNewUseDir'] ?? base.pickerNewUseDir;
+  @override
+  String get pickerDeleteTitle => overrides['pickerDeleteTitle'] ?? base.pickerDeleteTitle;
+  @override
+  String pickerDeleteBody(String name) => base.pickerDeleteBody(name);
+  @override
+  String pickerForgetBody(String name) => base.pickerForgetBody(name);
+  @override
+  String get pickerDeleteNote => overrides['pickerDeleteNote'] ?? base.pickerDeleteNote;
+  @override
+  String get pickerDeleteKeepDir => overrides['pickerDeleteKeepDir'] ?? base.pickerDeleteKeepDir;
+  @override
+  String get pickerDeleteWithDir => overrides['pickerDeleteWithDir'] ?? base.pickerDeleteWithDir;
+  @override
+  String get pickerRename => overrides['pickerRename'] ?? base.pickerRename;
+  @override
+  String get pickerRenameTitle => overrides['pickerRenameTitle'] ?? base.pickerRenameTitle;
+  @override
+  String get pickerRenameBody => overrides['pickerRenameBody'] ?? base.pickerRenameBody;
+  @override
+  String get pickerRenameSave => overrides['pickerRenameSave'] ?? base.pickerRenameSave;
+  @override
+  String get pickerProblemNameRequired => overrides['pickerProblemNameRequired'] ?? base.pickerProblemNameRequired;
+  @override
+  String get pickerProblemNoLauncher => overrides['pickerProblemNoLauncher'] ?? base.pickerProblemNoLauncher;
+  @override
+  String get pickerProblemLaunchFailed => overrides['pickerProblemLaunchFailed'] ?? base.pickerProblemLaunchFailed;
+  @override
+  String get pickerProblemPortUnavailable =>
+      overrides['pickerProblemPortUnavailable'] ?? base.pickerProblemPortUnavailable;
+  @override
+  String get pickerProblemRemoveFailed => overrides['pickerProblemRemoveFailed'] ?? base.pickerProblemRemoveFailed;
+  @override
+  String get pickerProblemRenameFailed => overrides['pickerProblemRenameFailed'] ?? base.pickerProblemRenameFailed;
+  @override
+  String pickerProblemDirNotEmpty(String dir) => base.pickerProblemDirNotEmpty(dir);
+  @override
+  String pickerProblemNotReady(int seconds, String phase, String port) =>
+      base.pickerProblemNotReady(seconds, phase, port);
+  @override
+  String pickerProblemPortTaken(String id) => base.pickerProblemPortTaken(id);
+  @override
+  String pickerProblemCannotDeleteRunning(String name) => base.pickerProblemCannotDeleteRunning(name);
+  @override
+  String pickerProblemCannotDeleteDefault(String name) => base.pickerProblemCannotDeleteDefault(name);
+  @override
+  String pickerStartingNamed(String name) => base.pickerStartingNamed(name);
+  @override
+  String pickerNewPort(String port) => base.pickerNewPort(port);
+  @override
+  String pickerDeleteDisabled(String reason) => base.pickerDeleteDisabled(reason);
+  @override
+  String pickerWaitingReady(int seconds, String phase) => base.pickerWaitingReady(seconds, phase);
+  @override
+  String get pickerStopWaiting => overrides['pickerStopWaiting'] ?? base.pickerStopWaiting;
+  @override
   String get settingsAboutNote => overrides['settingsAboutNote'] ?? base.settingsAboutNote;
   @override
   String get settingsAboutBadge => overrides['settingsAboutBadge'] ?? base.settingsAboutBadge;
@@ -2257,6 +2509,27 @@ class OverriddenStrings extends AppStrings {
   @override
   String restartRefused(String reason) => base.restartRefused(reason);
   @override
+  String restartNoReceipt(String reason) => base.restartNoReceipt(reason);
+  @override
+  String requestWaiting(String request, int seconds) => base.requestWaiting(request, seconds);
+  @override
+  String requestTimeout(String request, int seconds, bool maybeDone) =>
+      base.requestTimeout(request, seconds, maybeDone);
+  @override
+  String requestStreamStalled(int seconds) => base.requestStreamStalled(seconds);
+  @override
+  String gateWaitingBackend(int port) => base.gateWaitingBackend(port);
+  @override
+  String gateBackendDown(String address) => base.gateBackendDown(address);
+  @override
+  String gateBackendStarting(String phase) => base.gateBackendStarting(phase);
+  @override
+  String backendPhaseLabel(String phase) => base.backendPhaseLabel(phase);
+  @override
+  String gateBackendProgress(int seconds, int retries) => base.gateBackendProgress(seconds, retries);
+  @override
+  String get gateBackendLogHint => overrides['gateBackendLogHint'] ?? base.gateBackendLogHint;
+  @override
   String restartBackTimeout(int seconds) => base.restartBackTimeout(seconds);
   @override
   String quitAllConfirmBody(bool busy) => base.quitAllConfirmBody(busy);
@@ -2264,6 +2537,16 @@ class OverriddenStrings extends AppStrings {
   String quitAllFailed(String reason) => base.quitAllFailed(reason);
   @override
   String onboardingSecretConfigured(String? mask) => base.onboardingSecretConfigured(mask);
+  @override
+  String onboardingQqBindAppId(String appId) => base.onboardingQqBindAppId(appId);
+  @override
+  String onboardingQqBindTokenOk(int expiresIn) => base.onboardingQqBindTokenOk(expiresIn);
+  @override
+  String onboardingQqBindTokenFailed(String reason) => base.onboardingQqBindTokenFailed(reason);
+  @override
+  String onboardingQqBindStartFailed(String reason) => base.onboardingQqBindStartFailed(reason);
+  @override
+  String onboardingQqBindStatusFailed(String reason) => base.onboardingQqBindStatusFailed(reason);
   @override
   String onboardingDepsItemFailed(String reason) => base.onboardingDepsItemFailed(reason);
   @override
@@ -2291,6 +2574,77 @@ class OverriddenStrings extends AppStrings {
   @override
   String onboardingApiKeyNoSlot(String routes, String envNames) =>
       base.onboardingApiKeyNoSlot(routes, envNames);
+  // ── 第 2 步：模型探测 / 协议三档 / 密钥状态（2026-10-26）─────────────
+  @override
+  String get onboardingModelLabel => overrides['onboardingModelLabel'] ?? base.onboardingModelLabel;
+  @override
+  String get onboardingModelRequired => overrides['onboardingModelRequired'] ?? base.onboardingModelRequired;
+  @override
+  String get onboardingBaseUrlLabel => overrides['onboardingBaseUrlLabel'] ?? base.onboardingBaseUrlLabel;
+  @override
+  String get onboardingBaseUrlRequired =>
+      overrides['onboardingBaseUrlRequired'] ?? base.onboardingBaseUrlRequired;
+  @override
+  String get onboardingBaseUrlNote => overrides['onboardingBaseUrlNote'] ?? base.onboardingBaseUrlNote;
+  @override
+  String get onboardingApiKeyLabel => overrides['onboardingApiKeyLabel'] ?? base.onboardingApiKeyLabel;
+  @override
+  String get onboardingApiKeyStatusMissing =>
+      overrides['onboardingApiKeyStatusMissing'] ?? base.onboardingApiKeyStatusMissing;
+  @override
+  String onboardingApiKeyStatusWritten(String gates) => base.onboardingApiKeyStatusWritten(gates);
+  @override
+  String onboardingApiKeyStatusPartial(String have) => base.onboardingApiKeyStatusPartial(have);
+  @override
+  String get onboardingProbeButton => overrides['onboardingProbeButton'] ?? base.onboardingProbeButton;
+  @override
+  String get onboardingProbeRunning => overrides['onboardingProbeRunning'] ?? base.onboardingProbeRunning;
+  @override
+  String get onboardingProbeBaseRequired =>
+      overrides['onboardingProbeBaseRequired'] ?? base.onboardingProbeBaseRequired;
+  @override
+  String onboardingProbeDone({
+    required int count,
+    required bool responsesOk,
+    required int? responsesMs,
+    required bool chatOk,
+    required int? chatMs,
+    String? recommended,
+  }) =>
+      base.onboardingProbeDone(
+        count: count,
+        responsesOk: responsesOk,
+        responsesMs: responsesMs,
+        chatOk: chatOk,
+        chatMs: chatMs,
+        recommended: recommended,
+      );
+  @override
+  String get onboardingProbeSearchHint =>
+      overrides['onboardingProbeSearchHint'] ?? base.onboardingProbeSearchHint;
+  @override
+  String get onboardingProbeNoMatch => overrides['onboardingProbeNoMatch'] ?? base.onboardingProbeNoMatch;
+  @override
+  String get onboardingProbeEmptyList =>
+      overrides['onboardingProbeEmptyList'] ?? base.onboardingProbeEmptyList;
+  @override
+  String onboardingProbeBadge(String protocol, bool supported) => base.onboardingProbeBadge(protocol, supported);
+  @override
+  String get onboardingProbeUnreachable =>
+      overrides['onboardingProbeUnreachable'] ?? base.onboardingProbeUnreachable;
+  @override
+  String get onboardingProbeUnauthorized =>
+      overrides['onboardingProbeUnauthorized'] ?? base.onboardingProbeUnauthorized;
+  @override
+  String get onboardingProbeNoModels => overrides['onboardingProbeNoModels'] ?? base.onboardingProbeNoModels;
+  @override
+  String get onboardingProbeNoKey => overrides['onboardingProbeNoKey'] ?? base.onboardingProbeNoKey;
+  @override
+  String onboardingProbeFailed(String reason) => base.onboardingProbeFailed(reason);
+  @override
+  String onboardingProbeOnlyProtocol(String protocol) => base.onboardingProbeOnlyProtocol(protocol);
+  @override
+  String onboardingProbeWarning(String warning) => base.onboardingProbeWarning(warning);
   @override
   String receivedFrom(String sender, String id) => base.receivedFrom(sender, id);
   @override
@@ -2389,6 +2743,18 @@ class OverriddenStrings extends AppStrings {
   String overviewExternalSessionsError(String reason) => base.overviewExternalSessionsError(reason);
   @override
   String overviewFrameworkNotesError(String reason) => base.overviewFrameworkNotesError(reason);
+  @override
+  String overviewContextTokens(String used, String budget) => base.overviewContextTokens(used, budget);
+  @override
+  String overviewContextSubline(int percent, String keep, String stamp) =>
+      base.overviewContextSubline(percent, keep, stamp);
+  @override
+  String overviewContextShare(int share) => base.overviewContextShare(share);
+  @override
+  String overviewContextLegendNumbers(String tokens, int share) =>
+      base.overviewContextLegendNumbers(tokens, share);
+  @override
+  String overviewContextError(String reason) => base.overviewContextError(reason);
   @override
   String settingsSysEmptyError(String label) => base.settingsSysEmptyError(label);
   @override
@@ -2898,9 +3264,6 @@ class OverriddenStrings extends AppStrings {
   String get schedNotProjection =>
       overrides['schedNotProjection'] ?? base.schedNotProjection;
   @override
-  String get schedMemoryFactsMissing =>
-      overrides['schedMemoryFactsMissing'] ?? base.schedMemoryFactsMissing;
-  @override
   String get schedCancelTitle =>
       overrides['schedCancelTitle'] ?? base.schedCancelTitle;
   @override
@@ -2961,9 +3324,6 @@ class OverriddenStrings extends AppStrings {
   String get schedLoadHint =>
       overrides['schedLoadHint'] ?? base.schedLoadHint;
   @override
-  String schedFooter(String name) =>
-      base.schedFooter(name);
-  @override
   String get schedStatThisWeek =>
       overrides['schedStatThisWeek'] ?? base.schedStatThisWeek;
   @override
@@ -2991,9 +3351,6 @@ class OverriddenStrings extends AppStrings {
   String get schedCalendarTitle =>
       overrides['schedCalendarTitle'] ?? base.schedCalendarTitle;
   @override
-  String get schedCalendarHint =>
-      overrides['schedCalendarHint'] ?? base.schedCalendarHint;
-  @override
   String get schedPrevWeek =>
       overrides['schedPrevWeek'] ?? base.schedPrevWeek;
   @override
@@ -3005,9 +3362,6 @@ class OverriddenStrings extends AppStrings {
   @override
   String schedUnplaceable(int count) =>
       base.schedUnplaceable(count);
-  @override
-  String schedOutOfRange(int count) =>
-      base.schedOutOfRange(count);
   @override
   String schedTimeRecurring(String hour, String minute) =>
       base.schedTimeRecurring(hour, minute);
@@ -3026,9 +3380,6 @@ class OverriddenStrings extends AppStrings {
   @override
   String get schedListTitle =>
       overrides['schedListTitle'] ?? base.schedListTitle;
-  @override
-  String get schedListSubtitle =>
-      overrides['schedListSubtitle'] ?? base.schedListSubtitle;
   @override
   String schedFilterDay(String day) =>
       base.schedFilterDay(day);
@@ -3059,9 +3410,6 @@ class OverriddenStrings extends AppStrings {
   @override
   String get schedDetailPlaceholder =>
       overrides['schedDetailPlaceholder'] ?? base.schedDetailPlaceholder;
-  @override
-  String get schedDetailEmptyHint =>
-      overrides['schedDetailEmptyHint'] ?? base.schedDetailEmptyHint;
   @override
   String get schedFieldWhen =>
       overrides['schedFieldWhen'] ?? base.schedFieldWhen;
@@ -3095,24 +3443,6 @@ class OverriddenStrings extends AppStrings {
   @override
   String get schedUnwritten =>
       overrides['schedUnwritten'] ?? base.schedUnwritten;
-  @override
-  String get schedPlanTitle =>
-      overrides['schedPlanTitle'] ?? base.schedPlanTitle;
-  @override
-  String get schedPlanNote =>
-      overrides['schedPlanNote'] ?? base.schedPlanNote;
-  @override
-  String get schedGoMemory =>
-      overrides['schedGoMemory'] ?? base.schedGoMemory;
-  @override
-  String schedPlanUnavailable(String err) =>
-      base.schedPlanUnavailable(err);
-  @override
-  String get schedPlanEmpty =>
-      overrides['schedPlanEmpty'] ?? base.schedPlanEmpty;
-  @override
-  String schedPlanMore(int more) =>
-      base.schedPlanMore(more);
   @override
   String schedWakeReceipt(String text) =>
       base.schedWakeReceipt(text);
@@ -3661,6 +3991,14 @@ class OverriddenStrings extends AppStrings {
   String grantInboxCollapsed(int count) => base.grantInboxCollapsed(count);
   @override
   String grantInboxFailed(String reason) => base.grantInboxFailed(reason);
+  @override
+  String get grantUnreadableTitle =>
+      overrides['grantUnreadableTitle'] ?? base.grantUnreadableTitle;
+  @override
+  // 带参句子不参与覆盖（覆盖文件里没有参数位置，见文件头边界 1）
+  String grantUnreadableBody(String id, String why) => base.grantUnreadableBody(id, why);
+  @override
+  String grantUnreadableMore(int count) => base.grantUnreadableMore(count);
   @override
   String trayPendingItem(int count) => base.trayPendingItem(count);
   @override

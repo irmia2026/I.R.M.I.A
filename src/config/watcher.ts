@@ -97,7 +97,7 @@ export const HOT_RELOAD_FIELDS: readonly string[] = ['mcp.servers'];
 /**
  * **配置生效口径的唯一一句话**（2026-10-18 立）。
  *
- * 为什么要有个常量：这句话过去被手抄在五个地方（`README.md`、`ARCHITECTURE.md`、
+ * 为什么要有个常量：这句话过去被手抄在五个地方（`README.md`、`docs/ARCHITECTURE.md`、
  * `config/config.ts` 的 `McpConfig.servers`、`log/types.ts` 的 `McpIndexSnapshot`、
  * `web/server.ts` 的 `config-update`），五处各写各的，最后写成两种相反的结论
  * ——四处说"全部字段都要重启（热更白名单是空的）"，而真值是 `HOT_RELOAD_FIELDS` 里那一项

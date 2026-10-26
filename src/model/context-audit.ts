@@ -241,6 +241,112 @@ export function sectionFactOf(name: string, text: string): ContextSectionFact {
   };
 }
 
+// ──────────────────────────── 命中量的自算（前缀比较） ────────────────────────────
+
+/**
+ * **命中量的自算**——拿这一拍的 `context` 与**同一模型上一拍**的 `context` 做前缀比较。
+ *
+ * 用户的第二条指示（2026-10-26，原话）：「**如果是不返回缓存命中的模型就我们自己算**」。
+ *
+ * ────────── 为什么需要它（现场，不是设想） ──────────
+ *
+ * heavy 档曾用 `gpt-6.1-sol`（2026-10-25 16:37 起，events seq 250635–250947 / turns 3783–3786）：
+ * 30 拍 `cacheHitTokens` 只有**两种值**——0 或固定的 **5248**，而同一段的 `inputTokens` 已从
+ * 21,378 涨到 32,225（命中量与上下文规模**无关**）。合计 hit 47,232 / miss 820,151 ⇒ 未命中
+ * **94.6%**；可那 30 拍里 `instructions`（7052 tok / d3738e）与 `tools`（5476 tok / 4d118a）
+ * 一个字节都没变过。切回 `deepseek-flash` 之后同一段日志的未命中是 **11.1%**（逐步 6.3 / 8.1 /
+ * 6.5%）——同一个窗口、同一个前缀设计，两个数差 8 倍 ⇒ 那条 94.6% 量的是**端点报不报缓存**，
+ * 不是我们的前缀好不好。旧口径把两个模型的账混在同一个 20 轮窗口里，于是报出 79.8%，
+ * 读起来像"我们的前缀设计坏了"。
+ *
+ * ────────── 这条函数给的是什么 ──────────
+ *
+ * 我们自己发出的上下文快照（`budget/consumed.context`，每拍都有）里，段与段都有 `hash`。
+ * 按**请求体的顺序**逐段比，**连续相同的段**的 tokens 加起来 = 估算命中量。这是**已有数据**，
+ * 一个新协议字段都不用加。
+ *
+ * 三条口径（都刻意保守，宁可低估命中、不可高估）：
+ *   · **顺序即请求体**：instructions → tools → memory → history（逐条 item）→ state → now
+ *     → wake → hint → input。**第一处不同 ⇒ 立刻停**，后面的段落即使碰巧相同也不再累加
+ *     （前缀已经从那里断了，后面的"相同"不是同一段前缀）；
+ *   · **history 只能逐条比**：整段哈希每拍都变（尾巴一直在追加），拿它当判据等于"永远不命中"；
+ *     真正要回答的是"**前面那几条有没有被改写**"。没有逐条事实（老日志没有 `headItems`）时
+ *     **一个 token 都不算**，不猜。尾巴那几条没有逐条事实 ⇒ 也只算被比过且相同的条目；
+ *   · **没有 `context`（老日志）或没有同模型上一拍 ⇒ 0**，不拿别的拍顶替、不拿平均值凑。
+ *
+ * `input` 那一格是 **item 合计**（不是新的一段，上面各段已经计过），所以它只当"整段还相同"的
+ * 最后一道确认，**不再重复累加它的 tokens**——否则命中量会被算成两倍。
+ *
+ * 估出来的东西只进两处：`runtime/cache-alert.ts` 的**告警读数**（窗口级，见那里的
+ * `cacheCaliberOf`）与 `budget/consumed.cacheEstimated` 那一格留痕。**不覆盖**供方给的
+ * `cacheHitTokens` / `cacheMissTokens`（有就用供方，理由见 `log/types.ts` 的那两格注释）。
+ */
+export function estimatePrefixHitOf(previous: ContextBreakdown, current: ContextBreakdown): number {
+  let hit = 0;
+  // ①②③ 三段无条件的头：人格常驻层 / 工具清单 / 长期记忆层
+  for (const name of ['instructions', 'tools', 'memory'] as const) {
+    const before = previous[name];
+    const after = current[name];
+    if (before.hash !== after.hash) return hit;
+    hit += after.tokens;
+  }
+  // ④ 历史 items：逐条比（口径见方法头）
+  const history = historyPrefixOf(previous.history, current.history);
+  hit += history.tokens;
+  if (history.broken) return hit;
+  // ⑤⑥⑦⑧ 本轮固定块 / 此刻层 / 本轮输入 / 尾部插播
+  for (const name of ['state', 'now', 'wake', 'hint'] as const) {
+    const before = previous[name];
+    const after = current[name];
+    // 两边都没有 ⇒ 这一段本来就不存在（老日志的 `state`），视为相同、贡献 0
+    if (before === undefined && after === undefined) continue;
+    // 一边有一边没有 ⇒ 字节不同（缺的那一边读作"没有这一段"），前缀在这里断
+    if (before === undefined || after === undefined) return hit;
+    if (before.hash !== after.hash) return hit;
+    hit += after.tokens;
+  }
+  // ⑨ input 整体：**不累加**（它就是上面各段的合计），只当最后一道确认
+  return hit;
+}
+
+/**
+ * history 段的逐条前缀比较（{@link estimatePrefixHitOf} 的第 ④ 步）。
+ *
+ * 返回两件事：**比过且相同的条目贡献多少 token** + **前缀是不是在这里断了**。
+ * 断与不断分开返回是刻意的：`history` 之后还有 `state`/`now` 要接着比，
+ * 而"前面几条相同、尾巴在追加"是**正常**形状（每拍都在追加），不该让整条走不下去。
+ *
+ * 五种形状，各自的结论：
+ *   · 整段哈希相同 ⇒ 完全相同的段，整段 tokens 全算（唯一"完全命中"的形态）；
+ *   · 逐条比，某一条不同 ⇒ 前面的算、**从那条起断**；
+ *   · 逐条比全同、条目数变多 ⇒ 尾巴在追加，前缀完整，**不断**（尾巴不算 token）；
+ *   · 逐条比全同、条目数没变而整段哈希变了 ⇒ 有老条目被就地改写（压缩/重排队），**断**；
+ *   · 逐条比全同、条目数变少 ⇒ 有老条目被裁掉，**断**；
+ *   · 两边任一侧没有 `headItems`（老日志）⇒ 逐条事实缺失，**断**（一个 token 都不算）。
+ */
+function historyPrefixOf(
+  previous: ContextBreakdown['history'],
+  current: ContextBreakdown['history'],
+): { tokens: number; broken: boolean } {
+  if (previous.hash === current.hash) return { tokens: current.tokens, broken: false };
+  const before = previous.headItems;
+  const after = current.headItems;
+  // 没有逐条事实 ⇒ 只能看 headHash，而它只盖前 N 条，答不出"整段还一样吗" ⇒ 不猜
+  if (before === undefined || after === undefined) return { tokens: 0, broken: true };
+  let tokens = 0;
+  const shared = Math.min(before.length, after.length);
+  for (let index = 0; index < shared; index += 1) {
+    const left = before[index];
+    const right = after[index];
+    if (left === undefined || right === undefined) return { tokens, broken: true };
+    if (left.hash !== right.hash) return { tokens, broken: true };
+    tokens += right.tokens;
+  }
+  // 比过的条目全同：**追加**是正常形状（前缀仍然完整），其余都是改写了老条目
+  if (current.items > previous.items) return { tokens, broken: false };
+  return { tokens, broken: true };
+}
+
 // ──────────────────────────────── 哨兵 ────────────────────────────────
 
 /**

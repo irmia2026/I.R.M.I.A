@@ -40,7 +40,7 @@ function Check([string]$Name, [bool]$Ok, [string]$Detail) {
 # ── 沙盒：两个目录，一个纯 ASCII、一个**含中文**（模拟 `D:\项目\…`） ──────────────
 if (Test-Path $Work) { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
 $DirAscii = Join-Path $Work 'ascii'
-$DirCjk = Join-Path $Work '众测-日志目录'
+$DirCjk = Join-Path $Work '中文-日志目录'
 $GuiDir = Join-Path $Work 'gui'
 New-Item -ItemType Directory -Force -Path $DirAscii, $DirCjk, $GuiDir | Out-Null
 

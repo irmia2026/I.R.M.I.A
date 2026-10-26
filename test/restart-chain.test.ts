@@ -14,17 +14,26 @@
  *   · **真的重启一次**那条路在隔离端到端里验（见报告与 `_tmp/` 的现场记录）。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   RESTART_FAILURE_REASONS, chooseRestartPath, endTraceLine, instanceTraceLine, packagedRestartScript,
   parseRestartPath, repoRestartScript, restartReasonText, restartTraceLine, restartWorkerScript,
 } from '../src/runtime/restart-chain.ts';
+import {
+  DEFAULT_MAX_OLD_SPACE_MB, MAX_OLD_SPACE_ENV,
+} from '../src/runtime/node-memory.ts';
 import { parseRestartTrace, restartCommandLine, restartNote } from '../src/web/server.ts';
 import {
   MAX_OLD_SPACE_MB, backendSpawnArgv, parseRestartWorkerArgs, probeTcp, runRestartWorker,
   type RestartWorkerIo, type RestartWorkerOptions,
 } from '../src/runtime/restart-worker.ts';
+
+/** 仓库根（脚本同源那条断言要读 `packaging/` 与 `tools/` 下的 ps1） */
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 造一个"只有这些路径存在"的世界 */
 function world(existing: readonly string[]): (path: string) => boolean {
@@ -215,8 +224,9 @@ function fakeWorld(overrides: Partial<RestartWorkerOptions> & {
       if (!spawned && ticks >= oldDiesAfter) return 0;
       return lockPid;
     },
-    // 只重启界面时后端本来就该在服务（端口由**现役**后端回答）；否则要等新实例起来
-    probePort: async () => (options.guiOnly ? true : (spawned && ticks >= portAfter)),
+    // 只重启界面时后端本来就该在服务（health 由**现役**后端回答）；否则要等新实例就绪
+    // （判据是 `GET /api/health` 的 status，不是"TCP 能连"——见 restart-worker-health.test.ts）
+    probeHealth: async () => (options.guiOnly || (spawned && ticks >= portAfter) ? 'ready' : 'starting'),
     spawnBackend: () => {
       if (overrides.spawnThrows === true) throw new Error('spawn ENOENT');
       spawned = true;
@@ -365,11 +375,14 @@ test('端口探测：探不通就是 false（这条判据要能被单测钉住�
 
 test('④ 自重启拉新后端时带 `--max-old-space-size`，且**排在入口之前**', () => {
   // 这条钉的是一个真实的不一致：三份启动脚本（`packaging/start.ps1` /
-  // `packaging/restart.ps1` / `tools/restart-agent.ps1`）都带上了 `-NodeMaxOldSpaceMb 512`，
+  // `packaging/restart.ps1` / `tools/restart-agent.ps1`）都带上了上限，
   // 而 `self-restart` 是**第三条**拉后端的路 —— 少了这里，同一个进程在不同重启路径下
   // 内存行为不一样，那种不一致最难查。
+  //
+  // 2026-10-26：这个数从 512 抬到 1024（拉起器带 512 拉起的新实例在本机 62 秒撞死，
+  // 看护脚本带 1024 的那份活得好好的）。数只写在 `runtime/node-memory.ts`。
   const argv = backendSpawnArgv('C:\\Irmia\\app\\dist\\main.js');
-  assert.deepEqual(argv, ['--max-old-space-size=512', 'C:\\Irmia\\app\\dist\\main.js']);
+  assert.deepEqual(argv, [`--max-old-space-size=${DEFAULT_MAX_OLD_SPACE_MB}`, 'C:\\Irmia\\app\\dist\\main.js']);
   // 顺序是判据：Node 的选项排到入口之后会被当成 `main.js` 的参数（它不认，直接退）
   assert.match(argv[0]!, /^--max-old-space-size=\d+$/u);
   assert.equal(argv[argv.length - 1], 'C:\\Irmia\\app\\dist\\main.js', '入口必须是最后一个参数');
@@ -380,8 +393,23 @@ test('④b 上限设成 0 ⇒ 一个参数都不加（"回退"这条路的定义
   assert.deepEqual(backendSpawnArgv('C:\\Irmia\\app\\dist\\main.js', -1), ['C:\\Irmia\\app\\dist\\main.js']);
 });
 
-test('④c 三处默认值同源：worker 的常量与脚本里的 512 是同一个数', () => {
+test('④c 四条拉后端的路同源：worker 的常量、看护脚本、三份启动脚本读同一个数', () => {
   // 脚本那一侧没法在这里 import（PowerShell），所以把"同一个数"写成一条断言：
   // 改任何一处而忘了另一处，这条会红。
-  assert.equal(MAX_OLD_SPACE_MB, 512);
+  //
+  // 2026-10-26：这个数从 512 抬到 1024，并且**只写在 `runtime/node-memory.ts`**
+  // （拉起器带 512 拉起的新实例在本机 62 秒撞死，看护脚本带 1024 的那份活得好好的）。
+  assert.equal(MAX_OLD_SPACE_MB, DEFAULT_MAX_OLD_SPACE_MB, '拉起器的常量必须就是那一份唯一来源');
+  assert.equal(DEFAULT_MAX_OLD_SPACE_MB, 1024, '缺省 1024（512 在本机实测 ready 之后约 20 秒必 OOM）');
+  const scripts = [
+    join(PROJECT_ROOT, 'packaging', 'start.ps1'),
+    join(PROJECT_ROOT, 'packaging', 'restart.ps1'),
+    join(PROJECT_ROOT, 'packaging', 'ensure-running.ps1'),
+    join(PROJECT_ROOT, 'tools', 'restart-agent.ps1'),
+  ];
+  for (const script of scripts) {
+    const text = readFileSync(script, 'utf8');
+    assert.ok(text.includes(MAX_OLD_SPACE_ENV), `${script} 必须读 ${MAX_OLD_SPACE_ENV}（同一个覆盖口）`);
+    assert.ok(text.includes('1024'), `${script} 的缺省值必须是 1024（与 node-memory.ts 同源）`);
+  }
 });

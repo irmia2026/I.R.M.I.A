@@ -66,7 +66,7 @@ export const RECALL_MIN_DISTINCT_DAYS = 2;
  * 一次命名可能是巧合（"这个叫 X 的东西"），两次以上才说明这个字在她记忆里**是个名字**。
  * 这是 2026-10-19 用户裁决的核心改动：把 PMI 从**硬门**降级为**辅助分**，硬门换成
  * "至少有一条命名位置证据"——因为 PMI 天生歧视"常用字拼出来的中文实体名"
- * （实测三个漏召回例子全是这种：`内测群` PMI 7.07、`清漪群` 7.38、`长门` 7.90，
+ * （实测三个漏召回例子全是这种：`内测群` PMI 7.07、`测试群` 7.38、`长门` 7.90，
  * 而当时的中档门槛是 9.25）。
  */
 export const RECALL_MIN_NAMING_EVIDENCE = 2;
@@ -262,7 +262,7 @@ export function isStale(candidate: RecallCandidate, now: string, evictAfterDays 
  *
  *   ① **⭐ 被命名过**（硬门，2026-10-19 第三轮改成**加权分**）：`evidenceWeight ≥ RECALL_MIN_EVIDENCE_WEIGHT`。
  *      这是**新的硬门**——它取代了原来那条"PMI ≥ 分位门槛"。PMI 判的是"这串字像不像一个词"，
- *      我们要的是"这串字**是不是一个名字**"（`内测群`/`清漪群`/`长门` 的 PMI 都低于同期门槛，
+ *      我们要的是"这串字**是不是一个名字**"（`内测群`/`测试群`/`长门` 的 PMI 都低于同期门槛，
  *      但它们在记忆里被**显式命名**过）。
  *   ② **够自由**：min(左邻熵, 右邻熵) ≥ 分位门槛；
  *   ③ **够常用但不够通用**：`countMin ≤ count ≤ countMax` 且 `distinctDays ≤ daysMax`；

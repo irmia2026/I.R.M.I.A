@@ -340,6 +340,14 @@ void main() {
     }
   }
 
+  /// 第 3 步切到「填写凭据」入口（默认是「扫码创建（推荐）」）。
+  ///
+  /// 2026-10-23 用户要求两个**并列入口**，扫码排第一 ⇒ 原来那两格凭据要人先点一下
+  /// 「填写凭据」才摆出来；这两条旧用例验的是凭据那条路，所以先切过去。
+  Future<void> chooseManualCredentials(WidgetTester tester) async {
+    await tapAndSettle(tester, find.text(const ZhStrings().onboardingQqEntryManual));
+  }
+
   Map<String, dynamic> postFor(String path) =>
       posts.firstWhere((entry) => entry['path'] == path, orElse: () => <String, dynamic>{});
 
@@ -539,9 +547,13 @@ void main() {
       });
       expect(postFor('/api/commands/set-key')['confirm'], 'set-key');
       // 预填的就是这一格的值：盘上还是后端出厂默认（deepseek-chat）⇒ 点「继续」时写一次。
-      // 端点一个字节都没动，所以 fields 里没有 baseUrl。
+      // 2026-10-26 起这一屏只写 model / baseUrl：协议三档撤出引导页（那三档留在设置页），
+      // 所以 `models.heavy.protocol` **不许**出现在这次提交里。
       expect(postFor('/api/commands/config-update')['body'], {
-        'fields': {'models.heavy.model': kDefaultModelName},
+        'fields': {
+          'models.heavy.model': kDefaultModelName,
+          'models.heavy.baseUrl': 'https://api.deepseek.com',
+        },
       });
       expect(postFor('/api/commands/config-update')['confirm'], 'config-update');
 
@@ -964,6 +976,7 @@ void main() {
       await tapAndSettle(tester, find.text(kOnboardingSkipLabel)); // 第 1 步
       await tapAndSettle(tester, find.text(kOnboardingSkipLabel)); // 第 2 步 → 第 3 步
 
+      await chooseManualCredentials(tester); // 两个入口：这条验的是「填写凭据」那条
       final appId = find.byKey(const ValueKey('onboarding-qq-appid'));
       final appSecret = find.byKey(const ValueKey('onboarding-qq-appsecret'));
       await pumpUntil(tester, appId);
@@ -1014,6 +1027,7 @@ void main() {
       await tapAndSettle(tester, find.text(kOnboardingSkipLabel)); // 第 1 步
       await tapAndSettle(tester, find.text(kOnboardingSkipLabel)); // 第 2 步 → 第 3 步
 
+      await chooseManualCredentials(tester); // 已配置的掩码摆在「填写凭据」那一支
       final appId = find.byKey(const ValueKey('onboarding-qq-appid'));
       await pumpUntil(tester, appId);
       expect(

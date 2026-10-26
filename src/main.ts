@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
@@ -27,7 +27,8 @@ import { normalizeSid, parseAliases } from './channel/sessions.ts';
 import { createNotifier } from './alert/notifier.ts';
 import { notifyStartupRecoveryDetailed, restoreStartupAlertWindow } from './alert/startup.ts';
 import {
-  lightLaneKeyPolicy, loadConfig, modelKeyGroups, readApiKey, trustBoundaryRoot, type AppConfig,
+  CONFIG_FILE_NAME, lightLaneKeyPolicy, loadConfig, modelKeyGroups, readApiKey, trustBoundaryRoot,
+  configHash, type AppConfig, type LoadedConfig,
 } from './config/config.ts';
 import { ConfigWatcher } from './config/watcher.ts';
 import { ensurePersonaSeeds, loadPersona, type PersonaAssets } from './persona/loader.ts';
@@ -40,15 +41,43 @@ import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
 import type { ToolRegistry } from './tools/registry.ts';
 import type { InputNotifyPoster, MediaPoster, ReplyPoster } from './tools/admin.js';
-import { SkillManager } from './skill/skills.ts';
+import { SkillManager, planSkillRoots, type SkillRootRef } from './skill/skills.ts';
+import { ensureSkillsSeed, SKILLS_DIR_NAME } from './skill/seed.ts';
+// 路径比较（大小写 / 分隔符 / 尾部空格点的归一）只有一处实现：见 `tools/boundary.ts` 的文件头
+import { comparisonKey } from './tools/boundary.ts';
 import {
   HookRunner, digestProjection, hookConfigPath, loadHookConfig, protectedHookPaths,
 } from './hook/hooks.ts';
 import { RealLoop, memoryHostingEnabled } from './runtime/real-loop.ts';
-import { startWebServer, type WebServer } from './web/server.ts';
+import { instanceIdOf, startWebServer, type WebServer } from './web/server.ts';
+// 启动期的**早绑端口**（2026-10-26）：先 listen、再干重活；就绪前 HTTP 答 starting/503
+import { StartupState, startPreflightServer, type PreflightServer } from './web/preflight.ts';
+// 端口文件（`%LOCALAPPDATA%\Irmia\server.json`）：界面取端口的第一档，见那个模块的文件头
+import {
+  readServerPortFile, removeServerPortFile, serverPortFilePath, serverPortFilePathForPort, shouldClaimLegacyPortFile, writeServerPortFile,
+} from './runtime/server-port-file.ts';
+// 实例登记表（`%APPDATA%\Irmia\instances.json`）：多实例下"这台机器上有哪些实例"的唯一真相源，
+// **后端写、界面读**。判据与逐字段口径全在那个模块的文件头。
+import {
+  fallbackInstanceName, herNameFromIdentity, instancesFilePath as instancesFilePathOf, isDefaultDataDir,
+  markInstanceReady, markInstanceStopped, upsertRunningInstance, type InstanceRecord,
+} from './runtime/instance-registry.ts';
+
+/** pid 是否还活着（用于"旧名端口文件别抢"那条判据；与 restart-worker 的 pidAlive 同口径：EPERM 也算活着） */
+const legacyPidAlive = (pid: number): boolean => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+// 老生代上限的唯一来源（四条拉后端的路都读它；启动摘要那一行也在这里）
+import { describeMaxOldSpace } from './runtime/node-memory.ts';
 // 更新检查（2026-10-22）：检测器 + 节流/状态一层。只 GET 一个静态 JSON，不下载、不安装。
 import { UpdateService } from './update/service.ts';
-import { AUTH_FILE_NAME, UI_TOKEN_FILE } from './web/auth.ts';
+import { AUTH_FILE_NAME, AuthStore, UI_TOKEN_FILE } from './web/auth.ts';
 import { WEBHOOK_SECRET_FILE_NAME } from './web/webhook-secret.ts';
 import { backfillSharedKeys, keysPath, keyStatus } from './config/keys.ts';
 import { applyOne, finalizePressure } from './state/fold.ts';
@@ -101,7 +130,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.12';
+export const AGENT_VERSION = '0.1.0-beta.13';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -111,8 +140,24 @@ export type SessionEndReason = 'shutdown' | 'error' | 'signal';
 // ──────────────────────────────── 对外类型 ────────────────────────────────
 
 export interface MainOptions {
-  /** 数据目录；缺省取 IRMIA_DATA_DIR，再退到 <cwd>/data */
+  /**
+   * 数据目录（= 命令行 `--data-dir`，优先级最高）。
+   * 缺省按 `IRMIA_DATA_DIR` → config.json 的 `dataDir` → `<cwd>/data` 依次退。
+   */
   dataDir?: string;
+  /**
+   * 配置在哪（= 命令行 `--config`）：可以是**目录**，也可以直接给 `config.json` 的路径。
+   * 缺省 `<cwd>/config.json`。它决定"读哪份配置"，而 config.json 里的 `dataDir`
+   * 又是数据目录的第三档——所以它必须先于数据目录定下来（见 `resolveStartupPaths`）。
+   */
+  configPath?: string;
+  /**
+   * 监听端口（= 命令行 `--port`，优先级最高；缺省按 `config.web.port`）。
+   *
+   * 多实例的落点：安装根的 `config.json` 只有一个 `web.port`，而每台实例要一个自己的端口
+   * （界面从 7788 起向上找第一个空闲的）。见 {@link parseMainArgs} 里那段取舍。
+   */
+  port?: number;
   out?: (line: string) => void;
   now?: () => Date;
   /** 嵌入方（测试、上级守护）自己管进程生命周期时可关掉 */
@@ -133,8 +178,11 @@ export interface MainHandle {
 
 // ──────────────────────── 可测的纯函数段（2026-10-18 抽，REVIEW P1-29）────────────────────────
 //
-// 这三个函数是从 `runMain` / `main` 里**原样抽出来**的，行为一个字都没改：
-//   · `resolveDataDir`        —— 参数 > 环境变量 `IRMIA_DATA_DIR` > `<cwd>/data`
+// 这几个函数是从 `runMain` / `main` 里抽出来的判据：
+//   · `resolveDataDir`        —— 参数 > 环境变量 `IRMIA_DATA_DIR` > config.json 的 `dataDir`
+//                                > `<cwd>/data`（**2026-10-23 补上第三档**，见下面那段长注释）
+//   · `parseMainArgs`         —— 命令行里的 `--data-dir` / `--config` / `--port`（别的参数一律忽略）
+//   · `resolveStartupPaths`   —— **先定配置路径、读它，再定数据目录**（顺序本身就是判据）
 //   · `isDirectRun`           —— `process.argv[1]` 是不是本模块（决定"是入口还是被 import"）
 //   · `startupExitCode` / `startupFailureLine` —— 启动失败 ⇒ exit 1 + 一行人话
 // 抽的理由只有一个：**启动路径此前零覆盖**（REVIEW P1-29：`main.ts` 是唯一的生产装配入口，
@@ -142,12 +190,203 @@ export interface MainHandle {
 // 抢单实例锁、起模型客户端；那类"起真进程"的用例不在本笔的范围内，也不该拿它冒充覆盖。
 // 用例在 `test/main-entry.test.ts`，与这里逐条对账（改这里要一起改那边）。
 
+/**
+ * 数据目录的**来路**：优先级链上第一个有值的那一档。启动摘要的「数据来源」逐字打印它。
+ *
+ * 四档而不是三档：`flag` 是宿主/命令行**直接给**的（`--data-dir`），它与"配置文件说了什么"
+ * 是两件事——把它们都说成 `config` 会让摘要撒谎，而这份摘要存在的唯一理由就是
+ * "此刻到底按谁说的在跑"。
+ */
+export type DataDirSource = 'flag' | 'env' | 'config' | 'cwd';
+
+export interface DataDirResolution {
+  /** 生效数据目录（**原样**：相对路径不在这里展开，历史语义如此，见下面的用例） */
+  dataDir: string;
+  /** 这个值是从哪一档来的 */
+  source: DataDirSource;
+}
+
+/**
+ * 数据目录的取值链：**`--data-dir` 参数 > `IRMIA_DATA_DIR` > config.json 的 `dataDir`
+ * > `<cwd>/data`**。
+ *
+ * ── 第三档是 2026-10-23 补的，它修的是一个产品级故障 ──
+ *
+ * 现场（`data` 根是 `<安装根>/data`，`config.json` 里写着 `"dataDir": "<安装根>/data"` 的绝对路径）：
+ * 从别的工作目录起进程，**key 从配置那份 `.keys.json` 读得到**（`readApiKey` 用的是
+ * `config.dataDir`），而事件日志、人格、锁全写进了 `<cwd>/data`（`resolveDataDir` 用的是
+ * 参数/环境变量/cwd）⇒ 启动摘要写着 `最大 seq 0`、人格是"种子模板未填写"，
+ * 而她真实的 235197 条事件在另一个目录里。**一句话：配置说了 A，实际写进 B。**
+ *
+ * 为什么"只加一档"不够、还要看 `resolveStartupPaths`：`config.json` 的位置本身由
+ * cwd / `--config` 决定，所以**必须先定配置路径、读配置，再定数据目录**——顺序反了，
+ * 第三档就永远读不到（这正是原来那个写法：`resolveDataDir` 在 `loadConfig` 之前就定死了）。
+ *
+ * 两条分寸：
+ *   · **空串也算"给了值"**（`??` 只看 null/undefined）：历史语义如此，钉在用例里。
+ *     空值会在 `runMain` 的 `mkdirSync` 当场炸出来，不会静默换目录。
+ *   · **相对路径不在这里展开**：`configDataDir` 由 `loadConfig` 交出时**已经是绝对路径**
+ *     （它按配置文件所在目录解析，不是按 cwd），其余三档原样返回——"配置里的相对路径
+ *     相对配置文件"这条语义因此只有一处实现（`config.ts` 的 `parseAppConfig`）。
+ */
 export function resolveDataDir(input: {
+  /** `--data-dir` / `MainOptions.dataDir`：优先级最高 */
   dataDir?: string | undefined;
   env: Readonly<Record<string, string | undefined>>;
   cwd: string;
-}): string {
-  return input.dataDir ?? input.env['IRMIA_DATA_DIR'] ?? join(input.cwd, DEFAULT_DATA_DIR_NAME);
+  /**
+   * config.json 里**显式写下的** dataDir（`LoadedConfig.dataDirWritten !== null` 时才给）。
+   * 传进来的是 `loaded.config.dataDir`——`loadConfig` 已按配置目录解析成绝对路径。
+   */
+  configDataDir?: string | undefined;
+}): DataDirResolution {
+  if (input.dataDir !== undefined) return { dataDir: input.dataDir, source: 'flag' };
+  const fromEnv = input.env['IRMIA_DATA_DIR'];
+  if (fromEnv !== undefined) return { dataDir: fromEnv, source: 'env' };
+  if (input.configDataDir !== undefined) return { dataDir: input.configDataDir, source: 'config' };
+  return { dataDir: join(input.cwd, DEFAULT_DATA_DIR_NAME), source: 'cwd' };
+}
+
+export interface MainArgs {
+  dataDir?: string;
+  configPath?: string;
+  /** `--port`：界面/拉起器指定这一次监听哪个端口（多实例的关键一格，见 `parseMainArgs`） */
+  port?: number;
+  /** 认不出来的参数（原样留着，只为诊断）：**绝不该因为它们就拒绝启动** */
+  ignored: string[];
+}
+
+/**
+ * 认命令行里的三个参数：`--data-dir <路径>` / `--config <路径>` / `--port <端口>`
+ * （`=` 写法同样认）。
+ *
+ * 为什么必须**宽容**（认不出来就忽略，而不是报错退出）：拉起器会往命令行里塞别的东西
+ * ——`tools/restart-agent.ps1 -KillTag` 就是给入口追加一个 `--kill-tag=<值>`，那是**进程
+ * 匹配用的标记**，本进程一个字都不该管。严格解析的后果不是"参数写错了"，而是
+ * "她起不来了"，而症状会出现在一个与参数毫无关系的错误上。
+ *
+ * 空值（`--data-dir=`）当没给：手滑不该让一个无人值守进程起不来（那里还有 `mkdirSync`
+ * 与"指到文件上"那道检查在兜底，静默换目录是不可能的）。
+ *
+ * **`--port` 是 2026-10 多实例加的那一格**：安装根的 `config.json` 只有**一个** `web.port`，
+ * 而"新建实例"要给它一个自己的端口（界面从 7788 起找到的空闲端口）。两条路可选——让界面
+ * 替新实例写一份 config.json，或把端口**当场**交给进程。选后者：界面不必懂配置文件的形状，
+ * 也不会留下第二份"这台实例的配置"（多一份配置文件就多一处会跟人改的东西打架）。
+ * 它**只**在命令行显式给的时候生效（不走环境变量）：继承来的 `IRMIA_WEB_PORT` 把后端带到
+ * 另一个端口上，正是 `gui/lib/backend_port.dart` 文件头记的那次事故的形状。
+ */
+export function parseMainArgs(argv: readonly string[]): MainArgs {
+  const out: MainArgs = { ignored: [] };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] as string;
+    const eq = arg.indexOf('=');
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    if (name !== '--data-dir' && name !== '--config' && name !== '--port') {
+      out.ignored.push(arg);
+      continue;
+    }
+    let value = eq === -1 ? undefined : arg.slice(eq + 1);
+    if (value === undefined) {
+      const next = argv[index + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        value = next;
+        index += 1;
+      }
+    }
+    if (value === undefined || value === '') {
+      out.ignored.push(arg);
+      continue;
+    }
+    if (name === '--port') {
+      const port = Number.parseInt(value, 10);
+      // 非法端口当没给（宽容解析的一条：手滑不该让进程起不来，`config.web.port` 兜住）
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        out.ignored.push(arg);
+        continue;
+      }
+      out.port = port;
+      continue;
+    }
+    if (name === '--data-dir') out.dataDir = value;
+    else out.configPath = value;
+  }
+  return out;
+}
+
+/** 启动期"配置在哪 + 数据目录在哪 + 它们是怎么定的"这一组事实 */
+export interface StartupPaths {
+  /** 配置目录（config.json 的父目录，绝对路径） */
+  configDir: string;
+  /** `loadConfig` 的结果；`loaded.config.dataDir` 这一格**已钉成生效数据目录**（见 `pinDataDir`） */
+  loaded: LoadedConfig;
+  /** 生效数据目录（**原样**，目录还没建） */
+  dataDir: string;
+  /** 数据目录的来路（启动摘要打印它） */
+  source: DataDirSource;
+  /** config.json 里写下的 dataDir 原文（可能是相对路径）；没写就是 null */
+  configDataDir: string | null;
+}
+
+/**
+ * **先定配置路径、读它，再定数据目录**——启动顺序的判据全在这一个函数里。
+ *
+ * 三件事按这个顺序做，顺序本身就是为什么它必须抽出来单独测：
+ *   ① `configPath`（`--config` / 缺省 `<cwd>/config.json`）归一成**配置目录**；
+ *   ② `loadConfig(configDir)` 真读（缺文件时它会写一份出厂配置——与从前同一行为）；
+ *   ③ 用"配置里写没写 dataDir"决定第三档，走完四档得到生效数据目录，并把它**钉回配置对象**。
+ *
+ * 第③步里那个"钉"（`pinDataDir`）不是顺手：`config.dataDir` 是**好几个消费者**读的那一格
+ * （`.keys.json`、协议端安装目录、依赖自装目录、trust 的缺省工作根），而事件/人格/锁读的是
+ * `dataDir`。两份值就是两份事实——现场那个"key 读得到、事件却写进另一个目录"正是这么来的。
+ */
+export async function resolveStartupPaths(input: {
+  dataDir?: string | undefined;
+  configPath?: string | undefined;
+  env: Readonly<Record<string, string | undefined>>;
+  cwd: string;
+}): Promise<StartupPaths> {
+  const configDir = normalizeConfigDir(input.configPath, input.cwd);
+  const loaded = await loadConfig(configDir);
+  const written = loaded.dataDirWritten;
+  const resolved = resolveDataDir({
+    dataDir: input.dataDir,
+    env: input.env,
+    cwd: input.cwd,
+    ...(written === null ? {} : { configDataDir: loaded.config.dataDir }),
+  });
+  pinDataDir(loaded, resolved.dataDir);
+  return {
+    configDir,
+    loaded,
+    dataDir: resolved.dataDir,
+    source: resolved.source,
+    configDataDir: written,
+  };
+}
+
+/**
+ * 把**生效数据目录**钉进这份配置（返回同一个对象，就地改）。
+ *
+ * `config.json` 里的 `dataDir` 从此只是**输入**之一，不是运行期事实：否则 `IRMIA_DATA_DIR`
+ * 或 `--data-dir` 一给，`config.dataDir` 与 `dataDir` 就分家了（现场那个脑裂）。
+ * `configHash` 跟着重算——它描述的是**生效配置**的指纹（render 三输入之一）。
+ */
+export function pinDataDir(loaded: LoadedConfig, dataDir: string): LoadedConfig {
+  if (loaded.config.dataDir !== dataDir) {
+    loaded.config.dataDir = dataDir;
+    loaded.configHash = configHash(loaded.config);
+  }
+  return loaded;
+}
+
+/**
+ * 配置路径归一：允许给**目录**、也允许直接给 `config.json` 本身；没给就跑 `cwd`。
+ * 相对路径相对 cwd（命令行参数的自然语义），之后一切都用绝对路径。
+ */
+function normalizeConfigDir(configPath: string | undefined, cwd: string): string {
+  if (configPath === undefined || configPath.trim() === '') return resolve(cwd);
+  const absolute = resolve(cwd, configPath.trim());
+  return basename(absolute).toLowerCase() === CONFIG_FILE_NAME ? dirname(absolute) : absolute;
 }
 
 /** 启动结果 → 进程退出码：跑起来 = 0，启动失败 = 1（与抽之前逐字相同） */
@@ -174,20 +413,78 @@ function describeError(err: unknown): string {
   return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
-/** 启动摘要：水位/待办/定时器/锁是无人值守场景最先要确认的四件事 */
+/**
+ * 读一眼 `persona/IDENTITY.md` 的正文（实例登记表要在 bind 那一刻知道"她叫什么"）。
+ *
+ * 为什么直接读文件而不是走 `loadPersona`：那一趟要读四个文件并算 personaHash，而这里
+ * 只需要一行字。读不到就是 null（首启时这份文件还没被种下，登记表就走"目录末段"那一档）。
+ */
+function readIdentityText(dataDir: string): string | null {
+  try {
+    return readFileSync(join(dataDir, 'persona', 'IDENTITY.md'), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 启动摘要里「技能根」那一行（v79）。
+ *
+ * 为什么摘要里非有它不可：技能从 2026-10-23 起住在**数据目录**（`<dataDir>/skills`），
+ * 而安装目录/仓库里的 `skills/` 只是出厂种子。这两件事在盘上是**两个同名目录**——
+ * 光看摘要里的"数据目录"那一行，读的人分不出"她现在用的是哪一份技能"，而现场那次
+ * "界面上没有任何技能"正是这么发生的。所以把**这次真正扫的那串根**印出来，
+ * 并且明说哪个是数据目录、哪个是 cwd 兼容根（后者只在数据目录里还没有这一份时出现）。
+ *
+ * 没有根（`roots` 为空）时返回 null：那一行整个不出现，不印"技能根：（无）"这种空话。
+ * 纯函数（不读盘）：入参就是 `planSkillRoots` 的结论，摘要与用例读同一份。
+ */
+export function renderSkillsRootLine(roots: readonly SkillRootRef[]): string | null {
+  if (roots.length === 0) return null;
+  const primary = roots.filter((root) => !root.compat).map((root) => root.dir);
+  const compat = roots.filter((root) => root.compat).map((root) => root.dir);
+  const head = primary.length === 0 ? '（数据目录里没有默认根）' : primary.join('、');
+  const tail = compat.length === 0
+    ? ''
+    : `（附 cwd 兼容根 ${compat.join('、')}——数据目录里还没有这一份时才用它）`;
+  return `技能根: 数据目录 ${head}${tail}`;
+}
+
+/**
+ * 启动摘要：水位/待办/定时器/锁是无人值守场景最先要确认的四件事。
+ *
+ * 头三行是**同一个事实的三面**（2026-10-23 加）：`数据目录` 是"此刻真的写在哪"、
+ * `配置` 是"读的是哪一份 config.json"、`数据来源` 是"这个数据目录是按谁说的定的"。
+ * 为什么三行都要印：现场那次脑裂的全部症状就是这三件事对不上，而当时摘要里只有第一行
+ * ——读的人因此看不出"配置说 A、实际写进 B"。三行必须**同时**出现且一致。
+ */
 export function renderStartupSummary(input: {
   dataDir: string;
+  /** 生效的 config.json 绝对路径（`LoadedConfig.path`） */
+  configPath: string;
+  /** 数据目录的来路（`resolveDataDir` 的结论） */
+  dataDirSource: DataDirSource;
   recovery: RecoverResult;
   timers: TimerStore;
   startTurn: number;
   mode: 'real' | 'fake';
   persona: PersonaAssets;
+  /**
+   * 技能根的生效计划（`planSkillRoots` 的结论；v79）。
+   *
+   * 可选：老的调用点/用例不传就不印那一行（生产装配 `main.ts` 一定传）。
+   * 为什么不在这里现算：根的存在性要在**装配那一刻**判（数据目录里刚被复制过技能），
+   * 而摘要渲染是之后的事——两处各算一次，就会出现"摘要说的根"与"真的要扫的根"不一致。
+   */
+  skills?: readonly SkillRootRef[];
 }): string {
-  const { dataDir, recovery, timers, startTurn, mode, persona } = input;
+  const { dataDir, configPath, dataDirSource, recovery, timers, startTurn, mode, persona, skills } = input;
   const p = recovery.projection;
   const lines: string[] = [
     '=== Irmia Agent 启动摘要 ===',
     `数据目录: ${dataDir}`,
+    `配置: ${configPath}`,
+    `数据来源: ${dataDirSource}`,
     `循环模式: ${mode === 'real' ? '真循环（已配置模型）' : '假循环（未配置 API key，仅写事件不调模型）'}`,
     `人格: ${persona.isSeed ? '种子模板未填写（去 data/persona/ 填 IDENTITY.md）' : '已加载'}（hash ${persona.personaHash}）`,
     `事件日志: 最大 seq ${p.lastSeq} / 分片 ${recovery.log.shardFiles.length} 个`,
@@ -196,6 +493,10 @@ export function renderStartupSummary(input: {
     `下一轮 turn 号: ${startTurn + 1}`,
     `锁: 持有 pid ${recovery.lock.pid}（startedAt ${recovery.lock.startedAt}）`,
   ];
+  if (skills !== undefined) {
+    const skillsLine = renderSkillsRootLine(skills);
+    if (skillsLine !== null) lines.push(skillsLine);
+  }
   if (recovery.repairs.length > 0) {
     lines.push(`恢复补偿 ${recovery.repairs.length} 项:`);
     for (const repair of recovery.repairs) lines.push(`  - ${repair}`);
@@ -275,14 +576,17 @@ function mcpReloadIdentityKeyOf(change: McpDeclarationChange): string {
  *
  * 与 web 侧 `mcpChangeWakeNoteOf` 的差别也在这第一句：那条说的是"界面刚存了配置"，
  * 这条说的是"文件在运行期变了"——两条路的来源不同，正文里说清是哪一种，读历史的人才分得清。
+ *
+ * ⚠ **正文里不许出现 Markdown 记号**（2026-10-22 用户点名的硬性要求）：它是在界面上读的
+ * 纯文本，渲染层不认 Markdown——要强调用「」或换行。
  */
-function mcpReloadNoteOf(change: McpDeclarationChange, totalAfter: number): string {
+export function mcpReloadNoteOf(change: McpDeclarationChange, totalAfter: number): string {
   const total = totalAfter === 0 ? '现在一个都没有了' : `现在一共 ${totalAfter} 个`;
   return [
     `config.json 里的 MCP 声明改了（改动当场生效，不用重启）：${describeMcpDeclChange(change, 'sentence')}`,
     `${total}。要看工具清单就用 \`mcp\` 工具（不带 server 看有哪些 server）。`,
-    '⚠️ 你上下文里那份 **MCP 常驻索引不会立刻跟着变**——它保持原样，等下一次上下文重大变化'
-      + '（压缩 / reset）或下次启动时才归集。所以这份通报是**追加在末尾**的：'
+    '⚠️ 你上下文里那份 MCP 常驻索引不会立刻跟着变——它保持原样，等下一次上下文重大变化'
+      + '（压缩 / reset）或下次启动时才归集。所以这份通报是追加在末尾的：'
       + '以它为准，别以为索引里没写就等于没有。',
   ].join('\n');
 }
@@ -435,18 +739,222 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     console.log(line);
   });
   const now = options.now ?? (() => new Date());
-  const dataDir = resolveDataDir({ dataDir: options.dataDir, env: process.env, cwd: process.cwd() });
+
+  /**
+   * ── 顺序即判据（2026-10-23）：① 先定"读哪份配置"并真读它 → ② 再由它定数据目录 ──
+   *
+   * 反过来（先按 cwd/环境变量定数据目录，再读 cwd 的配置）就是那个产品级故障：
+   * 数据目录的第三档 `config.json` 的 `dataDir` **永远来不及生效**（`loadConfig` 在它之后），
+   * 而 key 那一侧读的偏偏是 `config.dataDir` ⇒ 配置说 A、实际写进 B，seq 从 0 开始。
+   * 判据全部在 `resolveStartupPaths` 里（含"配置里的相对 dataDir 相对配置文件"），这里只装配。
+   */
+  const startup = await resolveStartupPaths({
+    dataDir: options.dataDir,
+    configPath: options.configPath,
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  const loadedConfig = startup.loaded;
+  const config = loadedConfig.config;
+  const dataDir = startup.dataDir;
+
+  /**
+   * `--port`：**显式给的端口压过 config.json 的 `web.port`**（多实例的唯一入口）。
+   *
+   * 只在命令行显式给的时候生效（不看环境变量，理由见 `parseMainArgs`）。它落在 `config.web.port`
+   * 上而不是另开一格里：**下游每一处（preflight / startWebServer / 端口文件 / 登记表）
+   * 读的都是同一个 `config.web.port`**，两处取值就是两份事实，而"听起来 7789、实际听 7788"
+   * 那种故障查起来最贵。说出来的那一行是必须的：改了一个数就得有人能看见是谁改的。
+   */
+  if (options.port !== undefined) {
+    const before = config.web.port;
+    config.web.port = options.port;
+    write(`[界面] 端口按命令行 --port=${options.port} 生效（config.json 里写的是 ${before}）`);
+  }
+
   // 先把"指到文件上"这种错抓出来，别让它变成一句 `EEXIST: file already exists, mkdir
   // '…\config.json'`——那个报错只说"已经存在"，完全看不出根因是"我把一个文件当目录用了"，
   // 排查的人会以为代码有 bug（真发生过一次：一个冒烟脚本把 dataDir 指到了 config.json）。
   if (existsSync(dataDir) && !statSync(dataDir).isDirectory()) {
-    throw new Error(`数据目录指向了一个文件：${dataDir}——它应该是一个目录（检查 --data-dir / IRMIA_DATA_DIR）`);
+    throw new Error(`数据目录指向了一个文件：${dataDir}——它应该是一个目录（检查 --data-dir / IRMIA_DATA_DIR / config.json 的 dataDir；本次来源 ${startup.source}）`);
   }
   mkdirSync(dataDir, { recursive: true });
 
-  // 配置与人格：先加载配置（configHash 是 render 三指纹之一），再确保人格种子并加载
-  const loadedConfig = await loadConfig(process.cwd());
-  const config = loadedConfig.config;
+  /**
+   * 「配置说一套、实际写进另一套」必须当场说出来（2026-10-23）。
+   *
+   * 为什么不靠上面那三行摘要：它们只说"现在用的是哪个"，而**最容易误判的那种现场**
+   * 是"我以为配置生效了"——所以两个数一旦不同就在启动日志里点明"配置那一格本次不生效，
+   * 改它没用"（要改就得先撤掉 `--data-dir` / `IRMIA_DATA_DIR`，或重启）。
+   *
+   * **值相同就不说**：环境变量恰好等于配置里那个值时，"配置那一格不生效"是一句噪音
+   * ——它确实不生效，但结果一样，读者不需要为这句话去改任何东西。判据是路径比较
+   * （`comparisonKey`）而不是字符串相等：Windows 上大小写与分隔符写法都不改变
+   * "是不是同一个目录"。
+   */
+  if (
+    startup.configDataDir !== null
+    && startup.source !== 'config'
+    && comparisonKey(startup.configDataDir) !== comparisonKey(dataDir)
+  ) {
+    const via = startup.source === 'flag' ? '--data-dir 参数' : '环境变量 IRMIA_DATA_DIR';
+    write(`[配置] config.json 写的是 dataDir=${startup.configDataDir}，但本次生效的是 ${dataDir}`
+      + `（来源：${via}）——配置那一格本次不生效，改它没用`);
+  }
+
+  /**
+   * ── ⓪ 开工第一行：**老生代上限是多少、这个数是谁给的**（2026-10-26）──────────────
+   *
+   * 事故那天 OOM 之后，日志里只有 `FATAL ERROR: Reached heap limit`——看不出上限是多少、
+   * 更看不出是**哪条路**给的（同一份安装上，拉起器给 512、看护脚本给 1024，两种生死）。
+   * 这一行让下一次 OOM 有得查：策略值（环境变量或 1024 缺省）+ 本进程命令行到底带没带。
+   *
+   * 唯一的数在 `runtime/node-memory.ts`（四条拉后端的路都读它）。
+   */
+  write(describeMaxOldSpace());
+
+  /**
+   * ── ① 端口**先 bind**，重活后干（2026-10-26 的事故根治点）────────────────────────
+   *
+   * 事故现场：后端冷启动到开始监听要 **35–42 秒**（23.5 万条事件首折 + MCP + SnowLuma
+   * 预热），而拉起器等端口的窗口是 32 秒 ⇒ 每次「重启前后端」都被判失败，界面连不上、
+   * 后端半途生死不明（`data/restart-worker.log` 那行 `[结束] ok=False … port=timeout`）。
+   *
+   * 所以顺序反过来：配置一读出来就把端口 bind 住（`preflight.ts`），重活照旧在后面干。
+   * 这中间 HTTP 层**照常答话**：`GET /api/health` 报 `starting`，其余 `/api` 回 503
+   * `{starting:true, phase}`——拉起器与界面凭这两个读数就知道"它在起，不是没了"。
+   *
+   * 三件配套：
+   *   · `auth` 在这里**早建一份**：启动期 `GET /api/auth/state` 也要能答（界面进门第一步），
+   *     而且它与就绪后是**同一个实例**（认证判据只有一份，在 AuthStore 里）；
+   *   · **端口文件**：bind 成功那一刻写下 `{port,pid,since}`，界面按它取端口（第一档来源）；
+   *   · **失败不拦启动**：端口被占时说清"没能先 bind"，后面 `startWebServer` 照旧会如实报。
+   */
+  const boundPort: { value: number } = { value: 0 };
+  const startupState = new StartupState({
+    port: () => (boundPort.value > 0 ? boundPort.value : config.web.port),
+    now: () => now().getTime(),
+  });
+  /**
+   * ── 实例登记（多实例，2026-10）─────────────────────────────────────────────────
+   *
+   * 「登出 = 结束当前实例」之后界面要回到**实例选择页**，而它得知道这台机器上登记过哪些
+   * 实例、每个实例该用哪个 node 跑哪个入口、数据目录在哪——那些只有**正在跑的后端**知道。
+   * 所以 bind 成功那一刻把自己写进 `%APPDATA%\Irmia\instances.json`（唯一真相源在盘上，
+   * 后端写、界面读），并把端口文件改成**每实例一份**：`server.<port>.json`；
+   * 旧名 `server.json` 只由**默认实例**写（界面旧逻辑读它照旧能进默认实例）。
+   *
+   * 三条分寸（与端口文件同一套）：bind 成功那一刻才写；退出时清 pid 而不是删条目；
+   * 写不进去**不拦启动**（登记表是一个提示位，界面还有"读不到就当没有"那一档）。
+   * 判据与逐字段口径全在 `runtime/instance-registry.ts` 的文件头，这里只做装配。
+   */
+  const instancesPath = instancesFilePathOf(process.env);
+  /** 旧名的端口文件（`server.json`：**只有默认实例写**，见下面 registerInstance） */
+  const portFilePath = serverPortFilePath(process.env);
+  /** 入口脚本：`node <entry> …` 的那个。宿主嵌入（测试）时它可能是用例文件——登记表只认相对路径之外的事实 */
+  const entryPath = ((): string => {
+    const raw = (process.argv[1] ?? '').trim();
+    return raw === '' ? '' : resolve(raw);
+  })();
+  const isDefaultInstance = isDefaultDataDir({
+    entry: entryPath,
+    dataDir,
+    configDataDir: startup.configDataDir,
+  });
+  /** 每实例一份的端口文件路径（bind 成功那一刻才定得下来：端口是文件名的一部分） */
+  let perInstancePortPath: string | null = null;
+  /**
+   * 登记表里自己那条（`/api/instance` 与退出路径都读它；写不进去就是 null）。
+   *
+   * 用一个**容器**而不是裸的 `let x: T | null`：赋值发生在闭包里，而 TS 对闭包外的赋值
+   * 一律看不见——裸变量在 `if (x === null) … else { x.name }` 处会被窄化成 `never`。
+   */
+  const instanceRef: { record: InstanceRecord | null } = { record: null };
+  const registerInstance = (port: number): void => {
+    if (port <= 0) return;
+    perInstancePortPath = serverPortFilePathForPort(port, process.env);
+    if (writeServerPortFile({
+      path: perInstancePortPath,
+      port,
+      pid: process.pid,
+      now,
+      out: write,
+    })) {
+      write(`[界面] 每实例端口文件已写：${perInstancePortPath}（{"port":${port},"pid":${process.pid}}）`);
+    }
+    // 旧名：**只有默认实例写**。非默认实例写它会把默认实例那一份顶掉——那正是多实例下
+    // "界面被带到一个已经不在的端口"的那条老路（见 runtime/server-port-file.ts 的文件头）
+    if (isDefaultInstance) {
+      // 2026-10-26 补一条更硬的判据：**盘上指着的那一份还活着就不抢**。
+      // 否则一个便携副本（config.json 里显式写着 dataDir，于是被判成"默认实例"）
+      // 一起来就把现役主实例的端口指针改成自己的——实测：主界面被带到了新副本的端口上。
+      const legacyClaim = shouldClaimLegacyPortFile({
+        path: portFilePath,
+        pid: process.pid,
+        existing: portFilePath === null ? null : readServerPortFile(portFilePath),
+        alive: legacyPidAlive,
+      });
+      if (!legacyClaim.claim) {
+        write(`[界面] 旧名端口文件**没抢**：${portFilePath}（判据 ${legacyClaim.reason}）`
+          + '——另一份实例正在用它，抢了会把界面带到我这边来');
+      } else if (writeServerPortFile({
+        path: portFilePath,
+        port,
+        pid: process.pid,
+        now,
+        out: write,
+      })) {
+        write(`[界面] 端口文件已写：${portFilePath}（默认实例；{"port":${port},"pid":${process.pid}}）`
+          + '——界面按它找端口，不再只靠环境变量 IRMIA_WEB_PORT');
+      }
+    }
+    // 名字取她的（`persona/IDENTITY.md` 解出来的；解不出用目录末段）。**出处一起交给登记表**：
+    // 只有"这次真解出来了"（identity）才有资格把旧条目里那个回落的名字升级一次
+    // （见 `runtime/instance-registry.ts` 的 `nameSourceOf` / `upsertRunningInstance`）。
+    const identityName = herNameFromIdentity(readIdentityText(dataDir));
+    instanceRef.record = upsertRunningInstance({
+      path: instancesPath,
+      id: instanceIdOf(config.web.host, port, dataDir),
+      name: identityName ?? fallbackInstanceName(dataDir),
+      nameSource: identityName === null ? 'dir' : 'identity',
+      dataDir,
+      host: config.web.host,
+      port,
+      pid: process.pid,
+      nodeExe: process.execPath,
+      entry: entryPath,
+      isDefault: isDefaultInstance,
+      now,
+      out: write,
+    });
+  };
+  const authStore = new AuthStore({ dataDir, now, out: write });
+  let preflight: PreflightServer | null = null;
+  try {
+    preflight = await startPreflightServer({
+      host: config.web.host,
+      port: config.web.port,
+      state: startupState,
+      auth: authStore,
+      out: write,
+    });
+    boundPort.value = preflight.portOf();
+    registerInstance(boundPort.value);
+  } catch (err) {
+    preflight = null;
+    write(`[界面] 端口没能先 bind（${describeError(err)}）——不拦启动；`
+      + '如果端口被占，本次的界面仍会退回环境变量 / 默认端口那两档去找后端');
+  }
+  /** 收掉那个"还没交给真服务"的 socket（启动失败 / 退出时用；已经 handoff 之后是空操作） */
+  const closePreflight = async (): Promise<void> => {
+    const current = preflight;
+    if (current === null || current.handedOff()) return;
+    preflight = null;
+    removeServerPortFile(portFilePath, { pid: process.pid, out: write });
+    await current.close();
+  };
+
+  // 配置与人格：配置已在上面加载好（configHash 是 render 三指纹之一），这里确保人格种子并加载
   const seededFiles = ensurePersonaSeeds(dataDir);
   const persona = loadPersona(dataDir);
   if (seededFiles.length > 0) write(`[人格] 首次启动，已写入种子文件：${seededFiles.join('、')}`);
@@ -534,6 +1042,9 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       },
     );
   } catch (err) {
+    // 起不来就别留着那个"已经在听"的端口：一份指向死进程的端口文件会把界面带到一个
+    // 永远不该被连的端口上（那正是这次事故的另一半）。
+    await closePreflight();
     // 「已经有一个后端在跑」要有一句人能直接读懂的话，而不是一个 LockHeldError 的类名
     // （用户 2026-10-11 要的判据：第二个实例**立刻退出** + 人话说明）
     if (err instanceof LockHeldError) {
@@ -598,6 +1109,50 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     schemaVersion: SCHEMA_VERSION,
     configHash: loadedConfig.configHash,
   }, 'internal');
+
+  /**
+   * ── 出厂技能 → 数据目录（v79，2026-10-23 现场两条病同源）──
+   *
+   * 技能实体住在**数据目录**（`<dataDir>/skills/<name>/SKILL.md`，与 `persona/` 同级），
+   * 安装目录/仓库里的 `skills/` 只是**出厂种子**。这里做那唯一一次复制：
+   *
+   *   · `<dataDir>/skills` **不存在**才复制（`ensureSkillsSeed` 的全部判据在 `skill/seed.ts`
+   *     的文件头：已存在就一个字节都不动、幂等、失败不留半成品）；
+   *   · 复制成功写一条 `skill/seed`（internal）——它解释"盘上这几个技能目录是怎么来的"，
+   *     也是"复制了几件"的唯一凭据（摘要行会随 stdout 滚掉，事件留得住）；
+   *   · 它**不是信任门**：复制过来的技能照样要 `skill/installed{by:'human'}` 才进 catalog；
+   *     内容逐字照搬 ⇒ 老日志里那些确认的内容哈希照旧命中，人不必重新点一遍。
+   *
+   * 为什么放在单实例锁**之后**（`recover()` 已经拿到锁、`session/start` 已经落下）：
+   * 并发的第二个进程会在拿锁时就被挡住，于是"两个进程同时往 `<dataDir>/skills` 复制"
+   * 这种半成品现场根本不会出现；事件顺序也就自然是"这一任起来了 → 它补了哪些出厂技能"。
+   */
+  const launchCwd = process.cwd();
+  const skillsSeed = ensureSkillsSeed(dataDir, join(launchCwd, SKILLS_DIR_NAME));
+  if (skillsSeed.state === 'created') {
+    append('skill/seed', {
+      source: SKILLS_DIR_NAME,
+      dest: SKILLS_DIR_NAME,
+      skills: skillsSeed.skills,
+      files: skillsSeed.files,
+    }, 'internal');
+    write(`[技能] 首次运行：已把出厂技能复制到数据目录（${skillsSeed.skills.length} 个：`
+      + `${skillsSeed.skills.join('、')}，共 ${skillsSeed.files} 个文件）⇒ ${skillsSeed.dest}`);
+    write('[技能] 此后技能住在数据目录：安装器更新（替换安装目录）不再碰它们，界面装/删也落在这里');
+  } else if (skillsSeed.state === 'failed') {
+    write(`[技能] 出厂技能没有复制成功：${skillsSeed.failure ?? '（没有原因）'}`);
+  } else if (skillsSeed.state === 'no-seed') {
+    // 老安装包/裁剪发行版里没有出厂种子：不是错误。技能从哪来由兼容根与界面/申请单那几条路决定
+    write(`[技能] 没有可复制的出厂种子（${skillsSeed.seedRoot} 不存在或里面没有技能目录）：`
+      + `数据目录保持原样（${skillsSeed.dest}）`);
+  }
+
+  /**
+   * 技能根的**生效计划**（v79）：在"种子已经复制完"之后算一次，摘要与 `SkillManager`
+   * 读的是同一份输入（数据目录 + cwd 兼容根）。`SkillManager` 内部按同一函数现算，
+   * 所以两处不可能给出两种说法（`planSkillRoots` 是唯一判据）。
+   */
+  const skillRoots: SkillRootRef[] = planSkillRoots(dataDir, launchCwd);
 
   /**
    * ── `%TEMP%` 兜底扫（2026-10-21）：**启动时一次**（每日整理那一拍还会再来一次）──
@@ -771,6 +1326,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * QQ 官方通道（M9）。装配条件：配置打开 + 两个环境变量非空。
    * 密钥教义：配置文件里只有变量名，值在这里从进程环境读，不落盘、不进日志、不进事件。
    */
+  // 阶段播报（`/api/health` 的 `phase`）：接下来这段是通道与协议端（SnowLuma 预热也在这一档）
+  startupState.setPhase('channels');
   const qqChannel = createQqChannelIfConfigured(config.channels.qqOfficial, write, config.dataDir);
   /**
    * 内置协议端（可选）：`channels.onebot.managed` 有值就由框架把它拉起来。
@@ -831,7 +1388,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   /**
    * **「这条是不是我自己发的」——判据只此一处**（2026-10-11 用户裁决的落点）。
    *
-   * 现场（`D:\IrmiaAgent\_ops-readchannel\REPORT.md` §2）：她一次 speak 的三条气泡从**平台另一扇门**
+   * 现场（`_ops-readchannel\REPORT.md` §2）：她一次 speak 的三条气泡从**平台另一扇门**
    * （同一实体群的 qq-official 那一路）被当作"别人发来的消息"推回来，`person` 是她自己的 openid。
    * 整条入站链路上没有任何一处判这一条，于是它被完整地当成某个群成员说的话：落
    * `channel/message` → 算未读 → **进群成员档案**（`data/group-members.json` 里多出一条
@@ -1027,6 +1584,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 照样要看得见 `mcp` 这件工具（与 `memory_read` / `pwsh` 同一条理由）。假循环那个池
    * 永远不会被调用（不跑模型就不派发工具），所以它也不会拉起任何外部进程。
    */
+  // 阶段播报（`/api/health` 的 `phase`）：接下来是 MCP 池与工具注册表的装配
+  startupState.setPhase('mcp');
   const mcpPool = new McpClientPool({
     servers: config.mcp.servers,
     // 生命周期事件落 mcp/server-started / mcp/server-stopped（internal）：
@@ -1100,8 +1659,18 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    *     顺带写下的 `tools.disabled` 接不住 ⇒ true）。
    */
   const configWatcher = new ConfigWatcher({
-    configDir: process.cwd(),
+    configDir: startup.configDir,
     initial: loadedConfig,
+    /**
+     * 重载也把数据目录钉回启动时那一个（判据见 `pinDataDir`）。
+     *
+     * 不钉的后果是**每次热更都附带一句假警报**：盘上那份配置的 `dataDir` 与生效值不同
+     * （`--data-dir`/环境变量覆盖，或配置里就是默认值）时，`diffConfigFields` 会稳定地
+     * diff 出 `dataDir`，而它是**重启级**字段 ⇒ 每改一格 `mcp.servers` 都会多一行
+     * "以下字段需要重启才生效：dataDir"。真话要说在该说的时候（这里的数据目录是启动时定的，
+     * 运行期不会被这行配置改掉），不该变成每次保存的噪音。
+     */
+    load: async (dir) => pinDataDir(await loadConfig(dir), dataDir),
     // `config/changed`（internal）：与 web 侧写的那条同名同形（fields + configHash）。
     // 这里**不写** `requiresRestart`——那一条只描述"盘上改了、进程没改"的那种写盘命令；
     // 热更这条路是真的生效了，而没生效的那些字段在 `warnings` 与下面的日志里逐条点名。
@@ -1355,7 +1924,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // **记账那一行是 2026-10-11 补的**：这个适配器原先把 `ds.generate()` 的返回值当
     // **无类型透传**交出去，`tools/vision.ts` 转手就把它压成字符串（`extractResponseText`）
     // ——`usage` 在第一跳就断了，vision 的 64 次真实模型请求因此一条账都没有，
-    // 预算闸门看不见它（见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+    // 预算闸门看不见它（见 `_ops-light2\REPORT.md` ②）。
     // 现在**只是多交一份出去**：`return res` 与改动之前逐字节一样（同一个对象、同一个引用），
     // 请求体更是一个字节都没动（下面那个记账函数只写事件，不碰 `DsRequest`）。
     //
@@ -1529,11 +2098,26 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 单件工具注册失败必须说出来：静默少一件能力，比启动失败更难查（§4.18 的描述预算）
     for (const problem of catalog.problems) write(`[工具] 未注册（已跳过）：${problem}`);
 
-    // 技能系统（design §4.19）：技能根是项目级资产（skills/、.agents/skills/，与 workspace/ 同级），
-    // 工具白名单根同为 cwd，所以模型能用 safe_read 自己读 SKILL.md 正文（渐进披露第二层）。
-    // 只有过了信任门（skill/installed{by:'human'}）的 skill 才进 catalog——启动时把话说清楚。
+    /**
+     * 技能系统（design §4.19）：技能根 = **数据目录**（`<dataDir>/skills`、`<dataDir>/.agents/skills`），
+     * 与 `persona/` 同级。
+     *
+     * 为什么 baseRoot 从 `process.cwd()` 改成 `dataDir`（v79，2026-10-23 两条病同源）：
+     *   ① 运行环境搬进安装目录、数据目录另立一处之后，cwd 那份技能根就是**安装目录**里的
+     *      技能——界面上"没有任何技能"、catalog 0 条；
+     *   ② 更重的那条：技能实体住在安装目录 ⇒ 安装器更新（整体替换）⇒ 装的技能全没。
+     * 技能实体搬进数据目录之后，安装目录/仓库里的 `skills/` 只是出厂种子（`skill/seed.ts`
+     * 首次运行复制一次），更新再也碰不到用户装的技能。
+     *
+     * `compatBaseRoot: process.cwd()` 是**兼容根**（优先级最低）：数据目录里还没有这一份时
+     * 仍能扫到老安装/开发目录里的技能（`planSkillRoots` 的三条规则写在 `skills.ts` 里）。
+     * 模型读正文的写法一个字节都没变（还是 `skills/<name>/SKILL.md`）：fs 工具的别名表把
+     * `skills/` 接到 `<dataDir>/skills`（`tools/fs/env.ts` 的 `pathAliasesFor`）。
+     * 只有过了信任门（skill/installed{by:'human'}）的 skill 才进 catalog——启动时把话说清楚。
+     */
     const skills = new SkillManager({
-      baseRoot: process.cwd(),
+      baseRoot: dataDir,
+      compatBaseRoot: launchCwd,
       out: write,
       emit: (type, data, visibility) => {
         append(type, data, visibility);
@@ -1667,8 +2251,38 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       config,
       personaRoot: join(dataDir, 'persona'),
       dataDir,
+      /**
+       * **端口早绑那一层交出来的 socket 与同一份启动状态**（2026-10-26）：
+       *   · `bootstrap` 给了 ⇒ 本服务**不重新 bind**，直接把同一个 socket 上的请求接到
+       *     `route`（不换端口、不留空窗，界面在重启窗口里不会被 RST / ECONNREFUSED）；
+       *   · `startup` 是**同一个实例** ⇒ `/api/health` 报 ready 的那一刻，数据路由已经能答
+       *     （拉起器与界面都只凭这一条就敢说"后端回来了"）。
+       * 端口没能先 bind 时（`preflight === null`）两格都不传：本服务自己 listen，
+       * 启动状态是自带的"已经就绪"——行为与改前逐字相同。
+       */
+      ...(preflight === null ? {} : { bootstrap: preflight, startup: startupState }),
+      // 认证库：与启动期 `/api/auth/state` 用的是**同一个实例**（认证判据只有一份）
+      auth: authStore,
+      /**
+       * 技能根基准（v79）：与运行期那份 `SkillManager` **同一个基准**（数据目录），
+       * 界面上的技能列表 / 批准落地 / 删除 / 重建预览因此与"她当时看到的"同源。
+       *
+       * 不传的代价（改之前就是这样）：web 侧按 `process.cwd()` 猜，于是界面看的是
+       * **安装目录**里的那份技能——点"装一个技能"也装回安装目录，更新一次全没
+       * （正是这次要修的第二条病）。这一格是那些动作唯一的落点，不能省。
+       */
+      skillsRoot: dataDir,
       timers,
       now,
+      /**
+       * **配置文件的绝对路径**（2026-10-23 加）：界面侧的保存（`config-update` /
+       * `mcp-save` / 工具开关）写的就是这一份。
+       *
+       * 不传的话 web 侧按 `join(process.cwd(), 'config.json')` 自己猜一个——`--config`
+       * 指到别处时，界面会把改动写进**另一份文件**，而进程读的还是原来那份：
+       * 屏幕上"已保存"、行为一点没变。判据只有一处（这里给的就是 `loadConfig` 读过的那条）。
+       */
+      configPath: loadedConfig.path,
       ...(toolRegistry !== undefined ? { registry: toolRegistry } : {}),
       // 更新检查的数据口（GET /api/update 与 POST /api/update/check 的宿主）
       update: updateService,
@@ -1745,6 +2359,16 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         (loop instanceof RealLoop ? loop.consumeStopCommand(type, data, wakeSeq) : null),
       // 第三步：载体摘除。**只能在 `appendSync` 折完投影之后**（见 RealLoop.dropStopInput 的注释）
       dropPendingStopInput: () => (loop instanceof RealLoop ? loop.dropStopInput() : 0),
+      /**
+       * **实例自述的静态那一半**（`GET /api/instance` 的 `name` / `isDefault`）。
+       *
+       * 为什么由宿主给：那两个字段的真源在**登记表**（后端 bind 时写、界面读），而 `name`
+       * 是"新增那一刻定下、之后永不覆盖"的东西——web 层每次现读盘反而会让"启动之后改名"
+       * 跟登记表打架。端口与 pid 是 web 层自己知道的事实，不进这一格。
+       */
+      ...(instanceRef.record === null ? {} : {
+        instanceIdentity: { name: instanceRef.record.name, isDefault: instanceRef.record.isDefault },
+      }),
       out: write,
     });
     // 启动时只报"门是什么状态"，**不打印任何凭据**（密码与会话凭据的原文从不进日志）。
@@ -1756,8 +2380,29 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     } else {
       write(`[界面] 本地服务 ${webServer.url()} · 还没设密码：请打开 GUI 设置一个`);
     }
+    // 「就绪」这条读数同时是拉起器等的那个判据（`GET /api/health` = ready）。
+    // 打上从**进程启动**到就绪的毫秒数：这台机器冷启动到底多久，日志里一眼能查。
+    write(`[界面] 后端就绪：http://${config.web.host}:${webServer.port()}`
+      + `（从进程启动起 ${Math.round(process.uptime() * 1000)} ms；/api/health 现报 ready）`);
+    /**
+     * 登记表：**就绪那一刻**补记 `lastReadyAt`。
+     *
+     * 为什么不在 bind 那一刻写：`lastStartedAt` 与 `lastReadyAt` 是两个事实，中间那段
+     * （本机冷启动 35–42 秒）恰恰是"它起了但还不能干活"——界面判活要能区分这两档。
+     *
+     * `instanceRef.record === null`（端口没能先 bind，所以 bind 那一刻没登记）⇒ 这里补登记一次：
+     * 真服务的端口就是这一次 listen 出来的那个，"我听了 7788"这句话现在才有事实撑。
+     */
+    if (instanceRef.record === null) {
+      registerInstance(webServer.port());
+    } else {
+      markInstanceReady({ path: instancesPath, dataDir, pid: process.pid, now });
+    }
   } catch (err) {
     write(`[界面] 本地服务启动失败（不拦启动）：${describeError(err)}`);
+    // 端口早绑了、真服务却起不来 ⇒ 那个 socket 与端口文件都得收掉：
+    // 留着只会让界面对着一个"有人听、谁都不答"的端口（或者连到一个死端口）等到超时。
+    await closePreflight();
   }
 
   // 更新检查起拍：**无论 web 服务成没成**（见上面装配点那段注释）。
@@ -1856,7 +2501,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    *
    * 与 `onChannelMessage` 的两条出口刻意不同：notice 不进 `loop.wake`（"有人撤回了一条消息"
    * 不是叫她）、也不参与未读（未读数的必须是**别人的话**）。它唯一的出路是 `read_channel`：
-   * 她翻开这个群时，那一行 `[OWNER 开启了全员禁言]` 就在时间轴上（渲染在
+   * 她翻开这个群时，那一行 `[阿岚 开启了全员禁言]` 就在时间轴上（渲染在
    * `channel/self-identity.ts` 的 `noticeLineText`，名字走既有真源现查，查不到不编）。
    *
    * `msgSeq` 补成事件 seq：与 `channel/message` 同一条规则（`msgSeqOf`），
@@ -1910,7 +2555,17 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     for (const warning of manualSource.warnings()) write(`[唤醒源/manual] ${warning}`);
   }
 
-  write(renderStartupSummary({ dataDir, recovery, timers, startTurn, mode: apiKey !== null ? 'real' : 'fake', persona }));
+  write(renderStartupSummary({
+    dataDir,
+    configPath: loadedConfig.path,
+    dataDirSource: startup.source,
+    recovery,
+    timers,
+    startTurn,
+    mode: apiKey !== null ? 'real' : 'fake',
+    persona,
+    skills: skillRoots,
+  }));
   if (backfilled > 0) {
     write(`[唤醒源/timer] 补记 ${backfilled} 条恢复期已触发的定时器（wake/timer 已入队）`);
   }
@@ -2008,6 +2663,22 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
     for (const source of sources) source.stop();
     if (webServer !== null) await webServer.close();
+    // 端口文件：**退出时删掉**（只删自己那份）。留着它，下一次界面启动会去连一个已经不在的端口
+    // ——那正是这次事故里"界面指向了错误端口"的同一类失败。web 服务没起来时那份文件本来就不该在。
+    //
+    // 多实例（2026-10）：删的是**自己那两份**——每实例那份（`server.<port>.json`，按文件名里的
+    // 端口定身份）与旧名的 `server.json`（`removeServerPortFile` 会核对 pid，只在还是自己时才删）。
+    removeServerPortFile(perInstancePortPath, { out: write });
+    removeServerPortFile(portFilePath, { pid: process.pid, out: write });
+    /**
+     * 登记表：**自己的 pid 清 0，不删条目**。
+     *
+     * 条目是"这台机器上存在过哪些实例"的记忆——删掉它等于让界面忘了那个实例，而它的
+     * 数据目录还在盘上。清 0 的语义是"它现在没在跑"，界面据此显示"未运行"并给一个
+     * 「启动并登录」。核对 pid 是**自己**的那一半在 `markInstanceStopped` 里（见那里的注释）。
+     */
+    markInstanceStopped({ path: instancesPath, dataDir, pid: process.pid, out: write });
+    await closePreflight();
     // 配置热重载：先撤监听（fs.watch 与那路 250ms 轮询），再做后面那些收尾
     // ——退出过程中不该再有"配置变了 ⇒ 重连一个 MCP server"，那会与下面的池关机打起来。
     configWatcher.stop();
@@ -2213,9 +2884,24 @@ function createOneBotChannelIfConfigured(
 
 let activeHandle: MainHandle | null = null;
 
-export async function main(): Promise<number> {
+/**
+ * 进程入口：命令行里的 `--data-dir` / `--config` 与嵌进方显式给的 `options` 合并
+ * （**显式的 options 优先**：那是代码里写死的事实，命令行是外部输入）。
+ *
+ * 命令行这一层为什么必须有：启动失败那句话早就写着"检查 --data-dir / IRMIA_DATA_DIR"
+ * （见 `runMain` 里那条报错），而在此之前**根本没有这个参数**——指路指到一个不存在的东西，
+ * 比不指路更坏。`--config` 是同一笔的配套：数据目录的第三档在配置文件里，而配置文件
+ * 自己在哪，得有人能说。
+ */
+export async function main(options: MainOptions = {}): Promise<number> {
   try {
-    activeHandle = await runMain();
+    const args = parseMainArgs(process.argv.slice(2));
+    const merged: MainOptions = { ...options };
+    if (merged.dataDir === undefined && args.dataDir !== undefined) merged.dataDir = args.dataDir;
+    if (merged.configPath === undefined && args.configPath !== undefined) merged.configPath = args.configPath;
+    // `--port`：显式给的那一格压过 config.json（见 parseMainArgs 里那段取舍）
+    if (merged.port === undefined && args.port !== undefined) merged.port = args.port;
+    activeHandle = await runMain(merged);
     // 句柄持有锁与日志：保留引用，等信号处理器调用 stop
     void activeHandle;
     return startupExitCode(null);
@@ -2240,3 +2926,4 @@ if (isDirectRun(import.meta.url)) {
     if (code !== 0) process.exit(code);
   });
 }
+

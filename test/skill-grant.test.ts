@@ -497,12 +497,15 @@ test('④d 技能四种状态的正文都带那句"卡在哪"，且只加一句�
 //
 // ── 这一条要给出的实测答案：**批准的技能落到哪个根？** ──
 //   落点 = `skillsRootOf(baseRoot)` = baseRoot 下的 `DEFAULT_SKILL_ROOTS[0]`，也就是
-//   **`<项目根>/skills/<name>`**；`data/skills/` **不是**技能根（那条路根本没人扫）。
-//   baseRoot 的来源两处一处口径：web 层是 `deps.skillsRoot ?? process.cwd()`（server.ts 的 grant-decide），
-//   `main.ts` 的技能管理器是 `process.cwd()`（`new SkillManager({ baseRoot: process.cwd() })`）。
-//   为了在不碰真仓库的前提下把**生产那条默认路**跑出来，这里把 `process.cwd()` 换到台子的临时根上，
-//   **并且不给 `skillsRoot`**——与 `main.ts` 的装配逐字相同（那里也不传这一格）。
-//   断言里因此有三件事一起说清：实际落点（打出来）、`data/skills/` 不存在、`DEFAULT_SKILL_ROOTS` 扫得到。
+//   **`<baseRoot>/skills/<name>`**。baseRoot 的来源两处一处口径：web 层是
+//   `deps.skillsRoot ?? process.cwd()`（server.ts 的 grant-decide），`main.ts` 的技能管理器是
+//   `SkillManager.baseRoot = dataDir`（v79 起：技能实体住在数据目录）**并且装配 web 时传
+//   `skillsRoot: dataDir`**——所以生产上那个根是 `**<dataDir>/skills/<name>**`。
+//   本用例判的**不是**生产那份 baseRoot 的取值，而是"web 层缺省时按哪个根落地"这条**回退**
+//   判据：把 `process.cwd()` 换到台子的临时根上、**不给 `skillsRoot`**，于是落点就是
+//   `<台子根>/skills/<name>`。断言因此有三件事一起说清：实际落点（打出来）、
+//   `data/skills/` 在这个回退姿势下不被使用、`DEFAULT_SKILL_ROOTS` 扫得到。
+//   （生产那条路"装进数据目录"由 `test/skills-datadir.test.ts` 与 `main.ts` 的装配钉住。）
 //
 // ── 它同时钉住那个"顺手修的洞"：**引擎信任表的增量折叠** ──
 //   `skill/installed` 是 **web 层**写的（不是循环自己 `appendSync` 的那一条），所以循环里那张
@@ -623,9 +626,10 @@ test('⑤ 端到端：假技能包 → 递单 → 界面批准 → 装进技能�
   assert.equal(existsSync(installedDir), false, '批准之前不许有任何目录');
 
   // ── ④ 人点批准（**真的走 HTTP 的 `grant-decide`**） ──
-  // 把 cwd 换到临时根上，并且**不给 `skillsRoot`**：与 `main.ts` 的装配逐字相同
-  // （web 层那一格是 `deps.skillsRoot ?? process.cwd()`）。这样"装到哪个根"就是实测出来的，
-  // 而不是从代码里读出来的——同时它还保证一个字节都不会落进真仓库的 `skills/`。
+  // 把 cwd 换到临时根上，并且**不给 `skillsRoot`**：测的是 web 层那条**回退**判据
+  // （`deps.skillsRoot ?? process.cwd()`）。生产装配（`main.ts`）v79 起显式传 `dataDir`，
+  // 那一条路由 `test/skills-datadir.test.ts` 与 main 的装配钉住；这里不传是为了把
+  // "缺省时按哪个根落地"也实测到，同时保证一个字节都不会落进真仓库的 `skills/`。
   process.chdir(rig.dir);
   const webNow = (): Date => new Date(Date.parse(RIG_NOW));
   web = await startWebServer({
@@ -637,7 +641,7 @@ test('⑤ 端到端：假技能包 → 递单 → 界面批准 → 装进技能�
     timers: new TimerStore(join(dataDir, 'timers.json'), { now: webNow }),
     now: webNow,
     registry: new ToolRegistry(),
-    // ↓ **刻意不传 skillsRoot**：生产也不传（`main.ts`），默认就是 `process.cwd()`
+    // ↓ **刻意不传 skillsRoot**：这一条验的是回退（生产传的是 dataDir，见上面的说明）
     uiToken: WEB_TOKEN,
     configPath: join(rig.dir, 'config.json'),
     port: 0,

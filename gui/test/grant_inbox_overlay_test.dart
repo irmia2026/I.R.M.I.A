@@ -43,10 +43,10 @@ class _FakeApi extends IrmiaApi {
   Completer<void>? hold;
 
   @override
-  Future<dynamic> get(String path) async => <String, dynamic>{'items': <dynamic>[]};
+  Future<dynamic> get(String path, {Duration? timeout}) async => <String, dynamic>{'items': <dynamic>[]};
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async {
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
     posts.add(<String, dynamic>{'path': path, ...body});
     if (hold != null) await hold!.future;
     final failure = decideError;
@@ -114,7 +114,7 @@ void main() {
 
   /// 收场：把 toast 那一拍跑完、再拆掉宿主（宿主 dispose 会取消"15 秒收起"那一拍）。
   ///
-  /// 不这么做的话，测试收尾会留下 pending timer（本仓的规矩：`timer_cancel_test.dart` 那一族）。
+  /// 不这么做的话，测试收尾会留下 pending timer（本仓的规矩：`grant_inbox_test.dart` 那一族）。
   Future<void> teardownHost(WidgetTester tester) async {
     await tester.pump(IrmiaToast.duration);
     await tester.pump(const Duration(milliseconds: 300));
@@ -327,6 +327,53 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('grant-inbox-card-g-1')), findsNothing);
     expect(find.byKey(const ValueKey('grant-inbox-collapsed')), findsNothing);
+
+    await teardownHost(tester);
+  });
+
+  testWidgets('⑤b 没有待批、但有一张**读不出来的单子** ⇒ 那条提示要看得见（不静默丢）', (tester) async {
+    final env = makeState();
+    env.state.applyMalformedGrants(<Map<String, dynamic>>[
+      <String, dynamic>{'id': 'remove-obscura-mcp', 'why': 'kind 只能是 "mcp-add" / "mcp-remove"'},
+    ]);
+    await pumpHost(tester, env.state);
+
+    // 这是"人写了单子、框架一声不响"那条缝：没有卡可点，但**必须**有一句话
+    final bar = find.byKey(const ValueKey('grant-inbox-unreadable'));
+    expect(bar, findsOneWidget, reason: '读不出来的单子既不在待批队列里、也挂不出卡，不显示就等于吞了');
+    expect(find.text(s.grantUnreadableTitle), findsOneWidget);
+    expect(find.textContaining('remove-obscura-mcp'), findsOneWidget, reason: '要说清是哪一张');
+    expect(find.textContaining('mcp-remove'), findsOneWidget, reason: '原因原样带出来（不译成"未知错误"）');
+    expect(tester.getSize(bar).width, greaterThan(0), reason: '它不是"空着的一块"');
+    // 位置在右下角（与待批卡同一个落点：它会挡内容，所以必须在人习惯看的那一角）
+    final rect = tester.getRect(bar);
+    expect(rect.right, closeTo(1200 - kGrantInboxInset, 1));
+    expect(rect.bottom, closeTo(800 - kGrantInboxInset, 1));
+
+    // 它**不**进待批队列：没有卡、没有待批计数、也没有可点的批准按钮
+    expect(find.byKey(const ValueKey('grant-inbox-card-remove-obscura-mcp')), findsNothing);
+    expect(find.text(s.grantInboxHeader(0)), findsNothing);
+    expect(find.text(s.grantInboxApprove), findsNothing, reason: '一张读不出来的单子没有可批的东西');
+
+    // 读了之后（服务端把它退回/修好）：这条提示自己消失
+    env.state.applyMalformedGrants(const <Map<String, dynamic>>[]);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('grant-inbox-unreadable')), findsNothing);
+    expect(tester.getSize(find.byType(GrantInboxPanel)), Size.zero);
+
+    await teardownHost(tester);
+  });
+
+  testWidgets('⑤c 有待批卡 + 读不出来的单子 ⇒ 两件事同时看得见（互不遮蔽）', (tester) async {
+    final env = makeState();
+    env.state.applyPendingGrants(<Map<String, dynamic>>[pendingGrant()]);
+    env.state.applyMalformedGrants(<Map<String, dynamic>>[
+      <String, dynamic>{'id': 'g-broken', 'why': '文件读不出来（内容不是合法 JSON）'},
+    ]);
+    await pumpHost(tester, env.state);
+
+    expect(find.byKey(const ValueKey('grant-inbox-card-g-1')), findsOneWidget, reason: '有单时一定要看到卡');
+    expect(find.byKey(const ValueKey('grant-inbox-unreadable')), findsOneWidget, reason: '另一张坏单也不许被卡挡住');
 
     await teardownHost(tester);
   });

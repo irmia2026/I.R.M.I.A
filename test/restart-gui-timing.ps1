@@ -18,18 +18,25 @@
 # 跑法（**会真的重启用户的界面 3 次**，每组做完都把它留成"在跑且有窗口"）：
 #   pwsh -NoProfile -File test\restart-gui-timing.ps1
 # 参数：
-#   -GuiExe  默认 D:\IrmiaAgent\agent\gui\build\windows\x64\runner\Release\irmia_gui.exe
+#   -GuiExe  默认 <安装根>\agent\gui\build\windows\x64\runner\Release\irmia_gui.exe（安装根 = 仓库根的上一级）
 #   -Groups  默认 0,3,10（秒）；-ObserveSeconds 默认 30（单组观测上限）
 #   -ListOnly 只打印"现在有几个界面、都是谁"，一个进程都不动
 # ════════════════════════════════════════════════════════════════════════════
 param(
-  [string]$GuiExe = 'D:\IrmiaAgent\agent\gui\build\windows\x64\runner\Release\irmia_gui.exe',
+  [string]$GuiExe = '',
   [string]$LogPath = '',
   [int[]]$Groups = @(0, 3, 10),
   [int]$ObserveSeconds = 30,
   [switch]$ListOnly
 )
 $ErrorActionPreference = 'Continue'
+
+# 界面可执行文件：默认按「安装根 = 仓库根的上一级」推导（开发机上它就在 <安装根>\agent\gui\…），
+# 不写死任何机器路径。
+if ($GuiExe -eq '') {
+  $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+  $GuiExe = Join-Path (Split-Path -Parent $repo) 'agent\gui\build\windows\x64\runner\Release\irmia_gui.exe'
+}
 
 function Say([string]$Text) {
   Write-Host $Text

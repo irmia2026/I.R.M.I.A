@@ -31,6 +31,7 @@ import { defaultVisibility, planFingerprint } from '../src/log/types.ts';
 import type { DsClient, DsRequest, DsStreamResult } from '../src/model/ds-client.ts';
 import type { PersonaAssets } from '../src/persona/loader.ts';
 import { answerHuman, scanSuspension } from '../src/runtime/plan-mode.ts';
+import { BudgetGuard } from '../src/runtime/budget-guard.ts';
 import { RealLoop } from '../src/runtime/real-loop.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
 import { createAdminTools } from '../src/tools/admin.ts';
@@ -261,6 +262,21 @@ async function answer(h: Harness, text: string, callId?: string): Promise<Return
   });
 }
 
+/**
+ * 判据用的刹车实例：`isPaused(layer, p)` **从投影派生**（`lastExhausted` 里还有没有这一层），
+ * 所以不必把它接进循环——验收要的那句 `isPaused('task')` 为 false 就是这一读。
+ */
+function guardOf(h: Harness): BudgetGuard {
+  return new BudgetGuard({
+    config: {
+      stepTools: 20, turnSteps: 30, taskTokens: 500_000, dailyTokens: 2_000_000,
+      softRatio: 0.8, failStreakMax: 5,
+    },
+    projection: h.projection,
+    now: () => h.clock.now,
+  });
+}
+
 // ──────────────────────────────── M8-6 计划模式 ────────────────────────────────
 
 test('M8-6 计划模式：destructive 调用被拦成 plan/pending，turn 以 blocked 挂起', async (t) => {
@@ -487,53 +503,225 @@ test('scanSuspension：分批认领的挂起 turn，重入队要还**全部**输
   assert.deepEqual(scan.waiting?.sources, ['manual', 'manual']);
 });
 
-test('M8-7 挂起超时：超过上限按 budget-exhausted 同等语义暂停（注入时钟）', async (t) => {
+test('scanSuspension：**倒着答**不许留下幽灵挂起（2026-10-21 那台机器停掉的根因）', () => {
+  // 现场（`data/events/000000199078.jsonl` 实测，10-20 17:51）：
+  //   202192 human/asked「批准加一个 MCP server「playwright」？」（先递）
+  //   202194 human/asked「批准从配置里删掉 MCP server「playwright」？」（后递）
+  //   202196 human/answered{askSeq:202194} ← 人**先答了后递的那张**
+  //   202208 human/answered{askSeq:202192}
+  // 旧实现只允许"答队首"：202196 那条答复因为 askSeq 不是队首而被当成"与挂起无关"丢掉，
+  // 202194 于是永远留在队列里。15:44 重启时 scanSuspension 把它重建出来，24 小时一到
+  // （10-21 17:51:08）`maybeTimeoutHuman` 落了一条 budget/exhausted{task}，整台机器停到第二天。
+  let seq = 0;
+  const ev = (type: string, data: unknown): AppEvent => {
+    seq += 1;
+    return {
+      seq, ts: `2026-10-20T17:51:0${seq}.000Z`, type, data,
+      visibility: defaultVisibility(type), origin: 'test',
+    } as unknown as AppEvent;
+  };
+  const events: AppEvent[] = [
+    ev('human/asked', { question: '批准加一个 MCP server「playwright」？', context: '', turn: 0, source: 'system' }),
+    ev('human/asked', { question: '批准从配置里删掉 MCP server「playwright」？', context: '', turn: 0, source: 'system' }),
+  ];
+  const firstAsk = events[0]!.seq;
+  const secondAsk = events[1]!.seq;
+  events.push(
+    ev('human/answered', { question: '批准从配置里删掉 MCP server「playwright」？', answer: 'approve', by: 'human', askSeq: secondAsk }),
+    ev('human/answered', { question: '批准加一个 MCP server「playwright」？', answer: 'approve', by: 'human', askSeq: firstAsk }),
+  );
+
+  const scan = scanSuspension(events);
+  assert.equal(scan.waiting, null, '两条都答过了：一条挂起都不许剩（剩下的那一条就是幽灵）');
+  assert.equal(scan.answered?.suspension.askSeq, firstAsk, '最后一条答复销掉的是最早那条提问');
+});
+
+test('M8-7 挂起超时：按「未批准」处置并让她继续（不再暂停整个 agent）', async (t) => {
   const h = await makeHarness(t, {
     planMode: true,
-    script: [toolCall('call_d1', 'destroy_workspace', { target: 'tmp' })],
+    // 第一轮：destructive 调用被拦成待批准（挂起）；超时处置后输入回到队列 ⇒ 第二轮接着跑
+    script: [
+      toolCall('call_d1', 'destroy_workspace', { target: 'tmp' }),
+      { text: '那先不动，等你回话' },
+    ],
   });
   const askWake = wake(h, '开始干活', 'k-ask-2');
   await h.loop.tickOnce();
   assert.notEqual(h.projection.waitingHuman, null);
+  const ask = (await h.ofType('human/asked'))[0]!;
 
   // 还没到时限：什么也不发生
   h.advanceMs(HUMAN_TIMEOUT_MS - 60_000);
   await h.loop.tickOnce();
-  assert.equal((await h.ofType('budget/exhausted')).length, 0, '未超时不写暂停事件');
+  assert.equal((await h.ofType('human/timed-out')).length, 0, '未超时不处置');
 
-  // 拨到超时：写 budget/exhausted{layer:'task'}（暂停可恢复），且只写一次
+  // 拨到超时：**不写 budget/exhausted**（用户 2026-10-22：「不要有这种玩意」）
   h.advanceMs(2 * 60_000);
   await h.loop.tickOnce();
-  const exhausted = await h.ofType('budget/exhausted');
-  assert.equal(exhausted.length, 1, '超时按预算耗尽同等语义记账');
-  assert.equal(exhausted[0]!.data.layer, 'task');
-  assert.equal(exhausted[0]!.data.resumable, true, '暂停而不是失败：加注或答复都能继续');
-  assert.notEqual(h.projection.lastExhausted['task'], undefined);
+  assert.equal((await h.ofType('budget/exhausted')).length, 0,
+    '超时不许再写预算暂停：那条暂停会关掉整个唤醒门');
+  assert.equal(h.projection.lastExhausted['task'], undefined, '投影里也不许冒出 task 层暂停记录');
+  // `isPaused('task')` 的判据就是上面那一格（`BudgetGuard.isPaused` 从投影派生）
+  assert.equal(guardOf(h).isPaused('task', h.projection), false, '唤醒门不会被这条路点亮');
 
-  await h.loop.tickOnce();
-  assert.equal((await h.ofType('budget/exhausted')).length, 1, '同一事实只落一条事件');
+  // ① 事实 + ② 处置各一条（且只各一条）
+  const timedOut = await h.ofType('human/timed-out');
+  assert.equal(timedOut.length, 1, '处置只落一条 human/timed-out');
+  assert.equal(timedOut[0]!.data.askSeq, ask.seq, '处置说的是哪一条提问（seq）');
+  assert.equal(timedOut[0]!.data.question, ask.data.question, '问题原样留档');
+  assert.equal(timedOut[0]!.data.waitedMs, HUMAN_TIMEOUT_MS + 60_000, '等了多久是实测的那个数');
+  assert.equal(timedOut[0]!.visibility, 'internal', '处置是簿记：不进她的上下文');
+  const expired = await h.ofType('human/expired');
+  assert.equal(expired.length, 1, '既有的"时间到了"事实照旧写（model 可见，她得知道人可能不在）');
+  assert.equal(expired[0]!.data.askSeq, ask.seq);
+  // ④' 给用户一条**看得见**的提醒（level warn；不是只躺在日志里）
+  const notices = (await h.ofType('alarm/sent'))
+    .filter(event => event.data.title.includes('已按"未批准"处理并让她继续'));
+  assert.equal(notices.length, 1, '超时要有人看得见的那一条（一次）');
+  assert.equal(notices[0]!.data.level, 'warn');
+  assert.equal(notices[0]!.data.title, '有一条提问等了 1 小时没答，已按"未批准"处理并让她继续：批准执行计划？');
 
-  // 暂停生效：新输入不写 turn/start、不认领，原样留在队列里
-  const late = wake(h, '又过了很久', 'k-ask-3');
-  await h.loop.tickOnce();
-  assert.equal((await h.ofType('turn/start')).length, 1, '暂停期间不起新 turn');
-  assert.equal(h.projection.pending.some(item => item.wakeSeq === late.seq), true, '输入留在队列里，不丢');
+  // ③ 计划簿记：按 expired 结案，**批准位一格不写** ⇒ 那件 destructive 调用绝不执行
+  const resolved = await h.ofType('plan/resolved');
+  assert.equal(resolved.length, 1, '计划按 expired 结案（否则同一件调用永远递不出新卡）');
+  assert.equal(resolved[0]!.data.outcome, 'expired');
+  assert.equal(resolved[0]!.data.by, 'human-timeout');
+  assert.deepEqual(h.projection.planApproved, [], '一张执行许可都不许留');
+  assert.equal(h.dangerRuns(), 0, '超时 = 未获批准：需要批准的动作一次都没执行');
+  // 投影里那条提问出队了（作图：waitingHuman 跟着清掉）
+  assert.equal(h.projection.humanAsks.some(item => item.seq === ask.seq), false, '待答作废（出队）');
+  assert.equal(h.projection.waitingHuman, null, '不再有"她还在等人"的残留');
 
-  // 答复到达（超时后人也可能补答）→ 自动解除挂起留下的暂停 → 输入回到队列
-  const answered = await answer(h, '继续吧');
-  assert.ok(answered.ok);
-  h.advanceMs(1_000);
-  await h.loop.tickOnce();
-  assert.equal(h.projection.lastExhausted['task'], undefined, '答复解除挂起留下的暂停');
-  // 2026-10-02 起 `input/requeued` 不止一种来源：整轮失败（模型/服务端拒了请求）也会退回输入
-  // （见 agent-loop 的 requeueOnTurnError）。这条用例盯的是**挂起解开**那一笔，所以按 reason 过滤。
-  const requeued = (await h.ofType('input/requeued')).filter(event => event.data.reason === 'human-answered');
-  assert.equal(requeued.length, 1, '挂起拍掉的那条输入也要一起重入队');
+  // ④ 输入回到队列，她继续干活
+  const requeued = (await h.ofType('input/requeued')).filter(event => event.data.reason === 'human-timeout');
+  assert.equal(requeued.length, 1, '挂起拍掉的那条输入要放回去');
   assert.deepEqual(requeued[0]!.data.wakeSeqs, [askWake.seq]);
-  const replies = await h.ofType('budget/topped-up');
-  assert.equal(replies.length, 1, '解除动作留痕（不是人工加注，addedTokens 为 0）');
-  assert.equal(replies[0]!.data.addedTokens, 0);
-  assert.equal(replies[0]!.data.by, 'human-answer');
+
+  // 下一拍：没有暂停 ⇒ 新的 turn 起来（她继续），且不需要人再做什么
+  await h.loop.tickOnce();
+  const turnStarts = await h.ofType('turn/start');
+  assert.equal(turnStarts.length, 2, '超时之后她照常起新 turn（不再停在暂停态）');
+  assert.equal(turnStarts[1]!.data.turn, 2, 'turn 号只增不回头复用');
+  assert.equal(h.dangerRuns(), 0, '第二轮拿到的仍是没有批准的事实：那件调用没有被重放执行');
+
+  // 同一事实只落一条：再走几拍也不会重复处置
+  h.advanceMs(60_000);
+  await h.loop.tickOnce();
+  assert.equal((await h.ofType('human/timed-out')).length, 1, '同一挂起只处置一次');
+});
+
+test('旧版本留下的"人审超时暂停"在启动后立刻解开（判据：actual < limit ⇒ 不可能是撞线）', async (t) => {
+  const h = await makeHarness(t, {
+    planMode: true,
+    script: [{ text: '好' }],
+  });
+  // 现场那条（2026-10-21 17:51：limit 552000000 / actual 67186217）的形状：
+  // 旧版本把它当"撞线"写下来，可 actual 远小于 limit——预算撞线的口径是 used >= limit，
+  // 所以它只可能是那次"人审挂起超时按预算耗尽同等语义暂停"。
+  h.projection.lastExhausted['task'] = {
+    at: new Date(h.clock.now).toISOString(),
+    limit: 552_000_000,
+    actual: 67_186_217,
+  };
+  assert.equal(guardOf(h).isPaused('task', h.projection), true, '前提：这条旧记录此刻确实停着唤醒门');
+
+  await h.loop.tickOnce();
+  assert.equal(h.projection.lastExhausted['task'], undefined, '启动那一拍就把它撤掉');
+  assert.equal(guardOf(h).isPaused('task', h.projection), false, 'isPaused(\'task\') 不再被这条路点亮');
+  const releases = await h.ofType('budget/topped-up');
+  assert.equal(releases.length, 1, '解除留痕（用的是既有事件，不新造词）');
+  assert.equal(releases[0]!.data.layer, 'task');
+  assert.equal(releases[0]!.data.addedTokens, 0, '不是加注：只是撤掉一条不属于预算的暂停');
+  assert.equal(releases[0]!.data.by, 'human-timeout');
+
+  // 真撞线的记录（actual >= limit）不许被这条规则顺手解开：那是钱的事。
+  // 上限取一个高于出厂配置（task 层 5e8）的数，这样"抬上限"那条规则也不掺和——
+  // 唯一可能动它的就是这里这条规则，而它必须什么都不做。
+  h.projection.lastExhausted['task'] = {
+    at: new Date(h.clock.now).toISOString(), limit: 1_000_000_000_000, actual: 1_200_000_000_000,
+  };
+  await h.loop.tickOnce();
+  assert.notEqual(h.projection.lastExhausted['task'], undefined,
+    'actual >= limit 的记录是真撞线，一条都不许动');
+  assert.equal((await h.ofType('budget/topped-up')).length, 1, '没有再写第二条解除');
+});
+
+// ──────────────────────────────── 80% 提醒（2026-10-22） ────────────────────────────────
+
+/**
+ * 用户的现场：06:32 的提问一直没人答，到 17:51 才落 `budget/exhausted`——中间**一句话都没有**。
+ * 所以挂起到上限 80% 时提醒一次（notifier.fail 的 warn 档），到点再暂停。
+ *
+ * 这个用例盯四件事：
+ *   ① 80% 之前一个字都不发；
+ *   ② 到 80% 发**恰好一条**，标题把"多久了 / 上限 / 再不理会怎样"三格说全（时长是**实测**的）；
+ *   ③ 同一挂起（同一 askSeq）后面每拍都不再发（去重）；
+ *   ④ 答复之后账清零：下一次挂起（新的 askSeq）到 80% 照样提醒。
+ */
+test('M8-7 挂起 80%：提醒一次（按 askSeq 去重），答复之后重新记账', async (t) => {
+  const h = await makeHarness(t, {
+    planMode: true,
+    script: [
+      toolCall('call_w1', 'destroy_workspace', { target: 'tmp' }),
+      toolCall('call_w2', 'destroy_workspace', { target: 'tmp2' }),
+    ],
+  });
+  /** 盘上"到 80% 了"那一类告警（恢复通知的标题是「已恢复：…」，自然被滤掉） */
+  const warns = async () =>
+    (await h.ofType('alarm/sent')).filter(event => event.data.title.includes('人审挂起已'));
+
+  wake(h, '开始干活', 'k-warn-1');
+  await h.loop.tickOnce();
+  const firstAsk = (await h.ofType('human/asked'))[0];
+  assert.ok(firstAsk !== undefined, '第一个 destructive 调用被拦成一张卡（挂起）');
+
+  // ① 80% 之前：一句话都不发
+  h.advanceMs(Math.round(HUMAN_TIMEOUT_MS * 0.8) - 60_000);
+  await h.loop.tickOnce();
+  assert.equal((await warns()).length, 0, '未到 80% 不提醒');
+
+  // ② 到 80%：恰好一条 warn
+  h.advanceMs(2 * 60_000);
+  await h.loop.tickOnce();
+  const first = await warns();
+  assert.equal(first.length, 1, '到 80% 提醒一次');
+  assert.equal(first[0]!.data.level, 'warn', '提醒不是 critical（还没暂停）');
+  assert.equal(first[0]!.data.key, 'category:human-timeout', '与到点那条同一类故障，答复时一起销账');
+  assert.equal(
+    first[0]!.data.title,
+    '人审挂起已 0.8 小时（上限 1 小时）：再不理就按"未批准"处理',
+    '标题：实测已挂起时长 + 上限 + 后果（不是 80% 那条线本身）',
+  );
+  assert.equal(h.projection.lastExhausted['task'], undefined, '只是提醒，**没有**暂停（占比/暂停都还没发生）');
+
+  // ③ 同一挂起再走几拍：不重复提醒
+  h.advanceMs(3 * 60_000);
+  await h.loop.tickOnce();
+  h.advanceMs(3 * 60_000);
+  await h.loop.tickOnce();
+  assert.equal((await warns()).length, 1, '同一挂起只提醒一次（按 askSeq 去重）');
+
+  // ④ 答复 → 账清零；下一个 destructive 调用被拦成**新的一张卡**
+  const answered = await answer(h, '继续');
+  assert.ok(answered.ok);
+  await h.loop.tickOnce();
+  const asks = await h.ofType('human/asked');
+  const secondAsk = asks[1];
+  assert.ok(secondAsk !== undefined, '答复之后接着跑，第二张卡（新 askSeq）挂起');
+  assert.notEqual(secondAsk.seq, firstAsk.seq, '新的一张卡是新的 askSeq');
+
+  const replied = (await h.ofType('alarm/sent'))
+    .filter(event => event.data.recovered === true && event.data.key === 'category:human-timeout');
+  assert.equal(replied.length, 1, '答复到达 → 那条提醒被销账（不能一直红在「框架提示」里）');
+
+  h.advanceMs(Math.round(HUMAN_TIMEOUT_MS * 0.8) - 60_000);
+  await h.loop.tickOnce();
+  assert.equal((await warns()).length, 1, '新挂起也要从 80% 才提醒');
+  h.advanceMs(2 * 60_000);
+  await h.loop.tickOnce();
+  const twice = await warns();
+  assert.equal(twice.length, 2, '答复之后重置：下一条提问到 80% 照样提醒');
+  assert.equal(twice[1]!.data.title, '人审挂起已 0.8 小时（上限 1 小时）：再不理就按"未批准"处理');
 });
 
 // ──────────────────────────────── 挂起重建（停机期答复） ────────────────────────────────

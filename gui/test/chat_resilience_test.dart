@@ -40,7 +40,7 @@ class _ReconnectApi extends IrmiaApi {
   final streams = <StreamController<Map<String, dynamic>>>[];
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (path.startsWith('/api/events')) {
       historyCalls += 1;
       final error = historyError;

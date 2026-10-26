@@ -51,7 +51,7 @@ const NOW_MS = Date.parse('2026-10-08T02:00:00.000Z');
 const OWNER_OPENID = '00000000000000000000000000000001';
 const OWNER_QQ = '1234567890';
 /** 谁是用户：`runtime/trust.ts` 按这个名字判 owner */
-const OWNER_LABEL = '用户（OWNER）';
+const OWNER_LABEL = '用户（阿岚）';
 /** 联系人表（口径与 config.json 的 `persona.contacts` 同形，键是 sid） */
 const CONTACTS = new Map<string, string>([
   [sidOf('qq-official', 'c2c', OWNER_OPENID), OWNER_LABEL],
@@ -421,7 +421,7 @@ describe('OneBot 私聊与官 Bot 私聊走同一条行为（2026-10-08）', () 
       id: `ROBOT1.0_${OWNER_OPENID}_M`,
       content: PRIVATE_TEXT,
       timestamp: '2026-10-08T10:00:00+08:00',
-      author: { id: OWNER_OPENID, user_openid: OWNER_OPENID, username: 'OWNER' },
+      author: { id: OWNER_OPENID, user_openid: OWNER_OPENID, username: '阿岚' },
     }, 'qq-official');
     assert.notEqual(data, null, '官方 c2c 事件必须映射出一条 wake 载荷');
 
@@ -436,7 +436,7 @@ describe('OneBot 私聊与官 Bot 私聊走同一条行为（2026-10-08）', () 
     // 正文口径——两条通道给分流器的东西必须是同一个形状。
     const official = mapDispatchToWakeChannel('C2C_MESSAGE_CREATE', {
       id: 'ROBOT1.0_M', content: PRIVATE_TEXT, timestamp: '2026-10-08T10:00:00+08:00',
-      author: { id: OWNER_OPENID, user_openid: OWNER_OPENID, username: 'OWNER' },
+      author: { id: OWNER_OPENID, user_openid: OWNER_OPENID, username: '阿岚' },
     }, 'qq-official');
     assert.equal(official?.chatType, 'c2c');
     assert.equal(official?.person, official?.chatId, '私聊：说话的人就是会话');
@@ -492,7 +492,7 @@ describe('OneBot 私聊与官 Bot 私聊走同一条行为（2026-10-08）', () 
       },
       visibility: 'model',
     } as unknown as AppEvent;
-    assert.equal(trustOfWake(wake, CONTACTS, 'OWNER'), 'owner');
+    assert.equal(trustOfWake(wake, CONTACTS, '阿岚'), 'owner');
 
     // 反向：没被声明过的私聊仍是 external（放宽的是"叫不叫她"，**不是**信任级）
     const stranger = {
@@ -500,7 +500,7 @@ describe('OneBot 私聊与官 Bot 私聊走同一条行为（2026-10-08）', () 
       data: { ...wake.data, person: '10009', chatId: '10009' },
     } as unknown as AppEvent;
     assert.equal(
-      trustOfWake(stranger, CONTACTS, 'OWNER'),
+      trustOfWake(stranger, CONTACTS, '阿岚'),
       'external',
       '私聊一律唤醒 ≠ 私聊一律可信：谁在说话仍由联系人表说了算',
     );
@@ -556,7 +556,7 @@ describe('OneBot 私聊与官 Bot 私聊走同一条行为（2026-10-08）', () 
       sub_type: 'friend', message_id: 70005, user_id: Number(OWNER_QQ),
       message: [{ type: 'text', data: { text: PRIVATE_TEXT } }],
       raw_message: PRIVATE_TEXT, font: 0,
-      sender: { user_id: Number(OWNER_QQ), nickname: 'OWNER', sex: 'unknown', age: 0 },
+      sender: { user_id: Number(OWNER_QQ), nickname: '阿岚', sex: 'unknown', age: 0 },
       status: 'online',
     };
     assert.equal(await deliver(cat, h, payload), 'wake');

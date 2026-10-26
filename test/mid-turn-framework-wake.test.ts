@@ -3,7 +3,7 @@
  *
  * ──────────────────────────── 现场（逐 seq，全部可复算） ────────────────────────────
  *
- * 10-08 那一天（`D:\IrmiaAgent\_ops-light2\REPORT.md` ③）：
+ * 10-08 那一天（`_ops-light2\REPORT.md` ③）：
  *   · `seq 64021 turn/start{turn:1119}` —— 用户派的那件活开跑了；
  *   · `seq 64033/64034` —— 每日整理的 cron **在 turn 跑着的时候**到点：
  *     `timer/fired` + `wake/timer{payload:{kind:'memory-maintain'}}`；

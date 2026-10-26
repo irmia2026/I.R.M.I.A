@@ -52,7 +52,7 @@ class _PasswordPromptHostState extends State<PasswordPromptHost> {
         title: const Text('给这台实例设个密码'),
         content: const Text(
           '现在用的是升级前留下的旧凭据。设一个密码之后，打开界面就用它进来——'
-          '那条旧凭据会当场作废。\n\n'
+          '那条旧凭据会当场失效。\n\n'
           '密码只保存在本机（data/.auth.json）。它挡的是本机上别的程序、以及本地网页'
           '顺手打你的端口，不是拿到你磁盘的人。',
           style: TextStyle(height: 1.6),
@@ -81,3 +81,4 @@ class _PasswordPromptHostState extends State<PasswordPromptHost> {
   @override
   Widget build(BuildContext context) => widget.child;
 }
+

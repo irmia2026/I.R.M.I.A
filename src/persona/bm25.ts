@@ -8,8 +8,8 @@
  *
  * ──────────────────────────── 口径与出处（**别改**，改了要与下面这份报告对账） ────────────────────────────
  *
- * 分词与打分口径**逐字照搬**那份只读测量报告 `D:\IrmiaAgent\_ops-bm25\REPORT.md` 的"口径 A"，
- * 它的实现是仓库外的 `D:\IrmiaAgent\_ops-bm25\bm25-eval3.mjs`（`tokenizeA` / `buildIndex` / `score`）：
+ * 分词与打分口径**逐字照搬**那份只读测量报告 `_ops-bm25\REPORT.md` 的"口径 A"，
+ * 它的实现是仓库外的 `_ops-bm25\bm25-eval3.mjs`（`tokenizeA` / `buildIndex` / `score`）：
  *
  *   · **口径 A（免依赖）**：中文按**字符二元组（bigram）**；英文 / 数字 / 路径按**词**，
  *     路径再按 `/\ . _ -` 切一刀（`MEMORIES/facts.md` → `memories`、`facts`、`md`）。

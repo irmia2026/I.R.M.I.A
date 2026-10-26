@@ -451,14 +451,15 @@ export interface WakeManual extends EventEnvelope<'wake/manual', {
    *
    * **它不受 `maintenanceWindowOf` 那道 6 小时闸约束**：那条闸管的是此刻层那一行提示，
    * 而这一种是**独立的一条真唤醒**（判据与迟滞写在 `real-loop.ts` 的
-   * `handleCompactionSoonWarning` 方法头里——一句话：一次压缩只提醒一次）。
+   * `handleCompactionSoonWarning` 方法头里——一句话：**每个压缩周期每档（80% / 95%）只报一次**）。
    */
   /**
-   * **`'self-organize'`（2026-10-20 补）是第六种：空拍到第二拍就提醒她「可以进行自我整理」**。
+   * **`'self-organize'`（2026-10-20 补）是第六种：空拍提醒她「可以进行自我整理」**。
    *
-   * 用户这一场的原话（逐字）：「之前**自我整理**不是要 **6 拍空拍**才触发吗，改成**第二拍空拍
-   * 就提醒可以进行自我整理**吧。」判据、文案与"一次安静期只提醒一次"的迟滞都在
-   * `model/self-organize-reminder.ts`（纯模块），写入点是 `real-loop.ts` 的
+   * 用户 2026-10-22 的原话（逐字）：「**自我整理提示**：连续两次空拍后提示一次，然后，
+   * 再过三个空拍再提示一次，**然后就不提示了**。」所以这一种**一段安静期最多两条**：
+   * 第 2 拍一条、第 5 拍一条，之后闭嘴（第 3 条永不出现）。判据、文案与"什么算重置"
+   * 都在 `model/self-organize-reminder.ts`（纯模块），写入点是 `real-loop.ts` 的
    * `remindSelfOrganizeIfDue`。
    *
    * 与其余五个值的关系：
@@ -1115,6 +1116,40 @@ export interface BudgetConsumed extends EventEnvelope<'budget/consumed', {
   inputTokens: number; outputTokens: number;
   cacheHitTokens: number; cacheMissTokens: number;
   /**
+   * **这一拍的 cache 数是不是供方报的**（2026-10-26 加，纯观测·可选）。
+   *
+   * 判据只有一条，写在 `runtime/agent-loop.ts` 的 `accountStep` 里：`cacheHitTokens > 0`。
+   * 为什么是它而不是"有没有 usage"：写入侧 `cacheMissTokens = inputTokens − cacheHitTokens`
+   * 是**我们自己减出来的**，所以"供方没给缓存字段"与"供方给了、命中是 0"在事件上**长得一样**
+   * （都是 hit=0 / miss=input）。只有 hit>0 才证明供方确实报了缓存命中。
+   *
+   * ⇒ 读的一侧别把它读成"这条端点支持前缀缓存"：它只说**这一拍**的 0 是不是供方报的。
+   * 窗口级的口径（是否需要我们自算）在 `runtime/cache-alert.ts` 的 `cacheCaliberOf`，
+   * 那里的判据比这一格宽（还认"每拍命中量恒为一个与上下文规模无关的常数"，现场见
+   * `model/context-audit.ts` 的 `estimatePrefixHitOf`）。
+   *
+   * **可选**：本字段之前写下的 `budget/consumed` 里没有它（只增不改，见 docs/operations.md
+   * §3 规则 2）；`failStep` 那条路（调用抛错、一个字都没回来）也**不写**——没有回包就没有
+   * "供方报了什么"这件事。
+   */
+  cacheReported?: boolean;
+  /**
+   * **这一拍的命中量是我们自算的**（2026-10-26 加，纯观测·可选）：供方没报命中（`hit === 0`）、
+   * 有真实输入、且**本 runner 上一拍是同模型** ⇒ 这一拍的命中量可由
+   * `model/context-audit.ts` 的 `estimatePrefixHitOf` 从两份 `context` 快照算出来。
+   *
+   * ⚠ **它只是一个留痕**：`cacheHitTokens` / `cacheMissTokens` **一个字节都不改**（有就用供方）。
+   * 估算值本身没有落进这一格——它是两份 `context` 的纯函数，读的一侧（告警）用同一个函数、
+   * 同两份快照，算出来的是同一个数（`grep '"cacheEstimated":true'` 就是"哪些拍的命中量
+   * 供方没给、而我们可以自算"的清单）。
+   *
+   * 两处口径差别（刻意写清，免得读的人以为两处矛盾）：
+   *   · **事件这一格是"这一拍"**（本 runner 上一拍是不是同模型；跨重启/跨写入点时可能没有基线）；
+   *   · **告警那一格是"这个窗口"**（从日志里找同模型上一拍，见 `cache-alert.ts`）。
+   * 判据只认日志那一份——事件上的两格是留痕，不是判据。
+   */
+  cacheEstimated?: boolean;
+  /**
    * 这次调用的**思维链 token**（`usage.output_tokens_details.reasoning_tokens`，
    * 即 `DsUsage.reasoningTokens`，解析在 `model/ds-client.ts` 的 `readUsage`）。
    *
@@ -1394,8 +1429,34 @@ export type CacheAlertContributor =
 export interface CacheAlertPayload {
   /** 哪条 lane（两条 lane 的"正常值"不是一个数，判据分开算、事件分开落） */
   lane: ModelLane;
+  /**
+   * **窗口用的是哪个模型的桶**（2026-10-26 加）——窗口从"最近 20 轮"改成
+   * "**同一模型**的最近 20 轮"，所以这一格是读数的一部分：同一个 lane 换了模型，
+   * 读数就换了一套账，不写模型名的话两行日志根本没法比（现场：`gpt-6.1-sol` 94.6% 与
+   * `deepseek-flash` 11.1% 曾被算成同一个数）。文案里必须带上它。
+   */
+  model: string;
+  /**
+   * 最近 {@link CACHE_ALERT_WINDOW_TURNS} 档里**出现过的模型**（2026-10-26 加，**仅作诊断**）。
+   *
+   * 窗口本身只统计 {@link CacheAlertPayload.model} 那一套桶；这一格回答的是"这一段历史上
+   * 混过几个模型"——升级前写下的日志、同一轮里切换过模型时都会出现 ≥2 个。
+   * **不参与任何判据**（它进载荷是为了让复盘的人一眼看到"这里换过模型"，
+   * 而不是让告警按模型个数做判断）。
+   */
+  modelsInWindow: string[];
   /** 窗口里参与统计的**轮数**（`turn > 0` 的那些轮；无轮号的内部调用各算一轮） */
   windowTurns: number;
+  /** 窗口里**输入 token 合计**（Σ`inputTokens`，2026-10-26 加：零命中那一档要报"命中 0 / 输入多少"） */
+  windowInputTokens: number;
+  /**
+   * 窗口里**供方报的命中 token 合计**（2026-10-26 加，**不是**读数用的那个数）。
+   *
+   * 读数用的命中量在自算那一档是估算值（见 {@link CacheAlertPayload.cacheEstimated}），
+   * 这一格永远是 `budget/consumed.cacheHitTokens` 的原样加总——它回答"供方到底报了多少命中"，
+   * 文案据此分辨"一次都没命中"（= 0）与"给了一个与上下文无关的常数"（> 0）。
+   */
+  windowProviderHitTokens: number;
   /** 窗口未命中率 = Σmiss / (Σhit + Σmiss)，0–1，4 位小数；`-1` = 算不出来（分母为 0） */
   missRatio: number;
   /** 基线：窗口**之前** 24 小时内"每轮未命中率"的**中位数**，0–1，4 位小数；`-1` = 没有可比基线 */
@@ -1419,6 +1480,24 @@ export interface CacheAlertPayload {
   renderVersion: string;
   /** 去重档位 = `floor(missRatio / 0.1)`（10 个百分点一档；理由见 `runtime/cache-alert.ts` 文件头 ⑤） */
   missRatioBand: number;
+  /**
+   * **这一行读数用的是供方给的数**（2026-10-26 加；与 `budget/consumed` 同名那两格同一个词，
+   * 但口径是**窗口级**：这一格说"这个窗口的命中量取自供方账目"）。
+   *
+   * ⚠ 与 `budget/consumed.cacheReported` 的差别写在这里（免得读的人以为两处矛盾）：
+   * 那里是"这一拍 hit>0"（逐拍，留痕）；这里是"这个窗口的读数按供方算"（窗口级，判据）。
+   */
+  cacheReported: boolean;
+  /**
+   * **这一行读数是按上下文前缀自算的**（2026-10-26 加）。为 `true` 时：
+   *   · 该模型的窗口"不返回缓存数据"（供方一次都没报命中，或只报了一个与上下文规模无关的
+   *     常数——判据在 `runtime/cache-alert.ts` 的 `cacheCaliberOf`）；
+   *   · `missRatio` / `baselineMissRatio` 都由 `model/context-audit.ts` 的
+   *     `estimatePrefixHitOf` 逐拍估出来（**供方给的数一个字节都没改**）。
+   * 文案必须写明这一档（`cacheAlertReadings` / `cacheAlertWakeNote`），否则同一个百分数会被
+   * 当成"供方说的"读——那正是这次要修的病。
+   */
+  cacheEstimated: boolean;
 }
 
 /**
@@ -1508,10 +1587,12 @@ export interface InputRequeued extends EventEnvelope<'input/requeued', {
   /**
    * 退回原因：`turn-interrupted`（崩溃/中断）、`startup-recovery`（恢复七步补投）、
    * `human-answered`（人审挂起的 turn 得到答复后重入，design §4.21）、
-   * `turn-error`（整轮失败：模型/服务端拒了请求——输入不该就此消失，2026-10-02 补）。
-   * 四者的共同语义是「这些输入回到队列里，还有一次完整机会」；差别只在记账。
+   * `turn-error`（整轮失败：模型/服务端拒了请求——输入不该就此消失，2026-10-02 补）、
+   * `human-timeout`（人审挂起超时：那条待答按"未获批准"作废，她手上的活**继续**
+   * ——2026-10-22 加，见 `HumanTimedOut`）。
+   * 五者的共同语义是「这些输入回到队列里，还有一次完整机会」；差别只在记账。
    */
-  reason: 'turn-interrupted' | 'startup-recovery' | 'human-answered' | 'turn-error';
+  reason: 'turn-interrupted' | 'startup-recovery' | 'human-answered' | 'turn-error' | 'human-timeout';
 }> {}
 
 /**
@@ -1729,36 +1810,41 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
    * 事后要回答"她这几天为什么没被提醒"就只能靠反推（实测踩过：把此刻层那道 6 小时闸的语义
    * 与这条唤醒混成一件事）。这一格把**判据的三个数**与**结论**就地记下来。
    *
-   * **2026-10-21 改成分档 + 冷却**（用户 14:33 那次"突然被压缩、之前没预警"的直接修法）：
+   * **2026-10-21 改成分档**（用户 14:33 那次"突然被压缩、之前没预警"的直接修法）：
    * 原来这里只有一个 `already-warned` 的一刀切——**上一次压缩之后只要报过一次，之后无论历史
    * 涨到多高都永久静默**（实测连续 6 条 `warning.fired=false, why:"already-warned"`，
-   * 其中 histTok 170,207 / 175,379 / 179,777 三笔已经贴着 200k 的线）。现在：
-   *   · **跨过 80% / 90% / 95% 各报一次**（`tier` 就是当前所处的那一档，0 = 一档都没到）；
-   *   · **同档 30 分钟冷却**（`cooldownMs`；同档在冷却内不再叫，过了冷却同档可以再叫一次）；
-   *   · **回落重置**：压缩过（`reason='wrote'`）或可见历史掉到阈值 50% 以下 ⇒ 分档状态归零，
-   *     下一次跨 80% 照样报（`lastTier` = 0）。
+   * 其中 histTok 170,207 / 175,379 / 179,777 三笔已经贴着 200k 的线）。
    *
-   * `why` 的六个取值就是判据的形状（`planCompactionWarning` 每个 return 各一个），
+   * **2026-10-22 收成"每档只报一次"**（用户原话：「压缩临近变成了每次唤醒都有。80% 提醒
+   * 一次、95% 提醒一次就行了」；现场同一档 80 在 07:34 / 08:25 / 09:09 各报了一次）：
+   *   · **两档**：跨过 **80% / 95%** 各报**一次**（90 那一档删掉）；
+   *   · **同一档报过就永久不再报**（判据里没有时钟；上一版的 `cooldownMs` 已废弃、恒为 0）；
+   *   · **重置**：压缩过（`reason='wrote'`）或可见历史掉到阈值 50% 以下 ⇒ 分档状态归零，
+   *     下一个压缩周期照样报（`lastTier` = 0）。
+   *
+   * `why` 的取值就是判据的形状（`planCompactionWarning` 每个 return 各一个），
    * 不是给人看的形容词：
-   *   · `fired`           —— 该发 ⇒ 这一轮发了那条唤醒（跨了新档，或同档已过冷却）；
+   *   · `fired`           —— 该发 ⇒ 这一轮发了那条唤醒（跨了新档）；
    *   · `below-line`      —— 历史没到 80%（绝大多数轮次都是它；<50% 同时是"重置"的那一行）；
-   *   · `cooldown`        —— **同一档**刚报过、还在 `cooldownMs` 之内（不重复叫：她可能正在整理，
-   *     也可能判断"现在不值得整"，两种都该由她定，框架不该催第二遍）；
-   *   · `already-warned`  —— 本周期已经报过**更高**的一档（历史回落到 80~90 之间时不回头补报低档）；
+   *   · `already-warned`  —— **本周期这一档已经报过**（或报过更高的一档，不回头补报低档；
+   *     永久：她可能正在整理，也可能判断"现在不值得整"，两种都该由她定，框架不该催第二遍）；
    *   · `just-compacted`  —— 本轮压缩判定的结论是 `wrote` ⇒ 刚压过（压缩也是重置点）；
    *   · `unknown`         —— 本轮没算出可见历史（或读数不可用）⇒ 不判。
    *
+   * ⚠ `cooldown` 这一格**只出现在 2026-10-22 之前的老日志里**（上一版"同档 30 分钟冷却"
+   * 的出口）：本版判据不再产生它，联合类型留着它是为了让老日志读得懂、复算得回。
+   *
    * `tier` / `lastTier` / `lastAtMs` / `cooldownMs` 四格是**为了让判据可复算**（把当时的
    * 状态与参数一起落账，事后不必猜"那一拍为什么没报"）：读一行就知道"当时在第几档、
-   * 这一档上次报是什么时候、冷却多长"，`now - lastAtMs >= cooldownMs` 就是同档那一支的算式。
-   * `lastTier` / `lastAtMs` 记的是**判据读到的上一拍状态**（本行自己造成的重置从下一行起生效）。
+   * 这一档上次报是什么时候"。`lastTier` / `lastAtMs` 记的是**判据读到的上一拍状态**
+   * （本行自己造成的重置从下一行起生效）。
    *
    * **它是 internal 观测**（本事件整体不进她的上下文）⇒ 不改请求字节、不动 `RENDER_VERSION`。
    */
   warning?: {
     /** 这一轮有没有真的发出那条唤醒 */
     fired: boolean;
-    /** 结论（见上：每个取值对应判据里的一个出口） */
+    /** 结论（见上：每个取值对应判据里的一个出口；`cooldown` 只出现在老日志里） */
     why: 'fired' | 'below-line' | 'cooldown' | 'already-warned' | 'just-compacted' | 'unknown';
     /** 判据用的那个**可见历史估算**（与压缩判定同源；没算出来时为 null） */
     historyTokens: number | null;
@@ -1766,13 +1852,13 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
     thresholdTokens: number | null;
     /** 比例（第一档，当前固定 0.8，见 `model/compaction-warning.ts` 的 `COMPACTION_WARNING_RATIO`） */
     ratio: number;
-    /** 本拍所处的档位（`0` = 线下；`null` = 本轮没读数，判不出来） */
+    /** 本拍所处的档位（`0` = 线下；`null` = 本轮没读数，判不出来；`90` 只出现在老日志里） */
     tier: CompactionWarningTier | null;
     /** 本拍之前、当前压缩周期里已经报过的**最高**档（`0` = 一档都没报过） */
     lastTier: CompactionWarningTier;
-    /** 上一次真的报出去的毫秒时刻（`null` = 本周期还没报过） */
+    /** 上一次真的报出去的毫秒时刻（`null` = 本周期还没报过）。**判据不再读它**（冷却已删），只做账 */
     lastAtMs: number | null;
-    /** 同档冷却（毫秒；生产固定 30 分钟，见 `COMPACTION_WARNING_COOLDOWN_MS`） */
+    /** **已废弃**（2026-10-22 起恒为 0；老日志里是 1800000）：同档冷却已删，判据不读时钟 */
     cooldownMs: number;
   };
   /**
@@ -1800,6 +1886,10 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
  *
  * 取值只有这四个：档位是**判据的形状**，不是给人看的形容词——事件里的 `tier` / `lastTier`
  * 与 `model/compaction-warning.ts` 的 `warningTierOf` 共用这一份词表。
+ *
+ * ⚠ **2026-10-22 起判据只产生 `0 / 80 / 95`**（90 那一档删掉，用户：「80% 提醒一次、
+ * 95% 提醒一次就行了」）。`90` 留在联合类型里**只为读老日志**（那一版写下的行里 `tier: 90`
+ * 仍然要复算得回来）。
  */
 export type CompactionWarningTier = 0 | 80 | 90 | 95;
 
@@ -1926,7 +2016,7 @@ export interface MemorySelected extends EventEnvelope<'memory/selected', {
    * 形状是 `MEMORIES/facts.md:10` 这种指针，**按展示顺序**（pinned 保底的在前，其余按分数降序）。
    * 它回答的问题是 `indexHash` 回答不了的那一个：**"当时推到她眼前的是哪几条"**。
    * 升级之前这条账只落 `indexHash` + `entries`（条数），而报告 §6 记着那个后果——
-   * 事后**无法**逐轮重建"当时那 29 条到底是哪 29 条"（`D:\IrmiaAgent\_ops-bm25\REPORT.md` §6）。
+   * 事后**无法**逐轮重建"当时那 29 条到底是哪 29 条"（`_ops-bm25\REPORT.md` §6）。
    *
    * 只放指针、不放正文（与 `indexHash` 同一条纪律：账不是载体）。
    * **缺省 = 老事件**（2026-10-15 之前写的那些）：那时注入的是整张指针表，全文可由
@@ -2324,13 +2414,19 @@ export interface McpIndex extends EventEnvelope<'mcp/index', McpIndexSnapshot> {
  * ③ **append-only**：快照只增不改；`render` 取**最后一条**，于是"归集到正确位置"这件事
  *    不需要回改任何历史——此前那些"尾部追加"（申请单结局的唤醒）在历史里逐字节不动。
  *
- * ─────────────────── 什么时候写（`real-loop.skillIndexSync`，唯一写入点） ───────────────────
+ * ─────────────────── 什么时候写（`real-loop.skillIndexSync`，唯一写入实现） ───────────────────
  *
  * 与 `mcp/index` 的**同一组**判据：① 日志里还没有快照（首次 / 老日志 / 升级）；② 最后一条
  * 快照的 `version` ≠ 当前 `RENDER_VERSION`；③ 最后一条快照的 seq **早于**最后一条
  * `compaction/summary`（上下文重大变化 ⇒ 该归集了）。**"技能目录变了"刻意不是触发点**：
  * 增删技能要走尾部追加（那条 `wake/manual{via:'grant'}` + 她自己 `safe_read` 正文），
  * 到下一次归集才把那一行进到索引里——否则每加一个技能就改一次前缀，缓存保护等于没做。
+ *
+ * ⚠ 2026-10-23 起有**两个**写入点，但只有**一份**实现（`skill/index-snapshot.ts` 的
+ * `writeSkillIndexSnapshot`）：循环那一支（上面三条判据）与**人工归集**
+ * `irmia skill reindex`（"由人发起的一次归集"：信任表修好了、三条判据却一条都不成立时用它）。
+ * 两条路写下的 data **逐字段相同**（含键顺序），所以"同一份日志重建同一份请求"照旧成立；
+ * `reindex` 不新造事件类型、也不加字段。
  *
  * ⚠ **老日志没有这条事件**（这一版之前写下的轮次）：重建（`replay`）那时**不许**拿它去补，
  * 必须退回当时那条来源（`skillCatalogForRebuild`：同一个 `SkillManager` + 到那一步为止的
@@ -2370,6 +2466,41 @@ export interface SkillInstalled extends EventEnvelope<'skill/installed', {
    * 确认绑定内容，确认之后又被改动的目录自动退回待确认状态。旧事件可缺该字段。
    */
   contentHash?: string;
+}> {}
+
+/**
+ * 出厂技能**首次复制到数据目录**的留痕（v79，2026-10-23 现场两条病同源）。
+ *
+ * ──────────────────────────── 为什么技能要搬家 ────────────────────────────
+ * 病①：`SkillManager` 建在 `process.cwd()` 上 ⇒ 技能根 = `<安装根>/skills`；运行环境搬进
+ * 安装目录、数据目录另立一处之后，数据目录里一件技能都没有（界面上"没有任何技能"、catalog 0 条）。
+ * 病②（更重）：**技能实体住在安装目录里** ⇒ 安装器更新（安装目录被整体替换）⇒ 装的技能全没。
+ * 改法：技能实体住在 `<dataDir>/skills/<name>/SKILL.md`（与 `persona/` 同级），安装目录/仓库
+ * 里的 `skills/` 退化为**出厂种子**，只在"数据目录里还没有这一份"时复制一次
+ * （`skill/seed.ts` 的 `ensureSkillsSeed`）。
+ *
+ * ──────────────────────────── 为什么这条事实值得一条事件 ────────────────────────────
+ * 它解释的是**盘上为什么会多出这几个目录**：下一次启动看到的技能不是人装的、也不是 agent
+ * 自沉淀的，而是出厂那份被原样搬过来的。没有这条记录，事后只能靠"内容哈希和安装包里的
+ * 一模一样"去猜——而那正是这次事故里最难解释的一句话（"我没装过，它怎么进来的"）。
+ * 它同时也是"复制了几件"的唯一凭据：摘要行会随 stdout 滚掉，事件留得住。
+ *
+ * **它不是信任门**：复制过来的技能照样要 `skill/installed { by: 'human' }` 才进 catalog
+ * （内容哈希不变 ⇒ **老日志里那些确认照旧有效**，不需要人重新点一遍——这正是"按内容而不是
+ * 按路径"信任的红利）。所以本事件不改变任何裁决，只记事实。
+ *
+ * 可见性 internal（`EVENT_VISIBILITY` 里写明）：它是**装配账**，不是给她的输入——她知道
+ * 自己有哪些技能就够了（catalog），不需要每轮读一遍"这些技能是怎么来的"。
+ */
+export interface SkillSeeded extends EventEnvelope<'skill/seed', {
+  /** 出厂种子根（相对安装根/工作根：`skills`）——不是绝对路径，日志里不该有机器路径 */
+  source: string;
+  /** 落点（相对 dataDir：`skills`） */
+  dest: string;
+  /** 复制过去的技能目录名（目录名即技能名，升序） */
+  skills: string[];
+  /** 复制过去的文件总数（含 references/ assets/ scripts/ 那些随包文件） */
+  files: number;
 }> {}
 
 // ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
@@ -2701,6 +2832,33 @@ export interface HumanExpired extends EventEnvelope<'human/expired', {
 }> {}
 
 /**
+ * **人审挂起超时：框架按"未获批准"处置，并让她继续**（2026-10-22；internal）。
+ *
+ * 为什么必须是一条自己的事件，而不是拿 `human/expired` 顶替：那条说的是**时间到了**
+ * （"人可能不在"，卡仍然有效、人回来照样能答）；这一条说的是**框架把这件事办完了**——
+ * 那条待答被作废、挂起解除、她手上的活重新回到队列。两件事分得开，日志才答得出
+ * "那天为什么她突然又动起来了"。
+ *
+ * 与 `human/expired` 的关系：超时那一刻两条一起写（先 expired 记事实，再 timed-out 记处置），
+ * 于是"她被告知人可能不在"（§6.1）与"框架没有替人做决定"（§6.1 的另一半）同时成立。
+ *
+ * 为什么不再写 `budget/exhausted{layer:'task'}`（2026-10-22 拆掉的行为，用户原话
+ * 「不要有这种玩意」）：那条暂停会把**整个 agent** 的唤醒门关掉——一次没人答的提问
+ * 变成"她再也不干活"。超时的正确后果是这一条：**这件事没被批准，所以它不执行**，
+ * 而不是"整台机器停下来等人"。
+ *
+ * visibility 一律 internal：它是处置的**簿记**；她该看见的是紧随其后的重入队输入
+ * 与 `human/expired` 那条事实（model 可见）。
+ */
+export interface HumanTimedOut extends EventEnvelope<'human/timed-out', {
+  /** 超时的是哪一条 human/asked（seq） */
+  askSeq: number;
+  question: string;
+  /** 从提问到落这条处置等了多久（毫秒）；与 `human/expired.waitedMs` 同一个数 */
+  waitedMs: number;
+}> {}
+
+/**
  * 计划模式：一件 destructive 调用被挂起等人工批准（design.md §4.21「事前」人审）。
  *
  * 它**不写 tool/call 也不写 tool/result**（与 PreToolUse 钩子拒绝同一纪律：没执行的调用不进
@@ -2781,6 +2939,36 @@ export interface ModelProtocolSwitched extends EventEnvelope<'model/protocol', {
   evidence: { status: number | null; url: string; bodySnippet: string | null; errorCode: string };
   firstSeenAt: string;
   decidedAt: string;
+}> {}
+
+/**
+ * **模型切换的留痕**（2026-10-26，缓存告警分桶的配套；internal）。
+ *
+ * 为什么要单独一条事件（用户的指示："模型切换本身要落一条事件"）：
+ * `budget/consumed.model` 每拍都有，**"换过模型"这件事本身**却只能靠人逐条比对才看得出来。
+ * 而缓存命中率是**按模型分账**的（`runtime/cache-alert.ts` 的窗口 = 同一 model 的最近 20 轮）——
+ * 读告警的人要能一眼回答"这个窗口里换过模型吗、什么时候换的"。有了它，
+ * 窗口边界与那条 `budget/cache-alert` 的时间点在同一行日志里就对得上。
+ *
+ * 为什么不是塞进 `budget/consumed`：切换与"一次调用"不是一对一（一次切换之后的第一拍才带新
+ * model），而"切换发生了"这件事在**没有新调用**时也可能成立（配置改完还没跑活）。
+ *
+ * `from` 取的是**日志里这一条 lane 上一拍的模型**（不是内存里的配置值）：只有它才是
+ * "缓存窗口真正从哪个模型切到哪个模型"的那个 from。
+ *
+ * 可见性 internal、不折投影、不进请求体 ⇒ 不动 `RENDER_VERSION`。
+ */
+export interface RuntimeModelSwitch extends EventEnvelope<'runtime/model-switch', {
+  lane: ModelLane;
+  /** 切换前这一条 lane 最后用过的模型（日志里上一拍 `budget/consumed.model`） */
+  from: string;
+  /** 这一拍起用的模型 */
+  to: string;
+  /**
+   * 切换被观测到的时刻（RFC3339）。**与信封 `ts` 同源**——写进载荷是为了
+   * `grep '"type":"runtime/model-switch"'` 一行就读得到，不必回头看信封。
+   */
+  ts: string;
 }> {}
 
 /**
@@ -3259,18 +3447,19 @@ export type AppEvent =
   | SlashHandled
   | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
-  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | HookFired | SpeakSent
+  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | HookFired | SpeakSent
   | ToolsInventoryChanged
   | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
   | JobStarted | JobFinished
-  | HumanAsked | HumanAnswered | HumanExpired
+  | HumanAsked | HumanAnswered | HumanExpired | HumanTimedOut
   | PlanPending | PlanResolved
   | AuthPasswordSet
   | AuthWebhookTokenRotated
   | TempSwept
   | UpdateChecked
-  | ModelDegraded | ModelRestored | ModelProtocolSwitched | ModelReasoningEcho | ModelRejectRecord;
+  | ModelDegraded | ModelRestored | ModelProtocolSwitched | ModelReasoningEcho | ModelRejectRecord
+  | RuntimeModelSwitch;
 
 export type AppEventType = AppEvent['type'];
 
@@ -3281,6 +3470,9 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 不进请求体 ⇒ 不动 RENDER_VERSION。写在这里而不是靠 defaultVisibility 兜底，
   // 是为了让「这条线是有意画的」看得见。
   'model/protocol': 'internal',
+  // 模型切换的留痕（2026-10-26）：**internal**——它是审计账（缓存窗口从哪个模型切到哪个模型），
+  // 不是给她的输入。写在这里而不是靠 defaultVisibility 兜底，同 `model/protocol` 一条纪律。
+  'runtime/model-switch': 'internal',
   'session/start': 'internal', 'session/end': 'internal',
   // 进程重启的留痕（2026-10-11）：**internal，而"叫她"是另一条事件**。
   // 这条是簿记——"这一任是什么时候起的、上一任怎么没的、谁拉起的"；给她看的是紧随其后的
@@ -3362,6 +3554,11 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // （design §6.1：换个方式找人是她的判断）。写成 internal 等于让这件事只留在日志里，
   // 她下一拍还是以为自己在等人回话——那正是 §6.5 禁止的那种"等"。
   'human/expired': 'model',
+  // 超时的**处置**（2026-10-22）：那条待答被作废、挂起解除、她手上的活重新回到队列。
+  // internal 是刻意的——它是框架这一侧的簿记，不是给她的输入；她要看见的是 `human/expired`
+  // 那条事实（人可能不在）与紧随其后重入队的那几条输入本身。
+  // ⚠ 它**不进请求体 ⇒ 不动 `RENDER_VERSION`**（render 的 default 分支不认它）。
+  'human/timed-out': 'internal',
   // 计划模式的两次落库都是簿记：可见语义由同批 human/asked（事前提问）与 human/answered
   // （人的答复）承载，plan/* 再进一遍上下文只是同一件事被渲染两次
   'plan/pending': 'internal', 'plan/resolved': 'internal',
@@ -3386,6 +3583,13 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 两遍，第二遍纯属常驻开销。写在这里而不是靠 defaultVisibility 兜底，是为了让"这条线是有意
   // 画的"看得见——缓存保护的那条线（索引字节只在归集时改）正是靠它成立的。
   'skill/index': 'internal',
+  // 出厂技能首次复制进数据目录的留痕（v79）**同样刻意 internal**：它是**装配账**
+  // （"这几个技能目录是怎么来的、复制了几件"），不是给她的输入——她该看见的是 catalog
+  // 里那几行名称与描述（那由 `skills` 段渲染，与本事件无关）。写在这里而不是靠
+  // defaultVisibility 兜底，是为了让"这条线是有意画的"看得见，也防住将来有人手滑把它
+  // 写成 model（那会让她每轮读一遍"我的技能是从安装包复制的"——纯粹的常驻开销）。
+  // ⚠ 它**不改 `RENDER_VERSION`**：事件不进请求体，渲染口径一个字节都没动。
+  'skill/seed': 'internal',
   // 工具清单指纹的变化（2026-10-11，BUG-3）**同样刻意 internal**，理由与上面那条逐字同形：
   // 它是**装配账**（"这一刻进请求的清单是哪几件、比上次少了哪几件"），而清单本身已经作为
   // tools 段进了请求体——再把它作为一条事件渲染一遍，就是同一件事在她眼前出现两遍。

@@ -338,32 +338,45 @@ class Palette {
 // 四、形状
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 圆角与阴影：**一套规则，三个值**。
+/// 圆角与阴影：**一套规则，三档**（2026-10-25 收口）。
 ///
-/// 用户 ⑧ 的原话："多处圆角不一致？统一为这种吧"。所以：
-///   · [radiusCard] 12 —— 卡片、弹窗、Popover（**弹窗原来吃 M3 默认的 28**，
-///     与本表不是一个数，本轮由 `theme.dart` 的 `dialogTheme` 统一到 12）；
-///   · [radiusControl] 8 —— 输入框、按钮、分段控件、toast、pill（**控件只有一个 8**）；
-///   · [radiusAvatar] 16 —— 头像那类正圆前的圆角方（历史遗留，现在头像都是正圆，
-///     这个值只给少数圆角方块占位留着）。
+/// 用户这轮的原话：「输入框和发送按钮做得更好看一点。圆角不要那么大了。」
+/// 紧接着又补一句「发送按钮改圆角矩形。」于是散落的"胶囊按钮"到此为止：
+///   · [radiusCard] **12** —— 卡片、弹窗、Popover、大块面板（弹窗原来吃 M3 默认的 28，
+///     早就由 `theme.dart` 的 `dialogTheme` 收到这里）；
+///   · [radiusControl] **10** —— **按钮 / 输入框 / 分段按钮 / 小容器**，页面里的控件只用这一档。
+///     从前那些胶囊按钮（`StadiumBorder`、`BorderRadius.circular(999)` 用在按钮上的）
+///     一律换成它：胶囊把一个 28 高的按钮的圆角画成 14，比卡片还圆，摆在一起就是"两种语言"；
+///   · [radiusPill] **999** —— **只给正圆**：头像、状态点、圆点。999 大于任何半高，
+///     所以它等价于"按尺寸自己算圆"，正是正圆要的；**它不许再出现在按钮上**。
+///
+/// [radiusControlLarge] 12 是 [radiusControl] 的**派生档**（+2），只给聊天页那条 52 高的
+/// 输入框与它右边 40×40 的发送键：它们比普通按钮大一号，10 在 52 高上会显得"方"。
+/// 它不是一个新语义，改 [radiusControl] 时它跟着走。
 ///
 /// **分隔线只在"卡片内分节"用**（[dividerInset] 左边从那道内边距起画）：
 /// 卡片与卡片之间靠 24 的间距分开，不靠线；页面区块之间也不画线。
 abstract final class Shape {
-  /// 卡片 / 弹窗圆角
+  /// 卡片 / 弹窗 / 面板圆角（16）
   static const double radiusCard = 12;
 
-  /// 控件圆角（输入 / 按钮 / 分段 / toast / pill）
-  static const double radiusControl = 8;
+  /// 控件圆角（按钮 / 输入框 / 分段 / 小容器）（10）
+  static const double radiusControl = 10;
 
-  /// 圆角方头像（历史值，新代码一律用正圆）
-  static const double radiusAvatar = 16;
+  /// 大控件圆角（= [radiusControl] + 2 = 12）：聊天页的输入框与发送键
+  static const double radiusControlLarge = radiusControl + 2;
+
+  /// 正圆的圆角（**只给头像、圆点**，别用在按钮上）
+  static const double radiusPill = 999;
 
   /// 卡片圆角
   static BorderRadius get card => BorderRadius.circular(radiusCard);
 
   /// 控件圆角
   static BorderRadius get control => BorderRadius.circular(radiusControl);
+
+  /// 正圆（半径大于半高 ⇒ 谁用谁是圆的）
+  static BorderRadius get pill => BorderRadius.circular(radiusPill);
 
   /// 描边宽度（1 逻辑像素）
   static const double hairline = 1;
@@ -479,3 +492,4 @@ class IrmiaInk extends ThemeExtension<IrmiaInk> {
     );
   }
 }
+

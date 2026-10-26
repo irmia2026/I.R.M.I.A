@@ -4,11 +4,15 @@ import 'package:window_manager/window_manager.dart';
 import 'app.dart';
 // 「我要走了」的标记：后端保活靠它把"他主动关的"与"崩了"分开，见 docs/gui-guard.md §3
 import 'gui_quit.dart';
+// 界面自己的运行日志：卡死时唯一能回答"卡在哪一条请求/哪一页"的东西
+import 'gui_log.dart';
 import 'i18n/strings_override.dart';
 import 'i18n/strings_scope.dart';
 import 'shell/tray.dart';
 // 「关窗时收进托盘」这个界面偏好（`%APPDATA%/Irmia/ui-state.json`，键 close-to-tray）
 import 'ui_state.dart';
+// 窗口状态留痕（`[win] focus/visibility/restore`）：与主 isolate 的 `[stall]` 拼在一起读
+import 'win_trace.dart';
 
 /// Irmia GUI 入口。
 ///
@@ -32,6 +36,18 @@ import 'ui_state.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
+
+  // 界面自己的运行日志（`%LOCALAPPDATA%\Irmia\gui.log`，滚动上限 2MB）：
+  // 2026-10-23「用久了卡死」那场之后加的——那一次只有进程数字，没有任何界面日志，
+  // "卡在哪个请求/哪一页"全靠猜。开的时机放在最前面：连窗口起来之前那几步也要留痕。
+  // **只在真机上开**：`flutter test` 不调这一处，所以那 800 多条用例不会往用户的
+  // `%LOCALAPPDATA%` 里写字（见 gui_log.dart 的"三条分寸"）。
+  guiLog.attach();
+
+  // 窗口状态留痕（`[win] focus=true/false`、`[win] visibility=…`）：卡死现场第一件要分清的事
+  // 是"窗口当时在不在屏幕上、有没有焦点"——可见却不动才是主 isolate 停了（见 win_trace.dart）。
+  // 放在最前面：连 show 之前那几拍（窗口建好、抢焦点）也要留痕。
+  WinTrace.instance.attach();
 
   // 窗口几何**交回 C++ runner**（windows/runner/main.cpp 的 origin/size 是客户区口径），
   // 这里只负责"把已经建好的窗口显示出来"。
@@ -86,6 +102,8 @@ class _CloseToTray extends WindowListener {
     // 走到这儿的是"开关开着但窗口还是收到关闭事件"的兜底路径。
     if (closeToTray.value && IrmiaTray.instance.installed) {
       // 界面收起来，她不跟着走：agent 是独立进程，界面只是她的一个窗口
+      // （`hide()` 不会回一个事件，所以这一下要自己说一声，见 win_trace.dart）
+      WinTrace.instance.noteHidden();
       unawaited(windowManager.hide());
       return;
     }

@@ -247,7 +247,7 @@ export interface VisionToolsOptions {
    *   · 模型调用失败 ⇒ **不调**（没有响应可交；失败那笔账归主循环，不在这里编一个 0）。
    *
    * 不传 = 不记账，与 2026-10-11 之前的行为逐字节相同（那时 vision 的 64 次真实请求
-   * 一条账都没有，见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ②）。
+   * 一条账都没有，见 `_ops-light2\REPORT.md` ②）。
    *
    * `turn` / `step` 由工具层从 `ctx` 交出来（**与 `memory_read` 的访问账同一条路**：
    * `tools/catalog.ts` 那格注释写着"turn 由工具层从 `ctx.turn` 交出来，所以这里不需要

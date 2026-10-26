@@ -69,6 +69,7 @@ import { renderMentionNote } from '../model/self-brief.ts';
 import { sidOf } from '../channel/sessions.ts';
 // 待办清单的唯一载体是 STATE 的两节（见 persona/todo-state.ts）：任务卡只从那里读
 import { openTodoItems } from '../persona/todo-state.ts';
+import type { RelationshipNote } from '../persona/relationship.ts';
 import type { EventLog } from '../log/event-log.js';
 import type {
   AppEvent, AppEventType, CompactionDecision, IdleReason, MemorySelected, ModelLane, Projection,
@@ -474,8 +475,8 @@ export interface AgentLoopPersona {
   state: string;
   /** 人格资产内容哈希（step/start 留档；重放时据此取对应版本） */
   personaHash: string;
-  /** 情景档案：唤醒路由命中时注入 */
-  relationship?: { who: string; content: string } | null;
+  /** 情景档案的**索引**（v78：路径 / 字数 / 小节名；正文由她 safe_read 现取） */
+  relationship?: RelationshipNote | null;
 }
 
 /** 刹车钩子（M3 实现于 runtime/budget-guard.ts，循环层只调用） */
@@ -582,7 +583,7 @@ export interface AgentLoopDeps {
    * 于是每日记忆整理的唤醒（`{kind:'memory-maintain'}`）在 turn 跑着的时候到达时被当普通输入
    * 销账 + 送进请求体：turn 正常跑完 ⇒ 没有安全网 ⇒ **那条唤醒永久消失**。
    * 实测 10-08 那一天：`memory/maintained` 全窗口唯一缺的就是它，`diary/2026-10-08.md` 永久没有
-   * （10 次自动 cron 丢 1 次；见 `D:\IrmiaAgent\_ops-light2\REPORT.md` ③）。
+   * （10 次自动 cron 丢 1 次；见 `_ops-light2\REPORT.md` ③）。
    *
    * **为什么是回调、不是在这里 import 业务常量**：判据只该有一份。整理唤醒的判据住在
    * `runtime/real-loop.ts`（`isMemoryMaintainPayload`，布防/认领两处共用），循环层 import
@@ -1473,6 +1474,27 @@ export class TurnRunner {
    * 跨 turn 的边界由 `context-audit.detectCacheBreak` 的跨轮判据兜住（本字段每轮归零）。
    */
   private previousAuditedCall: AuditedCall | null = null;
+
+  /**
+   * **本 runner 上一次记账那一拍的模型**（2026-10-26 加，只服务 `budget/consumed` 的两格留痕）。
+   *
+   * 为什么需要它：`cacheEstimated` 那一格要说的是"这一拍的命中量**我们算得出来**"——
+   * 而"算得出来"的前提是**上一拍是同一个模型**（估算口径是拿同模型上一份 `context` 做前缀
+   * 比较，见 `model/context-audit.ts` 的 `estimatePrefixHitOf`）。`previousAuditedCall` 里
+   * 没有模型这一格（它是 `AuditedCall`，那边一个字都没改），所以单独记一个。
+   * 与 `previousAuditedCall` 同一条纪律：`runTurn` 每轮新建 runner ⇒ 天然是"本 turn"的。
+   */
+  private previousAuditedModel: string | null = null;
+
+  /**
+   * 本轮**模型切换的留痕写过了吗**（2026-10-26 加；`runtime/model-switch` 的唯一写入点）。
+   *
+   * 为什么需要这一格：判据在 {@link TurnRunner.noteModelSwitch}——第一次 `accountStep` 时拿
+   * **轮首快照**里这一条 lane 的上一拍模型与这一拍的比。`this.events` 是轮首快照、**不含本 turn
+   * 刚写的那些**，所以同一轮里每拍都会得到同一个结论 ⇒ 没有这一格就会一拍写一条同样的切换。
+   * 跨轮不靠它：下一轮的快照里已经有新模型了，本来就比不出来。
+   */
+  private modelSwitchNoted = false;
 
   /**
    * **本 turn 最近一笔成功调用的真实/估算输入账**（2026-10-21 加，纯观测）。
@@ -2487,6 +2509,13 @@ export class TurnRunner {
     const inputTokens = usage.inputTokens;
     const cacheHit = Math.max(0, Math.min(usage.cachedTokens, inputTokens));
     const ts = this.deps.now();
+    /**
+     * 这一拍**实际用的模型**（2026-10-26：从下面 `data` 的字面量里提出来）。
+     *
+     * 提出来是为了两件事都读**同一个值**：`budget/consumed.model` 与模型切换的留痕
+     * （{@link TurnRunner.noteModelSwitch}）——两处各取一次就会出现"账上写 A、切换账写 B"。
+     */
+    const model = result.model ?? fallbackModel;
     // 基准 = **本 runner 上一次记账的那一拍**（见 {@link TurnRunner.previousAuditedCall}）。
     // 刻意**不再**从 `this.events` 现取：那是轮首对齐的日志快照，而 `budget/consumed` 由本 runner
     // 自己写、不回填快照 ⇒ 取到的是**上一轮**那一拍（00:30 三拍共用同一 prev 的根）。
@@ -2529,11 +2558,28 @@ export class TurnRunner {
       turn: this.turn,
       step,
       lane: this.lane,
-      model: result.model ?? fallbackModel,
+      model,
       inputTokens,
       outputTokens: usage.outputTokens,
       cacheHitTokens: cacheHit,
       cacheMissTokens: Math.max(0, inputTokens - cacheHit),
+      /**
+       * **cache 数的两格留痕**（2026-10-26，用户：「如果是不返回缓存命中的模型就我们自己算」）。
+       *
+       *   · `cacheReported` —— **供方报了命中**（`cacheHit > 0`）。为什么不是"有没有 usage"：
+       *     写入侧 `cacheMissTokens = inputTokens − cacheHitTokens` 是**我们自己减的**，
+       *     "供方没给缓存字段"与"供方给了、命中 0"在事件上长得一模一样；只有 >0 才证明
+       *     供方确实报了命中（判据与理由写在 `log/types.ts` 那一格的注释里）。
+       *   · `cacheEstimated` —— 这一拍的命中量**我们算得出来**：供方没报、有真实输入、
+       *     且本 runner 上一拍**是同一个模型**（估算口径就是拿同模型上一份 `context` 做前缀
+       *     比较，见 `model/context-audit.ts` 的 `estimatePrefixHitOf`）。
+       *
+       * ⚠ **估算值没有落进事件**，也**不覆盖**上面那两格：读的一侧（`runtime/cache-alert.ts`）
+       * 用同一个函数、同两份 `context` 快照算出来的是同一个数（`context` 就在这条事件上）。
+       * 两格都是"只增不改"的可选字段：既有事件与引入它们之前逐字节相同。
+       */
+      cacheReported: cacheHit > 0,
+      cacheEstimated: cacheHit === 0 && inputTokens > 0 && this.previousAuditedModel === model,
       // 思维链 token（观测字段，已含在 outputTokens 里，不参与预算算式）。
       // **每次都写**：这一档没产思维链就是 0——见 log/types.ts 的字段注释。
       reasoningTokens: usage.reasoningTokens,
@@ -2573,9 +2619,14 @@ export class TurnRunner {
       ...(cacheBreak === null ? {} : { cacheBreak }),
     };
     this.write('budget/consumed', data, { sync: false });
+    // 模型切换留痕（2026-10-26，用户：「缓存命中只看窗口内模型。切换模型就重新放。」）：
+    // 紧挨着账写，让"这一笔是新模型的开始"和"哪一刻换的"在同一处。
+    this.noteModelSwitch(model, ts);
     // 存下这一拍，供**下一步**当基准（唯一写入点，紧挨着上面那条账：两者必须同进同出，
     // 分开放就会漂成"记了一拍、基准是另一拍"——那正是这次修的错）。
     this.previousAuditedCall = audit;
+    // 上一拍的模型（`cacheEstimated` 那一格的判据之一：估算只对"同模型上一拍"成立）
+    this.previousAuditedModel = model;
     /**
      * **本 turn 最近一笔成功调用的真实输入账**（2026-10-21，只服务 `compaction/decision` 的两格）。
      *
@@ -3463,6 +3514,41 @@ export class TurnRunner {
     if (changed === null) return;
     const data: ToolsInventoryChanged['data'] = { ...changed, turn: this.turn, step };
     this.write('tools/inventory-changed', data, { sync: false });
+  }
+
+  /**
+   * **这一条 lane 换模型了就落一条 `runtime/model-switch`**（2026-10-26 加，用户："模型切换本身
+   * 要落一条事件"）。
+   *
+   * 为什么必须有它：缓存命中率是**按模型分账**的（`runtime/cache-alert.ts` 的窗口 = 同一 model
+   * 的最近 20 轮），而"换过模型"这件事在日志里**天生没有对应事件**——`budget/consumed.model`
+   * 每拍都有，要回答"这个窗口里换过没有、什么时候换的"却得人工逐条比对。有了它，那条
+   * `budget/cache-alert` 与"哪一刻重开的窗口"在同一行日志里就对得上。
+   *
+   * 三条边界：
+   *   · **判据是日志，不是内存**：`from` 取**轮首快照**（`this.events`）里这一条 lane 的上一拍
+   *     模型——它才是"缓存窗口真正从哪个模型切过来"的那个 from；内存里没有可比对象
+   *     （进程刚起时 `previousAuditedModel` 是 null）。
+   *   · **一条切换只写一条**：`this.events` 是轮首快照（不含本 turn 刚写的），同一轮里每拍都会
+   *     得到同一个结论 ⇒ 由 {@link TurnRunner.modelSwitchNoted} 挡住重复；跨轮不用挡——
+   *     下一轮的快照里已经有新模型了。
+   *   · **只落账、不进请求体**：可见性 internal（`EVENT_VISIBILITY`），不改 `RENDER_VERSION`。
+   *     找不到上一拍（新机器 / 日志刚滚过）⇒ 一个字都不写（没有"从哪来"就没有切换这件事）。
+   */
+  private noteModelSwitch(model: string, ts: string): void {
+    if (this.modelSwitchNoted) return;
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index];
+      if (event === undefined) continue;
+      if (event.type !== 'budget/consumed') continue;
+      if (event.parentCallId !== undefined) continue;
+      if (event.data.lane !== this.lane) continue;
+      const from = event.data.model;
+      this.modelSwitchNoted = true;
+      if (typeof from !== 'string' || from === '' || from === model) return;
+      this.write('runtime/model-switch', { lane: this.lane, from, to: model, ts }, { sync: false, ts });
+      return;
+    }
   }
 
   /** 唯一写入点：分配 seq → append（承诺类 fsync）→ 立即折进投影 */

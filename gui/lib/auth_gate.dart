@@ -19,10 +19,17 @@
 ///
 /// ## 状态怎么定的（都在 AppState 里，这里只画）
 ///
-/// 界面启动时先不带凭据打一条读端点，服务端会在 401 里回一个 `code`：
-///   · `auth-uninitialized` → 这台实例还没设过密码 → 画 [AuthGateKind.setup]；
-///   · `unauthorized`       → 设过密码但手上这张票不作数 → 画 [AuthGateKind.login]。
-/// 所以**不需要第二条公开的探测端点**，服务端那边的"待初始化只放行设置密码"一个字都不用让步。
+/// 先读公开的 `GET /api/auth/state`（**不需要凭据**）：`initialized: false` → 画
+/// [AuthGateKind.setup]，`true` → 画 [AuthGateKind.login]。读不到（老服务端没有这条端点）
+/// 才退回 401 的 `code`：`auth-uninitialized` → 设置密码，`unauthorized` → 登录。
+///
+/// 为什么不再只靠 401（2026-10-23 的死锁现场）：那条通道把"分流信号"与"错误播报"混在
+/// 一起——探测那一次的 message 会被当成红字显示给人看，看着像"这台实例没密码"，而它其实
+/// 有密码；更要紧的是它没有复核通道，服务端的状态在别处变了（密码在另一个进程里设上、
+/// 凭据文件被重命名重置），界面只能停在旧判断上，对着一扇永远失败的门。
+///
+/// 所以这一层**红字只放真错误**：`gateError` 是密码不对、两次输入不一致、连不上这些；
+/// "你该去哪一扇门、为什么换了门"写在 `gateHint` 那行**中性**提示里。
 library;
 
 import 'dart:async';
@@ -31,9 +38,12 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'app.dart';
+import 'i18n/strings_scope.dart';
+// 第三种门：**实例选择页**（登出 = 结束实例之后的落点，见那个文件的文件头）
+import 'instance_picker.dart';
 import 'theme.dart';
 
-/// 门上的三种画面。`ready`（进主界面）不在这里——那是 `AppState` 的事，
+/// 门上的四种画面。`ready`（进主界面）不在这里——那是 `AppState` 的事，
 /// 门只负责"还没进去的时候画什么"。
 enum AuthGateKind {
   /// 正在问服务端"这台实例是什么状态"（一两百毫秒的事，但必须有一屏，
@@ -45,10 +55,43 @@ enum AuthGateKind {
 
   /// 登录（设过密码了，手上这张票不作数）
   login,
+
+  /// **实例选择页**（2026-10 多实例）。
+  ///
+  /// 它是"登出之后"的落点，不是启动时的落点：启动仍走默认实例那条老路（`server.json` /
+  /// 环境变量 / 7788），**只有"结束实例"这一件事**会把人送到这里——因为那时候手上
+  /// 已经没有实例了，要重新选一台（或者新建一台）。
+  ///
+  /// 为什么它是"门"而不是壳里的一页：`ready == false` 那一刻壳里什么都没有（没有凭据、
+  /// 没有数据、连 baseUrl 都还是上一台的），把选择页塞进壳里等于让一页"没有身份"的界面
+  /// 去读一个已经不存在的实例的数据。
+  picker,
 }
 
-/// 门：她的脸 + 一件事（设密码 / 登录）。沿用 TokenGate 那套视觉（380 宽卡片、
-/// 圆角 16、hairline 阴影），只是卡片里换成了密码表单。
+/// 门上那行**中性提示**说的是哪一种情况。
+///
+/// 文案不在状态层拼（`AppState` 没有 BuildContext）：那边只记类型，这一层用
+/// [IrmiaStrings] 取当前语言的那一句。它**不是错误**——错误走 `AppState.gateError` 的红字行。
+enum AuthGateHint {
+  /// 不提示（直接画表单）
+  none,
+
+  /// 会话凭据失效了 → 回到登录页
+  sessionExpired,
+
+  /// 设置页收到 409（实例已经有密码）→ 切到登录页
+  alreadyInitialized,
+
+  /// 这台实例还没有密码 → 去设置页
+  ///
+  /// 两个入口共用这一句（进门时 state 说未初始化；登录端点回 `auth-uninitialized`）：
+  /// 话是一样的，不该因为"从哪条路发现"而长成两句。
+  setupNeeded,
+}
+
+/// 门：她的脸 + 一件事（设密码 / 登录 / 选实例）。沿用 TokenGate 那套视觉（380 宽卡片、
+/// 圆角 16、hairline 阴影），只是卡片里换成了密码表单；选择页要放列表，所以它自带更宽的外壳
+/// （见 `instance_picker.dart`）。
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key, required this.state});
 
@@ -56,18 +99,24 @@ class AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(vertical: 24),
-          child: switch (state.gate) {
-            AuthGateKind.checking => _ConnectingCard(state: state),
-            AuthGateKind.setup => _SetupForm(state: state),
-            AuthGateKind.login => _LoginForm(state: state),
-          },
+    return switch (state.gate) {
+      // 选择页自带 Scaffold 与外壳：它是"一页"，不是一个表单
+      AuthGateKind.picker => InstancePicker(state: state),
+      _ => Scaffold(
+          body: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: switch (state.gate) {
+                AuthGateKind.checking => _ConnectingCard(state: state),
+                AuthGateKind.setup => _SetupForm(state: state),
+                AuthGateKind.login => _LoginForm(state: state),
+                // 上面那条已经接走了；留一个兜底让 switch 穷尽（将来再加一态时编译器会提醒）
+                AuthGateKind.picker => const SizedBox.shrink(),
+              },
+            ),
+          ),
         ),
-      ),
-    );
+    };
   }
 }
 
@@ -99,7 +148,12 @@ class _ConnectingCard extends StatelessWidget {
       body: degraded
           ? '界面还在后台自动重试（每 ${state.gateSlowRetrySeconds} 秒一次），服务端一起来就会自己进来。'
           : (state.gateRetrying
+              // 前端半句是"在等"，后半句把**等的是哪个端口**说清楚（2026-10-26）：
+              // 事故那天屏幕上只有 `SocketException … port = 1580`，连"该等 7788"都看不出来。
+              // 端口来自三级来源（见 backend_port.dart），三档都连不上时这句话就是唯一的线索。
+              // 后半句走文案表（`AppStrings.gateWaitingBackend`）：新文案不许硬编码在页面里。
               ? '本地服务正在启动…（第 ${state.gateAttempt} 次尝试，已等 ${state.gateWaited}s）'
+                  ' · ${IrmiaStrings.of(context).gateWaitingBackend(state.backendPort)}'
               : '在确认这台实例的状态…'),
       error: degraded && state.gateError.isNotEmpty ? state.gateError : null,
       child: degraded
@@ -121,12 +175,20 @@ class _Shell extends StatelessWidget {
     required this.title,
     required this.body,
     required this.child,
+    this.hint,
     this.notice,
     this.error,
+    this.progress,
   });
 
   final String title;
   final String body;
+
+  /// 中性提示（"现在该去哪一扇门、为什么换了门"）。**不是错误**，所以不带红色与感叹号。
+  ///
+  /// 服务端那两条 401（`auth-uninitialized` / `unauthorized`）是分流信号，只许进这里
+  /// （见 AppState.gateHint）；真正失败的原因走 [error]。
+  final String? hint;
 
   /// 卡片底部的说明（安全口径那一段）
   final String? notice;
@@ -136,12 +198,22 @@ class _Shell extends StatelessWidget {
   /// 空串也要当成"没有"：否则会画出一个只有红色感叹号、一个字都没有的行——
   /// 那比不画更让人慌（"它是不是想说点什么但说不出来"）。
   final String? error;
+
+  /// 门前等待的**从读数**：`第 N 秒 · 已重试 M 次`（2026-10-28）。
+  ///
+  /// 它只在"后端还没就绪"那两档里有内容。为什么要单独一行而不是并进 [error]：
+  /// 那句错说"是什么情况"，这一行说"它还在动"——两件事，后者每秒都在变，
+  /// 混在一句里会让人以为那句错在反复刷新。
+  final String? progress;
+
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final problem = error == null || error!.trim().isEmpty ? null : error!.trim();
+    final hintText = hint == null || hint!.trim().isEmpty ? null : hint!.trim();
+    final progressText = progress == null || progress!.trim().isEmpty ? null : progress!.trim();
     return Container(
       width: 380,
       padding: const EdgeInsets.all(24),
@@ -163,11 +235,24 @@ class _Shell extends StatelessWidget {
             body,
             style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant, height: 1.6),
           ),
+          if (hintText != null) ...[
+            const SizedBox(height: 10),
+            _HintLine(text: hintText),
+          ],
           const SizedBox(height: 16),
           child,
           if (problem != null) ...[
             const SizedBox(height: 12),
             _ProblemLine(text: problem),
+          ],
+          if (progressText != null) ...[
+            const SizedBox(height: 6),
+            // 小字、不加图标：它不是错误也不是提示，就是一只秒表
+            Text(
+              progressText,
+              key: const ValueKey('gate-backend-progress'),
+              style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+            ),
           ],
           if (notice != null) ...[
             const SizedBox(height: 14),
@@ -210,6 +295,36 @@ class _ProblemLine extends StatelessWidget {
   }
 }
 
+/// 中性提示行：**不是错误**（没有红字、没有感叹号）。
+///
+/// 它只说"现在该去哪一扇门 / 为什么换了一扇门"。服务端那两条 401
+/// （`auth-uninitialized` / `unauthorized`）是**分流信号**，只许进这一行——
+/// 把它们画成错误，人就回去查一个并不存在的问题（2026-10-23 的现场：设置页底部红字写着
+/// "这台实例还没设密码。请先在界面里设置一个密码。"，而实例其实有密码）。
+class _HintLine extends StatelessWidget {
+  const _HintLine({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(Icons.info_outline_rounded, size: 16, color: scheme.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant, height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// 遮蔽的密码框：两态共用（遮蔽与"回车即提交"是同一件事的两面，不该各写一遍）
 class _PasswordField extends StatelessWidget {
   const _PasswordField({
@@ -243,6 +358,20 @@ class _PasswordField extends StatelessWidget {
   }
 }
 
+/// [AuthGateHint] → 当前语言的一句中性话（null = 不显示）。
+///
+/// 放成一个函数而不是在每个表单里写 switch：两态共用同一份映射，"哪一句用在哪种情况"
+/// 只有一处判据（两处判据迟早漂移）。
+String? _hintText(BuildContext context, AuthGateHint hint) {
+  final s = IrmiaStrings.of(context);
+  return switch (hint) {
+    AuthGateHint.none => null,
+    AuthGateHint.sessionExpired => s.gateHintSessionExpired,
+    AuthGateHint.setupNeeded => s.gateHintSetupNeeded,
+    AuthGateHint.alreadyInitialized => s.gateHintAlreadyInitialized,
+  };
+}
+
 /// 首次设密码
 class _SetupForm extends StatefulWidget {
   const _SetupForm({required this.state});
@@ -258,14 +387,29 @@ class _SetupFormState extends State<_SetupForm> {
   final confirm = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    // ③ 进场就问一次后端状态：那颗「设置密码」不能等人点了才报错。
+    // 后端没起 / 还在启动时，它当场变灰，旁边摆的是同一套三档提示（见 AppState.watchBackend）。
+    unawaited(widget.state.watchBackend());
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final s = IrmiaStrings.of(context);
     final busy = widget.state.gateBusy;
+    // 后端没就绪：那颗按钮点不出任何结果，灰着并让人看见"还在重试"
+    final blocked = widget.state.gateBackendBlocked;
     return _Shell(
       title: '设置密码',
       body: '这台实例还没有密码。设一个，之后打开界面就用它进来。',
+      hint: _hintText(context, widget.state.gateHint),
       error: widget.state.gateError,
-      notice: '密码只保存在本机（data/.auth.json）。它挡的是「本机上别的程序」与「本地网页顺手'
-          '打你的端口」，不是拿到你磁盘的人——忘记密码的处理办法就是删掉那个文件重启，再设一次。',
+      progress: blocked
+          ? s.gateBackendProgress(widget.state.backendWaitSeconds, widget.state.backendRetryCount)
+          : null,
+      notice: '忘记密码？删掉 data/.auth.json 后重启主进程，再设一次。'
+          '密码只保存在本机，它挡的是「本机上别的程序」与「本地网页顺手打你的端口」，不是拿到你磁盘的人。',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -284,7 +428,8 @@ class _SetupFormState extends State<_SetupForm> {
           ),
           const SizedBox(height: 14),
           FilledButton(
-            onPressed: busy ? null : _submit,
+            key: const ValueKey('gate-setup-submit'),
+            onPressed: busy || blocked ? null : _submit,
             child: Text(busy ? '正在设置…' : '设置并进入'),
           ),
         ],
@@ -322,13 +467,29 @@ class _LoginFormState extends State<_LoginForm> {
   final password = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    // 进场先问一次后端状态（与设密码页同一条口径）：人站在这里看到的应当是
+    // "后端还没起来，正在重试"，而不是一个看起来很正常的密码框。
+    unawaited(widget.state.watchBackend());
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final s = IrmiaStrings.of(context);
     final busy = widget.state.gateBusy;
+    // ①②两档（后端没起 / 正在启动）时按钮灰着：那一趟**不发登录请求**，
+    // 密码不许被自动重发，也不许人对着一个点了没反应的按钮猜（见 AppState._enter）。
+    final blocked = widget.state.gateBackendBlocked;
     return _Shell(
       title: '登录',
       body: '这台实例设过密码了。输一次，之后请求自动携带会话凭据。',
+      hint: _hintText(context, widget.state.gateHint),
       error: widget.state.gateError,
-      notice: '忘记密码：删掉 data/.auth.json 后重启主进程，再设一次。'
+      progress: blocked
+          ? s.gateBackendProgress(widget.state.backendWaitSeconds, widget.state.backendRetryCount)
+          : null,
+      notice: '忘记密码？删掉 data/.auth.json 后重启主进程，再设一次密码。'
           '连续输错会退避（等几秒），但不会把谁永久锁在门外。',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -342,7 +503,8 @@ class _LoginFormState extends State<_LoginForm> {
           ),
           const SizedBox(height: 14),
           FilledButton(
-            onPressed: busy ? null : _submit,
+            key: const ValueKey('gate-login-submit'),
+            onPressed: busy || blocked ? null : _submit,
             child: Text(busy ? '正在登录…' : '登录'),
           ),
         ],

@@ -31,7 +31,7 @@ class _FakeApi extends IrmiaApi {
   final List<Map<String, dynamic>> history;
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (path.startsWith('/api/events')) {
       final uri = Uri.parse('http://x$path');
       final limit = int.tryParse(uri.queryParameters['limit'] ?? '') ?? 200;
@@ -47,7 +47,7 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm}) async =>
+  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async =>
       {'ok': true};
 
   @override

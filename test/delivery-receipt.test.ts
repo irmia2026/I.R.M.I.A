@@ -277,34 +277,84 @@ test('speak 半路失败：`失败，已发出 1/2 条；<原因>`（一条信�
 
 // ──────────────────────────────── ③ report：成功 / 失败（同款） ────────────────────────────────
 
-test('report 成功：与 speak 同样的三态——正文 >25 字 ⇒ `成功，但超25字限制（N 字）`', async (t) => {
+test('report 成功：回执**固定** `发送成功`——report 没有 25 字建议线（5 字与 1293 字一个样）', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: true, status: 200 } });
   rig.write('channel/message', {
     channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'G1',
     text: '报告跑得怎么样了', messageId: 'm1', msgSeq: 1,
   });
-  const body = '# 进度\n\n- 42 个文件已处理\n- 剩下 3 个在排队';
-  const out = await rig.report({ text: body, to: SID });
-  assert.equal(out.isError, undefined, out.content);
 
-  // v74：report 与 speak 同一份三态判据（正文 >25 字 ⇒ 超限提示），除此之外一个多余字都不印。
-  assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
-    [`- 成功，但超25字限制（${[...body].length} 字）`], out.content);
-  assert.equal(out.content.includes('不必重复发送'), false, '判据搬进 SELF_BRIEF/描述，不再每轮回执付');
-  assert.equal(out.content.includes(SENT_CREDENTIAL_NOTE), false, '不再印整句凭据');
-  assert.equal(out.content.includes(body), false, '整篇不许抄进回执（回执进历史，那是每轮重发）');
-  assert.equal(rig.posted.length, 1, 'report 整段一条，不切分');
-  assert.equal(rig.posted[0], body, '出站的就是原文（逐字节）');
-
-  // 短正文（≤25 字）⇒ 逐字 `发送成功`
-  const shortOut = await rig.report({ text: '进度：42 个文件', to: SID });
+  // ① 短正文（5 字）⇒ 逐字 `发送成功`
+  const shortOut = await rig.report({ text: '进度如下', to: SID });
+  assert.equal(shortOut.isError, undefined, shortOut.content);
   assert.deepEqual(shortOut.content.split('\n').filter(line => line !== ''), ['- 发送成功'], shortOut.content);
 
-  // 凭据读得回来（与 speak 同一折）
+  /**
+   * ② 长正文（**正好 1293 字**——用户 2026-10-21 截图实证的那个数）⇒ **仍然只有** `发送成功`。
+   *
+   * report 是发长文的那一件（desc 写着"不限长"、`REPORT_TEXT_MAX` 六万四）；25 字是 `speak` 的
+   * **聊天风格目标**，只属于 speak。v74 那句"report 照 speak 一样"管的是**回执格式**
+   * （短、不印坐标、不回显正文、不印"不必重复发送"），**不是数值也一样**。
+   * 旧账：照搬两态时，1293 字的报告被回执判成"超25字限制"——这条回执会被后续每个请求读回，
+   * 等于每轮都在告诉她"你的报告超限了"，是**假话**。
+   */
+  const head = '# 进度\n\n- 42 个文件已处理，剩下 3 个在排队。\n';
+  const padUnit = '明细逐条核过，没有阻塞项。';
+  const need = 1293 - [...head].length;
+  const pad = padUnit.repeat(Math.ceil(need / [...padUnit].length)).slice(0, need);
+  const longBody = head + pad;
+  assert.equal([...longBody].length, 1293, '夹具必须正好 1293 字（runes）');
+  const longOut = await rig.report({ text: longBody, to: SID });
+  assert.equal(longOut.isError, undefined, longOut.content);
+  assert.deepEqual(longOut.content.split('\n').filter(line => line !== ''),
+    ['- 发送成功'], `1293 字的报告回执逐字也是这一行：\n${longOut.content}`);
+  // `SPEAK_TEXT_SUGGESTED_MAX` 相关字样在这条回执里出现 **0 次**：数值、`超`、`字限制`、`字数`都不许有
+  for (const ghost of ['超', '字限制', '字数', String(SPEAK_TEXT_SUGGESTED_MAX)]) {
+    assert.equal(longOut.content.includes(ghost), false,
+      `report 的回执不许出现「${ghost}」（那条线只属于 speak）：\n${longOut.content}`);
+  }
+  assert.equal(longOut.content.includes('不必重复发送'), false, '判据搬进 SELF_BRIEF/描述，不再每轮回执付');
+  assert.equal(longOut.content.includes(SENT_CREDENTIAL_NOTE), false, '不再印整句凭据');
+  assert.equal(longOut.content.includes('42 个文件已处理'), false, '整篇不许抄进回执（回执进历史，那是每轮重发）');
+
+  // ③ 出站还是原文：两次 report 各一条、逐字节（长正文不截断、不改写）
+  assert.equal(rig.posted.length, 2, 'report 整段一条，不切分');
+  assert.equal(rig.posted[0], '进度如下', '短正文逐字节出站');
+  assert.equal(rig.posted[1], longBody, '1293 字逐字节出站（report 本来就不限长）');
+
+  // ④ 凭据读得回来（与 speak 同一折）：两篇都落了带会话坐标的凭据，正文在 `read_channel` 里读得到
+  assert.equal((await rig.credentials()).length, 2, '两篇 report 各落一条"发出去过"的凭据');
   const view = await rig.read(SID, 10);
   assert.ok(view.content.split('\n').some((line) => line.includes('（我）') && line.includes('42 个文件已处理')),
     `她 report 的那一篇要读得回来：\n${view.content}`);
+});
+
+test('speak 的超 25 字线**没有被顺手改坏**：40 字（能成功的最长一句）仍是 `成功，但超25字限制（40 字）`', async (t) => {
+  useNoSleep(t);
+  // 25/26 的边界由上面那条 `speak >25 字` 用例钉着；这里补 40（`SPEAK_TEXT_MAX` 硬门）这一侧。
+  /**
+   * 40 字 ⇒ 仍旧是这条超限提示（不是失败、不是 `发送成功`）。
+   *
+   * ⚠ 验收里"speak 250 字 ⇒ 仍是 `成功，但超25字限制（250 字）`"在现口径下**不可能**：
+   * speak 头上有 40 字**硬门**（2026-10-05 用户定的"超过直接拒绝、一个字不发"），
+   * 250 字根本到不了成功那一支（下面第二段钉着它被拒的原话）。所以这条超 25 字线的
+   * **成功区间只有 26–40 字**——要让它出现在 250 字上，得先动那道硬门，那是另一条口径。
+   */
+  const rig40 = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  const forty = '啊'.repeat(40);
+  const out40 = await rig40.speak({ text: forty });
+  assert.deepEqual(out40.content.split('\n').filter(line => line !== ''),
+    ['- 成功，但超25字限制（40 字）'], out40.content);
+  assert.equal(out40.content.includes('失败'), false, '超限不是失败');
+
+  // 250 字：先被 40 字硬门退回（一个字不发），回执里**不出现**那条超限提示
+  const rig250 = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  const out250 = await rig250.speak({ text: '啊'.repeat(250) });
+  assert.equal(out250.isError, true, `250 字必须走硬门（不是成功回执）：${out250.content}`);
+  assert.match(out250.content, /超过 speak 的上限（一次至多 40 字）/u, out250.content);
+  assert.equal(out250.content.includes('成功，但超'), false, '没发出去就不许有"成功"字样');
+  assert.equal(rig250.posted.length, 0, '硬门在进 speak 之前，一段都不发');
 });
 
 test('report 失败：与 speak 同一句 `失败，<原因>`（中文、能判断下一步）', async (t) => {
@@ -315,7 +365,9 @@ test('report 失败：与 speak 同一句 `失败，<原因>`（中文、能判�
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
     ['- 失败，没有权限（平台拒绝），不必重试'], out.content);
   assert.equal(out.content.includes('不必重复发送'), false, out.content);
+  assert.equal(out.content.includes('这一篇发不出去'), false, '失败不回显正文（回执进历史，逐轮重发）');
   assert.equal(out.content.includes('403'), false, '不印英文原文/内部码');
+  assert.equal(/[0-9]/u.test(out.content), false, '失败那一行不数字数（长度不是 report 的判据）');
   assert.deepEqual(await rig.credentials(), [], '失败 ⇒ 不落凭据');
 });
 

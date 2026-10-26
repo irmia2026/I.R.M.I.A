@@ -25,7 +25,7 @@ import type { FsEnv } from './env.ts';
 import {
   VERSION_SCOPE_WORKSPACE, workspaceVersionRelOf, writeFileVersion,
 } from '../../persona/versions.ts';
-import { insideAny, readOnlyPrefixOf } from './path-guard.ts';
+import { insideAny, readOnlyPrefixOfWrite } from './path-guard.ts';
 import { checkSyntax, describeVerdict, type SyntaxVerdict } from './syntax-check.ts';
 import { encodeText, positionAt, previewLine, splitLines, type DetectedEncoding, type Eol } from './text-codec.ts';
 import {
@@ -519,6 +519,13 @@ export interface WriteTarget {
   path: string;
   /** 工作区相对路径，用于展示 */
   relPath: string;
+  /**
+   * **别名改写前**的那条输入（`guarded.inputPath`）。
+   *
+   * 只读区判定要它：`skills/office/SKILL.md` 被别名改写到 `<dataDir>/skills/…` 之后，
+   * `skills` 这个只读前缀已经不在 `relPath` 里了（见 `readOnlyPrefixOfWrite`）。
+   */
+  inputPath: string;
   /** 待写入的文本 */
   text: string;
   /** 读盘得到的原始字节；null 表示目标是新建文件 */
@@ -589,8 +596,12 @@ export async function guardedWrite(
 
   // 第零步：只读区（design §4.19 技能目录 / P2 的人格资产）。放在最前面——命中就不该产生备份、更不该碰盘。
   // 这是「拦截在决定操作的那一层」：不靠提示词祈求模型别改这些地方。
+  //
+  // v79：判据换成 `readOnlyPrefixOfWrite`（**改写前**与**改写后**两种写法都看）——技能实体搬进
+  // 数据目录之后，`skills/x` 会被别名改写到 `<dataDir>/skills/x`，只判 `relPath` 会让那批技能
+  // 成为唯一"读得到也改得动"的技能目录。
   for (const target of targets) {
-    const prefix = readOnlyPrefixOf(env.readOnlyPrefixes, target.relPath);
+    const prefix = readOnlyPrefixOfWrite(env.readOnlyPrefixes, target);
     if (prefix === null) continue;
     return {
       ok: false,

@@ -405,6 +405,12 @@ const BEFORE_MANUAL_TYPES = [
 //   见 `test/instructions-budget.test.ts` 的常量 v76 那一行），这一拍的 `input` 一个字节都没动
 //   （v76 的 ① 只作用于"本轮钉住的那条通道唤醒"，这台子的非心跳拍是 `wake/manual` ⇒ 不吃名字）。
 //   判据未放宽：仍是 16 位 sha256 精确比对。
+// v78（2026-10-22，关系档案从整篇注入改成索引）：**两个常量照旧不动**——这一笔只改
+//   `input` 的固定块（关系档案那一段），而这张台子的 `wake/manual` **不带 `person`** ⇒ 本来就不
+//   注入档案，`instructions` 也一个字节没改（v78 首版曾给 `SELF_BRIEF` 补一句、随后按用户
+//   「不要给指令」撤回；撤回之后 `instructions` 逐字节回到 v76）。
+//   **复量证据**：把关系档案改成索引、且删掉那句之后，复跑本文件与此前的基线 ⇒ 指纹逐字回到
+//   v76 的 `5f0b11e528bf8fc8`（混批 `46b672ac9c9fb55f`）。判据未放宽：仍是 16 位 sha256 精确比对。
 const BEFORE_MANUAL_FINGERPRINT = '5f0b11e528bf8fc8';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
@@ -471,6 +477,9 @@ const BEFORE_MIXED_TYPES = [
 //   与上面那条常量同一笔、同一份对照实验（位移只来自 `instructions`；混批那一拍把它一并带进请求体）。
 // v76（2026-10-21，`SELF_BRIEF` §2.1 的回执说明）：`494d717c35bc0f43` → **`46b672ac9c9fb55f`**——
 //   同一笔、同一份判断（位移只来自 `instructions`；混批那一拍含心跳唤醒行，但那一行 v76 没碰）。
+// v78（2026-10-22，关系档案改索引）：**两个常量照旧不动**——与上面那条同一笔、同一份判断
+//   （这一拍也没有 `person`，固定块里的关系档案那一段一个字节都不出现；`instructions` 撤回那句
+//   之后回到 v76）⇒ 混批仍回到 `46b672ac9c9fb55f`。
 const BEFORE_MIXED_FINGERPRINT = '46b672ac9c9fb55f';
 /** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [

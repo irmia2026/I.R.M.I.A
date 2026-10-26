@@ -217,7 +217,7 @@ test('重启前到达的群 @，重启后靠**已落盘的事件**回填进成�
   // **重启之前**落库的三条：两个 OneBot 群里 @ 她的人、一个官方群里 @ 她的人
   rig.write('wake/channel', atMe({ person: '1234567891', nickname: '阿岚', messageId: 'g-1', msgSeq: 1 }));
   rig.write('wake/channel', atMe({ person: '10001', nickname: '群里的老王', messageId: 'g-2', msgSeq: 2 }));
-  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: 'OWNER', messageId: 'o-1', msgSeq: 1 }));
+  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: '阿岚', messageId: 'o-1', msgSeq: 1 }));
   assert.equal(existsSync(join(rig.dir, GROUP_MEMBERS_FILE)), false, '重启前还没有人折过这些事件：档案不存在');
 
   // 只做**一次** `tickOnce`：里面会跑 `warmUp`（这就是重启），而 `foldChannelEvents` 因为
@@ -237,7 +237,7 @@ test('重启前到达的群 @，重启后靠**已落盘的事件**回填进成�
 
   const kai = memberEntry(rig.dir, 'E7FE0A1B');
   assert.ok(kai !== null, '官方那条通道同样适用（用户要的是跨通道一致，不是只修 OneBot）');
-  assert.equal(kai.nickname, 'OWNER');
+  assert.equal(kai.nickname, '阿岚');
   assert.equal(kai.groupSid, 'qq:group:G-OFFICIAL', '官方那条的群 sid 也要如实记');
 });
 
@@ -246,7 +246,7 @@ test('重启前到达的群 @，重启后靠**已落盘的事件**回填进成�
 test('回填**幂等**：再重启一次，档案字节与再次重启前逐字节相同', async (t) => {
   const rig = await makeRig(t);
   rig.write('wake/channel', atMe({ person: '1234567891', nickname: '阿岚', messageId: 'g-1', msgSeq: 1 }));
-  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: 'OWNER', messageId: 'o-1', msgSeq: 1 }));
+  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: '阿岚', messageId: 'o-1', msgSeq: 1 }));
 
   await rig.loop().tickOnce();
   const afterFirst = membersBytes(rig.dir);
@@ -388,12 +388,12 @@ test('后到的昵称只是**补上事实**，不覆盖运行期已经发出去�
   assert.equal(memberEntry(rig.dir, 'E7FE0A1B')?.name, '群友A', '运行期那条路照旧发占位号');
 
   // 之后平台才给出昵称（同一个人的下一条消息），而且这一条落在**重启之前**
-  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: 'OWNER', messageId: 'o-2', msgSeq: 2 }));
+  rig.write('wake/channel', officialAtMe({ person: 'E7FE0A1B', nickname: '阿岚', messageId: 'o-2', msgSeq: 2 }));
   rig.restart();
   await rig.loop().tickOnce();
 
   const entry = memberEntry(rig.dir, 'E7FE0A1B');
   assert.equal(entry?.name, '群友A', '占位号是运行期发的、她可能已经认过它：回填不许替它改名');
-  assert.equal(entry?.nickname, 'OWNER', '但平台给的昵称要如实补上（这是"补事实"，不是"改身份"）');
+  assert.equal(entry?.nickname, '阿岚', '但平台给的昵称要如实补上（这是"补事实"，不是"改身份"）');
 });
 

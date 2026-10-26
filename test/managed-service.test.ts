@@ -347,7 +347,7 @@ test('抹除器：同一行里出现两次也全抹掉', () => {
 });
 
 test('凭据留痕：进程不是本次起的时，从框架自己的启动输出里捞回**最后一条**', () => {
-  // 现场那两份留痕的形状（`D:\IrmiaAgent\agent-console.out.log` 里就是这么两行）：
+  // 现场那两份留痕的形状（`<安装根>\agent-console.out.log` 里就是这么两行）：
   // 它每次启动都重新生成口令，所以留痕里可能有好几条，**只有最后那条还有效**
   const dir = tempDir();
   const logPath = join(dir, 'agent-console.out.log');

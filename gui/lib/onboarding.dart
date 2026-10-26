@@ -317,7 +317,7 @@ class OnboardingSignals {
   /// 通道侧就绪：QQ 官方 或 OneBot 至少开了一个
   final bool channelsReady;
 
-  /// 当前生效的四个值：既是判据的输入，也用来回填输入框与判断"这一格改没改"
+  /// 当前生效的两个值：既是判据的输入，也用来回填输入框与判断"这一格改没改"
   final String model;
   final String baseUrl;
 
@@ -464,6 +464,9 @@ Future<OnboardingSignals> readOnboardingSignals(AppState state) async {
 
   final model = _text(cfg, 'models.heavy.model');
   final baseUrl = _text(cfg, 'models.heavy.baseUrl');
+  // 协议（`models.heavy.protocol`）在这里**已经不读了**（2026-10-26 用户：「算了，协议项不放在
+  // 引导第二步吧，有点占位置了」）：引导页不问协议，那三档仍原样留在设置页（`settings_page.dart`
+  // 的 `_protocolPicker`）。读一个不问的字段，只会让人以为这一屏还要照着它写点什么。
 
   final keywords = <String>[];
   final rawKeywords = _at(cfg, 'channels.mentionKeywords');
@@ -621,7 +624,7 @@ class _OnboardingHostState extends State<OnboardingHost> {
         state: widget.state,
         signals: ready,
         // 手动打开（「配置引导」那颗按钮）= 只是打开看看：预填的推荐模型不算"改动"，
-        // 关掉时一个字节都不写（见 `_OnboardingCardState._modelDirty`）；
+        // 关掉时一个字节都不写（见 `_OnboardingCardState._apiDirty`）；
         // 卡头也要据此挂上「手动打开 · 不计入首次判据」那行标识（见 `_header`）。
         fromFirstRun: fromFirstRun,
       );
@@ -657,6 +660,22 @@ const _stepKeys = <String>['name', 'api', 'channel', 'persona', 'trust', 'deps']
 
 /// 一步的标题 + 一句人话（两种语言由 [AppStrings] 给；标题也当步骤条的标签用）
 typedef _StepCopy = ({String title, String note});
+
+/// 第 3 步 QQ 官方 Bot 的**两个并列入口**（用户 2026-10-23）：
+///   · [scan]   —— 扫码创建（推荐）：点一下 → 系统浏览器打开二维码页 → 轮询状态；
+///   · [manual] —— 填写凭据：原有的 AppID / AppSecret 表单（一个字都不改）。
+///
+/// 为什么默认是扫码：用户在原话里把它排在第一，且新用户手里通常**还没有** AppID /
+/// AppSecret（要先去开放平台建机器人）；扫码那条路把这些步骤都省了。
+enum _QqEntry { scan, manual }
+
+/// 扫码创建那一支的状态机（界面侧）：
+///   · [idle]     —— 还没点过（或上一次发起失败，可以重来）；
+///   · [starting] —— 正在向 QQ 要任务（一个短过场，界面上给一句"正在申请二维码"）；
+///   · [pending]  —— 二维码已在浏览器里打开，等手机扫（每 2 秒查一次）；
+///   · [success]  —— 「绑定成功」+ AppID（secret 只显示"已保存"）；
+///   · [expired]  —— 过期/超时/取消 ⇒ 摆「二维码过期了，重新生成」。
+enum _QqBindPhase { idle, starting, pending, success, expired }
 
 /// 按当前语言取六步的标题与说明（顺序与 [_stepKeys] 一一对应）。
 ///
@@ -778,6 +797,41 @@ class _OnboardingCardState extends State<_OnboardingCard> {
   /// 这一趟**写不进去**的那几条路由（`degraded` 这种没有密钥格的）：回执要如实说出来
   List<({String route, String envName})> keyGatesNoSlot = const [];
 
+  // ── 第二步：模型探测（2026-10-26）──
+  //
+  // 只有探测，**没有协议选择**（2026-10-26 用户：「算了，协议项不放在引导第二步吧，
+  // 有点占位置了」）：那三档仍原样留在设置页（`settings_page.dart` 的 `_protocolPicker`），
+  // 这一屏只是不再问。
+
+  /// 正在探测（按钮转圈 + 结果区那一行"正在探测…"）
+  bool probeRunning = false;
+
+  /// 探测成功的结果（服务端 `POST /api/models/probe` 的原样回包；null = 还没成功过）
+  Map<String, dynamic>? probe;
+
+  /// 探测失败的**分档**（`unreachable` / `unauthorized` / `no-models-endpoint` / …）。
+  ///
+  /// 文案按它选（[AppStrings]），不把服务端那句中文直接摆给英文界面。
+  String? probeFailureCode;
+
+  /// 兜底失败的原文（只有认不出的 code 才显示；三类已知分档各有自己的话）
+  String? probeFailureMessage;
+
+  /// Base URL 空着就点了探测：就地红字，一个请求都不发
+  bool probeBaseMissing = false;
+
+  /// 探测请求的序号：飞行中改了 Base URL / 密钥 ⇒ 旧结果作废（不许盖掉新输入对应的那一份）。
+  ///
+  /// 为什么需要它：一次探测在网络里要待几百毫秒到十几秒，人完全可能在这期间改端点；
+  /// 没有序号的话，旧端点回来的列表会摆在新端点下面，人照着选模型就选错了。
+  int probeSeq = 0;
+
+  /// 探测结果里被选中的模型（只是为了在列表里高亮；真相仍是 [modelCtl] 的文本）
+  String? selectedProbeModel;
+
+  /// 模型列表上方的搜索框（纯界面过滤，不改服务端任何东西）
+  final modelSearchCtl = TextEditingController();
+
   // ── 第三步：消息适配器（现状 + 人这次的选择；勾上的就是"这次要开"的） ──
   late bool qqOn = widget.signals.qqEnabled;
   late bool onebotOn = widget.signals.onebotEnabled;
@@ -789,6 +843,49 @@ class _OnboardingCardState extends State<_OnboardingCard> {
   /// 键名取自 `channel_keys.dart`——两处填的是同一把凭据。
   final appIdCtl = TextEditingController();
   final appSecretCtl = TextEditingController();
+
+  // ── 第三步的扫码入口（2026-10-23）──
+  //
+  // 这一组状态只属于**界面**：真正在轮询、在落盘的是后端那个绑定会话
+  // （`src/channel/qq-bind.ts` 的 QqBindSession，成功那一刻自己写 `data/.keys.json`）。
+  // 界面每 2 秒问一次 `/bind/status`，按回来的 status 换三态——所以**关掉这张卡也不会丢**：
+  // 后端照样会把它落完，下次打开设置页就能看到 AppID 已配置。
+
+  /// 人选的入口（默认扫码创建：推荐那条）
+  _QqEntry qqEntry = _QqEntry.scan;
+
+  /// 扫码那一支当前处在哪一态
+  _QqBindPhase qqBindPhase = _QqBindPhase.idle;
+
+  /// 二维码地址（发不出去浏览器时要把地址说出来，这是唯一不靠外部程序的办法）
+  String? qqBindUrl;
+
+  /// 成功之后服务端回的 AppID（**不是** secret：secret 永远不回显，只显示"已保存"）
+  String? qqBindAppId;
+
+  /// 成功那一刻两条落盘事实（服务端回执的原样）
+  bool qqBindSaved = false;
+  bool qqBindEnabled = false;
+
+  /// 服务端自动跑的那一次连接测试（`ok` 为 null = 还没跑到/不知道）
+  bool? qqBindConnectionOk;
+  int? qqBindExpiresIn;
+  String? qqBindConnectionError;
+
+  /// 扫码那一支最近一句人话（发起失败 / 查状态失败 / 保存失败）
+  String? qqBindError;
+
+  /// 界面的轮询定时器（2 秒一次；离场/成功/过期/取消都释放）
+  Timer? qqBindTimer;
+
+  /// 上一次轮询还没回来：别叠着发（假服务/慢网络下会把同一个请求排成一串）
+  bool qqBindPolling = false;
+
+  // 「填写凭据」那一支的「测试连接」结果（与服务端 `qq-token-test` 同一条端点）
+  bool qqTestRunning = false;
+  bool? qqTestOk;
+  int? qqTestExpiresIn;
+  String? qqTestError;
 
   /// 第四步：人格
   late final TextEditingController personaCtl =
@@ -872,6 +969,10 @@ class _OnboardingCardState extends State<_OnboardingCard> {
 
   @override
   void dispose() {
+    // 扫码轮询的定时器随这张卡一起释放：卡没了就没有"再查一次"的意义
+    // （后端那一轮会话不受影响：它自己会把成功结果落盘，最长 3 分钟自己结束）
+    qqBindTimer?.cancel();
+    qqBindTimer = null;
     // 退场动画跑完再销毁输入控制器：`showDialog` 的 Future 在路由弹出时就 resolve，
     // 而这几个 TextField 还要几十毫秒才从树上摘掉（原因见 ui_kit 里那段注释）。
     for (final ctl in [
@@ -880,6 +981,7 @@ class _OnboardingCardState extends State<_OnboardingCard> {
       modelCtl,
       baseCtl,
       keyCtl,
+      modelSearchCtl,
       appIdCtl,
       appSecretCtl,
       personaCtl,
@@ -889,7 +991,7 @@ class _OnboardingCardState extends State<_OnboardingCard> {
     super.dispose();
   }
 
-  /// 输入框的值变没变（统一 trim：尾部空格是手滑，不是值）。
+  /// 第 2 步那两格（模型名 / Base URL）有没有一项与盘上不同。
   ///
   /// 基准是"**这一屏进来时摆的是什么**"：
   ///   · 首次启动（[widget.fromFirstRun] = true）时基准是盘上那份——这一格摆的是
@@ -897,7 +999,13 @@ class _OnboardingCardState extends State<_OnboardingCard> {
   ///     （"默认走 deepseek-flash"这条要求落地的形状）；
   ///   · 手动打开（false）时基准是**预填值**：人只是打开看看，什么都没改就关掉 ⇒ 零写入
   ///     （`onboarding_manual_open_test` 钉着这条）。
-  bool get _modelDirty {
+  ///
+  /// **两格是一组**：任何一格变了，就把两格一起写（见 `_settleApi`）——只写一半的配置
+  /// 下一次启动就是连不上的那一半。
+  ///
+  /// 协议（`models.heavy.protocol`）**不在这里**：引导页不问它（2026-10-26），也就不该拿它
+  /// 当"改没改"的判据；设置页那三档自己管自己那一份。
+  bool get _apiDirty {
     final baseline = widget.fromFirstRun
         ? widget.signals.model
         : initialOnboardingModel(widget.signals.model);
@@ -1305,6 +1413,329 @@ class _OnboardingCardState extends State<_OnboardingCard> {
     );
   }
 
+  // ── 第 2 步：探测（2026-10-26）──
+  //
+  // 探测走 `POST /api/models/probe`（唯一的新端点，见 src/web/server.ts）。界面在这一层
+  // 只做四件事：**收集输入**（model 当前值 / baseUrl / 可选的新密钥）、**分档显示失败**、
+  // **让模型列表可搜索可选**、**把两套协议通不通翻成一句人话**。它不自己发外部请求，
+  // 也不替服务端猜"哪些模型走 Responses 通"——那是实测结论。
+  //
+  // 这一层**不管"选哪个协议"**：那三档在设置页（2026-10-26 起引导页不问，见 `_apiStep`）。
+
+  /// 点「探测」：先本地判 Base URL 非空（空着就不发请求），再调那一条端点。
+  Future<void> _runProbe() async {
+    if (probeRunning) return;
+    final s = IrmiaStrings.read(context);
+    final baseUrl = baseCtl.text.trim();
+    if (baseUrl.isEmpty) {
+      // 就地红字；**一个请求都不发**（"先填 Base URL"是本地就能回答的事）
+      setState(() {
+        probeBaseMissing = true;
+        probe = null;
+        probeFailureCode = null;
+        probeFailureMessage = null;
+      });
+      return;
+    }
+    setState(() {
+      probeRunning = true;
+      probeBaseMissing = false;
+      probe = null;
+      probeFailureCode = null;
+      probeFailureMessage = null;
+      selectedProbeModel = null;
+      modelSearchCtl.clear();
+    });
+    final seq = ++probeSeq;
+    final key = keyCtl.text.trim();
+    try {
+      final data = await widget.state.api.post('/api/models/probe', {
+        'lane': 'heavy',
+        'baseUrl': baseUrl,
+        // 框里刚打的密钥优先（人可能还没点「继续」保存）；空着就让服务端用已存的那把
+        if (key.isNotEmpty) 'apiKey': key,
+      });
+      if (!mounted || seq != probeSeq) return;
+      final map = data is Map ? Map<String, dynamic>.from(data) : null;
+      if (map == null) {
+        setState(() {
+          probeFailureCode = 'request-failed';
+          probeFailureMessage = s.onboardingProbeFailed('服务端返回的不是 JSON 对象');
+        });
+      } else if (map['ok'] == true) {
+        setState(() {
+          probe = map;
+        });
+      } else {
+        setState(() {
+          probeFailureCode = map['code']?.toString();
+          probeFailureMessage = map['message']?.toString() ?? '';
+        });
+      }
+    } catch (err) {
+      if (!mounted || seq != probeSeq) return;
+      setState(() {
+        probeFailureCode = 'request-failed';
+        probeFailureMessage = s.onboardingProbeFailed('$err');
+      });
+    } finally {
+      if (mounted && seq == probeSeq) setState(() => probeRunning = false);
+    }
+  }
+
+  /// 从结果列表里点中一个模型：写回「模型名」输入框（只改这一格，不碰 Base URL）
+  void _pickProbeModel(String name) {
+    setState(() {
+      modelCtl.text = name;
+      selectedProbeModel = name;
+      problem = null;
+    });
+  }
+
+  /// 探测结果里的模型清单（形状不对 = 空表；不在这里抛）
+  List<String> get _probeModelList {
+    final raw = probe?['models'];
+    if (raw is! List) return const <String>[];
+    return raw.whereType<String>().toList(growable: false);
+  }
+
+  /// 搜索框过滤之后的清单（大小写不敏感的子串；空查询 = 全量）
+  List<String> get _probeFilteredModels {
+    final query = modelSearchCtl.text.trim().toLowerCase();
+    if (query.isEmpty) return _probeModelList;
+    return _probeModelList
+        .where((name) => name.toLowerCase().contains(query))
+        .toList(growable: false);
+  }
+
+  /// 探测结果里某一套协议通不通（`key` = `responses` / `chat`）
+  bool _probeSupported(String key) {
+    final raw = probe?[key];
+    if (raw is! Map) return false;
+    return raw['supported'] == true;
+  }
+
+  /// 探测结果里某一套协议的耗时（毫秒；缺项 = null，界面上显示 `—`）
+  int? _probeLatency(String key) {
+    final raw = probe?[key];
+    if (raw is! Map) return null;
+    final value = raw['latencyMs'];
+    return value is num ? value.round() : null;
+  }
+
+  /// 服务端 warnings（橙色小字，原样显示——那是数据，不是界面文案）
+  List<String> get _probeWarnings {
+    final raw = probe?['warnings'];
+    if (raw is! List) return const <String>[];
+    return raw.whereType<String>().where((line) => line.trim().isNotEmpty).toList(growable: false);
+  }
+
+  /// 失败分档 → 界面话。三类已知分档各有自己的出路文案（不可达 / 密钥无效 / 没有 /models），
+  /// `no-api-key` 与兜底各有各的；**不把服务端那句中文原样摆给英文界面**。
+  String _probeFailureText(AppStrings s) {
+    switch (probeFailureCode) {
+      case 'unreachable':
+        return s.onboardingProbeUnreachable;
+      case 'unauthorized':
+        return s.onboardingProbeUnauthorized;
+      case 'no-models-endpoint':
+        return s.onboardingProbeNoModels;
+      case 'no-api-key':
+        return s.onboardingProbeNoKey;
+      default:
+        final detail = probeFailureMessage?.trim() ?? '';
+        return detail.isEmpty ? s.onboardingProbeFailed('—') : s.onboardingProbeFailed(detail);
+    }
+  }
+
+  /// 探测结论里"这个端点**只**通一套协议"时，那套协议的名字（null = 通两套 / 两套都不通 / 还没探测）。
+  ///
+  /// 这是一句**事实陈述**，不是"建议你去选某一档"（引导页 2026-10-26 起不问协议了，
+  /// 那三档仍在设置页）。两端都不可用或都可用时没有话可说，返回 null。
+  ///
+  /// 返回的是服务端那两套协议的名字（`Responses` / `Chat Completions`）：它们是产品事实，
+  /// 两种语言里都这么写，所以不由文案表翻译（与 `onboardingProbeBadge` 同一口径）。
+  String? _probeSingleProtocol() {
+    if (probe == null) return null;
+    final responsesOk = _probeSupported('responses');
+    final chatOk = _probeSupported('chat');
+    if (responsesOk == chatOk) return null;
+    return responsesOk ? 'Responses' : 'Chat Completions';
+  }
+
+  /// 结果区里的一行模型：名字 + 两套协议的实测徽章；点一下写回模型名输入框。
+  Widget _probeModelRow(String name, ColorScheme scheme) {
+    final s = IrmiaStrings.of(context);
+    final responsesOk = _probeSupported('responses');
+    final chatOk = _probeSupported('chat');
+    final selected = selectedProbeModel == name || modelCtl.text.trim() == name;
+    return InkWell(
+      key: ValueKey('onboarding-probe-model-$name'),
+      onTap: () => _pickProbeModel(name),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: Space.x2, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? scheme.primary.withValues(alpha: 0.10) : null,
+          border: Border(bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.6))),
+        ),
+        child: Row(
+          children: [
+            if (selected) ...[
+              Icon(Icons.check_rounded, size: 14, color: scheme.primary),
+              const SizedBox(width: 4),
+            ],
+            Expanded(
+              child: Text(
+                name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: selected ? scheme.primary : scheme.onSurface,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              s.onboardingProbeBadge('Responses', responsesOk),
+              style: TextStyle(fontSize: 11, color: responsesOk ? IrmiaTheme.ok : scheme.error),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              s.onboardingProbeBadge('Chat', chatOk),
+              style: TextStyle(fontSize: 11, color: chatOk ? IrmiaTheme.ok : scheme.error),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 探测结果区（有内容才展开）：三态 = 探测中 / 失败分档 / 有结果。
+  ///
+  /// **失败不收起输入**：本方法只画结果区，输入框在它上面、状态全在 controller 里，
+  /// 一次失败不会清掉任何一个字（用户明确要求："失败时保留输入"）。
+  Widget _probeResultArea(ColorScheme scheme, AppStrings s) {
+    final hasFailure = probeFailureCode != null;
+    if (!probeRunning && probe == null && !hasFailure) return const SizedBox.shrink();
+    final children = <Widget>[];
+    if (probeRunning) {
+      children.add(Row(
+        key: const ValueKey('onboarding-probe-running'),
+        children: [
+          const SizedBox(
+            width: 13,
+            height: 13,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: Space.x2),
+          Text(
+            s.onboardingProbeRunning,
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ));
+    } else if (hasFailure) {
+      children.add(Text(
+        _probeFailureText(s),
+        key: const ValueKey('onboarding-probe-failure'),
+        style: TextStyle(fontSize: 12, height: 1.6, color: scheme.error),
+      ));
+    } else if (probe != null) {
+      final models = _probeFilteredModels;
+      final allModels = _probeModelList;
+      final responsesOk = _probeSupported('responses');
+      final chatOk = _probeSupported('chat');
+      final recommended = probe?['recommended'];
+      children.add(Text(
+        s.onboardingProbeDone(
+          count: allModels.length,
+          responsesOk: responsesOk,
+          responsesMs: _probeLatency('responses'),
+          chatOk: chatOk,
+          chatMs: _probeLatency('chat'),
+          recommended: recommended is String && recommended.trim().isNotEmpty ? recommended : null,
+        ),
+        key: const ValueKey('onboarding-probe-summary'),
+        style: TextStyle(fontSize: 12, height: 1.6, color: scheme.onSurface),
+      ));
+      children.add(const SizedBox(height: Space.x2));
+      children.add(TextField(
+        key: const ValueKey('onboarding-probe-search'),
+        controller: modelSearchCtl,
+        autocorrect: false,
+        enableSuggestions: false,
+        style: const TextStyle(fontSize: 12.5),
+        onChanged: (_) => setState(() {}),
+        decoration: InputDecoration(
+          hintText: s.onboardingProbeSearchHint,
+          isDense: true,
+          prefixIcon: const Icon(Icons.search_rounded, size: 16),
+        ),
+      ));
+      children.add(const SizedBox(height: Space.x1));
+      children.add(Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          border: Border.all(color: scheme.outlineVariant),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: models.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.all(Space.x2),
+                child: Text(
+                  allModels.isEmpty ? s.onboardingProbeEmptyList : s.onboardingProbeNoMatch,
+                  key: const ValueKey('onboarding-probe-no-match'),
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                ),
+              )
+            : ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 168),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  itemCount: models.length,
+                  itemBuilder: (_, index) => _probeModelRow(models[index], scheme),
+                ),
+              ),
+      ));
+      // 「这个端点只通一套协议」是实测结论里的一句事实（中性色，不是警告、不是建议）：
+      // 引导页不问协议，但人得知道这一端点另一套不通——否则下一屏（设置页）里那三档
+      // 就成了没有依据的选择。
+      final only = _probeSingleProtocol();
+      if (only != null) {
+        children.add(const SizedBox(height: Space.x2));
+        children.add(Text(
+          s.onboardingProbeOnlyProtocol(only),
+          key: const ValueKey('onboarding-probe-single-protocol'),
+          style: TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurfaceVariant),
+        ));
+      }
+      for (final (index, warning) in _probeWarnings.indexed) {
+        children.add(const SizedBox(height: Space.x1));
+        children.add(Text(
+          s.onboardingProbeWarning(warning),
+          key: ValueKey('onboarding-probe-warning-$index'),
+          style: TextStyle(fontSize: 11.5, height: 1.5, color: IrmiaTheme.warn),
+        ));
+      }
+    }
+    return Container(
+      key: const ValueKey('onboarding-probe-result'),
+      margin: const EdgeInsets.only(top: Space.x3),
+      padding: const EdgeInsets.all(Space.x3),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
+    );
+  }
+
   Widget _apiStep(ColorScheme scheme) {
     final s = IrmiaStrings.of(context);
     // 已配置时的样子（蓝、居中）与设置页的密钥格共用一份：ui_kit 的 secretLook
@@ -1325,46 +1756,118 @@ class _OnboardingCardState extends State<_OnboardingCard> {
       hintFontSize: 13,
       base: InputDecoration(hintText: hint),
     );
+    // 状态那一行：**能看出配没配、属于哪一档**，但永远不显示内容（只有格名）。
+    final statusText = ready
+        ? s.onboardingApiKeyStatusWritten(_gatesLabel(gates))
+        : (holding.isEmpty
+            ? s.onboardingApiKeyStatusMissing
+            : s.onboardingApiKeyStatusPartial(_gatesLabel(holding)));
+    final statusColor = ready
+        ? IrmiaTheme.ok
+        : (holding.isEmpty ? scheme.onSurfaceVariant : IrmiaTheme.warn);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('模型名', style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        Text(s.onboardingModelLabel, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
         const SizedBox(height: 6),
-        TextField(
-          controller: modelCtl,
-          autocorrect: false,
-          enableSuggestions: false,
-          style: const TextStyle(fontSize: 13),
-          onChanged: (_) => setState(() => problem = null),
-          // 框里已经有默认值（[kDefaultModelName]），提示只在人清空之后才看得见
-          decoration: const InputDecoration(hintText: kDefaultModelName),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: TextField(
+                key: const ValueKey('onboarding-model'),
+                controller: modelCtl,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: const TextStyle(fontSize: 13),
+                onChanged: (_) => setState(() => problem = null),
+                // 框里已经有默认值（[kDefaultModelName]），提示只在人清空之后才看得见
+                decoration: const InputDecoration(hintText: kDefaultModelName),
+              ),
+            ),
+            const SizedBox(width: Space.x2),
+            SizedBox(
+              width: 88,
+              height: 44,
+              child: OutlinedButton(
+                key: const ValueKey('onboarding-probe'),
+                onPressed: probeRunning ? null : () => unawaited(_runProbe()),
+                child: probeRunning
+                    ? const SizedBox(
+                        width: 15,
+                        height: 15,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(s.onboardingProbeButton),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 12),
-        Text('Base URL', style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        Text(s.onboardingBaseUrlLabel, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
         const SizedBox(height: 6),
         TextField(
+          key: const ValueKey('onboarding-base'),
           controller: baseCtl,
           autocorrect: false,
           enableSuggestions: false,
           style: const TextStyle(fontSize: 13),
-          onChanged: (_) => setState(() => problem = null),
+          // 端点变了 ⇒ 上一次的探测结果是对旧端点的，必须作废（否则人会照着旧列表选模型）；
+          // 飞行中的那一条也一并作废：`probeSeq` 一加，它回来时自己会被丢掉。
+          onChanged: (_) => setState(() {
+            problem = null;
+            probeBaseMissing = false;
+            probe = null;
+            probeFailureCode = null;
+            probeFailureMessage = null;
+            probeSeq += 1;
+            probeRunning = false;
+          }),
           decoration: const InputDecoration(hintText: 'https://api.deepseek.com'),
         ),
-        _note('API 根地址，不含 /responses。', scheme),
-        const SizedBox(height: 12),
-        Text('API Key', style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        _note(s.onboardingBaseUrlNote, scheme),
+        if (probeBaseMissing)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              s.onboardingProbeBaseRequired,
+              key: const ValueKey('onboarding-probe-base-required'),
+              style: TextStyle(fontSize: 11.5, color: scheme.error),
+            ),
+          ),
+        // 协议三档**不在这屏**（2026-10-26 用户：「算了，协议项不放在引导第二步吧，有点占位置了」）：
+        // 那组单选整块删掉，设置页里那三档原样留着（`settings_page.dart` 的 `_protocolPicker`）。
+        // 探测结果区里的 `Responses ✓ / Chat ✓` 与摘要那行照旧——那是实测信息，不是选择项。
+        const SizedBox(height: Space.x3),
+        Row(
+          children: [
+            Text(s.onboardingApiKeyLabel, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+            const Spacer(),
+            Text(
+              statusText,
+              key: const ValueKey('onboarding-api-key-status'),
+              style: TextStyle(fontSize: 11.5, color: statusColor),
+            ),
+          ],
+        ),
         const SizedBox(height: 6),
         TextField(
+          key: const ValueKey('onboarding-api-key'),
           controller: keyCtl,
           obscureText: true,
           autocorrect: false,
           enableSuggestions: false,
           style: const TextStyle(fontSize: 13),
           textAlign: look.textAlign,
-          // 又动手改这把 key 了 ⇒ 上一次那条回执已经过时，收掉（别让两句矛盾的话同时挂着）
+          // 又动手改这把 key 了 ⇒ 上一次那条回执与探测结果都过时了，收掉
           onChanged: (_) => setState(() {
             problem = null;
             receipt = null;
+            probe = null;
+            probeFailureCode = null;
+            probeFailureMessage = null;
+            probeSeq += 1;
+            probeRunning = false;
           }),
           decoration: look.decoration,
         ),
@@ -1396,6 +1899,7 @@ class _OnboardingCardState extends State<_OnboardingCard> {
           // 用例按这个 key 找"那一行"：整句话只许有一个 [Wrap]（两行就成两个了）
           lineKey: const ValueKey('onboarding-api-recommend'),
         ),
+        _probeResultArea(scheme, s),
       ],
     );
   }
@@ -1428,14 +1932,23 @@ class _OnboardingCardState extends State<_OnboardingCard> {
             problem = null;
           }),
         ),
-        // 用户 ④（2026-10-18）：两把凭据**首次就在这一页填**（原来只写着"在「消息适配器」页里填"）。
-        // 跳过也行：这两个框空着就等于没填，后面仍能在设置页补。
-        _qqCredentialFields(scheme, s),
+        const SizedBox(height: Space.x2),
+        // **两个并列入口**（用户 2026-10-23）：扫码创建（推荐）/ 填写凭据。
+        // 扫码那条走 `/api/channels/qq-official/bind/*`；填凭据那条就是原来那两格
+        // （同一个 set-key、同一对键名、同一条落盘路径）。
+        _qqEntrySwitch(scheme, s),
+        const SizedBox(height: Space.x2),
+        if (qqEntry == _QqEntry.scan)
+          _qqScanPanel(scheme, s)
+        else
+          _qqCredentialFields(scheme, s),
         const SizedBox(height: Space.x2),
         _channelTile(
           scheme,
           label: 'OneBot 11',
-          detail: '连本机协议端（NapCat / go-cqhttp）的正向 WebSocket；ws 地址与 access_token 在「消息适配器」页里填。',
+          // 用户 2026-10-23：这里只写一句「配置完成后可自行另行设置。」——
+          // 不做任何自动流程（不扫、不填、不检测协议端）。
+          detail: s.onboardingOnebotDetail,
           value: onebotOn,
           wasOn: widget.signals.onebotEnabled,
           onChanged: (next) => setState(() {
@@ -1448,6 +1961,346 @@ class _OnboardingCardState extends State<_OnboardingCard> {
             : '现在开着的那条不会再被这里关掉（这一屏只负责"要开哪条"）。', scheme),
       ],
     );
+  }
+
+  /// 两个并列入口的二选一（扫码 / 填凭据）。
+  ///
+  /// 用 [SegmentedButton] 而不是两颗按钮：这是**同一个问题的两种填法**（QQ 官方 Bot 从哪来），
+  /// 二选一的语义靠控件本身说清；两颗并排的按钮会让人以为可以"都点一下"。
+  Widget _qqEntrySwitch(ColorScheme scheme, AppStrings s) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SegmentedButton<_QqEntry>(
+        key: const ValueKey('onboarding-qq-entry'),
+        segments: [
+          ButtonSegment<_QqEntry>(
+            value: _QqEntry.scan,
+            label: Text(s.onboardingQqEntryScan),
+            icon: const Icon(Icons.qr_code_2_rounded, size: 16),
+          ),
+          ButtonSegment<_QqEntry>(
+            value: _QqEntry.manual,
+            label: Text(s.onboardingQqEntryManual),
+            icon: const Icon(Icons.key_rounded, size: 16),
+          ),
+        ],
+        selected: <_QqEntry>{qqEntry},
+        showSelectedIcon: false,
+        onSelectionChanged: busy
+            ? null
+            : (picked) => setState(() {
+                  qqEntry = picked.first;
+                  problem = null;
+                }),
+      ),
+    );
+  }
+
+  /// 扫码创建那一支的面板：三态（进行中 / 成功 / 过期）+ 发起失败的人话。
+  Widget _qqScanPanel(ColorScheme scheme, AppStrings s) {
+    return Container(
+      padding: const EdgeInsets.all(Space.x3),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(s.onboardingQqBindIntro, style: _asideStyle(scheme)),
+          const SizedBox(height: Space.x2),
+          ..._qqBindBody(scheme, s),
+          if (qqBindError != null) ...[
+            const SizedBox(height: Space.x2),
+            Text(
+              qqBindError!,
+              key: const ValueKey('onboarding-qq-bind-error'),
+              style: TextStyle(fontSize: 12, height: 1.6, color: scheme.error),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 按 [qqBindPhase] 摆这一屏的三态。
+  ///
+  /// 为什么是"每次 build 现算"而不是把整块塞进状态里：文案要跟着语言换（同一条状态，
+  /// 切到英文后那几句也得是英文），把 Widget 存进状态就锁在切换语言那一刻了。
+  List<Widget> _qqBindBody(ColorScheme scheme, AppStrings s) {
+    switch (qqBindPhase) {
+      case _QqBindPhase.idle:
+        return [
+          FilledButton.icon(
+            key: const ValueKey('onboarding-qq-bind-start'),
+            onPressed: busy ? null : () => unawaited(_startQqBind()),
+            icon: const Icon(Icons.qr_code_2_rounded, size: 18),
+            label: Text(s.onboardingQqBindStart),
+          ),
+        ];
+      case _QqBindPhase.starting:
+        return [_busyLine(scheme, s.onboardingQqBindStarting)];
+      case _QqBindPhase.pending:
+        return [
+          _busyLine(scheme, s.onboardingQqBindWaitScan),
+          const SizedBox(height: Space.x1),
+          Text(s.onboardingQqBindWaiting, style: _asideStyle(scheme)),
+          const SizedBox(height: Space.x1),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextButton(
+                key: const ValueKey('onboarding-qq-bind-cancel'),
+                onPressed: busy ? null : _cancelQqBind,
+                child: Text(s.cancel),
+              ),
+              if (qqBindUrl != null)
+                Expanded(
+                  child: Padding(
+                    // 浏览器打不开时这一行就是唯一的出路：地址要能选中、能复制
+                    padding: const EdgeInsets.only(left: Space.x1, top: 10),
+                    child: SelectableText(
+                      qqBindUrl!,
+                      maxLines: 2,
+                      style: _asideStyle(scheme),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ];
+      case _QqBindPhase.success:
+        return [
+          Row(
+            children: [
+              Icon(Icons.check_circle_rounded, size: 18, color: IrmiaTheme.ok),
+              const SizedBox(width: 6),
+              Text(
+                s.onboardingQqBindSuccess,
+                key: const ValueKey('onboarding-qq-bind-success'),
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: IrmiaTheme.ok),
+              ),
+            ],
+          ),
+          if (qqBindAppId != null) ...[
+            const SizedBox(height: Space.x1),
+            SelectableText(
+              s.onboardingQqBindAppId(qqBindAppId!),
+              key: const ValueKey('onboarding-qq-bind-appid'),
+              style: TextStyle(fontSize: 12, height: 1.6, color: scheme.onSurface),
+            ),
+          ],
+          // 落盘成功才敢说"已保存并启用"：保存失败时下面那行红字才是实话，
+          // 这两句不能同时挂着（一对互相矛盾的话比少一句更难查）。
+          if (qqBindSaved && qqBindEnabled) ...[
+            const SizedBox(height: Space.x1),
+            Text(
+              s.onboardingQqBindSavedNote,
+              key: const ValueKey('onboarding-qq-bind-saved'),
+              style: _asideStyle(scheme),
+            ),
+          ],
+          // 连接测试是**独立的一行**（修正 4：绑定成功 ≠ 一定能连上）：
+          // 凭据已存、但机器人可能没上线 / secret 被轮换过——那件事在这行说。
+          if (qqBindConnectionOk != null) ...[
+            const SizedBox(height: Space.x1),
+            Text(
+              qqBindConnectionOk!
+                  ? s.onboardingQqBindTokenOk(qqBindExpiresIn ?? 0)
+                  : s.onboardingQqBindTokenFailed(qqBindConnectionError ?? ''),
+              key: const ValueKey('onboarding-qq-bind-connection'),
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: qqBindConnectionOk! ? IrmiaTheme.ok : scheme.error,
+              ),
+            ),
+          ],
+        ];
+      case _QqBindPhase.expired:
+        return [
+          // 官方没有给二维码的明确有效期（只有"过期"这个状态 + 可以重建），
+          // 所以**不做倒计时**：过期了就摆这一颗，重新要一个任务。
+          OutlinedButton.icon(
+            key: const ValueKey('onboarding-qq-bind-regenerate'),
+            onPressed: busy ? null : () => unawaited(_startQqBind()),
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            label: Text(s.onboardingQqBindRegenerate),
+          ),
+        ];
+    }
+  }
+
+  /// 「进行中」那一行：转圈 + 一句人话
+  Widget _busyLine(ColorScheme scheme, String text) {
+    return Row(
+      children: [
+        const SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(text, style: TextStyle(fontSize: 13, height: 1.6, color: scheme.onSurface)),
+        ),
+      ],
+    );
+  }
+
+  /// 扫码那一支的 2 秒轮询（可取消：见 pending 那一态的「取消」与 dispose）。
+  void _stopQqBindPolling() {
+    qqBindTimer?.cancel();
+    qqBindTimer = null;
+  }
+
+  /// 点「扫码创建」/「二维码过期了，重新生成」：建任务 → **系统浏览器**打开 → 起轮询。
+  ///
+  /// 三条口径（与后端 `src/channel/qq-bind.ts` 同一个节奏）：
+  ///   · 二维码由 q.qq.com 那个页面自己渲染（官方原文「请使用手机QQ扫码绑定」），
+  ///     所以我们只把 URL 交给系统浏览器，**不需要二维码编码库**；
+  ///   · 打开失败不静默：把地址原样显示出来（人手动打开也能扫）；
+  ///   · 轮询 2 秒一次；成功/过期/取消都停表，离场（dispose）也停。
+  Future<void> _startQqBind() async {
+    final s = IrmiaStrings.read(context);
+    _stopQqBindPolling();
+    setState(() {
+      qqBindPhase = _QqBindPhase.starting;
+      qqBindError = null;
+      qqBindUrl = null;
+      qqBindAppId = null;
+      qqBindSaved = false;
+      qqBindEnabled = false;
+      qqBindConnectionOk = null;
+      qqBindExpiresIn = null;
+      qqBindConnectionError = null;
+    });
+    try {
+      final resp = await widget.state.api.post(
+        '/api/channels/qq-official/bind/start',
+        const <String, dynamic>{},
+      );
+      if (!mounted) return;
+      final url = resp is Map ? resp['url'] : null;
+      if (url is! String || url.trim().isEmpty) {
+        // 开发者口径（只有日志/断言看得到），不是界面文案
+        throw StateError('qq bind: start returned no url');
+      }
+      final opened = await openExternalUrl(url.trim());
+      if (!mounted) return;
+      setState(() {
+        qqBindUrl = url.trim();
+        qqBindPhase = _QqBindPhase.pending;
+        qqBindError = opened ? null : s.onboardingOpenLinkFailed(url.trim());
+      });
+      qqBindTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(_pollQqBind()),
+      );
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        qqBindPhase = _QqBindPhase.idle;
+        qqBindError = s.onboardingQqBindStartFailed('$err');
+      });
+    }
+  }
+
+  /// 查一次状态。**一次失败不结束这一轮**（后端会话有 3 分钟兜底，下一拍照旧）。
+  Future<void> _pollQqBind() async {
+    if (qqBindPolling || !mounted) return;
+    qqBindPolling = true;
+    final s = IrmiaStrings.read(context);
+    try {
+      final resp = await widget.state.api.get('/api/channels/qq-official/bind/status');
+      if (!mounted) return;
+      final map = resp is Map ? resp : const <Object?, Object?>{};
+      final status = map['status'];
+      if (status == 'success') {
+        _stopQqBindPolling();
+        final appId = map['appId'];
+        final connection = map['connection'];
+        final expires = connection is Map ? connection['expiresIn'] : null;
+        final why = connection is Map ? connection['error'] : null;
+        final saveError = map['error'];
+        setState(() {
+          qqBindPhase = _QqBindPhase.success;
+          // 服务端在成功那一刻已经把它启用了：勾选框跟着说实话，别还显示没开
+          qqOn = true;
+          qqBindAppId = appId is String && appId.trim().isNotEmpty ? appId.trim() : null;
+          qqBindSaved = map['saved'] == true;
+          qqBindEnabled = map['enabled'] == true;
+          qqBindConnectionOk = connection is Map ? connection['ok'] == true : null;
+          qqBindExpiresIn = expires is num ? expires.toInt() : null;
+          qqBindConnectionError = why is String && why.trim().isNotEmpty ? why.trim() : null;
+          qqBindError = saveError is String && saveError.trim().isNotEmpty ? saveError.trim() : null;
+        });
+        return;
+      }
+      if (status == 'expired' || status == 'idle') {
+        _stopQqBindPolling();
+        setState(() => qqBindPhase = _QqBindPhase.expired);
+        return;
+      }
+      // pending（或老服务端不认识的中间态）：继续等，把上一次的偶发错误收掉
+      setState(() {
+        qqBindPhase = _QqBindPhase.pending;
+        qqBindError = null;
+      });
+    } catch (err) {
+      if (!mounted) return;
+      setState(() => qqBindError = s.onboardingQqBindStatusFailed('$err'));
+    } finally {
+      qqBindPolling = false;
+    }
+  }
+
+  /// 「取消」：只停界面的轮询（后端那一轮会话自己会在 3 分钟内结束或落盘）。
+  void _cancelQqBind() {
+    _stopQqBindPolling();
+    setState(() {
+      qqBindPhase = _QqBindPhase.idle;
+      qqBindUrl = null;
+      qqBindError = null;
+    });
+  }
+
+  /// 「测试连接」：`POST /api/commands/qq-token-test` —— 用**框里刚敲的**那两把
+  /// （没敲就用盘上那份）真去换一次 access_token。凭据写对了不等于连得上，所以要有这一下。
+  Future<void> _testQqConnection() async {
+    setState(() {
+      qqTestRunning = true;
+      qqTestOk = null;
+      qqTestExpiresIn = null;
+      qqTestError = null;
+    });
+    final body = <String, dynamic>{};
+    final appId = appIdCtl.text.trim();
+    final secret = appSecretCtl.text.trim();
+    if (appId.isNotEmpty) body['appId'] = appId;
+    if (secret.isNotEmpty) body['clientSecret'] = secret;
+    try {
+      final resp = await widget.state.api.post('/api/commands/qq-token-test', body);
+      if (!mounted) return;
+      final map = resp is Map ? resp : const <Object?, Object?>{};
+      final expires = map['expiresIn'];
+      final why = map['error'];
+      setState(() {
+        qqTestRunning = false;
+        qqTestOk = map['ok'] == true;
+        qqTestExpiresIn = expires is num ? expires.toInt() : null;
+        qqTestError = why is String && why.trim().isNotEmpty ? why.trim() : null;
+      });
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        qqTestRunning = false;
+        qqTestOk = false;
+        // 只记原因原文：展示那一层会套 `onboardingQqBindTokenFailed` 的前缀，
+        // 这里再套一次就成了"连接测试没通过：连接测试没通过：…"
+        qqTestError = '$err';
+      });
+    }
   }
 
   /// 旁注那一档字（说明 12/18）。蓝链与它旁边的说明**同一个字号**，只有颜色与下划线不同。
@@ -1555,6 +2408,34 @@ class _OnboardingCardState extends State<_OnboardingCard> {
           ),
           const SizedBox(height: Space.x1),
           Text(s.onboardingQqCredentialsNote, style: _asideStyle(scheme)),
+          const SizedBox(height: Space.x2),
+          // 「测试连接」：真去换一次 access_token（`qq-token-test`）。凭据写对了不等于连得上，
+          // 这条消息与扫码成功后自动跑的那一次是**同一个端点、同一份判定**。
+          Row(
+            children: [
+              OutlinedButton(
+                key: const ValueKey('onboarding-qq-token-test'),
+                onPressed: busy || qqTestRunning ? null : () => unawaited(_testQqConnection()),
+                child: Text(
+                  qqTestRunning ? s.onboardingQqBindTokenTesting : s.onboardingQqBindTestConnection,
+                ),
+              ),
+            ],
+          ),
+          if (qqTestOk != null) ...[
+            const SizedBox(height: Space.x1),
+            Text(
+              qqTestOk!
+                  ? s.onboardingQqBindTokenOk(qqTestExpiresIn ?? 0)
+                  : s.onboardingQqBindTokenFailed(qqTestError ?? ''),
+              key: const ValueKey('onboarding-qq-token-result'),
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: qqTestOk! ? IrmiaTheme.ok : scheme.error,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2392,11 +3273,15 @@ class _OnboardingCardState extends State<_OnboardingCard> {
     final key = keyCtl.text.trim();
     final fields = <String, dynamic>{};
 
-    if (_modelDirty) {
-      // 两格是一个整体：只改一半的配置写下去，下一次启动就是连不上的那一半
-      if (model.isEmpty) return '模型名不能为空，未保存';
-      if (baseUrl.isEmpty) return 'Base URL 不能为空，未保存';      if (model != widget.signals.model) fields['models.heavy.model'] = model;
-      if (baseUrl != widget.signals.baseUrl) fields['models.heavy.baseUrl'] = baseUrl;
+    if (_apiDirty) {
+      // 两格是一个整体：只改一半的配置写下去，下一次启动就是连不上的那一半。
+      //
+      // **不写 `models.heavy.protocol`**（2026-10-26）：这一屏已经不问协议了，
+      // 点「继续」只落 model 与 baseUrl；盘上那份协议原样不动（设置页写的那一档不被界面覆盖）。
+      if (model.isEmpty) return s.onboardingModelRequired;
+      if (baseUrl.isEmpty) return s.onboardingBaseUrlRequired;
+      fields['models.heavy.model'] = model;
+      fields['models.heavy.baseUrl'] = baseUrl;
     }
     // 第一次启动的人最可能什么都不改就点继续（默认值本来就是 DeepSeek 那两个），
     // 所以这一屏**不拦**"没填模型"——真正拦人的是密钥那一条：没有它她连不上任何模型。
@@ -2472,7 +3357,11 @@ class _OnboardingCardState extends State<_OnboardingCard> {
   /// 只写非空的那几条：框空着 = 这一次不碰那条（不是"清空"；清除密钥在渠道页有专门的确认动作）。
   Future<String?> _settleChannel() async {
     final fields = <String, dynamic>{};
-    if (qqOn && !widget.signals.qqEnabled) fields['channels.qqOfficial.enabled'] = true;
+    // 扫码绑定成功那一刻，服务端已经写过 `channels.qqOfficial.enabled = true` 与两把凭据
+    // （见 src/web/server.ts 的 settleQqBind）——这里再写一遍只会多一条 config/changed。
+    if (qqOn && !widget.signals.qqEnabled && !qqBindSaved) {
+      fields['channels.qqOfficial.enabled'] = true;
+    }
     if (onebotOn && !widget.signals.onebotEnabled) fields['channels.onebot.enabled'] = true;
 
     final secrets = <String, String>{};

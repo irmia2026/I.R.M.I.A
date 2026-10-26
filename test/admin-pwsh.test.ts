@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { estimateTokens } from '../src/tools/registry.ts';
 import { SELF_BRIEF } from '../src/model/self-brief.ts';
 import { after, before, describe, test } from 'node:test';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -517,6 +517,113 @@ describe('write_persona：persona 唯一写通道与只读保护', () => {
     assert.equal(missing.isError, true);
     assert.equal(missing.error?.code, 'E_INVALID_ARGS');
     assert.match(missing.content, /file/);
+  });
+
+  /**
+   * ── 经链接到达的 persona 根（2026-10-23 修）──
+   *
+   * 现场：`write_persona {file:'STATE.md'}` 报 `file 的父目录经符号链接指向 persona/ 之外：
+   * STATE.md`，而**同一条路径此前一直是能写的**。根因不是"不该 realpath"，而是
+   * "只 realpath 了一边"：她的 persona 根经 junction 到达（真值是 `<安装根>/data/persona`），
+   * 而比较的另一侧还是字面的 `<cwd>/data/persona` ⇒ 每次都判成越界。
+   *
+   * 两条必须同时成立，缺一条这个修法就是"把门拆了"：
+   *   · 经链接的**根**、以及经链接但**仍在 persona 内**的父目录 ⇒ 通过；
+   *   · 经链接**指向 persona 之外**的父目录 ⇒ 照旧拦住、且一个字节都不落盘。
+   */
+  test('persona 根经 junction 到达时照样能写（本次修复：两边都展开再比）', async () => {
+    const ws = await workspace('persona-via-link-root');
+    const realPersona = join(ws, 'real-persona');
+    await mkdir(realPersona, { recursive: true });
+    await writeFile(join(realPersona, 'STATE.md'), '# 当前状态\n\n旧\n', 'utf8');
+    // 根**经链接**到达：字面路径与真值不是同一个字符串（现场就是这个形状）
+    const linkedRoot = join(ws, 'persona');
+    await symlink(realPersona, linkedRoot, 'junction');
+
+    const toolkit = createAdminTools({
+      timers: new TimerStore(null),
+      emit: makeRecorder().emit,
+      personaRoot: linkedRoot,
+    });
+    const result = await toolkit.byName('write_persona').handler(
+      { file: 'STATE.md', content: '# 当前状态\n\n新\n' },
+      makeCtx(ws),
+    );
+
+    assert.equal(result.isError, undefined, `经链接的 persona 根不该被误判成越界：${result.content}`);
+    assert.equal(await readFile(join(realPersona, 'STATE.md'), 'utf8'), '# 当前状态\n\n新\n');
+  });
+
+  test('父目录经 junction 指向别处、但仍在 persona 内 ⇒ 通过（拒绝的是越界，不是链接）', async () => {
+    const ws = await workspace('persona-via-link-inside');
+    const personaRoot = join(ws, 'persona');
+    await mkdir(join(personaRoot, 'real-relationships'), { recursive: true });
+    await symlink(join(personaRoot, 'real-relationships'), join(personaRoot, 'RELATIONSHIPS'), 'junction');
+
+    const toolkit = createAdminTools({
+      timers: new TimerStore(null),
+      emit: makeRecorder().emit,
+      personaRoot,
+    });
+    const result = await toolkit.byName('write_persona').handler(
+      { file: 'RELATIONSHIPS/alex.md', content: '# 关系档案：Alex\n' },
+      makeCtx(ws),
+    );
+
+    assert.equal(result.isError, undefined, `仍在 persona 内的链接必须放行：${result.content}`);
+    assert.equal(
+      await readFile(join(personaRoot, 'real-relationships', 'alex.md'), 'utf8'),
+      '# 关系档案：Alex\n',
+    );
+  });
+
+  test('**真逃逸**：persona 里的子目录经 junction 指向 persona 之外 ⇒ 必须拦住且不落盘', async () => {
+    const ws = await workspace('persona-via-link-escape');
+    const personaRoot = join(ws, 'persona');
+    const outside = join(ws, 'outside-persona');
+    await mkdir(personaRoot, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(personaRoot, 'evil'), 'junction');
+
+    const recorder = makeRecorder();
+    const toolkit = createAdminTools({
+      timers: new TimerStore(null),
+      emit: recorder.emit,
+      personaRoot,
+    });
+    const result = await toolkit.byName('write_persona').handler(
+      { file: 'evil/x.md', content: '# 逃逸\n' },
+      makeCtx(ws),
+    );
+
+    assert.equal(result.isError, true, '指向 persona 之外的 junction 必须被拦');
+    assert.equal(result.error?.code, 'E_INVALID_ARGS');
+    assert.match(result.content, /符号链接指向 persona\/ 之外/);
+    // 反向验证：被拒的那一次一个字节都没有落到真值那边
+    assert.equal(await exists(join(outside, 'x.md')), false);
+    assert.equal(recorder.count('persona/updated'), 0, '被拒绝的写入不得产生 persona/updated');
+  });
+
+  test('目标的父目录还不存在（新建）⇒ 仍按最近的存在祖先展开判定（不因"不存在"就放过越界）', async () => {
+    const ws = await workspace('persona-via-link-missing');
+    const personaRoot = join(ws, 'persona');
+    const outside = join(ws, 'outside-missing');
+    await mkdir(personaRoot, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(personaRoot, 'evil'), 'junction');
+
+    const toolkit = createAdminTools({
+      timers: new TimerStore(null),
+      emit: makeRecorder().emit,
+      personaRoot,
+    });
+    // 三层都还不存在：`evil/new/deep.md`——"不存在"不是放行的理由
+    const result = await toolkit.byName('write_persona').handler(
+      { file: 'evil/new/deep.md', content: '# x\n' },
+      makeCtx(ws),
+    );
+    assert.equal(result.isError, true, '链接之后的目录即使还不存在，也仍属越界');
+    assert.equal(await exists(join(outside, 'new', 'deep.md')), false);
   });
 });
 
@@ -1494,7 +1601,8 @@ describe('speak：告警出口与三路投递', () => {
       `<qqbot-at-user id="${MEMBER1_OPENID}" /> 一号，用户让我把这条报告发给你：跑完了，42 个文件。`,
       '官方那一串（含真实 openid）逐字节原样',
     );
-    assert.match(result.content, /发送成功|成功，但超/u);
+    // report 没有 25 字建议线（2026-10-21）：这一篇远超 25 字，回执照样逐字 `发送成功`。
+    assert.equal(result.content.trim(), '- 发送成功', result.content);
   });
 
   test('`[@名字]` 原样出站而且**照发**：不再有"认不出就一个字都不发"那道门', async (t) => {

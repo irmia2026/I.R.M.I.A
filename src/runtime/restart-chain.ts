@@ -181,7 +181,17 @@ export function instanceTraceLine(input: {
 export function endTraceLine(input: {
   ok: boolean;
   backendPid: number;
-  port: 'ready' | 'waiting' | 'timeout' | 'unknown';
+  /**
+   * 端口那一档：
+   *   · `ready`           —— `/api/health` 已经答 `status=ready`（**唯一**算成功的那一档）；
+   *   · `starting`        —— 端口在听、health 说还在启动（`starting-timeout` 是它的严格版：
+   *     等到窗口用尽都还没 ready —— 见 `restart-worker.ts` 的 `STARTING_TIMEOUT`）；
+   *   · `waiting` / `timeout` / `unknown` —— 老口径（脚本那两条路照旧用它们）。
+   *
+   * `timeout` 与 `starting-timeout` 分开是有用的：前者是"根本没人听"，后者是
+   * "听了、但重活没干完"——**两种现场的下一步完全不同**（查进程 vs 查它卡在哪一段）。
+   */
+  port: 'ready' | 'starting' | 'starting-timeout' | 'waiting' | 'timeout' | 'unknown';
   guiPid: number;
   path: RestartPath;
   /** 失败的那一环（机器可读 token；成功时是 `ok`）——"不许没能确认了事" */

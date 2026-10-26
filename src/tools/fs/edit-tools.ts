@@ -24,7 +24,7 @@ import {
   readTargetFile,
   type WriteTarget,
 } from './edit-core.ts';
-import { insideAny, readOnlyPrefixOf } from './path-guard.ts';
+import { insideAny, readOnlyPrefixOfWrite } from './path-guard.ts';
 import { decodeText, encodeText, formatBytes, previewLine, type DetectedEncoding } from './text-codec.ts';
 import {
   ABORTED_RESULT,
@@ -225,6 +225,7 @@ export function createSafeEditTool(env: FsEnv): ToolDefinition {
       const target: WriteTarget = {
         path: guarded.path,
         relPath: guarded.relPath,
+        inputPath: guarded.inputPath,
         text: plan.text,
         original: read.buffer,
         encoding: decoded.encoding,
@@ -330,7 +331,7 @@ export function createSafeWriteTool(env: FsEnv): ToolDefinition {
       // 会以为"给了开关就能写"，而它其实永远不能写。**更严的判据必须先生效**。
       // 判据本身不另写一份：复用 `guardedWrite` 用的同两个来源（`readOnlyPrefixes`
       // 与 `protectedPaths`），消息也取同一份提示，避免两处口径漂移。
-      const roPrefixOfWrite = readOnlyPrefixOf(env.readOnlyPrefixes, guarded.relPath);
+      const roPrefixOfWrite = readOnlyPrefixOfWrite(env.readOnlyPrefixes, guarded);
       if (roPrefixOfWrite !== null) {
         return fail(
           FS_ERROR_CODES.PATH_DENIED,
@@ -395,6 +396,7 @@ export function createSafeWriteTool(env: FsEnv): ToolDefinition {
       const target: WriteTarget = {
         path: guarded.path,
         relPath: guarded.relPath,
+        inputPath: guarded.inputPath,
         text: content,
         original: read.buffer,
         encoding,
@@ -473,7 +475,7 @@ export function createSafeRollbackTool(env: FsEnv): ToolDefinition {
 
       // 只读区（design §4.19 技能目录 / P2 的人格资产）：可读不可写，而回滚也是写操作。
       // list:true 已在上面返回（那是纯读），所以这里拦不到误伤。
-      const roPrefix = readOnlyPrefixOf(env.readOnlyPrefixes, guarded.relPath);
+      const roPrefix = readOnlyPrefixOfWrite(env.readOnlyPrefixes, guarded);
       if (roPrefix !== null) {
         return fail(
           FS_ERROR_CODES.PATH_DENIED,
@@ -596,6 +598,7 @@ export function createMultiEditTool(env: FsEnv): ToolDefinition {
       interface PendingFile {
         path: string;
         relPath: string;
+        inputPath: string;
         text: string;
         encoding: WriteTarget['encoding'];
         original: Buffer | null;
@@ -635,6 +638,7 @@ export function createMultiEditTool(env: FsEnv): ToolDefinition {
           entry = {
             path: guarded.path,
             relPath: guarded.relPath,
+            inputPath: guarded.inputPath,
             text: decoded.text,
             encoding: decoded.encoding,
             original: read.buffer,
@@ -666,6 +670,7 @@ export function createMultiEditTool(env: FsEnv): ToolDefinition {
         return {
           path: entry.path,
           relPath: entry.relPath,
+          inputPath: entry.inputPath,
           text: entry.text,
           original: entry.original,
           encoding: entry.encoding,

@@ -32,7 +32,22 @@ import { boundaryDecision, boundaryRootFor, comparisonKey, isInside, outsideBoun
 import { FS_ERROR_CODES, type FsErrorCode, toErrorMessage } from './types.ts';
 
 export type GuardResult =
-  | { ok: true; path: string; relPath: string; existed: boolean }
+  | {
+    ok: true;
+    path: string;
+    relPath: string;
+    existed: boolean;
+    /**
+     * **改写前**的那条输入（别名接管之前；`resolveGuarded` 填原样输入，直接调
+     * `resolveInsideRoot` 时就是它收到的那串）。
+     *
+     * 为什么要留着它：`expandAliases` 会把 `skills/x` 改写成 `<dataDir>/skills/x`，
+     * 而只读区前缀是**相对工作根**的（`skills`）——改写之后那串前缀不再出现在
+     * `relPath` 里。写入口的只读判定必须两处都看（见 `readOnlyPrefixOfWrite`），
+     * 否则"数据目录里的技能"会被开一个只有模型读得到、改也改得动的口子（design §4.19）。
+     */
+    inputPath: string;
+  }
   | { ok: false; code: FsErrorCode; reason: string };
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -74,6 +89,20 @@ export interface PathAlias {
   prefix: string;
   /** 别名根的绝对路径，如 `<dataDir>/workspace/MEMORIES` */
   root: string;
+  /**
+   * 解析顺序（P1 起的缺省是 `'primary-first'`）：
+   *   · `'primary-first'` —— **主根优先**：主根下已经有这个目标就一个字都不改，别名只在
+   *     主根找不到时接管（下面 `expandAliases` 的头两段讲的就是这条的全部理由）；
+   *   · `'alias-first'`   —— **别名根优先**：别名根下真有这一份就**必须**用它。
+   *
+   * 为什么会有第二种（v79，`skills/` → `<dataDir>/skills`）：技能实体搬进数据目录之后，
+   * 安装目录里的 `skills/` 只是**出厂种子**。若沿用主根优先，模型读 `skills/<name>/SKILL.md`
+   * 会读到种子那份——而信任门绑的内容哈希是**数据目录**那份：人改了数据目录里的 SKILL.md
+   * 并重新确认之后，模型照旧读到旧正文（读到的是下一版安装包的内容）。所以"数据目录里有
+   * 这一份"就压过"工作根里有这一份"；数据目录里没有时才退回主根（老安装/开发目录里
+   * data 被清过的那种现场，读得到总比读不到强）。
+   */
+  mode?: 'primary-first' | 'alias-first';
 }
 
 /** 相对路径的首段（`MEMORIES/facts.md` → `MEMORIES`）；没有分隔符时就是整串 */
@@ -114,9 +143,12 @@ export function expandAliases(
   const lowered = head.toLowerCase();
   const alias = aliases.find((candidate) => candidate.prefix.toLowerCase() === lowered);
   if (alias === undefined) return input;
-  if (existsSync(resolve(primaryRoot, input))) return input;
   const rest = restAfterFirstSegment(input);
-  return rest === '' ? alias.root : resolve(alias.root, rest);
+  const aliased = rest === '' ? alias.root : resolve(alias.root, rest);
+  // `alias-first`：别名根里真有这一份 ⇒ 用它，主根里有没有都不看（理由见 PathAlias 的注释）
+  if (alias.mode === 'alias-first') return existsSync(aliased) ? aliased : input;
+  if (existsSync(resolve(primaryRoot, input))) return input;
+  return aliased;
 }
 
 /**
@@ -134,6 +166,31 @@ export function readOnlyPrefixOf(prefixes: readonly string[], relPath: string): 
     if (target === prefix || target.startsWith(`${prefix}/`)) return prefix;
   }
   return null;
+}
+
+/**
+ * 写入口的只读区判定：**改写后**的 `relPath` 与**改写前**的输入，两处任一命中都算。
+ *
+ * 为什么一个判据要看两处：`expandAliases` 会把 `skills/x` 改写成 `<dataDir>/skills/x`
+ * （v79 起 `skills/` 有别名），而只读前缀是相对工作根的（`skills`）——只看 `relPath`，
+ * "数据目录里的技能"就成了唯一一个**模型读得到、也改得动**的技能目录
+ * （design §4.19 的门是"模型可读、不可改"）。反过来只看输入，`data/persona/...`
+ * 那种**本来就是相对工作根**的写法才拦得住——两种写法各有一条失效路径，所以两处都看。
+ *
+ * 取**先命中者**：`relPath` 命中说明改写没有发生（或改写后的路径本身就在只读区），
+ * 那是更接近"磁盘事实"的那个前缀；只有它不命中时才回落到模型写下的那个前缀
+ * （消息里要说的正是它——模型看到的是自己写的那串）。
+ */
+export function readOnlyPrefixOfWrite(
+  prefixes: readonly string[],
+  guard: { relPath: string; inputPath?: string | undefined },
+): string | null {
+  const byRelPath = readOnlyPrefixOf(prefixes, guard.relPath);
+  if (byRelPath !== null) return byRelPath;
+  // 运行时兜底：`inputPath` 缺省（老调用点/测试里手搓的 WriteTarget）就退回既有判据，
+  // 不让"少填一格"静默扩大可写范围之外的任何东西
+  if (typeof guard.inputPath !== 'string' || guard.inputPath === '') return null;
+  return readOnlyPrefixOf(prefixes, guard.inputPath);
 }
 
 /**
@@ -348,6 +405,9 @@ export async function resolveInsideRoot(
     path: effective,
     relPath: relative(rootReal, effective).replaceAll('\\', '/'),
     existed,
+    // 直接调用时输入就是它；经 `resolveGuarded` 时那层会用**别名改写前**的原样输入覆盖
+    // （只读区判定要看模型写下的那个前缀，见 `readOnlyPrefixOfWrite`）
+    inputPath: input,
   };
 }
 

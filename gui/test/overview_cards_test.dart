@@ -28,7 +28,7 @@ class _FakeApi extends IrmiaApi {
   void release() => gate?.complete();
 
   @override
-  Future<dynamic> get(String path) async {
+  Future<dynamic> get(String path, {Duration? timeout}) async {
     if (gate != null && (path == '/api/sessions' || path == '/api/framework-notes')) {
       await gate!.future;
     }
@@ -51,6 +51,9 @@ Map<String, dynamic> _base() => {
         'nextWakeAt': null,
       },
       '/api/projection': {'needsReview': <dynamic>[]},
+      // 「当前上下文构成」那一块：这里只负责让它**读到数**（空态），
+      // 免得这份用例里多出一行跟它无关的「读取失败」——四态本身由 overview_context_test 钉
+      '/api/context/breakdown': {'empty': true},
     };
 
 /// 三个会话：一个群@（有未读、有名字）、一个群（没名字、没未读）、一个单聊

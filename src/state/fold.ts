@@ -436,6 +436,17 @@ export function applyOne(p: Projection, e: AppEvent): void {
       if (ask !== undefined) ask.expiredAt = e.ts;
       break;
     }
+    case 'human/timed-out': {
+      // **处置：作废那条待答**（2026-10-22）。它与 `human/expired` 分工不同——那条记"时间到了"
+      // 且卡仍然有效；这条记"框架把这件事结掉了"：提问出队，`waitingHuman` 随之重算，
+      // 于是投影里不再有"还有人在等"的残留（她已经被放回去干活了）。
+      // 出队之后投影里查不到这条提问 ⇒ 之后人再补答（human/answered{askSeq}）就是一次空配对，
+      // 不会把一件已经作废的计划批出去（§6.1：超时不是决定，但它也绝不能被事后当成批准）。
+      const index = p.humanAsks.findIndex(item => item.seq === e.data.askSeq);
+      if (index >= 0) p.humanAsks.splice(index, 1);
+      syncWaitingHuman(p);
+      break;
+    }
 
     case 'plan/pending':
       p.planPending.push({
@@ -458,7 +469,8 @@ export function applyOne(p: Projection, e: AppEvent): void {
 
     default:
       // 其余事件（session/*、log/repaired、instance/takeover、policy/denied、
-      // config/changed、mcp/*、skill/*、hook/*、speak/*、tool/zombie、
+      // config/changed、mcp/*、skill/*（含 v79 的 skill/seed：出厂技能首次复制进数据目录，
+      // 纯装配账，投影里没有它的位置）、hook/*、speak/*、tool/zombie、
       // developer/message、step/end、alarm/sent、compaction/summary、persona/updated、
       // image/trace——图片通道的留痕，纯观测，投影里没有它的位置）
       // 不进投影。新增事件类型在此显式落进 default 是有意为之——不允许静默吞掉。

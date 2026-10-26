@@ -130,10 +130,30 @@ export function loadPersona(dataDir: string): PersonaAssets {
   return { identity, constitution, style, state, personaHash, isSeed };
 }
 
+/**
+ * 关系档案的**文件名**（`who` 里那些会破坏路径的字符一律换成下划线）。
+ *
+ * 转义规则只此一处：`loadRelationship` 按它落盘读，`relationshipPathOf` 按它给 `safe_read`
+ * 地址。两处各写一份的话，出现"索引指的路径读不到"那种最坏的漂移——她照着读必然扑空。
+ */
+function relationshipFileName(who: string): string {
+  return `${who.replace(/[\\/:*?"<>|]/g, '_')}.md`;
+}
+
+/**
+ * 关系档案的**相对 dataDir 路径**（`persona/RELATIONSHIPS/<文件名>.md`）。
+ *
+ * v78：这条路径要进请求体（固定块里那行索引），所以她 `safe_read` 时直接照抄它就落到
+ * `<dataDir>/persona/RELATIONSHIPS/…`——fs 工具族那张别名表（`tools/fs/env.ts`）把
+ * `persona/` 接在同一个根上，两处口径同源。
+ */
+export function relationshipPathOf(who: string): string {
+  return `persona/RELATIONSHIPS/${relationshipFileName(who)}`;
+}
+
 /** 加载关系档案（唤醒路由：带人唤醒时注入对应档案） */
 export function loadRelationship(dataDir: string, who: string): string | null {
-  const safe = who.replace(/[\\/:*?"<>|]/g, '_');
-  const p = join(dataDir, 'persona', 'RELATIONSHIPS', `${safe}.md`);
+  const p = join(dataDir, 'persona', 'RELATIONSHIPS', relationshipFileName(who));
   try {
     return readFileSync(p, 'utf8');
   } catch {
