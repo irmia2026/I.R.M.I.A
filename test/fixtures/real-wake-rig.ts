@@ -110,6 +110,9 @@ export interface RigOptions {
    * 要测"读不到配置面"（`undefined`）得用 `patchConfig` 把那一格改成读不出结论的形状。
    */
   mcpServers?: readonly string[];
+  /** MCP 池与索引共享的完整声明面（含插件） */
+  mcpDeclarations?: () => readonly import('../../src/mcp/client.js').McpServerEntry[];
+  onTurnBoundary?: () => Promise<void>;
   /**
    * 技能管理器工厂（v34）：数字资产事实层的 skill 那一半要它（"她清单里那条技能还在不在"）。
    *
@@ -283,6 +286,8 @@ export async function makeRealWakeRig(options: RigOptions = {}): Promise<RealWak
     ...(options.skills === undefined ? {} : { skills: options.skills(workspaceRoot) }),
     // MCP 声明面（v34 事实层的 mcp 那一半）：不传就是"这一轮读不到配置面"
     ...(options.mcpServers === undefined ? {} : { mcpServers: () => options.mcpServers ?? [] }),
+    ...(options.mcpDeclarations === undefined ? {} : { mcpDeclarations: options.mcpDeclarations }),
+    ...(options.onTurnBoundary === undefined ? {} : { onTurnBoundary: options.onTurnBoundary }),
     // 执行点钩子：只有要验"钩子入参与请求体是不是同一串字节"的用例才传
     ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
   });

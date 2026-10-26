@@ -49,6 +49,7 @@ import { readBlob } from '../src/state/blob-store.ts';
 import { executeToolCalls } from '../src/tools/executor.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import type { ToolContext } from '../src/tools/types.js';
+import { AGENT_VERSION } from '../src/version.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
@@ -240,7 +241,10 @@ test('M7-1 全链路：握手 → initialized → tools/list → tools/call，�
   assert.ok(initialize !== undefined, '夹具收到了 initialize');
   // 不声明 roots/sampling/elicitation：capabilities 就是空对象
   assert.deepEqual(initialize.capabilities, {});
-  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: '0.1.0-beta.13' });
+  // clientInfo 是给 server 侧日志认人用的：name 是协议面常量，version 必须原样取自 AGENT_VERSION。
+  // 这里断言的是"进程版本号被写进握手帧"这条契约，而不是某个具体版本文本——写死字符串会成为
+  // 第二份版本真相，每次发版都要手动跟一次，跟漏了也不会有人发现。
+  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: AGENT_VERSION });
   assert.ok(marks.some((m) => m.t === 'initialized'), '握手第二步发了 notifications/initialized');
   assert.equal(marks.filter((m) => m.t === 'list').length, 1, 'tools/list 在进程启动时拉一次');
   assert.equal(marks.find((m) => m.t === 'call')?.name, 'echo');
@@ -255,6 +259,53 @@ test('M7-1 全链路：握手 → initialized → tools/list → tools/call，�
   assert.equal(failed.isError, true);
   assert.equal(failed.error?.code, MCP_ERROR_CODES.toolError);
   assert.match(failed.content, /夹具主动报告的工具失败/);
+});
+
+test('插件故障信号：真实响应上报成功，业务 isError 不上报系统性故障', async (t) => {
+  const failures: unknown[] = [];
+  const successes: string[] = [];
+  const h = createHarness(t, { pool: {
+    onSystemicFailure: (failure: unknown) => failures.push(failure),
+    onRequestSuccess: (name: string) => successes.push(name),
+  } });
+  const failed = await h.pool.callTool('fake', 'fail', {});
+  assert.equal(failed.isError, true);
+  const ok = await h.pool.callTool('fake', 'echo', { text: 'ok' });
+  assert.equal(ok.isError ?? false, false);
+  assert.deepEqual(failures, []);
+  assert.deepEqual(successes, ['fake', 'fake']);
+});
+
+test('插件故障信号：握手期进程退出只计一次 start，不重复计 crash', async (t) => {
+  const failures: Array<{ category: string }> = [];
+  const h = createHarness(t, { pool: {
+    requestTimeoutMs: 5,
+    onSystemicFailure: (failure: { category: string }) => failures.push(failure),
+  } });
+  const stopped = await h.pool.callTool('fake', 'echo', { text: 'x' });
+  assert.equal(stopped.isError, true);
+  assert.deepEqual(failures.map((failure) => failure.category), ['start']);
+});
+
+test('插件故障信号：tools/list 握手窗口只计一次 start', async (t) => {
+  const failures: Array<{ category: string }> = [];
+  const h = createHarness(t, { requestTimeoutMs: 100, env: { FAKE_MCP_HANG_LIST: '1' }, pool: {
+    onSystemicFailure: (failure: { category: string }) => failures.push(failure),
+  } });
+  const stopped = await h.pool.callTool('fake', 'echo', { text: 'x' });
+  assert.equal(stopped.isError, true);
+  assert.deepEqual(failures.map((failure) => failure.category), ['start']);
+});
+
+test('插件故障信号：握手完成后的进程退出计一次 crash', async (t) => {
+  const failures: Array<{ category: string }> = [];
+  const h = createHarness(t, { env: { FAKE_MCP_EXIT_ON_CALL: '1' }, pool: {
+    onSystemicFailure: (failure: { category: string }) => failures.push(failure),
+  } });
+  const stopped = await h.pool.callTool('fake', 'echo', { text: 'x' });
+  assert.equal(stopped.isError, true);
+  await waitFor(() => failures.length > 0, 1000, 'crash 故障信号');
+  assert.deepEqual(failures.map((failure) => failure.category), ['crash']);
 });
 
 test('M7-3 默认不信任：MCP 工具 destructive 注册，annotations 不参与三属性判定', async (t) => {
@@ -1095,6 +1146,25 @@ test('A② 成功之后稳定运行满重置窗口 ⇒ 计数归零（不拿"很
 });
 
 // ──────────────────────────────── A③ 资源观测（2026-10-10） ────────────────────────────────
+
+test('A③ 关机等待在飞 RSS 采样，不遗留采样器句柄', async (t) => {
+  let release: (() => void) | undefined;
+  let sampled = false;
+  const h = createHarness(t, { pool: { rssSampler: async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    sampled = true;
+    return { rssMb: 1, source: 'proc' as const };
+  } } });
+  await h.pool.listTools('fake', { requireConnected: true });
+  let stoppedEarly = false;
+  const stopped = h.pool.shutdown().then(() => { stoppedEarly = true; });
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  assert.equal(stoppedEarly, false);
+  assert.equal(sampled, false);
+  release!();
+  await stopped;
+  assert.equal(sampled, true);
+});
 
 test('A③ 资源观测：启动耗时 / RSS / 在飞峰值 / 回收时刻 都进 internal 事件与快照', async (t) => {
   const h = createHarness(t, {

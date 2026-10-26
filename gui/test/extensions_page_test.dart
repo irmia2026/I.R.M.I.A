@@ -183,6 +183,7 @@ void main() {
     addTearDown(tester.view.reset);
     final api = _FakeApi({
       '/api/skills': skills,
+      '/api/plugins': {'items': <dynamic>[]},
       '/api/mcp': mcp,
       '/api/tools': tools,
       '/api/hooks': hooks,

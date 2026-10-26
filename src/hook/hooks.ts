@@ -88,6 +88,10 @@ export interface HookConfigEntry {
   command: string;
   /** 单条超时（毫秒），超时即杀且丢弃输出 */
   timeoutMs: number;
+  /** 可选的条目级工作目录；缺省沿用 runner */
+  cwd?: string;
+  /** 宿主附加的插件身份，仅用于故障归因 */
+  plugin?: { id: string; contentHash: string; contributionName: string };
   /**
    * false = 保留这条配置但**不装配**（临时停用一条钩子不必把它的命令行删掉）。
    *
@@ -106,10 +110,13 @@ export interface HookConfigLoadResult {
   exists: boolean;
 }
 
-/** `hook/fired` 事件的落库载荷（schema §7 恰好这两个字段，不额外发明） */
+/** `hook/fired` 的故障归因载荷；内置 Hook 不带插件字段 */
 export interface HookFiredRecord {
   hook: HookPoint;
   outcome: HookOutcome;
+  pluginId?: string;
+  contentHash?: string;
+  contributionName?: string;
 }
 
 /** 钩子看到的投影摘要：只给可序列化的事实，不给宿主内部对象 */
@@ -375,6 +382,10 @@ export function parseHookEntry(item: unknown, index: number): HookConfigEntry | 
     timeoutMs,
   };
   if (typeof condition === 'string') entry.if = condition;
+  if (item['cwd'] !== undefined) {
+    if (typeof item['cwd'] !== 'string' || item['cwd'].trim() === '') return `${where}.cwd 必须是非空路径`;
+    entry.cwd = item['cwd'];
+  }
   // 只有显式 `false` 才算停用：缺省与 true 都是启用（老配置里没有这个键）
   if (item['enabled'] === false) entry.enabled = false;
   return entry;
@@ -521,8 +532,8 @@ interface PointRun {
  * `ExecutionContext.hooks` 与 `AgentLoopDeps.hooks` 即可，不需要适配层。
  */
 export class HookRunner {
-  readonly entries: readonly HookConfigEntry[];
-  private readonly compiled: CompiledHook[];
+  entries: readonly HookConfigEntry[];
+  private compiled: CompiledHook[];
   private readonly cwd: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly spawner: HookSpawner;
@@ -541,6 +552,16 @@ export class HookRunner {
     this.digest = options.digest ?? (() => null);
     this.now = options.now ?? (() => new Date());
 
+    this.compiled = [];
+    this.rebuild();
+  }
+
+  setEntries(entries: readonly HookConfigEntry[]): void {
+    this.entries = entries;
+    this.rebuild();
+  }
+
+  private rebuild(): void {
     this.compiled = [];
     this.entries.forEach((entry, index) => {
       try {
@@ -744,7 +765,11 @@ export class HookRunner {
   private async fire(point: HookPoint, compiled: CompiledHook, payload: HookPayload): Promise<PointRun> {
     const run = await this.runOne(compiled, payload);
     try {
-      this.emit({ hook: point, outcome: run.outcome });
+      this.emit({ hook: point, outcome: run.outcome,
+        ...(compiled.raw.plugin === undefined ? {} : {
+          pluginId: compiled.raw.plugin.id, contentHash: compiled.raw.plugin.contentHash,
+          contributionName: compiled.raw.plugin.contributionName,
+        }) });
     } catch {
       // 事件通道故障不影响判定（它本身是观测）
     }
@@ -762,7 +787,7 @@ export class HookRunner {
   private async runOne(compiled: CompiledHook, payload: HookPayload): Promise<HookRunOutcome> {
     let handle: HookProcess;
     try {
-      handle = this.spawner({ command: compiled.raw.command, cwd: this.cwd, env: this.env });
+      handle = this.spawner({ command: compiled.raw.command, cwd: compiled.raw.cwd ?? this.cwd, env: this.env });
     } catch (error) {
       return {
         outcome: 'error',

@@ -608,3 +608,17 @@ test('⑤e 盘上躺着**缺 descClauseVersion 的老快照**（升级上来的�
   const count = (await eventsOf(rig)).filter((event) => event.type === 'mcp/index').length;
   assert.equal(count, 2, '重建过一次之后就照旧冻结（这一条挡住"每拍都重建"那个毛病）');
 });
+
+test('插件声明与 MCP 池共用合并面时，索引包含插件 server', async (t) => {
+  const declarations = [
+    { name: 'builtin', command: 'not-started' },
+    { name: 'demo__chat', command: 'not-started', desc: '由插件提供' },
+  ];
+  const rig = await makeRealWakeRig({ mcpDeclarations: () => declarations });
+  t.after(rig.dispose);
+  rig.append('wake/manual', { note: '查看合并后的 MCP' });
+  await tick(rig);
+  const segment = mcpSegmentOf(rig.requests[0]!.request);
+  assert.match(segment, /- builtin /);
+  assert.match(segment, /- demo__chat —— 由插件提供 /);
+});
