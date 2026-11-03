@@ -82,6 +82,32 @@ test('store：最近十张去重、同图三十天三次上限与今日计数', 
   assert.equal(store.sentToday(new Date('2026-10-03T00:00:00.000Z')), 1);
 });
 
+test('store：discard 从索引与文件彻底移除，rejected 相对路径也安全', (t) => {
+  const store = rig(t);
+  const pending = store.importSticker({bytes: pngBytes(31, 31), mime: 'image/png', source: 'collected'});
+  const pendingPath = store.entryPath('collected', pending.entry.file);
+  assert.equal(store.discard(pending.entry.id), true);
+  assert.equal(store.findById(pending.entry.id), null);
+  assert.equal(existsSync(pendingPath), false);
+  assert.equal(store.discard(pending.entry.id), false, '找不到不抛，返回 false');
+
+  const rejected = store.importSticker({bytes: pngBytes(32, 32), mime: 'image/png', source: 'collected'});
+  store.review(rejected.entry.id, 'reject');
+  const rejectedPath = store.entryPath('collected', store.findById(rejected.entry.id)!.entry.file);
+  assert.equal(store.discard(rejected.entry.id), true);
+  assert.equal(store.findById(rejected.entry.id), null);
+  assert.equal(existsSync(rejectedPath), false);
+  assert.equal(store.purgeRejected(), 0);
+});
+
+test('store：手动 reject 仍保留在 rejected，不被 discard 逻辑误伤', (t) => {
+  const store = rig(t);
+  const imported = store.importSticker({bytes: pngBytes(33, 33), mime: 'image/png', source: 'collected'});
+  store.review(imported.entry.id, 'reject');
+  assert.equal(store.findById(imported.entry.id)?.entry.status, 'rejected');
+  assert.equal(store.listEntries().length, 1);
+});
+
 test('store：拒绝保留原图、恢复回库、彻底删除只清 rejected', (t) => {
   const store = rig(t);
   const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'collected' });

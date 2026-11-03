@@ -158,18 +158,23 @@ test('harvest：等待 phashReady 后再处理', async (t) => {
   assert.equal((await pending).result, 'pending');
 });
 
-test('harvest：isSticker=false 进 rejected，不进可发送列表', async (t) => {
+test('harvest：isSticker=false 直接丢弃，rejected 里也不留记录', async (t) => {
   const { store, harvester, events } = rig(t, {
     text: '{"tags":["开心"],"intensity":"obvious","confidence":0.9,"note":"截图","isSticker":false}',
   });
   const outcome = await harvester.harvest(message(pngBytes(32, 32)));
   assert.equal(outcome.result, 'rejected');
   assert.equal(outcome.reason, 'not-sticker');
-  assert.equal(store.listEntries()[0]?.entry.status, 'rejected');
+  assert.equal(outcome.entry, undefined);
+  assert.equal(store.listEntries().length, 0);
   assert.equal(store.candidates('开心').length, 0);
-  const harvested = events.find((event) => event.type === 'sticker/harvested')!.data as {result: string; reason: string};
+  assert.equal(store.purgeRejected(), 0, '没有 rejected 采收记录');
+  const harvested = events.find((event) => event.type === 'sticker/harvested')!.data as {
+    result: string; reason: string; discarded?: boolean;
+  };
   assert.equal(harvested.result, 'rejected');
   assert.equal(harvested.reason, 'not-sticker');
+  assert.equal(harvested.discarded, true);
 });
 
 test('harvest：骰子未命中不写文件也不打标', async (t) => {

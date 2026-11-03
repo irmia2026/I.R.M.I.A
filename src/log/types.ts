@@ -3578,6 +3578,7 @@ export interface StickerHarvested extends EventEnvelope<'sticker/harvested', {
   result: 'pending' | 'rejected';
   reason?: string;
   resizeFailed?: true;
+  discarded?: true;
 }> {}
 export interface StickerTagged extends EventEnvelope<'sticker/tagged', {
   stickerId: string;

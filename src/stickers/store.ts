@@ -258,6 +258,24 @@ export class StickerStore {
     return entry;
   }
 
+  /**
+   * 彻底丢弃一条自动采收记录：从包索引删除 + 删文件。人工 review('reject') 不走这里。
+   * 找不到返回 false；文件已缺失或删除失败不回滚索引（记录已经不该留在库里）。
+   */
+  discard(id: string): boolean {
+    const found = this.findById(id);
+    if (found === null) return false;
+    const { pack, entry } = found;
+    pack.stickers = pack.stickers.filter((item) => item.id !== id);
+    this.writePack(pack);
+    try {
+      rmSync(this.entryPath(pack.packId, entry.file), { force: true });
+    } catch {
+      // 索引已经移除；坏路径/权限问题不应把已丢弃的记录重新暴露出来。
+    }
+    return true;
+  }
+
   update(id: string, patch: { tags?: StickerTag[]; intensity?: StickerEntry['intensity'] }): StickerEntry {
     const found = this.findById(id);
     if (found === null) throw new Error(`找不到贴纸：${id}`);

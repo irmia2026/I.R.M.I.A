@@ -105,6 +105,13 @@ test('API：列表、筛选、九标签计数与分页参数都走真实库存',
   assert.equal(list.body.counts.pending, 1);
   assert.equal(list.body.tags['开心'], 1);
   assert.equal(list.body.settings.harvestProbability, 0.15);
+  assert.equal(list.body.settings.activeProbability, fx.config.stickers.activeProbability);
+  assert.equal(list.body.settings.cooldownSeconds, fx.config.stickers.cooldownSeconds);
+  fx.config.stickers.activeProbability = 0.42;
+  fx.config.stickers.cooldownSeconds = 17;
+  const refreshed = await fx.call('GET', '/api/stickers');
+  assert.equal(refreshed.body.settings.activeProbability, 0.42);
+  assert.equal(refreshed.body.settings.cooldownSeconds, 17);
   const filtered = await fx.call('GET', '/api/stickers?status=pending&source=collected');
   assert.deepEqual(filtered.body.items.map((item: any) => item.id), [collected.entry.id]);
   assert.equal(filtered.body.items[0].source, 'collected');
@@ -144,13 +151,17 @@ test('API：上传近重复 phash 被 duplicate 拒绝，不新增条目', async
   assert.equal(fx.store.listEntries().length, 1);
 });
 
-test('API：上传非表情包 isSticker=false 进 rejected，不自动可用', async (t) => {
+test('API：上传非表情包 isSticker=false 返回 400 not-sticker，库里不新增', async (t) => {
   const fx = await rig(t, true,
     JSON.stringify({tags: ['开心'], intensity: 'obvious', confidence: 0.96, note: '截图', isSticker: false}));
-  const uploaded = await fx.upload();
-  assert.equal(uploaded.entry.status, 'rejected');
-  assert.equal(uploaded.tagging.reason, 'not-sticker');
-  assert.equal(fx.store.candidates('开心').length, 0);
+  const response = await fx.call('POST', '/api/stickers', {
+    mime: 'image/png', data: pngBytes().toString('base64'),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.code, 'not-sticker');
+  assert.match(response.body.error.message, /不是表情包/u);
+  assert.equal(fx.store.listEntries().length, 0);
+  assert.equal(fx.store.purgeRejected(), 0);
 });
 
 test('API：批准、改标签、拒绝与恢复都落人审事件', async (t) => {

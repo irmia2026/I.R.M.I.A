@@ -131,6 +131,8 @@ export class StickerService {
         taggingEnabled: config.tagging.enabled,
         groups: config.groups,
         passiveProbability: config.passiveProbability,
+        activeProbability: config.activeProbability,
+        cooldownSeconds: config.cooldownSeconds,
         minTurnsBetween: config.minTurnsBetween,
         rejectedRetentionDays: config.rejectedRetentionDays,
       },
@@ -183,11 +185,11 @@ export class StickerService {
         bytes, mime, source: 'owner', ...(phash === null ? {} : {phash}),
       });
       if (imported.duplicate) return { entry: this.entry(imported.entry.id), duplicate: true, tagging: null };
-      let outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
+      const outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
       if (outcome.reason === 'not-sticker') {
-        // 上传与采集同一条判据：不是表情包就进 rejected，不留在可发送列表。
-        const rejected = this.deps.store.review(imported.entry.id, 'reject');
-        outcome = {...outcome, entry: rejected};
+        // 上传与采集同一条判据：非表情包直接丢弃，连 rejected 都不留。
+        this.deps.store.discard(imported.entry.id);
+        throw new StickerServiceError(400, 'not-sticker', '这张图不是表情包/贴纸，没有收录');
       }
       return { entry: this.entry(outcome.entry.id), duplicate: false, tagging: outcome };
     });

@@ -127,13 +127,15 @@ export class StickerHarvester {
       if (imported.duplicate) return this.reject(message, 'duplicate', sha256);
       const tagged = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime: finalMime });
       if (tagged.reason === 'not-sticker') {
-        const rejected = this.deps.store.review(imported.entry.id, 'reject');
+        // 非表情包根本不入库：不是 reject（rejected 里也不留采收记录）。
+        this.deps.store.discard(imported.entry.id);
         this.deps.emit?.('sticker/harvested', {
           chatType: message.chatType, sha256, result: 'rejected', reason: 'not-sticker',
+          discarded: true,
           ...(resizeFailed === undefined ? {} : {resizeFailed}),
         });
         return {
-          result: 'rejected', reason: 'not-sticker', sha256, entry: rejected,
+          result: 'rejected', reason: 'not-sticker', sha256,
           ...(resizeFailed === undefined ? {} : {resizeFailed}),
         };
       }
