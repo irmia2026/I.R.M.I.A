@@ -4,6 +4,7 @@ import test, { type TestContext } from 'node:test';
 
 import { createHash } from 'node:crypto';
 import { StickerHarvester, STICKER_HARVEST_MAX_BYTES, type HarvestMessage } from '../src/stickers/harvest.ts';
+import type { StickerPHasher } from '../src/stickers/phash.ts';
 import type { StickerResizer } from '../src/stickers/resize.ts';
 import { StickerStore } from '../src/stickers/store.ts';
 import { StickerTagger } from '../src/stickers/tagger.ts';
@@ -17,7 +18,10 @@ const message = (bytes: Buffer, chatType: HarvestMessage['chatType'] = 'group'):
   attachments: [{ type: 'image', url: dataUrl(bytes) }],
 });
 
-function rig(t: TestContext, options: { probability?: number; text?: string; resize?: StickerResizer } = {}) {
+function rig(t: TestContext, options: {
+  probability?: number; text?: string; resize?: StickerResizer;
+  phash?: StickerPHasher; phashReady?: Promise<unknown>;
+} = {}) {
   const dir = tempDirSync('irmia-sticker-harvest-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // store 与 harvester 必须用同一个固定时钟：store 用 04:00 写限流窗口，而 harvester
@@ -40,6 +44,8 @@ function rig(t: TestContext, options: { probability?: number; text?: string; res
     random: () => 0,
     now,
     ...(options.resize === undefined ? {} : {resize: options.resize}),
+    phash: options.phash ?? (async (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 16)),
+    ...(options.phashReady === undefined ? {} : {phashReady: options.phashReady}),
     emit: (type, data) => events.push({ type, data }),
   });
   return { store, harvester, events, modelCalls: () => modelCalls };
@@ -121,6 +127,35 @@ test('harvest：resize 失败回退原图、事件带 resizeFailed，不崩', as
   assert.deepEqual(store.readEntryBytes(store.listEntries()[0]!.entry.id), original);
   const harvested = events.find((event) => event.type === 'sticker/harvested')!.data as {resizeFailed?: boolean};
   assert.equal(harvested.resizeFailed, true);
+});
+
+test('harvest：换尺寸/编码后的近重复 phash 被 duplicate 拒绝，不新增条目', async (t) => {
+  let call = 0;
+  const hashes = ['0000000000000000', '0000000000000001'];
+  const { store, harvester } = rig(t, {phash: async () => hashes[Math.min(call++, 1)]!});
+  const first = await harvester.harvest(message(pngBytes(32, 32)));
+  assert.equal(first.result, 'pending');
+  const second = await harvester.harvest(message(pngBytes(64, 64)));
+  assert.equal(second.result, 'rejected');
+  assert.equal(second.reason, 'duplicate');
+  assert.equal(store.listEntries().length, 1, '近重复没有新增条目');
+});
+
+test('harvest：phash 失败不崩，退回 sha 层并继续入库', async (t) => {
+  const { store, harvester } = rig(t, {phash: async () => null});
+  const outcome = await harvester.harvest(message(pngBytes(32, 32)));
+  assert.equal(outcome.result, 'pending');
+  assert.equal(store.listEntries().length, 1);
+});
+
+test('harvest：等待 phashReady 后再处理', async (t) => {
+  let resolveReady!: () => void;
+  const phashReady = new Promise<void>((resolve) => { resolveReady = resolve; });
+  const { harvester } = rig(t, {phash: async () => '0000000000000000', phashReady});
+  const pending = harvester.harvest(message(pngBytes(32, 32)));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  resolveReady();
+  assert.equal((await pending).result, 'pending');
 });
 
 test('harvest：isSticker=false 进 rejected，不进可发送列表', async (t) => {

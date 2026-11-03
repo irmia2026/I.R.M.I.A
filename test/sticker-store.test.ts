@@ -53,6 +53,26 @@ test('store：init 幂等降级旧的 collected 自动批准条目，owner/人�
   assert.equal(store.migrateLegacyCollectedApprovals(), 0, '幂等');
 });
 
+test('store：phash 写入、最近邻查找、补写与缺 hash 列表', (t) => {
+  const store = rig(t);
+  const a = store.importSticker({
+    bytes: pngBytes(21, 21), mime: 'image/png', source: 'collected', phash: '0000000000000000',
+  });
+  const b = store.importSticker({
+    bytes: pngBytes(22, 22), mime: 'image/png', source: 'collected', phash: 'ffffffffffffffff',
+  });
+  const c = store.importSticker({bytes: pngBytes(23, 23), mime: 'image/png', source: 'owner'});
+  assert.equal(a.entry.phash, '0000000000000000');
+  assert.equal(store.findByPHash('0000000000000001')?.entry.id, a.entry.id, '距离 1');
+  assert.equal(store.findByPHash('00000000000000ff'), null, '距离 8 超阈值');
+  assert.equal(store.findByPHash('ffffffffffffffff')?.entry.id, b.entry.id);
+  assert.deepEqual(store.entriesMissingPHash().map((row) => row.id), [c.entry.id]);
+  assert.ok(store.entriesMissingPHash()[0]!.path.endsWith('.png'));
+  store.setPHash(c.entry.id, '00ff00ff00ff00ff');
+  assert.equal(store.findById(c.entry.id)?.entry.phash, '00ff00ff00ff00ff');
+  assert.deepEqual(store.entriesMissingPHash(), []);
+});
+
 test('store：最近十张去重、同图三十天三次上限与今日计数', (t) => {
   const store = rig(t);
   const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'owner' });

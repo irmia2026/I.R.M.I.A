@@ -13,6 +13,8 @@ export interface StickerEntry {
   intensity: StickerIntensity;
   status: StickerStatus;
   sha256: string;
+  /** 64-bit dHash, 16 lowercase hex; absent for legacy entries until backfilled. */
+  phash?: string;
   addedAt: string;
   rejectedAt?: string;
   tagSource: StickerTagSource;

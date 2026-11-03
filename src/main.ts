@@ -25,6 +25,7 @@ import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channe
 // P1b 的入站唯一收口：过滤链 → 指令 → 原有唤醒/信箱分流（语义全在模块文件头）
 import { InboundPipeline } from './channel/inbound.ts';
 import { StickerHarvester } from './stickers/harvest.ts';
+import { backfillStickerPHashes } from './stickers/phash-backfill.ts';
 import { StickerRuntime } from './stickers/runtime.ts';
 import { StickerService } from './stickers/service.ts';
 import { StickerStore } from './stickers/store.ts';
@@ -2357,6 +2358,17 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     applyOne(recovery.projection, event);
     finalizePressure(recovery.projection, event.ts);
   };
+  // 回填在后台跑：服务 ready 不等它；采集/上传入口通过 phashReady 等它完成。
+  const stickerPHashReady: Promise<void> = backfillStickerPHashes(stickerStore)
+    .then((result) => {
+      if (result.total > 0) {
+        write(`[贴纸] 感知哈希回填：${result.filled}/${result.total} 成功，失败 ${result.failed} 张`
+          + (result.failed > 0 ? '（失败项会在下次启动重试；采集仍可用）' : ''));
+      }
+    })
+    .catch(() => {
+      write('[贴纸] 感知哈希回填失败：本次不阻塞启动；采集/上传暂时只用 sha256 去重');
+    });
   const stickerVisionClient: import('./tools/vision.js').VisionModelClient = {
     generate: async (request) => {
       const client = pluginModelClientRef.current;
@@ -2379,6 +2391,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   });
   const stickerService = new StickerService({
     store: stickerStore, tagger: stickerTagger, config: () => config, emit: emitStickerEvent,
+    phashReady: stickerPHashReady,
   });
 
   if (apiKey !== null) {
@@ -3231,6 +3244,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     probability: () => config.stickers.harvest.enabled ? config.stickers.harvest.probability : 0,
     maxGlobalPerHour: () => config.stickers.harvest.maxGlobalPerHour,
     now,
+    phashReady: stickerPHashReady,
     emit: emitStickerEvent,
   });
   const harvestQuietly = (data: WakeChannel['data']): void => {

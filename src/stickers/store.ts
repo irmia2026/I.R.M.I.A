@@ -6,6 +6,7 @@ import {
 import { dirname, join, resolve, sep } from 'node:path';
 
 import { stickerExtension } from './media.ts';
+import { STICKER_PHASH_MAX_DISTANCE, phashDistance } from './phash.ts';
 import {
   emptyStickerState, type StickerEntry, type StickerMime, type StickerPack, type StickerSource, type StickerState,
   type StickerTag, type StickerTaggingResult,
@@ -123,6 +124,43 @@ export class StickerStore {
     return this.listEntries().find(({ entry }) => entry.sha256 === sha256) ?? null;
   }
 
+  /** Nearest perceptual hash within maxDistance; null if none. */
+  findByPHash(phash: string, maxDistance = STICKER_PHASH_MAX_DISTANCE): { pack: StickerPack; entry: StickerEntry } | null {
+    if (!/^[0-9a-f]{16}$/u.test(phash)) return null;
+    let best: { pack: StickerPack; entry: StickerEntry; distance: number } | null = null;
+    for (const row of this.listEntries()) {
+      if (row.entry.phash === undefined) continue;
+      const distance = phashDistance(row.entry.phash, phash);
+      if (distance <= maxDistance && (best === null || distance < best.distance)) {
+        best = {...row, distance};
+      }
+    }
+    return best === null ? null : {pack: best.pack, entry: best.entry};
+  }
+
+  setPHash(id: string, phash: string): StickerEntry {
+    if (!/^[0-9a-f]{16}$/u.test(phash)) throw new Error('非法感知哈希');
+    const found = this.findById(id);
+    if (found === null) throw new Error(`找不到贴纸：${id}`);
+    found.entry.phash = phash;
+    this.writePack(found.pack);
+    return found.entry;
+  }
+
+  entriesMissingPHash(): Array<{
+    packId: string; id: string; file: string; path: string; mime: StickerMime;
+  }> {
+    return this.listEntries()
+      .filter(({ entry }) => entry.phash === undefined)
+      .map(({ pack, entry }) => ({
+        packId: pack.packId,
+        id: entry.id,
+        file: entry.file,
+        path: this.entryPath(pack.packId, entry.file),
+        mime: this.mimeOfEntry(entry),
+      }));
+  }
+
   entryPath(packId: string, file: string): string {
     const full = resolve(this.root, 'packs', packId, file);
     if (full !== this.root && !full.startsWith(this.root + sep)) throw new Error('贴纸文件越出数据目录');
@@ -140,6 +178,7 @@ export class StickerStore {
     mime: StickerMime;
     source: Exclude<StickerSource, 'plugin'>;
     addedAt?: string;
+    phash?: string;
   }): { entry: StickerEntry; duplicate: boolean } {
     this.init();
     const sha256 = createHash('sha256').update(input.bytes).digest('hex');
@@ -152,6 +191,7 @@ export class StickerStore {
     const id = `${packId === 'collected' ? 'collected' : 'ws'}-${sha256.slice(0, 16)}`;
     const entry: StickerEntry = {
       id, file, tags: [], intensity: 'obvious', status: 'pending', sha256,
+      ...(input.phash === undefined ? {} : {phash: input.phash}),
       addedAt: input.addedAt ?? this.clock().toISOString(), tagSource: 'auto', tagConfidence: 0,
       note: '', stats: { sent: 0, lastSentAt: null },
     };

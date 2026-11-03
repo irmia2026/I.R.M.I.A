@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config/config.ts';
 import { normalizeStickerMime, sniffStickerMime, stickerDimensions } from './media.ts';
+import { computeStickerPHash, type StickerPHasher } from './phash.ts';
 import type { StickerStore } from './store.ts';
 import type { StickerTagger, StickerTaggingOutcome } from './tagger.ts';
 import {
@@ -28,6 +29,8 @@ export interface StickerServiceDeps {
   tagger: StickerTagger;
   config: () => AppConfig;
   emit: (type: string, data: unknown) => void;
+  phash?: StickerPHasher;
+  phashReady?: Promise<unknown>;
 }
 
 export interface StickerView extends StickerEntry {
@@ -165,7 +168,20 @@ export class StickerService {
       throw new StickerServiceError(400, 'sticker-dimensions-too-large', '图片宽高都不能超过 1024 像素');
     }
     return await this.mutate(async () => {
-      const imported = this.deps.store.importSticker({ bytes, mime, source: 'owner' });
+      await this.deps.phashReady?.catch(() => undefined);
+      let phash: string | null = null;
+      try {
+        phash = await (this.deps.phash ?? computeStickerPHash)(bytes, mime);
+      } catch {
+        phash = null;
+      }
+      if (phash !== null) {
+        const near = this.deps.store.findByPHash(phash);
+        if (near !== null) return {entry: this.entry(near.entry.id), duplicate: true, tagging: null};
+      }
+      const imported = this.deps.store.importSticker({
+        bytes, mime, source: 'owner', ...(phash === null ? {} : {phash}),
+      });
       if (imported.duplicate) return { entry: this.entry(imported.entry.id), duplicate: true, tagging: null };
       let outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
       if (outcome.reason === 'not-sticker') {

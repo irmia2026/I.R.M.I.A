@@ -8,6 +8,7 @@ import { defaultConfig } from '../src/config/config.ts';
 import { EventLog } from '../src/log/event-log.ts';
 import type { AppEvent } from '../src/log/types.js';
 import { defaultVisibility, emptyProjection } from '../src/log/types.ts';
+import type { StickerPHasher } from '../src/stickers/phash.ts';
 import { StickerService } from '../src/stickers/service.ts';
 import { StickerStore } from '../src/stickers/store.ts';
 import { StickerTagger } from '../src/stickers/tagger.ts';
@@ -23,7 +24,7 @@ const PASSWORD = 'sticker-api-test-password';
 const SALT = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
 const HASH = scryptSync(PASSWORD, SALT, 32, { N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p }).toString('hex');
 
-async function rig(t: TestContext, withService = true, tagText = '') {
+async function rig(t: TestContext, withService = true, tagText = '', phash?: StickerPHasher) {
   const dir = tempDirSync('irmia-sticker-api-');
   const dataDir = join(dir, 'data');
   mkdirSync(dataDir, { recursive: true });
@@ -59,7 +60,10 @@ async function rig(t: TestContext, withService = true, tagText = '') {
     finalizePressure(projection, event.ts);
     return event;
   };
-  const service = new StickerService({ store, tagger, config: () => config, emit: append });
+  const service = new StickerService({
+    store, tagger, config: () => config, emit: append,
+    phash: phash ?? (async (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 16)),
+  });
   const server: WebServer = await startWebServer({
     log, projection, config, personaRoot: join(dataDir, 'persona'), dataDir,
     timers: new TimerStore(join(dataDir, 'timers.json'), { now }), now,
@@ -85,7 +89,8 @@ async function rig(t: TestContext, withService = true, tagText = '') {
     const text = bytes.toString('utf8');
     return { status: response.status, body: text.startsWith('{') || text.startsWith('[') ? JSON.parse(text) as any : bytes };
   };
-  const upload = async () => (await call('POST', '/api/stickers', { mime: 'image/png', data: pngBytes().toString('base64') })).body;
+  const upload = async (bytes: Buffer = pngBytes()) =>
+    (await call('POST', '/api/stickers', { mime: 'image/png', data: bytes.toString('base64') })).body;
   return { store, config, modelCalls, call, upload, dir };
 }
 
@@ -125,6 +130,18 @@ test('API：上传→视觉打标→待审预览；高置信也不绕过人工�
   assert.equal(second.duplicate, true);
   assert.equal(second.tagging, null);
   assert.equal(fx.modelCalls.length, 1);
+});
+
+test('API：上传近重复 phash 被 duplicate 拒绝，不新增条目', async (t) => {
+  let call = 0;
+  const hashes = ['0000000000000000', '0000000000000001'];
+  const fx = await rig(t, true, '', async () => hashes[Math.min(call++, 1)]!);
+  const first = await fx.upload(pngBytes(10, 10));
+  assert.equal(first.duplicate, false);
+  const second = await fx.upload(pngBytes(20, 20));
+  assert.equal(second.duplicate, true);
+  assert.equal(second.entry.id, first.entry.id);
+  assert.equal(fx.store.listEntries().length, 1);
 });
 
 test('API：上传非表情包 isSticker=false 进 rejected，不自动可用', async (t) => {

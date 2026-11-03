@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { parseImageDataUrl } from '../log/types.ts';
 import { normalizeStickerMime, sniffStickerMime, stickerDimensions } from './media.ts';
+import { computeStickerPHash, type StickerPHasher } from './phash.ts';
 import { resizeStickerImage, type StickerResizer } from './resize.ts';
 import type { StickerStore } from './store.ts';
 import type { StickerTagger } from './tagger.ts';
@@ -37,6 +38,9 @@ export interface StickerHarvesterDeps {
   now?: () => Date;
   emit?: (type: string, data: unknown) => void;
   resize?: StickerResizer;
+  phash?: StickerPHasher;
+  /** Resolves after startup backfill (or failure); harvest waits so old stickers are comparable. */
+  phashReady?: Promise<unknown>;
 }
 
 export class StickerHarvester {
@@ -55,6 +59,8 @@ export class StickerHarvester {
   }
 
   async harvest(message: HarvestMessage, options: { self?: boolean; owner?: boolean } = {}): Promise<HarvestOutcome> {
+    // 回填失败也放行；等待只是为了不在旧图尚无 phash 时抢先入库。
+    await this.deps.phashReady?.catch(() => undefined);
     const probability = this.probability();
     if (probability <= 0) return { result: 'skipped', reason: 'disabled', sha256: '' };
     if (options.self === true) return this.reject(message, 'self-message', '');
@@ -97,6 +103,15 @@ export class StickerHarvester {
         return this.reject(message, 'too-large', sha256);
       }
       if (this.deps.store.findBySha256(sha256) !== null) return this.reject(message, 'duplicate', sha256);
+      let phash: string | null = null;
+      try {
+        phash = await (this.deps.phash ?? computeStickerPHash)(bytes, finalMime);
+      } catch {
+        phash = null;
+      }
+      if (phash !== null && this.deps.store.findByPHash(phash) !== null) {
+        return this.reject(message, 'duplicate', sha256);
+      }
       const sessionKey = `${message.channel}:${message.chatType}:${message.chatId}`;
       if (!this.deps.store.harvestAllowed(sessionKey, this.now(), 10, this.maxGlobalPerHour())) {
         return this.reject(message, 'rate-limited', sha256);
@@ -106,7 +121,9 @@ export class StickerHarvester {
       if (!this.deps.store.consumeHarvest(sessionKey, this.now(), 10, this.maxGlobalPerHour())) {
         return this.reject(message, 'rate-limited', sha256);
       }
-      const imported = this.deps.store.importSticker({ bytes, mime: finalMime, source: 'collected' });
+      const imported = this.deps.store.importSticker({
+        bytes, mime: finalMime, source: 'collected', ...(phash === null ? {} : {phash}),
+      });
       if (imported.duplicate) return this.reject(message, 'duplicate', sha256);
       const tagged = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime: finalMime });
       if (tagged.reason === 'not-sticker') {
