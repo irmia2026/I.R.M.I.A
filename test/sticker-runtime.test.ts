@@ -11,10 +11,10 @@ import type { MediaRequest, ReplyOutcome } from '../src/tools/admin.js';
 import { pngBytes } from './helpers/sticker-fixtures.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
-function rig(t: TestContext, options: { affect?: boolean; media?: boolean; state?: AffectState; random?: () => number } = {}) {
+function rig(t: TestContext, options: { affect?: boolean; media?: boolean; state?: AffectState; random?: () => number; now?: () => Date } = {}) {
   const dir = tempDirSync('irmia-sticker-runtime-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const now = () => new Date('2026-10-31T04:00:00.000Z');
+  const now = options.now ?? (() => new Date('2026-10-31T04:00:00.000Z'));
   const store = new StickerStore(dir, now);
   store.init();
   const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'owner' });
@@ -72,6 +72,44 @@ test('active：主动选图、发送与事件；同一轮至多一张', async (t
   assert.deepEqual(sent?.data, {
     source: 'active', tag: '开心', stickerId: id, position: 'after', dice: 0, candidates: [id],
   });
+});
+
+test('activeProbability：0 永不、1 放行、0.5 固定 random 边界', async (t) => {
+  const zero = rig(t, {random: () => 0});
+  zero.config.stickers.activeProbability = 0;
+  assert.equal(zero.runtime.active(1, 'c2c', 'onebot', '开心'), null);
+  assert.ok(zero.events.some((event) => event.type === 'sticker/skipped'
+    && (event.data as {reason: string}).reason === 'dice'));
+
+  const one = rig(t, {random: () => 0.999});
+  one.config.stickers.activeProbability = 1;
+  assert.ok(one.runtime.active(1, 'c2c', 'onebot', '开心') !== null);
+
+  const boundary = rig(t, {random: () => 0.5});
+  boundary.config.stickers.activeProbability = 0.5;
+  assert.equal(boundary.runtime.active(1, 'c2c', 'onebot', '开心'), null, '[0, p) 语义：0.5 不过');
+
+  const below = rig(t, {random: () => 0.499});
+  below.config.stickers.activeProbability = 0.5;
+  assert.ok(below.runtime.active(1, 'c2c', 'onebot', '开心') !== null);
+});
+
+test('cooldownSeconds：全局门 29 秒拒绝、31 秒放行，主动与被动都受控', async (t) => {
+  const base = new Date('2026-10-31T04:00:00.000Z');
+  const recent = rig(t, {now: () => new Date(base.getTime() + 29_000)});
+  recent.config.stickers.cooldownSeconds = 30;
+  const recentState = recent.store.readState(); recentState.sent = [{stickerId: recent.id, atMs: base.getTime()}]; recent.store.writeState(recentState);
+  assert.equal(recent.runtime.active(1, 'c2c', 'onebot', '开心'), null);
+  assert.ok(recent.events.some((event) => event.type === 'sticker/skipped'
+    && (event.data as {reason: string}).reason === 'cooldown'));
+  assert.equal(await passive(recent.runtime, 2), false);
+  assert.ok(recent.events.some((event) => event.type === 'sticker/skipped'
+    && (event.data as {reason: string}).reason === 'cooldown'));
+
+  const later = rig(t, {now: () => new Date(base.getTime() + 31_000)});
+  later.config.stickers.cooldownSeconds = 30;
+  const laterState = later.store.readState(); laterState.sent = [{stickerId: later.id, atMs: base.getTime()}]; later.store.writeState(laterState);
+  assert.ok(later.runtime.active(1, 'c2c', 'onebot', '开心') !== null);
 });
 
 test('active：四个失败出口各回调一次 onSkip 原因；成功不回调', async (t) => {

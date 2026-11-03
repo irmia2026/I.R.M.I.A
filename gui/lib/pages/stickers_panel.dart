@@ -80,9 +80,14 @@ class _StickersPanelState extends State<StickersPanel> {
   String? _selectedTag;
   String? _selectedStatus;
 
+  /// 熔断秒数：输入期间只改文本，提交（回车/失焦）才写后端。
+  final TextEditingController _cooldownInput = TextEditingController();
+  final FocusNode _cooldownFocus = FocusNode();
+
   @override
   void initState() {
     super.initState();
+    _cooldownFocus.addListener(_onCooldownFocusChanged);
     _accept(widget.view);
   }
 
@@ -94,6 +99,9 @@ class _StickersPanelState extends State<StickersPanel> {
 
   @override
   void dispose() {
+    _cooldownFocus.removeListener(_onCooldownFocusChanged);
+    _cooldownFocus.dispose();
+    _cooldownInput.dispose();
     _sideScroll.dispose();
     _rightScroll.dispose();
     super.dispose();
@@ -102,6 +110,7 @@ class _StickersPanelState extends State<StickersPanel> {
   void _accept(Map<String, dynamic> value) {
     _view = Map<String, dynamic>.from(value);
     _settings = Map<String, dynamic>.from((_view['settings'] as Map?) ?? const {});
+    _syncCooldownInput();
   }
 
   List<Map<String, dynamic>> get _entries => [
@@ -110,6 +119,40 @@ class _StickersPanelState extends State<StickersPanel> {
       ];
 
   int _count(String key) => ((_view['counts'] as Map?)?[key] as num?)?.toInt() ?? 0;
+
+  /// 后端的配置键是 dotted；老夹具 / 老响应只给短名时也认。
+  double get _activeProbability {
+    final raw = _settings['stickers.activeProbability'] ?? _settings['activeProbability'];
+    return ((raw as num?)?.toDouble() ?? 1).clamp(0.0, 1.0).toDouble();
+  }
+
+  int get _cooldownSeconds {
+    final raw = _settings['stickers.cooldownSeconds'] ?? _settings['cooldownSeconds'];
+    final value = (raw as num?)?.toInt() ?? 0;
+    return value < 0 ? 0 : value;
+  }
+
+  void _syncCooldownInput({bool force = false}) {
+    if (!force && _cooldownFocus.hasFocus) return;
+    final text = '$_cooldownSeconds';
+    if (_cooldownInput.text != text) _cooldownInput.text = text;
+  }
+
+  void _onCooldownFocusChanged() {
+    if (!_cooldownFocus.hasFocus) _submitCooldown();
+  }
+
+  void _submitCooldown() {
+    if (_busy || !mounted) return;
+    final value = int.tryParse(_cooldownInput.text.trim());
+    if (value == null || value < 0) {
+      _syncCooldownInput(force: true);
+      return;
+    }
+    _cooldownInput.text = '$value';
+    if (value == _cooldownSeconds) return;
+    unawaited(_setting('stickers.cooldownSeconds', value));
+  }
 
   List<Map<String, dynamic>> get _approvedEntries =>
       _entries.where((entry) => entry['status'] == 'approved').toList();
@@ -844,6 +887,7 @@ class _StickersPanelState extends State<StickersPanel> {
   Widget _settingsTab() {
     final s = IrmiaStrings.of(context);
     final probability = (_settings['stickers.harvest.probability'] as num?)?.toDouble() ?? (_settings['harvestProbability'] as num?)?.toDouble() ?? 0.15;
+    final activeProbability = _activeProbability;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _hint(s.stickerSettingsHint),
       SwitchListTile(
@@ -872,6 +916,44 @@ class _StickersPanelState extends State<StickersPanel> {
         onChanged: _busy ? null : (value) => setState(() => _settings['stickers.harvest.probability'] = value),
         onChangeEnd: _busy ? null : (value) => _setting('stickers.harvest.probability', value),
       ),
+      const Divider(height: 28),
+      Text('${s.stickerActiveProbability} ${(activeProbability * 100).round()}%'),
+      Slider(
+        key: const ValueKey('sticker-active-probability'),
+        value: activeProbability,
+        divisions: 100,
+        label: '${(activeProbability * 100).round()}%',
+        onChanged: _busy ? null : (value) => setState(() => _settings['stickers.activeProbability'] = value),
+        onChangeEnd: _busy ? null : (value) => _setting('stickers.activeProbability', value),
+      ),
+      _hint(s.stickerActiveProbabilityHint),
+      const SizedBox(height: 4),
+      Text(s.stickerCooldownSeconds),
+      const SizedBox(height: 6),
+      SizedBox(
+        width: 220,
+        child: TextField(
+          key: const ValueKey('sticker-cooldown-seconds'),
+          controller: _cooldownInput,
+          focusNode: _cooldownFocus,
+          enabled: !_busy,
+          keyboardType: TextInputType.number,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => _submitCooldown(),
+          decoration: const InputDecoration(
+            hintText: '0',
+            isDense: true,
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          ),
+        ),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        s.stickerCooldownSecondsHint,
+        style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).colorScheme.onSurfaceVariant),
+      ),
+      const SizedBox(height: 20),
     ]);
   }
 

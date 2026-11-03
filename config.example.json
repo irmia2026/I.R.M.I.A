@@ -220,6 +220,15 @@
     "spontaneousChance": 0.04,
     "privateOnly": true
   },
+  "stickers": {
+    "$comment": [
+      "贴纸主动发送门：activeProbability 是 speak 带 sticker 时的放行概率（0=永不，1=都尝试）。",
+      "cooldownSeconds 是全局强制间隔：最近一次成功发图后 N 秒内，主动与被动都拒绝。",
+      "其余贴纸运行期字段由代码默认值补齐。"
+    ],
+    "activeProbability": 1,
+    "cooldownSeconds": 0
+  },
   "speak": {
     "$comment": [
       "发言节奏（speak 的拆条投递）：段与段之间按「这一段要打多久」隔开，界面与 IM 同一个节奏。",

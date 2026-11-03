@@ -1064,6 +1064,10 @@ export interface IntimacyConfig {
 export interface StickersConfig {
   enabled: boolean;
   passiveProbability: number;
+  /** Active `speak` sticker dice; 0=never, 1=always. */
+  activeProbability: number;
+  /** Seconds after the latest successful sticker send during which both active and passive are refused. */
+  cooldownSeconds: number;
   minTurnsBetween: number;
   groups: boolean;
   rejectedRetentionDays: number;
@@ -1354,6 +1358,8 @@ function buildDefaults(dir: string): AppConfig {
     stickers: {
       enabled: true,
       passiveProbability: 0.12,
+      activeProbability: 1,
+      cooldownSeconds: 0,
       minTurnsBetween: 4,
       groups: false,
       rejectedRetentionDays: 7,
@@ -1869,11 +1875,14 @@ function defaultDocument(dir: string): JsonObject {
       $comment: [
         '私聊默认允许贴纸；群聊还要 channels.<x>.stickers=true 才发。enabled=false 时主动/被动都停用。',
         '被动默认 p=0.12、连续 4 轮未发且主导情绪 >=0.35 才候选；groups 是群功能总开关，默认关。',
+        'activeProbability：speak 带图时按此概率放行（0=永不，1=都尝试）；cooldownSeconds 是全局成功发图后的强制间隔。',
         '静默采收默认 p=0.15，0=关闭；enabled=false 也可关闭。私聊只收用户图，自我回声不收。',
         '打标默认开，单小时 20 张、并发 1；关闭后仍可入 inbox，但全部待审。拒绝图默认保留 7 天。',
       ],
       enabled: d.stickers.enabled,
       passiveProbability: d.stickers.passiveProbability,
+      activeProbability: d.stickers.activeProbability,
+      cooldownSeconds: d.stickers.cooldownSeconds,
       minTurnsBetween: d.stickers.minTurnsBetween,
       groups: d.stickers.groups,
       rejectedRetentionDays: d.stickers.rejectedRetentionDays,
@@ -2543,6 +2552,12 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     enabled: pickBoolean(stickersRaw['enabled'], 'stickers.enabled', base.stickers.enabled),
     passiveProbability: pickProbability(
       stickersRaw['passiveProbability'], 'stickers.passiveProbability', base.stickers.passiveProbability,
+    ),
+    activeProbability: pickProbability(
+      stickersRaw['activeProbability'], 'stickers.activeProbability', base.stickers.activeProbability,
+    ),
+    cooldownSeconds: pickInt(
+      stickersRaw['cooldownSeconds'], 'stickers.cooldownSeconds', base.stickers.cooldownSeconds, 0, 86400,
     ),
     minTurnsBetween: pickInt(stickersRaw['minTurnsBetween'], 'stickers.minTurnsBetween', base.stickers.minTurnsBetween, 0),
     groups: pickBoolean(stickersRaw['groups'], 'stickers.groups', base.stickers.groups),

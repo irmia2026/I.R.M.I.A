@@ -4010,6 +4010,12 @@ abstract class AppStrings {
   String get stickerHarvestEnabled;
   String get stickerTaggingEnabled;
   String get stickerHarvestProbability;
+  /// 设置：每次 speak 带表情时放行的概率
+  String get stickerActiveProbability;
+  String get stickerActiveProbabilityHint;
+  /// 设置：成功发图后的熔断秒数
+  String get stickerCooldownSeconds;
+  String get stickerCooldownSecondsHint;
   String get stickerSettingsHint;
   String get stickerLibraryHint;
   String get stickerTaggingHint;
@@ -7398,6 +7404,14 @@ class ZhStrings extends AppStrings {
   String get stickerTaggingEnabled => '自动打标';
   @override
   String get stickerHarvestProbability => '采收概率';
+  @override
+  String get stickerActiveProbability => '允许发送频率';
+  @override
+  String get stickerActiveProbabilityHint => '每次 speak 带表情时按这个概率放行；0 = 永不，1 = 都尝试。';
+  @override
+  String get stickerCooldownSeconds => '熔断间隔（秒）';
+  @override
+  String get stickerCooldownSecondsHint => '最近一次成功发图后 N 秒内，框架自动拦下不发；0 = 关闭。';
   @override
   String get stickerSettingsHint => '设置保存后在下一拍或下一轮生效；群聊仍按各通道的开关收敛。';
   @override
@@ -10972,6 +10986,14 @@ class EnStrings extends AppStrings {
   String get stickerTaggingEnabled => 'Auto-tag';
   @override
   String get stickerHarvestProbability => 'Collection probability';
+  @override
+  String get stickerActiveProbability => 'Allowed send frequency';
+  @override
+  String get stickerActiveProbabilityHint => 'Chance that a sticker is allowed when a speak turn includes one; 0 = never, 1 = always try.';
+  @override
+  String get stickerCooldownSeconds => 'Cooldown interval (seconds)';
+  @override
+  String get stickerCooldownSecondsHint => 'After a successful sticker send, further sends are blocked for N seconds; 0 = off.';
   @override
   String get stickerSettingsHint => 'Saved settings apply on the next tick or turn. Group chats still follow their channel switches.';
   @override

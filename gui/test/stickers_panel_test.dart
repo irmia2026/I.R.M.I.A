@@ -114,6 +114,8 @@ void main() {
           if (field == 'stickers.enabled') settings['enabled'] = fields[field];
           if (field == 'stickers.tagging.enabled') settings['taggingEnabled'] = fields[field];
           if (field == 'stickers.harvest.probability') settings['harvestProbability'] = fields[field];
+          if (field == 'stickers.activeProbability') settings['stickers.activeProbability'] = fields[field];
+          if (field == 'stickers.cooldownSeconds') settings['stickers.cooldownSeconds'] = fields[field];
         }
         response.write(jsonEncode({'ok': true, 'requiresRestart': false}));
       } else if (path == '/api/commands/stickers-purge') {
@@ -384,6 +386,63 @@ void main() {
     expect(writes[1]['body'], {'enabled': false});
     expect(writes[2]['body'], {'fields': {'stickers.tagging.enabled': false}});
     expect(find.byKey(const ValueKey('sticker-harvest-probability')), findsOneWidget);
+  });
+
+  testWidgets('设置：两个新控件渲染，缺字段时回默认 100% / 0', (tester) async {
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-3')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('sticker-active-probability')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-cooldown-seconds')), findsOneWidget);
+    expect(find.text('允许发送频率 100%'), findsOneWidget);
+    expect(find.text('熔断间隔（秒）'), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byKey(const ValueKey('sticker-cooldown-seconds'))).controller!.text,
+      '0',
+    );
+  });
+
+  testWidgets('设置：允许发送频率滑块改值后写 config-update', (tester) async {
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-3')));
+    final finder = find.byKey(const ValueKey('sticker-active-probability'));
+    final slider = tester.widget<Slider>(finder);
+    slider.onChanged!(0.4);
+    await tester.pump();
+    expect(find.text('允许发送频率 40%'), findsOneWidget);
+    expect(writes, isEmpty, reason: '拖动过程只改本地显示');
+    slider.onChangeEnd!(0.4);
+    await settle(tester);
+    expect(writes.single['body'], {'fields': {'stickers.activeProbability': 0.4}});
+    expect(writes.single['confirm'], 'config-update');
+  });
+
+  testWidgets('设置：熔断秒数提交才写，负数与非法值静默回退', (tester) async {
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-3')));
+    final finder = find.byKey(const ValueKey('sticker-cooldown-seconds'));
+    await tester.enterText(finder, '30');
+    await tester.pump();
+    expect(writes, isEmpty, reason: '键入过程不发请求');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await settle(tester);
+    expect(writes.single['body'], {'fields': {'stickers.cooldownSeconds': 30}});
+    expect(writes.single['confirm'], 'config-update');
+
+    await tester.enterText(finder, '-5');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(writes, hasLength(1), reason: '负数不写');
+    expect(tester.widget<TextField>(finder).controller!.text, '30');
+  });
+
+  testWidgets('设置：窄窗下两个新控件不溢出', (tester) async {
+    await pumpPanel(tester, height: 700, size: const Size(760, 800));
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-3')));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('sticker-active-probability')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-cooldown-seconds')), findsOneWidget);
   });
 
   testWidgets('事件：进入事件区才读取，发送与打标记录可复盘', (tester) async {

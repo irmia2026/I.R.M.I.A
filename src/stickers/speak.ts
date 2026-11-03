@@ -13,30 +13,6 @@ function targetOf(rawTo: string, current: WakeChannel['data'] | null, turn: numb
   return { target: { url, idempotencyKey: `sticker-${turn}` }, channel: parsed.channel, chatType: parsed.chatType };
 }
 
-const STICKER_UNSENT_GENERIC = '这条通道不支持发图，或发送失败';
-
-/** `active()` 的 skip reason → 给人（也给她）看的一句话。未知原因不猜，落到通用说明。 */
-function stickerSkipText(reason: string | null): string {
-  switch (reason) {
-    case 'disabled': return '这个会话没开表情包（群聊默认关闭）';
-    case 'turn-cap': return '这一轮已经发过一张表情了';
-    case 'unknown-tag': return '没有这个表情标签';
-    case 'no-candidates': return '库里没有这个标签的表情';
-    default: return STICKER_UNSENT_GENERIC;
-  }
-}
-
-function unsentNote(reason: string | null): string {
-  return `（表情包没发：${stickerSkipText(reason)}）`;
-}
-
-function appendNote(result: ToolHandlerResult, note: string): ToolHandlerResult {
-  return {
-    ...result,
-    content: result.content === '' ? note : `${result.content}\n${note}`,
-  };
-}
-
 export function withStickerSpeak(
   base: ToolDefinition,
   runtime: StickerRuntime,
@@ -73,13 +49,11 @@ export function withStickerSpeak(
       const text = typeof args['text'] === 'string' ? args['text'] : '';
       const rawTo = typeof args['to'] === 'string' ? args['to'].trim() : '';
       const resolved = targetOf(rawTo, currentWakeChannel(), ctx.turn);
-      let skipReason: string | null = null;
       const selection = runtime.active(
         ctx.turn,
         resolved?.chatType ?? 'c2c',
         resolved?.channel ?? '',
         rawSticker,
-        (reason) => { skipReason = reason; },
       );
       const rawPosition = args['stickerPos'];
       const position = rawPosition === 'only' || text.trim() === ''
@@ -96,19 +70,18 @@ export function withStickerSpeak(
         });
       };
 
-      // 只发图：没有任何文字回执可依托，必须把"没发出去"作为结果本身返回。
+      // 纯表情：发送与否都不进回执；发送失败只留内部 sticker/skipped 事件。
       if (text.trim() === '') {
-        const sent = await send();
-        return okResult(sent ? '（已发一张表情包）' : unsentNote(skipReason));
+        await send();
+        return okResult('');
       }
 
-      // 带文字：文字是主结果，照常交给 base.handler；表情的失败只能追加说明，
-      // 不能吞掉（否则她读到的仍是一个"成功但什么都没说"的回执）。
+      // 带文字：文字是唯一回执；表情成功/失败/跳过都不追加任何说明。
       const before = position === 'before';
-      const stickerSent = before ? await send() : null;
+      if (before) await send();
       const result = await base.handler(rawArgs, ctx);
-      const sent = before ? stickerSent === true : await send();
-      return sent ? result : appendNote(result, unsentNote(skipReason));
+      if (!before) await send();
+      return result;
     },
   };
 }

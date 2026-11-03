@@ -59,6 +59,11 @@ export class StickerRuntime {
     rawTag: unknown,
     onSkip?: (reason: string) => void,
   ): StickerSelection | null {
+    if (this.cooldownActive()) {
+      this.deps.emit('sticker/skipped', { reason: 'cooldown' });
+      onSkip?.('cooldown');
+      return null;
+    }
     if (this.sentTurns.has(turn)) {
       this.deps.emit('sticker/skipped', { reason: 'turn-cap' });
       onSkip?.('turn-cap');
@@ -72,6 +77,13 @@ export class StickerRuntime {
     if (!isStickerTag(rawTag)) {
       this.deps.emit('sticker/unknown-tag', { tag: String(rawTag ?? '') });
       onSkip?.('unknown-tag');
+      return null;
+    }
+    const activeProbability = this.deps.config().stickers.activeProbability ?? 1;
+    const dice = this.deps.random?.() ?? Math.random();
+    if (dice >= activeProbability) {
+      this.deps.emit('sticker/skipped', { reason: 'dice' });
+      onSkip?.('dice');
       return null;
     }
     const selection = this.choose(rawTag);
@@ -130,6 +142,10 @@ export class StickerRuntime {
     target: ReplyTarget | null;
     toolFailure: boolean;
   }): Promise<boolean> {
+    if (this.cooldownActive()) {
+      this.deps.emit('sticker/skipped', { reason: 'cooldown' });
+      return false;
+    }
     if (this.sentTurns.has(input.turn)) return false;
     const config = this.deps.config();
     if (!affectEnabled(config)) {
@@ -173,6 +189,15 @@ export class StickerRuntime {
       target: input.target,
       affect: { dominant, value },
     });
+  }
+
+  /** Global cooldown: latest successful sticker send gates both active and passive. */
+  private cooldownActive(): boolean {
+    const seconds = this.deps.config().stickers.cooldownSeconds ?? 0;
+    if (seconds <= 0) return false;
+    const state = this.deps.store.readState();
+    const latest = state.sent.reduce((max, item) => Math.max(max, item.atMs), 0);
+    return latest > 0 && this.now().getTime() - latest < seconds * 1000;
   }
 
   private choose(tag: StickerTag): StickerSelection | null {

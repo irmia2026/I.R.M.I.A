@@ -1418,6 +1418,10 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'stickerHarvestEnabled': s.stickerHarvestEnabled,
     'stickerTaggingEnabled': s.stickerTaggingEnabled,
     'stickerHarvestProbability': s.stickerHarvestProbability,
+    'stickerActiveProbability': s.stickerActiveProbability,
+    'stickerActiveProbabilityHint': s.stickerActiveProbabilityHint,
+    'stickerCooldownSeconds': s.stickerCooldownSeconds,
+    'stickerCooldownSecondsHint': s.stickerCooldownSecondsHint,
     'stickerSettingsHint': s.stickerSettingsHint,
     'stickerLibraryHint': s.stickerLibraryHint,
     'stickerTaggingHint': s.stickerTaggingHint,
@@ -5056,6 +5060,14 @@ class OverriddenStrings extends AppStrings {
   String get stickerTaggingEnabled => overrides['stickerTaggingEnabled'] ?? base.stickerTaggingEnabled;
   @override
   String get stickerHarvestProbability => overrides['stickerHarvestProbability'] ?? base.stickerHarvestProbability;
+  @override
+  String get stickerActiveProbability => overrides['stickerActiveProbability'] ?? base.stickerActiveProbability;
+  @override
+  String get stickerActiveProbabilityHint => overrides['stickerActiveProbabilityHint'] ?? base.stickerActiveProbabilityHint;
+  @override
+  String get stickerCooldownSeconds => overrides['stickerCooldownSeconds'] ?? base.stickerCooldownSeconds;
+  @override
+  String get stickerCooldownSecondsHint => overrides['stickerCooldownSecondsHint'] ?? base.stickerCooldownSecondsHint;
   @override
   String get stickerSettingsHint => overrides['stickerSettingsHint'] ?? base.stickerSettingsHint;
   @override
