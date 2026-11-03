@@ -33,7 +33,7 @@ function packageOf(rootDir: string, contributions: { skills: readonly string[]; 
     totalBytes: 1,
     manifest: {
       apiVersion: 1, id: 'demo', version: '1.0.0',
-      engine: { irmia: '>=0.1.0' }, contributions, permissions: [],
+      engine: { irmia: '>=0.1.0' }, contributions, permissions: [], netAllow: [],
     },
   };
 }

@@ -1,4 +1,10 @@
+import { prepareAffectStep } from '../affect/adapter.ts';
+import { chooseCandidates,shouldAppraise } from '../affect/triage.ts';
+import { evaluateCandidate } from '../affect/evaluator.ts';
+import { hasAppraised } from '../affect/engine.ts';
 import { allEventsOf } from '../state/event-snapshot.ts';
+import type { StickerRuntime } from '../stickers/runtime.ts';
+import { replyUrlForWake } from '../tools/admin.ts';
 /**
  * Irmia Agent — 真循环驱动（M2 骨架 + M3 刹车与告警接入）
  *
@@ -63,6 +69,7 @@ import type { ToolRegistry } from '../tools/registry.js';
 import {
   DEFAULT_ASK_HUMAN_TIMEOUT_MIN,
   DEFAULT_WORKSPACE_DIR_NAME,
+  affectEnabled,
   trustBoundaryRoot,
   type AppConfig,
 } from '../config/config.ts';
@@ -116,7 +123,7 @@ import {
   planEchoPressure,
   readEchoPressure,
 } from './reasoning-echo-pressure.ts';
-import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, skillIndexOf, wakeTitle } from '../model/render.ts';
+import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, reasoningEchoMaxCharsFor, skillIndexOf, wakeTitle } from '../model/render.ts';
 // 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
 // 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
 import type { ConfigReloadOutcome } from '../config/watcher.js';
@@ -139,7 +146,7 @@ import type { SkillManager } from '../skill/skills.js';
 import { writeSkillIndexSnapshot } from '../skill/index-snapshot.ts';
 import type { HookRunner } from '../hook/hooks.js';
 import type { TimerStore } from '../wake/timer-store.js';
-import { trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
+import { trustOfBatch, isOwnerLabel, ownerIdsFrom, type TurnTrust } from './trust.ts';
 import { createAuthzGate, type Scenario } from './authz.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 // 「我自己是谁」的判据实现（**全仓唯一一处**）：群成员登记那一档与宿主的落库口共用它
@@ -153,6 +160,10 @@ import { groupMemberGate } from '../channel/self-message-gate.ts';
 import { WarnExemptBook, type WarnExemptSubject } from '../channel/warn-exempt.ts';
 // `msgSeqOf`：平台给不出消息序号时"补事件 seq"的**唯一判据**（信箱那条路也走它）
 import { msgSeqOf } from '../channel/inbox.ts';
+import { applyIntent } from '../intimacy/engine.ts';
+import { evaluateIntimacy } from '../intimacy/evaluator.ts';
+import { renderIntimacyNow } from '../intimacy/render.ts';
+import { evolveIntimacy, phaseOf, estrusOf } from '../intimacy/state.ts';
 import { MEMORY_MAINTAIN_PAYLOAD_KIND, maintainMemory, memoriesDir } from '../persona/memory-maintain.ts';
 import {
   MCP_INDEX_DESC_CLAUSE_VERSION, mcpIndexView, probeOnPath, type AssetFactSource,
@@ -221,6 +232,19 @@ const CATEGORY = {
 
 /** 失败刹车后的半开冷却（毫秒）：冷却期满放行一次试探，避免坏接口被反复打 */
 const DEFAULT_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * 一拍（tick）卡住多久就告警（2026-10-31 加）。
+ *
+ * 为什么需要它：2026-10-31 凌晨一次模型请求在连接上挂住，tick 的单飞守卫
+ * （`tickInFlight`）让后面每一拍都静默丢弃——她没有回话、消息一直 pending，
+ * 而人能看到的只有"输入等了 10 分钟"那条滞后告警（stall）。这条看门狗把
+ * "这一拍卡住了"变成 3 分钟内可见的事实。
+ *
+ * 只观测、不强行释放：卡住的 promise 无法取消，强行复位标志会让两拍并跑
+ * （历史上 turn 1277 的双实例就是这么来的）。真正的恢复靠传输层超时 + 重试上限。
+ */
+const DEFAULT_TICK_STUCK_MS = 3 * 60 * 1000;
 /** 单拍最多认领的输入条数（与 M2 一致：一批多条时的边界固定，便于复盘） */
 const BATCH_LIMIT = 8;
 
@@ -1490,6 +1514,8 @@ export interface RealLoopDeps {  log: EventLog;
   notifier?: AlertNotifier;
   /** 水位停滞阈值（毫秒），默认 10 分钟（design §4.9） */
   stallMs?: number;
+  /** 一拍卡住的告警阈值（默认 3 分钟；测试用它压小） */
+  tickStuckMs?: number;
   /** 失败刹车的半开冷却（毫秒），默认 30 分钟 */
   failCooldownMs?: number;
   /** 心跳覆盖点（测试注入伪时钟/假闹钟用）；缺省按 config.wake 构造 */
@@ -1506,6 +1532,8 @@ export interface RealLoopDeps {  log: EventLog;
    * 不配则三个执行点都不存在——行为与未装钩子时完全一致。
    */
   hooks?: HookRunner;
+  /** 贴纸主动/被动发送运行期；缺省时被动路径不装配，主动 speak 也不带贴纸 */
+  stickerRuntime?: StickerRuntime;
   /**
    * 数字资产事实层里 `[path]` 条目的就绪探测（v34，见 `persona/assets.ts` 的 `probeOnPath`）。
    *
@@ -1525,7 +1553,12 @@ export interface RealLoopDeps {  log: EventLog;
    * 列表即可（就绪情况 real-loop 看不到——`McpClientPool` 归宿主）。
    */
   mcpServers?: () => readonly string[];
-  /** MCP 池与索引共享的声明面；缺省保持只读内置配置 */
+  /**
+   * MCP 池与索引共享的**声明面**（含已启用插件贡献的 server）；缺省保持只读内置配置。
+   *
+   * 为什么与上面的 `mcpServers`（只有名字）分开：那一格是事实层的读数，而这一格决定
+   * "索引里该写哪些 server"——两者读的必须是同一份合并面，否则插件 server 能调、索引却不写。
+   */
   mcpDeclarations?: () => readonly import('../mcp/client.js').McpServerEntry[];
   /**
    * 插件运行组合的摘要（宿主给）：与上次建索引时记下的值不等 ⇒ **索引该失效**。
@@ -1536,7 +1569,12 @@ export interface RealLoopDeps {  log: EventLog;
    * 缺省 `undefined` ⇒ 不参与判据（不注入插件平台的实例行为完全不变）。
    */
   pluginRevision?: () => string | undefined;
-  /** 一轮结算后、下一批输入前应用插件隔离/恢复 */
+  /**
+   * 一轮结算后、下一批输入前的一次钩子（插件隔离/恢复在这里落地）。
+   *
+   * ⚠ **必须尽快返回**：它在 `tickOnce` 的 finally 里被 await，拖住它就等于拖住下一轮。
+   * 生产实现是"踢一脚就走"（见 `main.ts` 的 `pluginTurnBoundary`）。
+   */
   onTurnBoundary?: () => Promise<void>;
   /**
    * **配置热更**：`config.json` 里可热更的那些字段变了之后，由宿主调一次（2026-10-10 加）。
@@ -1711,6 +1749,14 @@ export class RealLoop {
    * 而 `busy` 的置位也已提到 prepare 段之前（同一处修的另一半），两者一起才堵住这个缺口。
    */
   private tickInFlight = false;
+  /** 看门狗定时器：一拍超过 `tickStuckMs` 还没收尾就告警一次 */
+  private tickStuckTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 看门狗的第二只闸：超过两倍阈值还没收尾，就 abort 当前 turn（只报警不掐，现场会挂十几分钟） */
+  private tickAbortTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 这一拍已经报过"卡住"了吗（同一拍只报一次） */
+  private tickStuckReported = false;
+  private readonly tickStuckMs: number;
+  /** 本拍那个 promise（`stop()` 要等它收场，免得"退出时还有一个 turn 在写日志"） */
   private tickCompletion: Promise<void> | null = null;
   /**
    * 本拍进行期间**被守卫吞掉的拍数**。
@@ -1879,6 +1925,7 @@ export class RealLoop {
    * （下一拍归集才会换，那才是"一轮之内只允许变一次"）。
    */
   private skillIndexText = '';
+  /** 上次建索引时 `SkillManager.packageRevision` 的值（`-1` = 还没建过；见 `skillIndexSync` 的 ④） */
   private skillPackageRootsRevision = -1;
   /** 上次建 MCP 索引时看到的插件组合摘要（`undefined` = 还没建过 / 宿主不提供） */
   private pluginRevisionSeen: string | undefined = undefined;
@@ -2131,6 +2178,7 @@ export class RealLoop {
     this.write = deps.out ?? ((line) => console.log(line));
     this.pollMs = deps.pollMs ?? 1000;
     this.stallMs = deps.stallMs ?? DEFAULT_STALL_MS;
+    this.tickStuckMs = Math.max(10_000, deps.tickStuckMs ?? DEFAULT_TICK_STUCK_MS);
     this.failCooldownMs = deps.failCooldownMs ?? DEFAULT_FAIL_COOLDOWN_MS;
     this.failStreakMax = deps.config.budget?.failStreakMax ?? 5;
     this.snapshotEveryEvents = Math.max(1, Math.trunc(deps.snapshotEveryEvents ?? SNAPSHOT_EVERY_EVENTS));
@@ -2652,6 +2700,10 @@ export class RealLoop {
     return this.userSpokeNote;
   }
 
+  /**
+   * 停循环。**本拍若还在飞，等它收场再返回**（插件平台那次改动：turn 边界要应用插件
+   * 隔离/恢复，退出时不能让那条路径与"日志已经关了"撞车）。
+   */
   async stop(): Promise<void> {
     this.running = false;
     this.wakeChannelData = null;
@@ -2831,6 +2883,27 @@ export class RealLoop {
       try {
         reason = await runTurn(this.agentDeps(wakeEvents), wakeEvents);
       } finally {
+        if (this.deps.stickerRuntime !== undefined) {
+          const events = await allEventsOf(this.deps.log);
+          const turnStart = [...events].reverse().find((event) => event.type === 'turn/start');
+          if (turnStart !== undefined && turnStart.type === 'turn/start') {
+            const turn = turnStart.data.turn;
+            const wake = this.wakeChannelData;
+            try {
+              await this.deps.stickerRuntime.passive({
+                turn,
+                chatType: wake?.chatType ?? 'manual',
+                channel: wake?.channel ?? '',
+                target: wake === null ? null : { url: replyUrlForWake(wake), idempotencyKey: `sticker-passive-${turn}` },
+                toolFailure: events.some((event) => event.type === 'tool/result'
+                  && event.data.turn === turn
+                  && ['error', 'timeout', 'denied'].includes(event.data.status)),
+              });
+            } catch {
+              this.appendSync('sticker/skipped', { reason: 'media-failed' }, 'internal');
+            }
+          }
+        }
         // 无论如何都解绑：下一轮的 speak 不能再回到这一轮的会话里去。
         // 插话计数**不清零**（它只增不减，speak 每次开口时重新取基准值）。
         this.wakeChannelData = null;
@@ -2844,6 +2917,15 @@ export class RealLoop {
         this.lastTurnMs = Date.now() - turnStartedAt;
       }
       this.write(`[循环] turn 结束：${reason.kind}`);
+      // 余额不足是"人不处理就永远不会好"的一类失败：立刻告警，别让她反复重试把输入耗成死信
+      if (reason.kind === 'error' && /(?:402|insufficient[ _]?balance)/iu.test(reason.message)) {
+        void this.notifier.alert({
+          category: 'model-balance',
+          level: 'warn',
+          title: '模型余额不足',
+          body: '服务端返回 402（Insufficient Balance）：充值后她会自动恢复；在此期间发来的消息会重试两次后进死信。',
+        }).catch(() => undefined);
+      }
       // 压缩之后**叫醒她一次**（`wake/manual` · `via: 'compact'`，2026-10-09）：压完不叫，
       // 那份交接笔记要等到下一次有人说话才被看见，而"手上没做完的事"就是在这段时间里断掉的。
       // 放在 turn 结束之后、**且不 return**：它是把一条输入放进队列（下一拍起 turn），
@@ -2867,6 +2949,8 @@ export class RealLoop {
       // 为什么它非报不可：这条路两个现成刹车都到不了，详见 `notifyReasoningEcho` 的注释。
       if (reason.kind === 'error' && reason.reasoningEcho === true) await this.notifyReasoningEcho(reason);
     } finally {
+      // turn 边界钩子（插件隔离/恢复）：**必须尽快返回**的约定写在 `onTurnBoundary` 的注释里
+      // （生产实现是"踢一脚就走"，不在这里等 drain）。它抛错也不许把本拍收尾弄断。
       try {
         await this.deps.onTurnBoundary?.();
       } catch (error) {
@@ -2920,14 +3004,58 @@ export class RealLoop {
     }
     this.tickInFlight = true;
     const startedAt = Date.now();
+    this.tickStuckReported = false;
+    this.tickStuckTimer = setTimeout(() => {
+      this.tickStuckReported = true;
+      const elapsed = Date.now() - startedAt;
+      this.write(`[循环] 一拍卡住超过 ${Math.round(this.tickStuckMs / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：后续拍会被静默丢弃`);
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍卡住超过 ${Math.round(this.tickStuckMs / 60_000)} 分钟`,
+        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒还没收尾。她的消息会一直排在队列里（界面看起来像"不说话"）。`
+          + '恢复靠传输层超时；若长时间不恢复，重启后端即可。',
+        params: { thresholdMs: this.tickStuckMs },
+      }).catch(() => undefined);
+    }, this.tickStuckMs);
+    this.tickStuckTimer.unref?.();
+    // 第二只闸：告警之后再等一个阈值，仍没收尾就真掐掉这一轮。
+    // 现场（2026-11-03）：turn 4330 卡在 step/start 之前，模型连接一直 Established，
+    // watchdog 只发了告警、/stop 也没把 turn 结束，整轮挂了 12 分钟。只报警不够。
+    this.tickAbortTimer = setTimeout(() => {
+      if (!this.busy || this.stopController.signal.aborted) return;
+      const elapsed = Date.now() - startedAt;
+      this.write(`[循环] 一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：自动中断当前 turn`);
+      this.stoppedByOwner = false;
+      this.stopController.abort(new Error('看门狗：turn 卡住超时'));
+      this.stopController = new AbortController();
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 60_000)} 分钟，已自动中断`,
+        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒，watchdog 已 abort 当前 turn。`
+          + '输入会按 aborted 语义处理；若仍不恢复，再重启后端。',
+        params: { thresholdMs: this.tickStuckMs * 2 },
+      }).catch(() => undefined);
+    }, this.tickStuckMs * 2);
+    this.tickAbortTimer.unref?.();
     const completion = this.tickOnce();
     this.tickCompletion = completion;
     try {
       await completion;
     } finally {
-      if (this.tickCompletion === completion) this.tickCompletion = null;
       // try/finally：`tickOnce` 抛错也一定复位，否则一次异常就把循环永久锁死
       // （外层 `start()` 的 `.catch` 只管报错，不会复位任何标志）。
+      if (this.tickCompletion === completion) this.tickCompletion = null;
+      if (this.tickStuckTimer !== null) {
+        clearTimeout(this.tickStuckTimer);
+        this.tickStuckTimer = null;
+      }
+      if (this.tickAbortTimer !== null) {
+        clearTimeout(this.tickAbortTimer);
+        this.tickAbortTimer = null;
+      }
+      if (this.tickStuckReported) this.write('[循环] 卡住的那一拍已经收尾，恢复正常');
       this.tickInFlight = false;
       const elapsedMs = Date.now() - startedAt;
       const skipped = this.tickSkipped;
@@ -3183,7 +3311,7 @@ export class RealLoop {
    * 用户这一轮的判据（逐字）：「skill 索引的进入和退出也要有类似 mcp 的进入和退出那样的
    * 缓存保护的机制」。这一格因此是 `mcpIndexSync` 的**逐条同形**版本：同一拍、同一组触发点、
    * 同一种落库（快照事件）、同一个渲染位置（长期记忆层里技能在前、MCP 紧随其后）。
-   * 判据的来龙去脉写在 `mcpIndexSync` 的方法头上，这里只记**技能这一支特有**的三件事：
+   * 判据的来龙去脉写在 `mcpIndexSync` 的方法头上，这里只记**技能这一支特有**的几件事：
    *
    *   ① **来源是技能系统自己**：`SkillManager.catalog()`——信任门（`skill/installed`）、单条与总
    *      token 预算、截断全在里面，这里一个字节都不重拼。由此有一条重要推论：**只有过了信任门
@@ -3200,15 +3328,16 @@ export class RealLoop {
    *      墓碑快照——不写的话，重建（`replay` 的 `skillCatalogForReplay`）读到的仍是上一条
    *      非空快照，「实时请求里已经没有了、重建又把它请回来」——同一份日志重建出两份不同的
    *      请求，重放的基础约束当场作废。
-   *   ④ **「构建文本 + 写事件」不在这个方法里**（2026-10-23 抽出）：唯一一份实现在
+   *   ④ **"构建文本 + 写事件"不在这个方法里**（2026-10-23 抽出）：唯一一份实现在
    *      `skill/index-snapshot.ts` 的 `writeSkillIndexSnapshot`——人工归集（`irmia skill
    *      reindex`）走的是同一份，于是两条路写下的快照**逐字段相同**。这一格只负责
-   *      「什么时候该重建」（上面那几条判据）与「怎么落库」（`appendSync`）。
-   *      那一格正是为「信任表已修好、快照却停在旧字节上」的事故留的人工入口：此时上面几条
+   *      "什么时候该重建"（上面那几条判据）与"怎么落库"（`appendSync`）。
+   *      那一格正是为"信任表已修好、快照却停在旧字节上"的事故留的人工入口：此时上面几条
    *      判据一条都不成立（version 一致、seq 不小于 coveredSeq、日志里已有快照）⇒
    *      **重启也不会重建**，只能等下一次压缩摘要。
    *   ⑤ **插件技能根换代**（`SkillManager.packageRevision`）：插件的技能根被撤走/换上之后
-   *      同一拍就要重建——否则索引里还列着已经读不到的技能名。
+   *      同一拍就要重建——否则索引里还列着已经读不到的技能名（那一批技能不会写
+   *      `skill/installed`，所以除了这一格没有任何别的判据能发现它变了）。
    *
    * ⚠ 它**必须排在 `mcpIndexSync` 之后**（两个调用点都是这样：`warmUp` 与 `tickOnce` 的轮首）：
    * 事件快照 `eventView` 由那条先跑时读下，这里只读它、不再自己读一遍盘。
@@ -3247,6 +3376,14 @@ export class RealLoop {
     }
 
     const catalog = this.skills?.catalog() ?? null;
+    // 构建文本 + 写事件：**与人工归集（`irmia skill reindex`）共用同一份实现**，
+    // 所以那两条路写下的 `skill/index` 逐字段相同（含键顺序）。理由与口径在
+    // `skill/index-snapshot.ts` 的文件头：那里是唯一的写入实现，这里只提供"怎么落库"
+    // （`appendSync` 顺带折投影、压力与信任表）。
+    //
+    // 循环这一路**不传** `skipWhenUnchanged`：这里只在上面那几条判据成立时走到（首次 / 模板换代 /
+    // 快照早于最后一次压缩 / 插件技能根换代），而其中几条即使文本一字未变也**必须**写一条
+    // ——它记的是"我现在归集到了这次压缩之后"，少了它下一拍还会判过期。
     const snapshot = writeSkillIndexSnapshot({
       events: this.eventView,
       catalog,
@@ -3254,10 +3391,8 @@ export class RealLoop {
     });
     // 缓存跟着定下（空索引也走这条：`text` 就是空串，与 `mcpIndexSync` 那一支同形）
     this.skillIndexText = snapshot.text;
-    if (!snapshot.written) {
-      if (snapshot.skipped === 'empty') return this.skillIndexText;
-      return this.skillIndexText;
-    }
+    if (!snapshot.written) return this.skillIndexText;
+
     const reason = point.seq === 0
       ? '首次（日志里还没有快照）'
       : point.version !== version
@@ -3305,6 +3440,7 @@ export class RealLoop {
     const fields = change.fields.join('、');
     this.write(`[配置] 热更已并入：${fields}（循环这一侧读的是同一份就地改过的 AppConfig，无需重建）`);
     if (change.fields.includes('mcp.servers')) {
+      // 声明面读的是**合并面**（config + 已启用插件）：与 `mcpIndexSync` 同一份，别在这里另拼一份
       const declarations = this.deps.mcpDeclarations?.() ?? this.deps.config.mcp.servers;
       const enabled = declarations.filter(entry => entry.disabled !== true).length;
       this.write(`[MCP] 声明面已热更（当前 ${declarations.length} 个 server，`
@@ -5159,6 +5295,8 @@ export class RealLoop {
     // **不再有第三个消费点**：工具清单不读它（常量口径，见下面 `modelVisibility` 那段）。
     const trust: TurnTrust = this.trustOfTurn(wakeEvents);
     const scenario: Scenario = trust === 'owner' || trust === 'self' ? 'owner' : 'guest';
+    // 亲密层：状态只从用户来源更新（任何通道）；动态行按开关全局注入。
+    const intimacyEnabled = d.config.intimacy.enabled;
     // 本轮固定块的素材（B2）：**在这里读一次**，整轮共用同一份（见 turnBlockFacts）。
     // 读一次是这段代码的全部要点：`deriveRequest` 每步都会重新读 deps，而 deps 里的这份
     // 是**轮首快照**——一轮之内它逐字节不变，"不必每步重新编码"才成立。
@@ -5221,6 +5359,136 @@ export class RealLoop {
     return {
       log: d.log,
       ds: d.ds,
+      // 这三个开关与「情绪 master」无关：亲密层可以单独开启，回传上限也永远跟着上下文走。
+      affectRulesEnabled: d.config.affect.enabled,
+      intimacyRulesEnabled: d.config.intimacy.enabled,
+      // 上限跟上下文预算走（200k ⇒ 300k 与旧常量一致；450k ⇒ 675k）。
+      reasoningEcho: { maxTotalChars: reasoningEchoMaxCharsFor(d.config.persona.compactionThresholdTokens) },
+      // Master switch: absent/0 => no affect calls, no bytes, no new ledger events.
+      ...(affectEnabled(d.config) ? {
+      affectForStep: (now:string) => {
+          try { return prepareAffectStep(d.projection.affect,now,(line)=>d.out?.(`[情绪] ${line}`)); } catch { return null; }
+        },
+        ...(d.config.affect.evaluatorEnabled ? {
+          affectBeforeStep: async (args:{turn:number;step:number;firstStep:boolean;wakeEvents:readonly AppEvent[];events:readonly AppEvent[];signal?:AbortSignal})=> {
+            if(args.signal?.aborted)return;
+            // Budget gate before spending on light: same read-only criteria as admitWake.
+            // A paused task layer (or an over daily layer) must skip appraisal without writing
+            // budget/consumed or affect/appraised — the step itself may still run heavy.
+            if(this.guard.isPaused('task',d.projection)||this.guard.dailyBreach(d.projection)!==null)return;
+            const newToolResults = args.events.filter(e => e.type==='tool/result' && e.data.turn===args.turn && e.data.step===args.step-1);
+            const candidates=chooseCandidates({
+              wakes: args.firstStep ? args.wakeEvents as any : [],
+              trust: trust==='owner'?'owner':trust==='self'?'self':trust==='trusted'?'trusted':'external',
+              // Batch trust is not an identity. Resolve each wake independently.
+              trustForWake: (wake) => this.trustOfTurn([wake as unknown as AppEvent]),
+              newToolResults:newToolResults as any,history:args.events as any,
+            });
+            for(const candidate of candidates) {
+              if(args.signal?.aborted)break;
+              if(hasAppraised(d.projection.affect,candidate.sourceSeq)||!shouldAppraise(candidate))continue;
+              const started=Date.now();
+              const result=await evaluateCandidate({candidate,nowMs:started,client:d.ds,...(args.signal ? { signal: args.signal } : {}),timeoutMs:4000});
+              const u=result.response?.usage;
+              // Every actual light response is accounted, including invalid structured output.
+              if(result.response && u) {
+                const hit=Math.max(0,Math.min(u.cachedTokens??0,u.inputTokens));
+                this.appendSync('budget/consumed',{turn:args.turn,step:args.step,lane:'light',affectEvaluation:true,
+                  model:result.response.model??d.ds.modelFor('light'),inputTokens:u.inputTokens,outputTokens:u.outputTokens,
+                  cacheHitTokens:hit,cacheMissTokens:Math.max(0,u.inputTokens-hit),reasoningTokens:0,
+                  outputTextTokens:0,outputToolArgTokens:0,durationMs:Date.now()-started,retryCount:0,
+                  finishReason:result.status==='aborted'?'aborted':result.status==='failed'?'failed':'completed',
+                  tokensTodayAccum:d.projection.budget.tokensToday+u.inputTokens+u.outputTokens,
+                },'internal');
+              }
+              if(!result.response && (result.status==='failed'||result.status==='aborted')) {
+                this.appendSync('budget/consumed',{turn:args.turn,step:args.step,lane:'light',affectEvaluation:true,
+                  model:d.ds.modelFor('light'),inputTokens:0,outputTokens:0,cacheHitTokens:0,cacheMissTokens:0,
+                  reasoningTokens:0,outputTextTokens:0,outputToolArgTokens:0,durationMs:Date.now()-started,
+                  retryCount:0,finishReason:result.status==='aborted'?'aborted':'failed',tokensTodayAccum:d.projection.budget.tokensToday,
+                },'internal');
+              }
+              if(result.data!==null && !args.signal?.aborted) this.appendSync('affect/appraised',result.data,'internal');
+            }
+          },
+        } : {}),
+      } : {}),
+      ...(intimacyEnabled ? {
+        intimacyForStep: (now:string) => {
+          try {
+            const nowMs = Date.parse(now);
+            return renderIntimacyNow(evolveIntimacy(d.projection.intimacy, nowMs), {
+              maxLevel: d.config.intimacy.maxLevel,
+              nowMs,
+            }, (line)=>d.out?.(`[亲密] ${line}`));
+          } catch {
+            return null;
+          }
+        },
+        intimacyMetaForStep: (now:string) => {
+          try {
+            const state = evolveIntimacy(d.projection.intimacy, Date.parse(now));
+            return {estrus: estrusOf(state), phase: phaseOf(state)};
+          } catch {
+            return null;
+          }
+        },
+        intimacyBeforeStep: async (args:{turn:number;step:number;firstStep:boolean;wakeEvents:readonly AppEvent[];events:readonly AppEvent[];signal?:AbortSignal}) => {
+          if (args.signal?.aborted === true || trust !== 'owner') return;
+          if (this.guard.isPaused('task', d.projection) || this.guard.dailyBreach(d.projection) !== null) return;
+          const wake = [...args.wakeEvents].reverse().find((event) =>
+            event.type === 'wake/channel'
+            || (event.type === 'wake/manual' && event.data.via === undefined));
+          if (wake === undefined) return;
+          const text = wake.type === 'wake/channel'
+            ? wake.data.text
+            : (wake.data as {note?: string}).note ?? '';
+          if (text.trim() === '') return;
+          const now = this.deps.now();
+          const started = Date.now();
+          const result = await evaluateIntimacy({
+            text,
+            client: d.ds,
+            ...(args.signal ? {signal: args.signal} : {}),
+            timeoutMs: 4000,
+          });
+          const u = result.response?.usage;
+          if (result.response && u) {
+            const hit = Math.max(0, Math.min(u.cachedTokens ?? 0, u.inputTokens));
+            this.appendSync('budget/consumed', {
+              turn: args.turn, step: args.step, lane: 'light', intimacyEvaluation: true,
+              model: result.response.model ?? d.ds.modelFor('light'),
+              inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+              cacheHitTokens: hit, cacheMissTokens: Math.max(0, u.inputTokens - hit), reasoningTokens: 0,
+              outputTextTokens: 0, outputToolArgTokens: 0, durationMs: Date.now() - started, retryCount: 0,
+              finishReason: result.status === 'aborted' ? 'aborted' : result.status === 'failed' ? 'failed' : 'completed',
+              tokensTodayAccum: d.projection.budget.tokensToday + u.inputTokens + u.outputTokens,
+            }, 'internal');
+          } else if (result.status === 'failed' || result.status === 'aborted') {
+            this.appendSync('budget/consumed', {
+              turn: args.turn, step: args.step, lane: 'light', intimacyEvaluation: true,
+              model: d.ds.modelFor('light'), inputTokens: 0, outputTokens: 0,
+              cacheHitTokens: 0, cacheMissTokens: 0, reasoningTokens: 0,
+              outputTextTokens: 0, outputToolArgTokens: 0, durationMs: Date.now() - started, retryCount: 0,
+              finishReason: result.status === 'aborted' ? 'aborted' : 'failed',
+              tokensTodayAccum: d.projection.budget.tokensToday,
+            }, 'internal');
+          }
+          if (result.judgement === null || (args.signal !== undefined && args.signal.aborted)) return;
+          const state = evolveIntimacy(d.projection.intimacy, now.getTime());
+          const data = applyIntent({
+            state,
+            nowMs: now.getTime(),
+            sourceSeq: wake.seq,
+            intent: result.judgement.intent,
+            strength: result.judgement.strength,
+            spontaneousChance: d.config.intimacy.spontaneousChance,
+            timezone: d.config.timezone,
+            random: Math.random,
+          });
+          if (data !== null) this.appendSync('intimacy/updated', data, 'internal');
+        },
+      } : {}),
       registry: d.registry,
       projection: d.projection,
       // persona 用 **getter** 而不是拷快照：deriveRequest 每步都会重新读这些字段，
@@ -6387,41 +6655,53 @@ export class RealLoop {
   // `read_channel`（工具层不读日志、不读别名表）。写成 private 就没法从 main 接线，
   // 而在 main 里另写一份"取最近 N 条"等于让同一件事有两份实现（v27/v30 记过同款坑）。
   async readChannelMessages(sid: string, limit: number, before?: number): Promise<ChannelMessageView[]> {
-    const hits: ChannelMessageView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'wake/channel' && event.type !== 'channel/message') continue;
-      const d = event.data;
-      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
-      // 游标那一刀在**读完这一条的全部字段之前**：往回翻时绝大多数事件都落在游标之后，
-      // 提前跳过它们省下的是每条都要算的预警查表（`flaggedNoteFor`）
-      if (before !== undefined && event.seq >= before) continue;
-      const flagged = this.flaggedNoteFor(d.messageId);
-      hits.push({
-        sid,
-        channel: d.channel,
-        chatType: d.chatType,
-        chatId: d.chatId,
-        person: d.person,
-        // 平台昵称/群名片：**只用于显示**（认人用）；身份永远按 id 判（见 admin 的 ChannelMessageView）
-        ...(d.nickname === undefined ? {} : { nickname: d.nickname }),
-        text: d.text,
-        messageId: d.messageId,
-        msgSeq: d.msgSeq,
-        // 落库时分配的事件 seq：`read_channel` 判"这个会话有没有新东西"与翻页游标用的都是它
-        //（平台序号答不了这两个问题——官方单聊恒为 1，见 tools/admin.ts 的 ChannelMessageView.seq）
-        seq: event.seq,
-        ts: event.ts,
-        ...(d.attachments === undefined ? {} : { attachments: d.attachments }),
-        // "这条是不是在点她"：判据与唤醒那条路**同一个**（`group-at` 是平台 @、
-        // `mentionsMe` 是适配器/关键词判定如实填的），收进唯一的 `mentionedInMessage`。
-        // 为什么要在读的时候就算出来：`read_channel` 默认那一屏**只给提及**，
-        // 而工具层拿不到宿主的关键词表（判定是宿主的事，见 channel/inbox.ts）。
-        ...(mentionedInMessage(d) ? { mentionsMe: true } : {}),
-        // 判过的消息**回放时也要带预警**：那句话她可能正是在"翻旧账"这一刻才看到的，
-        // 而预警落在事件里、与她翻不翻无关——这正是把预警落成事件、而不是只在唤醒那一次
-        // 渲染里拼一句的理由（换个时刻看同一条消息，结论不该变）。
-        ...(flagged === null ? {} : { flaggedNote: flagged }),
-      });
+    const latest = this.deps.log.latestSeq();
+    const ceiling = before ?? latest + 1;
+    let hits: ChannelMessageView[] = [];
+    // 窗口化读取（2026-11-02）：以前用 `readAll()` 全量扫，28 万条 / 200+MB 时一次要十几秒，
+    // 而工具超时是 10s ⇒ 带 sid 的 `read_channel` **必然超时**（现场日志：status=timeout）。
+    // 现在从临近末尾（或 before）的一段开始，用 `readRange`（按分片 + 检查点定位）只读最近这段；
+    // 不够 limit 条就 ×2 扩，扩到 1 为止（深翻页 / 冷清会话才走全量）。
+    // 判据与全量扫逐字相同：只有"从哪开始读"不同，取到的内容必须一致。
+    let scanWindow = Math.max(2_000, limit * 500);
+    for (;;) {
+      hits = [];
+      const from = Math.max(1, Math.min(ceiling, latest + 1) - scanWindow);
+      for await (const event of this.deps.log.readRange(from)) {
+        if (event.seq >= ceiling) break;
+        if (event.type !== 'wake/channel' && event.type !== 'channel/message') continue;
+        const d = event.data;
+        if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
+        const flagged = this.flaggedNoteFor(d.messageId);
+        hits.push({
+          sid,
+          channel: d.channel,
+          chatType: d.chatType,
+          chatId: d.chatId,
+          person: d.person,
+          // 平台昵称/群名片：**只用于显示**（认人用）；身份永远按 id 判（见 admin 的 ChannelMessageView）
+          ...(d.nickname === undefined ? {} : { nickname: d.nickname }),
+          text: d.text,
+          messageId: d.messageId,
+          msgSeq: d.msgSeq,
+          // 落库时分配的事件 seq：`read_channel` 判"这个会话有没有新东西"与翻页游标用的都是它
+          //（平台序号答不了这两个问题——官方单聊恒为 1，见 tools/admin.ts 的 ChannelMessageView.seq）
+          seq: event.seq,
+          ts: event.ts,
+          ...(d.attachments === undefined ? {} : { attachments: d.attachments }),
+          // "这条是不是在点她"：判据与唤醒那条路**同一个**（`group-at` 是平台 @、
+          // `mentionsMe` 是适配器/关键词判定如实填的），收进唯一的 `mentionedInMessage`。
+          // 为什么要在读的时候就算出来：`read_channel` 默认那一屏**只给提及**，
+          // 而工具层拿不到宿主的关键词表（判定是宿主的事，见 channel/inbox.ts）。
+          ...(mentionedInMessage(d) ? { mentionsMe: true } : {}),
+          // 判过的消息**回放时也要带预警**：那句话她可能正是在"翻旧账"这一刻才看到的，
+          // 而预警落在事件里、与她翻不翻无关——这正是把预警落成事件、而不是只在唤醒那一次
+          // 渲染里拼一句的理由（换个时刻看同一条消息，结论不该变）。
+          ...(flagged === null ? {} : { flaggedNote: flagged }),
+        });
+      }
+      if (hits.length >= limit || from === 1) break;
+      scanWindow *= 2;
     }
     // 取数窗口才是"这一屏的候选"（`slice(-limit)` 就是工具层拿到的那些），所以图片事实
     // 也算在**窗口**上、名额也发在窗口上——不是算在整份日志上（那会为几十条历史白读文件）。
@@ -6913,14 +7193,9 @@ export class RealLoop {
    */
   private ownerIds(): Set<string> {
     const d = this.deps;
-    const ids = new Set<string>();
-    for (const [sid, name] of Object.entries(d.config.persona.contacts)) {
-      const parts = sid.split(':');
-      if (parts[1] === 'c2c' && parts.length >= 3 && isOwnerLabel(name, d.config.persona.owner)) {
-        ids.add(parts.slice(2).join(':'));
-      }
-    }
-    return ids;
+    // 实现与入站消息的插件权限共用 `trust.ts` 的 `ownerIdsFrom`：两处各写一份，
+    // 迟早出现"她被允许听他的、插件指令却不认他"。
+    return ownerIdsFrom(d.config.persona.contacts, d.config.persona.owner);
   }
 
   /**

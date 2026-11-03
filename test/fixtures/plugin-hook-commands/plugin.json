@@ -1,0 +1,13 @@
+{
+  "apiVersion": 2,
+  "id": "demo-hook-commands",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": ["commands.define", "state.plugin"],
+  "hooks": [
+    { "point": "command.before", "timeoutMs": 1500 },
+    { "point": "command.after" }
+  ],
+  "meta": { "title": "command.before/after 夹具", "author": "tests", "desc": "改 args / abort / after 载荷" }
+}

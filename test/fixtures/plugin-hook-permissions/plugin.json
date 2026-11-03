@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-hook-permissions",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": [],
+  "meta": { "title": "钩子权限夹具", "author": "tests", "desc": "六个能力族各试一次订阅，缺票必须 -32001" }
+}

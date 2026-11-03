@@ -19,7 +19,7 @@ function plugin(id = 'demo') {
       contentHash: 'a'.repeat(64),
       fileCount: 1,
       totalBytes: 2,
-      manifest: { apiVersion: 1, id, version: '1.0.0', engine: { irmia: '>=0.1.0' }, contributions: { skills: ['skills'] }, permissions: [] },
+      manifest: { apiVersion: 1, id, version: '1.0.0', engine: { irmia: '>=0.1.0' }, contributions: { skills: ['skills'] }, permissions: [], netAllow: [] },
     },
   };
 }

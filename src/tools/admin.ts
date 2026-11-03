@@ -1598,7 +1598,11 @@ export function deliveryFailureLines(input: {
 }
 
 /**
- * 本轮**没有 IM 会话可发**时的回执 —— `speak` 与 `report` 共用这一句（只有名词不同）。
+ * 本轮**没有 IM 会话可发**时的回执 —— `speak` 与 `report` 共用这一句。
+ *
+ * **2026-10-30 用户拍板：改成与正常投递同一句「发送成功」。**
+ * 旧措辞（"只落在本机、不等于他收到了、要发就带 to 再发"）会让她把已经说过的话再往
+ * 私聊发一遍——她读到的是"没送到"，而事实是她在对话流里已经说完了。
  *
  * 它不是失败，也**不是成功投递**：本机对话流那一份永远落下了，而 IM 那一跳根本没发生。
  * 所以这一段里**不许出现**"不必重复发送"（那会让她以为外面收到了），但必须给出去路：
@@ -1614,9 +1618,8 @@ export function deliveryFailureLines(input: {
  *   ③ 要发到那边就带 `to` 再发一次。
  * 实测（`estimateTokens`，仓库同一把尺；单条）：104 → 57 字、65 → 34 token。
  */
-export function localOnlyNote(noun: '发言' | '报告'): string {
-  return `投递：本轮没有 IM 会话可发（跳过）；${noun}只落在本机对话流，不等于他收到了。`
-    + '要发到那边，带 `to` 再发一次。';
+export function localOnlyNote(): string {
+  return '发送成功';
 }
 
 /**
@@ -2999,7 +3002,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // 说清"跳过的只是 IM 那一跳"：话已经落在对话流里，别让她读成"整条发言失败了"——
           // 实测她读到旧措辞（"本轮无回投地址，跳过"）后以为他收不到，把同一句再说四遍。
           // 与 `report` **同一句**（`localOnlyNote` 里记着为什么这一段不许写"不必重复发送"）。
-          lines.push(localOnlyNote('发言'));
+          lines.push(localOnlyNote());
         } else if (sent === segments.length) {
           // 三路都发完，逐段落的都是"本机对话流"那份回执；这一条是**IM 那一路走通了**的凭据
           // ——补上整篇文本与段数，`read_channel` 才能把"她在这个会话里说过什么"读回来
@@ -3118,7 +3121,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         if (target === null) {
           // 与 `speak` 同一句（`localOnlyNote`）：本机那一份到了、IM 那一跳根本没发生，
           // 所以这里**不许**出现"不必重复发送"——要它到那边就带 `to` 再发一次。
-          lines.push(localOnlyNote('报告'));
+          lines.push(localOnlyNote());
         } else {
           const outcome = await replyPoster.post(target, text);
           if (outcome.ok) {

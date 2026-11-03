@@ -1,0 +1,13 @@
+{
+  "apiVersion": 2,
+  "id": "demo-hook-py",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "python", "entry": "main.py" },
+  "permissions": ["hooks.turn", "commands.define", "state.plugin"],
+  "hooks": [
+    { "point": "command.before", "abort": true, "timeoutMs": 1000 },
+    { "point": "command.after" }
+  ],
+  "meta": { "title": "Python 命名钩子夹具", "author": "tests", "desc": "验证 Python 运行期 hook.subscribe 带选项与订阅 id" }
+}

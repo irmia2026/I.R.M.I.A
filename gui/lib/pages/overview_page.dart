@@ -295,21 +295,21 @@ class _OverviewPageState extends State<OverviewPage> {
     return raw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
   }
 
-  /// 建议清单（服务端 `DashboardView.suggestions`，结构见 src/web/server.ts:549）。
+  /// 建议清单：**只留死信**，其它一律不摆在这里（2026-10-26 用户定）。
+  ///
+  /// 后端的 `DashboardView.suggestions` 仍会发五类，这里只用其中一条：
+  ///   · `dead-letters` —— 她发出去**失败**的消息，重投/丢弃的入口只在这张卡上；
+  ///   · 其余四条（待确认超时 / 缓存偏低 / 日志久未归档 / 人格久未演化）属于
+  ///     "按自己的节奏该做的事"，不该在运行情况页占版面。
+  /// 效果：没有死信时这块**整段不出现**（渲染条件就是 `_advice.isNotEmpty`）。
   List<_Advice> get _advice {
     final out = <_Advice>[];
     final list = stats?['suggestions'];
     if (list is List) {
       for (final s in list.whereType<Map>()) {
         final item = _Advice.from(s);
-        if (item.title.isNotEmpty) out.add(item);
+        if (item.title.isNotEmpty && item.id == _AdviceCard.kDeadLettersId) out.add(item);
       }
-    }
-    if (stats?['personaIsSeed'] == true) {
-      out.add(_Advice(
-        id: 'persona-seed',
-        title: IrmiaStrings.of(context).overviewPersonaSeedAdvice,
-      ));
     }
     return out;
   }

@@ -5,7 +5,7 @@
 part of 'logs_page.dart';
 
 /// 事件摘要：与 web/pages/logs.js 的 summarize 同一张表
-String _summary(Map<String, dynamic> ev) {
+String _summary(AppStrings s, Map<String, dynamic> ev) {
   final d = _map(ev['data']);
   switch (_str(ev['type'])) {
     case 'tool/call':
@@ -56,9 +56,59 @@ String _summary(Map<String, dynamic> ev) {
       return '接管旧实例 pid ${d['previousPid'] ?? ''}';
     case 'model/degraded':
       return '${d['lane'] ?? ''} 降级：${_brief(d['reason'], 50)}';
+    case 'affect/appraised': {
+      // 评价事件的原始数据是一张 appraisal 表；行上只给人读「原因 · 主导情绪 强度」
+      final (dominant, strength) = _dominantImpulse(_map(d['impulse']));
+      return s.logsAffectSummary(
+        s.affectReason(_str(d['reasonCode'])),
+        s.moodEmotion(dominant),
+        strength.toStringAsFixed(2),
+      );
+    }
+    case 'sticker/sent': {
+      final candidates = d['candidates'] is List ? (d['candidates'] as List).length : 0;
+      return s.logsStickerSentSummary(
+        s.logsStickerSource(_str(d['source'])),
+        _str(d['tag']),
+        s.logsStickerPosition(_str(d['position'])),
+        candidates,
+      );
+    }
+    case 'sticker/skipped':
+      final reason = _str(d['reason']);
+      return reason.isEmpty ? _str(ev['type']) : _brief(reason, 80);
+    case 'sticker/harvested':
+      final result = _str(d['result']);
+      return result.isEmpty ? _str(ev['type']) : s.logsStickerHarvestResult(result);
+    case 'sticker/tagged': {
+      final tags = (d['tags'] is List ? (d['tags'] as List) : const <Object?>[])
+          .map((tag) => '$tag')
+          .toList();
+      final confidence = d['confidence'] is num ? (d['confidence'] as num).toDouble() : null;
+      return s.logsStickerTaggedSummary(tags, confidence?.toStringAsFixed(2) ?? '—');
+    }
+    case 'sticker/reviewed':
+      return s.logsStickerReviewAction(_str(d['action']));
     default:
       return _brief(d, 90);
   }
+}
+
+/// 评价事件里的冲动向量 → (主导情绪, 强度)。与情绪引擎的 `EMOTIONS` 同序同义；
+/// 这里只读事件里的原始 `impulse`（账本真值），不重算公式。
+(String, double) _dominantImpulse(Map<String, dynamic> impulse) {
+  const names = ['joy', 'distress', 'concern', 'irritation', 'warmth', 'shyness'];
+  var best = names.first;
+  var value = -1.0;
+  for (final name in names) {
+    final raw = impulse[name];
+    final current = raw is num ? raw.toDouble() : 0.0;
+    if (current > value) {
+      value = current;
+      best = name;
+    }
+  }
+  return (best, value < 0 ? 0 : value);
 }
 
 /// lane 大数字卡：进度条走「该 lane 今日消耗 / 日层硬上限」，软线由 softRatio 标出
@@ -154,6 +204,7 @@ class _TypeMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final s = IrmiaStrings.of(context);
     return PopupMenuButton<void>(
       tooltip: '按类型过滤',
       itemBuilder: (context) => [
@@ -176,9 +227,9 @@ class _TypeMenu extends StatelessWidget {
                     color: picked.contains(type) ? scheme.primary : scheme.onSurfaceVariant,
                   ),
                   const SizedBox(width: 8),
-                  // 显示名走 `_typeLabels`（logs_widgets.dart：人话名字表），
-                  // 勾选与过滤用的仍然是**事件类型**本身——服务端只按 type 过滤，见那张表的注释
-                  Text(_typeLabels[type] ?? type,
+                  // 显示名：情绪/表情包一族走 `_typeLabel`（AppStrings），其余沿用
+                  // `_typeLabels` 里那张本机表；勾选与过滤用的仍然是**事件类型**本身
+                  Text(_typeLabels[type] ?? _typeLabel(s, type),
                       style: _mono(11.5, picked.contains(type) ? scheme.primary : scheme.onSurface)),
                 ],
               ),
@@ -220,6 +271,7 @@ class _EventRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final s = IrmiaStrings.of(context);
     final type = _str(ev['type']);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -231,10 +283,10 @@ class _EventRow extends StatelessWidget {
             child: Row(
               children: [
                 SizedBox(width: 66, child: Text(_hms(ev['ts']?.toString()), style: _mono(11.5, scheme.onSurfaceVariant))),
-                _Badge(type, tone: _typeTone(context, type)),
+                _Badge(_typeLabel(s, type), tone: _typeTone(context, type)),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(_summary(ev),
+                  child: Text(_summary(s, ev),
                       maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
                 ),
                 Icon(open ? Icons.expand_less_rounded : Icons.expand_more_rounded,

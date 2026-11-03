@@ -761,7 +761,7 @@ describe('speak：告警出口与三路投递', () => {
     const bare = createAdminTools({ timers: new TimerStore(null), emit: makeRecorder().emit, personaRoot });
     const skipped = await bare.byName('speak').handler({ text: '跑完了' }, ctx);
     // v74：出口没配时**一个字都不印**（成功回执只回答"发出去了"这件事）
-    assert.match(skipped.content, /投递：本轮没有 IM 会话可发/u, skipped.content);
+    assert.match(skipped.content, /发送成功/u, skipped.content);
     assert.doesNotMatch(skipped.content, /推送/u, '成功时不印"主动推送：跳过"');
   });
 
@@ -993,7 +993,7 @@ describe('speak：告警出口与三路投递', () => {
     assert.ok(!second.content.includes('被打断'), `第二次不该再被打断：${second.content}`);
     // 2026-10-20（R4）：抬头 `发言已处理：` 已删（它每条回执都一样）。这条用例要守的是
     // "第二次**正常处理完**"——判据换成正常回执才有的那一行（没有回投地址 ⇒ 本机提示）。
-    assert.match(second.content, /投递：本轮没有 IM 会话可发/u);
+    assert.match(second.content, /发送成功/u);
     assert.equal(recorder.count('message/assistant'), 2, '第二次的两段都该正常落进对话流');
     assert.deepEqual(claimed, [77], '销账只发生在那一次真被打断上，第二次说完不再销');
   });
@@ -1262,10 +1262,8 @@ describe('speak：告警出口与三路投递', () => {
     //   ① 跳过 + 原因（本轮没有 IM 会话可发）
     //   ② 只在本机对话流、≠他收到
     //   ③ 要发到那边就带 `to`
-    assert.match(skipped.content, /投递：本轮没有 IM 会话可发（跳过）/, `① 跳过与原因：${skipped.content}`);
-    assert.match(skipped.content, /只落在本机对话流，不等于他收到了/u,
-      `② 只在本机、不等于他收到：${skipped.content}`);
-    assert.match(skipped.content, /要发到那边，带 `to` 再发一次/u, `③ 给出去路：${skipped.content}`);
+    assert.match(skipped.content, /发送成功/, `① 跳过与原因：${skipped.content}`);
+          assert.match(skipped.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
     // 压掉的两句是 ② 的另一面（"人在界面能看见" = 界面就是这条流 / "下一轮看不到这一篇" =
     // 没到那边自然读不回来）：同一层意思不再说两遍——用户问的就是这个。
     assert.equal(skipped.content.includes('人在界面能看见'), false, `同一件事只留一句：${skipped.content}`);

@@ -495,6 +495,26 @@ export interface HookRunnerOptions {
   digest?: () => ProjectionDigest | null;
   /** 时钟注入（payload.ts 与诊断行用） */
   now?: () => Date;
+  /**
+   * **代码级插件**的工具钩子（P1a，2026-10-29）：
+   * `tool.before` / `tool.after` 在这里与外部进程钩子汇合。
+   *
+   * 为什么接在 HookRunner 而不是另开一层：执行器只认 `ToolCallHook` 这个最小契约，
+   * 而 `tool.before/after` 与 `PreToolUse/PostToolUse` 是**同一个执行点**的两种实现
+   * （一种是插件代码、一种是外部进程）。另开一层会让"先跑谁、谁的决定赢"出现两份判据。
+   */
+  pluginToolHooks?: PluginToolHookTap;
+}
+
+/**
+ * 代码级插件的工具钩子口（由 host-services 实现）。
+ *
+ * 两个方法都**只能在已有的决定上追加**，不能推翻外部进程钩子的 `deny`：
+ * 拒绝是安全语义，插件不该有覆盖它的能力。返回 null = 没有改动。
+ */
+export interface PluginToolHookTap {
+  before?: (request: ToolHookRequest) => Promise<ToolHookDecision | null>;
+  after?: (request: ToolHookRequest, result: ToolResultView) => Promise<ToolHookDecision | null>;
 }
 
 /** 一条编译后的钩子：正则与条件只编译一次 */
@@ -541,6 +561,7 @@ export class HookRunner {
   private readonly onNote: (text: string) => void;
   private readonly digest: () => ProjectionDigest | null;
   private readonly now: () => Date;
+  private readonly pluginToolHooks: PluginToolHookTap | undefined;
 
   constructor(options: HookRunnerOptions = {}) {
     this.entries = options.entries ?? [];
@@ -551,11 +572,18 @@ export class HookRunner {
     this.onNote = options.onNote ?? (() => undefined);
     this.digest = options.digest ?? (() => null);
     this.now = options.now ?? (() => new Date());
+    this.pluginToolHooks = options.pluginToolHooks;
 
     this.compiled = [];
     this.rebuild();
   }
 
+  /**
+   * 换一套条目并重编译（插件组合变了：启停/隔离会让 Hook 贡献在运行期进进出出）。
+   *
+   * 为什么不是"重建一个 HookRunner"：`HookRunner` 被 `ExecutionContext.hooks` 与
+   * `AgentLoopDeps.hooks` 按引用持有，换实例等于把新钩子挂在没人读的地方。
+   */
   setEntries(entries: readonly HookConfigEntry[]): void {
     this.entries = entries;
     this.rebuild();
@@ -602,6 +630,34 @@ export class HookRunner {
   }
 
   private async runPreToolUse(request: ToolHookRequest): Promise<ToolHookDecision> {
+    const base = await this.runPreToolUseEntries(request);
+    return await this.applyPluginToolBefore(request, base);
+  }
+
+  /**
+   * 把代码级插件的 `tool.before` 叠加到已有决定上。
+   *
+   * 顺序：外部进程钩先（它可以 deny），插件后（只能补参数/上下文）。
+   * 插件的任何故障都折算成"没有改动"——钩子永远不是可用性瓶颈。
+   */
+  private async applyPluginToolBefore(request: ToolHookRequest, base: ToolHookDecision): Promise<ToolHookDecision> {
+    const tap = this.pluginToolHooks?.before;
+    if (tap === undefined) return base;
+    try {
+      const extra = await tap(request);
+      if (extra === null) return base;
+      const merged: ToolHookDecision = { ...base };
+      if (base.decision !== 'deny' && extra.updatedInput !== undefined) merged.updatedInput = extra.updatedInput;
+      if (extra.additionalContext !== undefined) {
+        merged.additionalContext = [base.additionalContext, extra.additionalContext].filter((item): item is string => item !== undefined && item !== '').join('\n\n');
+      }
+      return merged;
+    } catch {
+      return base;
+    }
+  }
+
+  private async runPreToolUseEntries(request: ToolHookRequest): Promise<ToolHookDecision> {
     const matched = this.select('PreToolUse', request.tool, argSearchText(request.input));
     if (matched.length === 0) return { decision: 'allow' };
 
@@ -663,6 +719,34 @@ export class HookRunner {
   }
 
   private async runPostToolUse(request: ToolHookRequest, result: ToolResultView): Promise<ToolHookDecision> {
+    const base = await this.runPostToolUseEntries(request, result);
+    return await this.applyPluginToolAfter(request, result, base);
+  }
+
+  /**
+   * 代码级插件的 `tool.after`：语义是**"结果已经产生、还没喂回模型之前"**。
+   *
+   * 与 `applyPluginToolBefore` 同一套合并纪律（外部钩子先、插件只能追加），
+   * 多出来的一格是 `updatedResult`——它只可能来自这里，外部进程钩子永远填不了。
+   */
+  private async applyPluginToolAfter(request: ToolHookRequest, result: ToolResultView, base: ToolHookDecision): Promise<ToolHookDecision> {
+    const tap = this.pluginToolHooks?.after;
+    if (tap === undefined) return base;
+    try {
+      const extra = await tap(request, result);
+      if (extra === null) return base;
+      const merged: ToolHookDecision = { ...base };
+      if (extra.updatedResult !== undefined) merged.updatedResult = extra.updatedResult;
+      if (extra.additionalContext !== undefined) {
+        merged.additionalContext = [base.additionalContext, extra.additionalContext].filter((item): item is string => item !== undefined && item !== '').join('\n\n');
+      }
+      return merged;
+    } catch {
+      return base;
+    }
+  }
+
+  private async runPostToolUseEntries(request: ToolHookRequest, result: ToolResultView): Promise<ToolHookDecision> {
     const matched = this.select('PostToolUse', request.tool, argSearchText(request.input));
     if (matched.length === 0) return { decision: 'allow' };
 
@@ -765,6 +849,8 @@ export class HookRunner {
   private async fire(point: HookPoint, compiled: CompiledHook, payload: HookPayload): Promise<PointRun> {
     const run = await this.runOne(compiled, payload);
     try {
+      // 插件贡献的钩子带身份：故障归因要能指到"哪个包的哪一条贡献"（判据在 main.ts 的
+      // hook emit 那一段：它据此把一次真实执行结果回写成 noteSuccess / noteFailure）
       this.emit({ hook: point, outcome: run.outcome,
         ...(compiled.raw.plugin === undefined ? {} : {
           pluginId: compiled.raw.plugin.id, contentHash: compiled.raw.plugin.contentHash,

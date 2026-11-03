@@ -2879,13 +2879,17 @@ abstract class AppStrings {
   /// 执行点钩子：PreToolUse / PostToolUse / Wake 三处可插入外部命令
   String get extSectionHooksBlurb;
 
+  // ── 插件平台（2026-10-26）──
+  // 左列表那一项与它的开场白
   String get extSectionPlugins;
   String get extSectionPluginsBlurb;
+  // 安装那一屏
   String get extPluginInstall;
   String get extPluginInstallTitle;
   String get extPluginSourceDir;
   String get extPluginSourceHint;
   String get extPluginAbsoluteRequired;
+  // 列表与卡片
   String get extPluginEmpty;
   String get extPluginEmptyHint;
   String extPluginSummary(int count);
@@ -2896,6 +2900,7 @@ abstract class AppStrings {
   String extPluginVersionHash(String version, String hash);
   String get extPluginPermissionsLabel;
   String get extPluginProblemsLabel;
+  // 审核与启停
   String get extPluginReview;
   String extPluginReviewTitle(String id);
   String extPluginReviewBody(String id, String hash);
@@ -2908,6 +2913,7 @@ abstract class AppStrings {
   String extPluginConfirmedToast(String id);
   String extPluginRestartToast(String action, String id);
   String extPluginFailed(String reason);
+  // 隔离态
   String extPluginCircuit(String contribution, int count);
   String extPluginCircuitReason(String reason);
   String extPluginRetryAt(String at);
@@ -3784,6 +3790,258 @@ abstract class AppStrings {
 
   /// 切换通道失败：$reason
   String updateSwitchFailed(String reason);
+
+  String get affectTitle;
+  String get affectSystem;
+  /// 表情包读不出来（带原始错误）
+  String stickersLoadFailed(String error);
+  String get affectInvalidData;
+  String get affectPending;
+  String affectSaved(bool enabled, bool applied);
+  String affectSaveFailed(String reason);
+  String affectLoadFailed(String reason);
+  String affectReason(String code);
+
+  // ── 情绪页（2026-10-31 按设计稿重做）────────────────────────────────
+  //
+  // 版式四块卡 + 页脚：当前心境 / 情绪构成 / 心境轨迹 / 最近的影响。
+  // 分类词（状态词、标题、描述、六维名、来源、数值档）都走带参 getter：
+  // 语序因语言而异，页面里不拼句子；只有"整句固定"的才单独给无参 getter。
+  String get moodPageEyebrow;
+  String get moodHeading;
+  String get moodTagline;
+  String get moodDetailTooltip;
+
+  String get moodHeroTitle;
+  String get moodUpdatedJustNow;
+  /// 情绪系统关闭时，页头更新时间那一格的说法（不显示假时间）
+  String get moodAffectOff;
+  String moodUpdatedMinutesAgo(int minutes);
+  String moodState(String key);
+  String moodHeadline(String key);
+  String moodDescription(String key);
+  /// 情绪系统开着、评价器也开着，但暂时还没有新评价
+  String get moodNoNewAppraisalTitle;
+  String get moodNoNewAppraisalBody;
+  /// 情绪系统开着，但评价器这个独立开关没开（情绪永远不会更新）
+  String get moodEvaluatorOffState;
+  String get moodEvaluatorOffTitle;
+  String get moodEvaluatorOffBody;
+  String moodRecentCause(String cause);
+  String get moodNoRecentCause;
+  String get moodSettlesOverTime;
+
+  String get moodValenceLabel;
+  String get moodArousalLabel;
+  String moodValenceWord(String key);
+  String moodArousalWord(String key);
+  String moodArousalValue(int percent);
+
+  String get moodEmotionsTitle;
+  String get moodEmotionsCaption;
+  String get moodEmotionsNote;
+  String get moodEmotionsEmpty;
+  String moodEmotion(String key);
+
+  String get moodTimelineTitle;
+  String get moodRangeToday;
+  String get moodRangeWeek;
+  String get moodChartInfoToday;
+  String get moodChartInfoWeek;
+  String get moodChartFlat;
+  String get moodChartEmptyToday;
+  String get moodChartEmptyWeek;
+  String moodChartDelta(bool up, String value);
+
+  String get moodFactorsTitle;
+  String get moodFactorsCaption;
+  String get moodFactorsEmpty;
+  String moodSource(String code);
+  String moodFactorMeta(String time, String source);
+  String moodFactorEffect(String emotion, String strength);
+
+  String get moodSheetTitle;
+  String get moodSheetBlurb;
+  String get moodSheetMoodLabel;
+  String get moodSheetValence;
+  String get moodSheetArousal;
+  String get moodSheetChangeMode;
+  String get moodSheetHalfLife;
+  String get moodSheetPrimaryLabel;
+  String get moodSheetRecentCause;
+  String get moodSheetSnapshot;
+  String get moodSheetSnapshotValue;
+  /// 详情浮层底部「请求侧」那一块：请求里真实注入的情绪行 + 状态时刻
+  String get moodSheetRequestLabel;
+  String get moodSheetRenderLine;
+  String get moodSheetRenderLineMissing;
+  String get moodSheetStateTime;
+  String get moodSheetStateTimeMissing;
+  String get moodSheetPrincipleTitle;
+  String get moodSheetPrincipleBody;
+  String get moodSheetClose;
+
+  String get moodFooterNote;
+  String get moodEngineMark;
+
+  // ── 亲密页（2026-11-02，情绪页的第三个 tab）──────────────────────────
+  //
+  // 与情绪同一族但**独立一层**：四格读数（亲密 / 情欲 / 满足 / 克制，0–100）、
+  // 上限三选一（含蓄 / 明显 / 强烈）、最近变化与走势。
+  // 契约是后端的 `GET /api/intimacy`；开关与上限仍走 `config-update`
+  // （`intimacy.enabled` / `intimacy.maxLevel`），不新造端点。
+  /// tab 名与页头标题（"亲密"）
+  String get intimacyTitle;
+
+  /// 页头/卡片上的系统名（"亲密系统"）
+  String get intimacySystem;
+
+  /// 顶部说明：只有用户私聊可见
+  String get intimacyNote;
+
+  /// 齿轮那颗按钮的 tooltip（打开详情浮层）
+  String get intimacyDetailTooltip;
+
+  /// 关闭态那一句：打开后才会有读数
+  String get intimacyOffHint;
+
+  /// 配置值与当前生效值不一致（环境变量覆盖 / 改动尚未生效）
+  String get intimacyPending;
+  String get intimacyReadingsTitle;
+
+  /// 读数的量纲说明（`0–100`）
+  String get intimacyReadingsCaption;
+
+  /// 四读数状态机的阶段（`phase`）：平稳 / 温热 / 绷着 / 发情。
+  /// 老后端没有这个字段时不显示，不留空标签。
+  String get intimacyPhaseCalm;
+  String get intimacyPhaseWarm;
+  String get intimacyPhaseTense;
+  String get intimacyPhaseEstrus;
+
+  /// `estrus: true` 时读数卡上的状态标签——只做状态，不写露骨内容
+  String get intimacyEstrusBadge;
+  String get intimacyLevelLabel;
+
+  /// 上限只封顶表达的明显程度，不改变读数
+  String get intimacyLevelNote;
+
+  /// 开着但还没有任何一拍读数
+  String get intimacyNoData;
+
+  /// 四格的名字：`intimacy` / `desire` / `satisfaction` / `restraint`
+  String intimacyMetric(String key);
+
+  /// 上限的取值：`subtle` / `obvious` / `strong`
+  String intimacyLevel(String key);
+
+  /// 读数旁边那一枚 chip：当前生效档位（参数是 [intimacyLevel] 的结果）
+  String intimacyLevelValue(String level);
+  String get intimacyCausesTitle;
+  String get intimacyCausesCaption;
+  String get intimacyCausesEmpty;
+
+  /// 原因条目：后端给了 label 就用它，没给才回一句兜底（label 是数据，不翻译）
+  String intimacyCauseLabel(String label);
+  String get intimacyHistoryTitle;
+
+  /// 走势图至少要两个点（1 点时这里说一句，不画假线）
+  String get intimacyHistoryEmpty;
+  String get intimacyJustNow;
+  String intimacyMinutesAgo(int minutes);
+  String intimacyHoursAgo(int hours);
+  String intimacyDaysAgo(int days);
+
+  /// 冷却中：还剩 N 分钟
+  String intimacyCoolingDown(int minutes);
+
+  /// 最近一次收住（后面接相对时间）；后端已在删停止词，字段缺失时整行不显示
+  String intimacyLastStopAt(String time);
+
+  /// 设置卡底部那条入口：打开详情浮层（齿轮那颗按钮的另一条路）
+  String get intimacyOpenDetails;
+  String get intimacySheetTitle;
+  String get intimacySheetBlurb;
+
+  /// 原文（后端给的 `line`，不做二次渲染）
+  String get intimacyLineLabel;
+
+  /// 请求里真实注入的那一行（`renderLine`）
+  String get intimacyRenderLineLabel;
+  String get intimacyRenderLineMissing;
+  String get intimacyLineEmpty;
+  String get intimacyInvalidData;
+  String intimacyLoadFailed(String reason);
+
+  /// 开关保存回执：`applied` = 回读到的生效值已经跟上
+  String intimacySaved(bool enabled, bool applied);
+
+  /// 上限保存回执（参数是本地化之后的名字；`applied` = 回读到的生效上限已经跟上）
+  String intimacyLevelSaved(String level, bool applied);
+  String intimacySaveFailed(String reason);
+
+  // ── 日志页：事件类型标签与摘要（2026-10-31 补情绪/表情包一族）────────────
+  String get logsTypeAffectAppraised;
+  String get logsTypeStickerSent;
+  String get logsTypeStickerSkipped;
+  String get logsTypeStickerHarvested;
+  String get logsTypeStickerTagged;
+  String get logsTypeStickerReviewed;
+  String logsAffectSummary(String reason, String emotion, String strength);
+  String logsStickerSentSummary(String source, String tag, String position, int candidates);
+  String logsStickerTaggedSummary(List<String> tags, String confidence);
+  String logsStickerSource(String source);
+  String logsStickerPosition(String position);
+  String logsStickerHarvestResult(String result);
+  String logsStickerReviewAction(String action);
+
+  String get stickerTitle;
+  String get stickerBlurb;
+  String get stickerTabLibrary;
+  String get stickerTabTagging;
+  String get stickerTabReview;
+  String get stickerTabSettings;
+  String get stickerTabEvents;
+  String get stickerUpload;
+  String get stickerUploadHint;
+  String get stickerEnabled;
+  String get stickerHarvestEnabled;
+  String get stickerTaggingEnabled;
+  String get stickerHarvestProbability;
+  String get stickerSettingsHint;
+  String get stickerLibraryHint;
+  String get stickerTaggingHint;
+  String get stickerReviewHint;
+  String get stickerEventsHint;
+  String get stickerEmpty;
+  String get stickerEmptyHint;
+  String get stickerInvalidData;
+  String get stickerApprove;
+  String get stickerReject;
+  String get stickerRestore;
+  String get stickerBlock;
+  String get stickerDelete;
+  String get stickerPurge;
+  String get stickerEditTags;
+  String get stickerBatchApprove;
+  String get stickerBatchReject;
+  String get stickerConfirmDeleteTitle;
+  String get stickerConfirmDeleteBody;
+  String get stickerConfirmPurgeBody;
+  String get stickerSettingsSaved;
+  String get stickerUploadDone;
+  String get stickerNoEvents;
+  String get stickerNoPending;
+  String get stickerNoRejected;
+  String get stickerIntensityLabel;
+  String get stickerConfidence;
+  String stickerStats(int approved, int pending, int sent);
+  String stickerSource(String source);
+  String stickerIntensity(String intensity);
+  String stickerStatus(String status);
+  String stickerUseCount(int count);
+  String stickerActionFailed(String reason);
+  String stickerBatchDone(int count);
 }
 
 /// 中文（**作者语言**，也是所有既有测试断言的基准）。
@@ -4159,7 +4417,7 @@ class ZhStrings extends AppStrings {
   @override
   String get chatSubtitle => '会话、消息来源与人工唤醒';
   @override
-  String get composerHint => '输入消息…（/reset 清空上下文、/dream 叫她整理记忆）';
+  String get composerHint => '输入消息…';
   @override
   String get jumpToLatest => '跳到最新';
   @override
@@ -6749,6 +7007,474 @@ class ZhStrings extends AppStrings {
   String updateSwitched(String channel) => '已切到 $channel 通道并立刻检查';
   @override
   String updateSwitchFailed(String reason) => '切换通道失败：$reason';
+
+  @override
+  String get affectTitle => '情绪';
+  @override
+  String get affectSystem => '情绪系统';
+  @override
+  String get affectInvalidData => '接口没有返回可显示的情绪数据，请重试。';
+  @override
+  String get affectPending => '配置与当前生效值不一致：可能来自环境变量覆盖，或改动尚未生效；若持续不一致，请重启后端再查。';
+  @override
+  String stickersLoadFailed(String error) => '表情包读不出来：$error';
+  @override
+  String affectSaved(bool enabled, bool applied) => applied
+      ? (enabled ? '已开启情绪系统，下一轮生效' : '已关闭情绪系统，下一轮生效')
+      : '配置已保存，等待生效';
+  @override
+  String affectSaveFailed(String reason) => '情绪开关保存失败：$reason';
+  @override
+  String affectLoadFailed(String reason) => '情绪状态读取失败：$reason';
+  @override
+  String affectReason(String code) => switch (code) {
+        'owner_setback' => '用户遇到困难',
+        'owner_success' => '用户有了进展',
+        'friendly_contact' => '最近的友善交流',
+        'unfriendly_contact' => '有依据的不友善交流',
+        'task_success' => '刚完成的任务',
+        'task_failure' => '刚遇到的执行挫折',
+        'new_discovery' => '刚发现的新信息',
+        _ => '近期经历',
+      };
+
+  // ── 情绪页（设计稿 2026-10-31）──────────────────────────────────────
+  @override
+  String get moodPageEyebrow => 'AFFECT / EMOTION';
+  @override
+  String get moodHeading => '情绪';
+  @override
+  String get moodTagline => '看看她此刻的感受';
+  @override
+  String get moodDetailTooltip => '查看她此刻的感受';
+  @override
+  String get moodHeroTitle => '当前心境';
+  @override
+  String get moodUpdatedJustNow => '刚刚更新';
+  @override
+  String get moodAffectOff => '未开启';
+  @override
+  String moodUpdatedMinutesAgo(int minutes) => '$minutes 分钟前';
+  @override
+  String moodState(String key) => switch (key) {
+        'positive' => '积极而轻快',
+        'low' => '情绪正在回落',
+        'quiet' => '状态平稳',
+        'off' => '情绪系统已关闭',
+        _ => '状态稳定',
+      };
+  @override
+  String moodHeadline(String key) => switch (key) {
+        'joy' => '心情不错，愿意多说两句。',
+        'warmth' => '温和，想靠近一点。',
+        'concern' => '平静，带一点牵挂。',
+        'shyness' => '有点害羞，话到嘴边又收住。',
+        'distress' => '情绪偏低，正在慢慢恢复。',
+        'irritation' => '有点烦，正在平复。',
+        'off' => '情绪系统现在是关着的。',
+        'empty' => '还没有新的情绪变化。',
+        _ => '平静，没有明显的起伏。',
+      };
+  @override
+  String moodDescription(String key) => switch (key) {
+        'positive' => '整体心境偏向积极。她更愿意回应，也愿意分享此刻的想法。',
+        'low' => '整体心境偏低。她在慢慢平复，正常任务仍会照常进行。',
+        'off' => '打开后她才会有一层当前情绪，会影响语气与表情包。',
+        'empty' => '等下一次评价之后，这里会显示她的心境。',
+        _ => '整体心境偏向温和。她仍在留意最近的对话，并不急着打扰你。',
+      };
+  @override
+  String get moodNoNewAppraisalTitle => '暂时没有新评价。';
+  @override
+  String get moodNoNewAppraisalBody => '评价器开着，暂时没有新评价；等下一次评价之后，这里会显示她的心境。';
+  @override
+  String get moodEvaluatorOffState => '评价器未开启';
+  @override
+  String get moodEvaluatorOffTitle => '评价器还没开。';
+  @override
+  String get moodEvaluatorOffBody => '评价器没开，情绪不会更新；打开情绪系统开关会一并打开。';
+  @override
+  String moodRecentCause(String cause) => '最近的变化来自：$cause';
+  @override
+  String get moodNoRecentCause => '还没有新的情绪变化';
+  @override
+  String get moodSettlesOverTime => '随时间自然平复';
+  @override
+  String get moodValenceLabel => '心境倾向';
+  @override
+  String get moodArousalLabel => '活跃程度';
+  @override
+  String moodValenceWord(String key) => switch (key) {
+        'high' => '积极',
+        'low' => '偏低',
+        _ => '温和',
+      };
+  @override
+  String moodArousalWord(String key) => switch (key) {
+        'high' => '较活跃',
+        'low' => '低活跃',
+        _ => '适中',
+      };
+  @override
+  String moodArousalValue(int percent) => '$percent%';
+  @override
+  String get moodEmotionsTitle => '情绪构成';
+  @override
+  String get moodEmotionsCaption => '6 个维度';
+  @override
+  String get moodEmotionsNote => '这些是她此刻的感受，会随眼前的事起落，不是固定的性格。';
+  @override
+  String get moodEmotionsEmpty => '还没有可显示的情绪维度。';
+  @override
+  String moodEmotion(String key) => switch (key) {
+        'joy' => '喜悦',
+        'distress' => '低落',
+        'concern' => '关切',
+        'irritation' => '烦躁',
+        'warmth' => '温暖',
+        'shyness' => '害羞',
+        _ => key,
+      };
+  @override
+  String get moodTimelineTitle => '心境轨迹';
+  @override
+  String get moodRangeToday => '今天';
+  @override
+  String get moodRangeWeek => '近 7 天';
+  @override
+  String get moodChartInfoToday => '相较今天早些时候';
+  @override
+  String get moodChartInfoWeek => '相较一周前';
+  @override
+  String get moodChartFlat => '持平';
+  @override
+  String get moodChartEmptyToday => '今天还没有足够的记录';
+  @override
+  String get moodChartEmptyWeek => '近 7 天还没有足够的记录';
+  @override
+  String moodChartDelta(bool up, String value) => '${up ? '↑' : '↓'} $value';
+  @override
+  String get moodFactorsTitle => '最近的影响';
+  @override
+  String get moodFactorsCaption => '根据近期事件';
+  @override
+  String get moodFactorsEmpty => '还没有新的情绪影响。';
+  @override
+  String moodSource(String code) => switch (code) {
+        'task' => '任务',
+        'discovery' => '探索',
+        'chat' => '对话',
+        _ => '其他',
+      };
+  @override
+  String moodFactorMeta(String time, String source) => '$time · $source';
+  @override
+  String moodFactorEffect(String emotion, String strength) => '$emotion $strength';
+  @override
+  String get moodSheetTitle => '状态详情';
+  @override
+  String get moodSheetBlurb => '这些数值只是另一种写法，用来看她此刻的感受。';
+  @override
+  String get moodSheetMoodLabel => '心境 · MOOD';
+  @override
+  String get moodSheetValence => 'Valence / 正负倾向';
+  @override
+  String get moodSheetArousal => 'Arousal / 活跃程度';
+  @override
+  String get moodSheetChangeMode => '情绪变化方式';
+  @override
+  String get moodSheetHalfLife => '时间半衰期';
+  @override
+  String get moodSheetPrimaryLabel => '当前主要情绪 · PRIMARY';
+  @override
+  String get moodSheetRecentCause => '最近原因';
+  @override
+  String get moodSheetSnapshot => '状态快照';
+  @override
+  String get moodSheetSnapshotValue => '仅供展示';
+  @override
+  String get moodSheetRequestLabel => '请求侧 · REQUEST';
+  @override
+  String get moodSheetRenderLine => '请求里的情绪行';
+  @override
+  String get moodSheetRenderLineMissing => '未注入（关闭态 / 评价器没开）';
+  @override
+  String get moodSheetStateTime => '状态时刻';
+  @override
+  String get moodSheetStateTimeMissing => '还没有评价';
+  @override
+  String get moodSheetPrincipleTitle => '设计原则';
+  @override
+  String get moodSheetPrincipleBody =>
+      '默认只呈现你读得懂的状态；更细的数值与事件编号收在这里。界面只展示，不改动她真实的感受。';
+  @override
+  String get moodSheetClose => '关闭';
+  @override
+  String get moodFooterNote => '情绪会影响她的关注与表达，但不会改变你的工具授权和任务要求。';
+  @override
+  String get moodEngineMark => 'AFFECT ENGINE';
+
+  // ── 亲密页（情绪页的第三个 tab）──────────────────────────────────────
+  @override
+  String get intimacyTitle => '亲密';
+  @override
+  String get intimacySystem => '亲密系统';
+  @override
+  String get intimacyNote => '她此刻的内在状态；是否表露、表露多少，由她按关系和场合判断。';
+  @override
+  String get intimacyDetailTooltip => '查看亲密详情';
+  @override
+  String get intimacyOffHint => '打开后才会记录亲密读数；关闭时不显示任何数值。';
+  @override
+  String get intimacyPending => '配置与当前生效值不一致：可能来自环境变量覆盖，或改动尚未生效。';
+  @override
+  String get intimacyReadingsTitle => '四格读数';
+  @override
+  String get intimacyReadingsCaption => '0–100';
+  @override
+  String get intimacyPhaseCalm => '平稳';
+  @override
+  String get intimacyPhaseWarm => '温热';
+  @override
+  String get intimacyPhaseTense => '绷着';
+  @override
+  String get intimacyPhaseEstrus => '发情';
+  @override
+  String get intimacyEstrusBadge => '已进入发情';
+  @override
+  String get intimacyLevelLabel => '上限';
+  @override
+  String get intimacyLevelNote => '上限决定她表达得多明显，默认明显。';
+  @override
+  String get intimacyNoData => '还没有读数';
+  @override
+  String intimacyMetric(String key) => switch (key) {
+        'intimacy' => '亲密',
+        'desire' => '情欲',
+        'satisfaction' => '满足',
+        'restraint' => '克制',
+        _ => key,
+      };
+  @override
+  String intimacyLevel(String key) => switch (key) {
+        'subtle' => '含蓄',
+        'obvious' => '明显',
+        'strong' => '强烈',
+        _ => key,
+      };
+  @override
+  String intimacyLevelValue(String level) => '档位 ${intimacyLevel(level)}';
+  @override
+  String get intimacyCausesTitle => '最近变化';
+  @override
+  String get intimacyCausesCaption => '根据近期事件';
+  @override
+  String get intimacyCausesEmpty => '还没有新的变化。';
+  @override
+  String intimacyCauseLabel(String label) => label.trim().isEmpty ? '近期经历' : label;
+  @override
+  String get intimacyHistoryTitle => '最近走势';
+  @override
+  String get intimacyHistoryEmpty => '至少要有两个记录点才画走势。';
+  @override
+  String get intimacyJustNow => '刚刚';
+  @override
+  String intimacyMinutesAgo(int minutes) => '$minutes 分钟前';
+  @override
+  String intimacyHoursAgo(int hours) => '$hours 小时前';
+  @override
+  String intimacyDaysAgo(int days) => '$days 天前';
+  @override
+  String intimacyCoolingDown(int minutes) => '冷却中，还剩 $minutes 分钟';
+  @override
+  String intimacyLastStopAt(String time) => '最近一次收住：$time';
+  @override
+  String get intimacyOpenDetails => '查看原文与请求行';
+  @override
+  String get intimacySheetTitle => '亲密详情';
+  @override
+  String get intimacySheetBlurb => '这些数值只是另一种写法，用来看她此刻的感受与想要。';
+  @override
+  String get intimacyLineLabel => '原文';
+  @override
+  String get intimacyRenderLineLabel => '请求里的亲密行';
+  @override
+  String get intimacyRenderLineMissing => '未注入（关闭态 / 非私聊）';
+  @override
+  String get intimacyLineEmpty => '还没有原文';
+  @override
+  String get intimacyInvalidData => '接口没有返回可显示的亲密数据，请重试。';
+  @override
+  String intimacyLoadFailed(String reason) => '亲密状态读取失败：$reason';
+  @override
+  String intimacySaved(bool enabled, bool applied) => applied
+      ? (enabled ? '已开启亲密，下一轮生效' : '已关闭亲密，下一轮生效')
+      : '配置已保存，等待生效';
+  @override
+  String intimacyLevelSaved(String level, bool applied) => applied ? '上限已设为 $level' : '配置已保存，等待生效';
+  @override
+  String intimacySaveFailed(String reason) => '亲密设置保存失败：$reason';
+
+  // ── 日志页：事件类型标签与摘要 ──
+  @override
+  String get logsTypeAffectAppraised => '情绪评价';
+  @override
+  String get logsTypeStickerSent => '表情包投递';
+  @override
+  String get logsTypeStickerSkipped => '表情包跳过';
+  @override
+  String get logsTypeStickerHarvested => '表情包采收';
+  @override
+  String get logsTypeStickerTagged => '表情包打标';
+  @override
+  String get logsTypeStickerReviewed => '表情包审核';
+  @override
+  String logsAffectSummary(String reason, String emotion, String strength) => '$reason · $emotion $strength';
+  @override
+  String logsStickerSentSummary(String source, String tag, String position, int candidates) =>
+      '$source · ${tag.isEmpty ? '无标签' : tag} · $position · 候选 $candidates';
+  @override
+  String logsStickerTaggedSummary(List<String> tags, String confidence) =>
+      '${tags.isEmpty ? '无标签' : tags.join(' / ')} · 置信 $confidence';
+  @override
+  String logsStickerSource(String source) => switch (source) {
+        'active' => '主动',
+        'passive' => '被动',
+        _ => source,
+      };
+  @override
+  String logsStickerPosition(String position) => switch (position) {
+        'after' => '配文后',
+        'before' => '配文前',
+        'only' => '单独发送',
+        _ => position,
+      };
+  @override
+  String logsStickerHarvestResult(String result) => switch (result) {
+        'auto-approved' => '自动入库',
+        'pending' => '待审',
+        'rejected' => '已拒绝',
+        _ => result,
+      };
+  @override
+  String logsStickerReviewAction(String action) => switch (action) {
+        'approve' => '批准',
+        'reject' => '拒绝',
+        'restore' => '恢复',
+        'delete' => '删除',
+        'block' => '停用',
+        _ => action,
+      };
+
+  @override
+  String get stickerTitle => '表情包';
+  @override
+  String get stickerBlurb => '让她用图表达，也让每一张图都有来处和审计。';
+  @override
+  String get stickerTabLibrary => '库';
+  @override
+  String get stickerTabTagging => '打标';
+  @override
+  String get stickerTabReview => '审核';
+  @override
+  String get stickerTabSettings => '设置';
+  @override
+  String get stickerTabEvents => '事件';
+  @override
+  String get stickerUpload => '上传贴纸';
+  @override
+  String get stickerUploadHint => '支持 PNG / JPEG / GIF / WebP，单张不超过 8MB。先打标预览，确认后才入库。';
+  @override
+  String get stickerEnabled => '启用表情包';
+  @override
+  String get stickerHarvestEnabled => '自动采收';
+  @override
+  String get stickerTaggingEnabled => '自动打标';
+  @override
+  String get stickerHarvestProbability => '采收概率';
+  @override
+  String get stickerSettingsHint => '设置保存后在下一拍或下一轮生效；群聊仍按各通道的开关收敛。';
+  @override
+  String get stickerLibraryHint => '按标签分区。已入库的图可以改标签、停用但不删除，或移入已拒绝。';
+  @override
+  String get stickerTaggingHint => '每张图保留 1–2 个标签，并标明强度、来源和使用次数。点“标签”可修改。';
+  @override
+  String get stickerReviewHint => '待审图批准后才可使用；已拒绝的图可恢复，也可确认后彻底删除。';
+  @override
+  String get stickerEventsHint => '发送、跳过、打标、采收和审核记录都在这里，便于复盘。';
+  @override
+  String get stickerEmpty => '还没有贴纸';
+  @override
+  String get stickerEmptyHint => '先上传一张图；若采收已开启，合格的图片也可能静默进入待审。';
+  @override
+  String get stickerInvalidData => '贴纸索引读不出来或响应格式不对，请重试。';
+  @override
+  String get stickerApprove => '批准';
+  @override
+  String get stickerReject => '拒绝';
+  @override
+  String get stickerRestore => '恢复';
+  @override
+  String get stickerBlock => '停用';
+  @override
+  String get stickerDelete => '删除';
+  @override
+  String get stickerPurge => '彻底删除';
+  @override
+  String get stickerEditTags => '标签';
+  @override
+  String get stickerBatchApprove => '批量批准';
+  @override
+  String get stickerBatchReject => '批量拒绝';
+  @override
+  String get stickerConfirmDeleteTitle => '确认删除这张贴纸？';
+  @override
+  String get stickerConfirmDeleteBody => '删除会把图移入已拒绝，之后仍可恢复。';
+  @override
+  String get stickerConfirmPurgeBody => '彻底删除后无法恢复，且只影响已拒绝的这张图。';
+  @override
+  String get stickerSettingsSaved => '设置已保存';
+  @override
+  String get stickerUploadDone => '已读取打标结果，请预览确认。';
+  @override
+  String get stickerNoEvents => '还没有贴纸事件';
+  @override
+  String get stickerNoPending => '没有待审贴纸';
+  @override
+  String get stickerNoRejected => '没有已拒绝贴纸';
+  @override
+  String get stickerIntensityLabel => '强度';
+  @override
+  String get stickerConfidence => '打标置信度';
+  @override
+  String stickerStats(int approved, int pending, int sent) => '已入库 $approved · 待审 $pending · 今日发送 $sent';
+  @override
+  String stickerSource(String source) => switch (source) {
+        'owner' => '用户',
+        'collected' => '采收',
+        'plugin' => '插件',
+        _ => source,
+      };
+  @override
+  String stickerIntensity(String intensity) => switch (intensity) {
+        'strong' => '强烈',
+        'mild' => '轻微',
+        _ => '明显',
+      };
+  @override
+  String stickerStatus(String status) => switch (status) {
+        'pending' => '待审',
+        'approved' => '已入库',
+        'rejected' => '已拒绝',
+        'blocked' => '已停用',
+        _ => status,
+      };
+  @override
+  String stickerUseCount(int count) => '使用 $count 次';
+  @override
+  String stickerActionFailed(String reason) => '贴纸操作失败：$reason';
+  @override
+  String stickerBatchDone(int count) => '已处理 $count 张';
 }
 
 /// English。
@@ -7163,7 +7889,7 @@ class EnStrings extends AppStrings {
   @override
   String get chatSubtitle => 'Conversations, message sources, manual wake-up';
   @override
-  String get composerHint => 'Type a message… (/reset clears context, /dream asks her to tidy up memory)';
+  String get composerHint => 'Type a message…';
   @override
   String get jumpToLatest => 'Jump to latest';
   @override
@@ -8204,10 +8930,7 @@ class EnStrings extends AppStrings {
   @override
   String get pickerTitle => 'Choose an instance';
   @override
-  String get pickerBody => 'The previous instance has ended: its backend process is stopped (no more heartbeat, '
-      'no more incoming messages), but your sign-in is kept — pick "Open" to come straight back. Choose an '
-      'instance here, or create a new one. Instances are fully isolated: their own data, their own password, '
-      'their own edit rights.';
+  String get pickerBody => 'Pick one to continue, or create a new instance.';
   @override
   String get pickerLoading => 'Reading the instance list…';
   @override
@@ -9848,6 +10571,480 @@ class EnStrings extends AppStrings {
   @override
   String updateSwitchFailed(String reason) => 'Could not switch channel: $reason';
 
+  @override
+  String get affectTitle => 'Affect';
+  @override
+  String get affectSystem => 'Affect system';
+  @override
+  String get affectInvalidData => 'The server returned no usable affect data. Try again.';
+  @override
+  String get affectPending => 'Config and the active value differ: this can come from an environment override, or from a change that has not taken effect yet. If it persists, restart the backend and check again.';
+  @override
+  String stickersLoadFailed(String error) => 'Could not load stickers: $error';
+  @override
+  String affectSaved(bool enabled, bool applied) => applied
+      ? (enabled ? 'Affect enabled; applies from the next turn' : 'Affect disabled; applies from the next turn')
+      : 'Configuration saved; waiting for it to apply';
+  @override
+  String affectSaveFailed(String reason) => 'Could not save the affect setting: $reason';
+  @override
+  String affectLoadFailed(String reason) => 'Could not read affect: $reason';
+  @override
+  String affectReason(String code) => switch (code) {
+        'owner_setback' => 'The owner is having difficulty',
+        'owner_success' => 'The owner made progress',
+        'friendly_contact' => 'Recent friendly contact',
+        'unfriendly_contact' => 'Observed unfriendly contact',
+        'task_success' => 'A recently completed task',
+        'task_failure' => 'A recent execution setback',
+        'new_discovery' => 'New information',
+        _ => 'Recent experience',
+      };
+
+  // ── 情绪页（设计稿 2026-10-31）──────────────────────────────────────
+  @override
+  String get moodPageEyebrow => 'AFFECT / EMOTION';
+  @override
+  String get moodHeading => 'Mood';
+  @override
+  String get moodTagline => 'A look at how she feels right now';
+  @override
+  String get moodDetailTooltip => 'See how she feels right now';
+  @override
+  String get moodHeroTitle => 'Current mood';
+  @override
+  String get moodUpdatedJustNow => 'Updated just now';
+  @override
+  String get moodAffectOff => 'Off';
+  @override
+  String moodUpdatedMinutesAgo(int minutes) => '$minutes min ago';
+  @override
+  String moodState(String key) => switch (key) {
+        'positive' => 'Bright and light',
+        'low' => 'Settling down',
+        'quiet' => 'Calm',
+        'off' => 'Affect system is off',
+        _ => 'Steady',
+      };
+  @override
+  String moodHeadline(String key) => switch (key) {
+        'joy' => 'In a good mood, glad to talk.',
+        'warmth' => 'Gentle, and leaning a little closer.',
+        'concern' => 'Calm, with a touch of concern.',
+        'shyness' => 'A little shy, keeping some words to herself.',
+        'distress' => 'A little low, and slowly recovering.',
+        'irritation' => 'A little annoyed, and calming down.',
+        'off' => 'The affect system is currently off.',
+        'empty' => 'No new emotional change yet.',
+        _ => 'Calm, without much of a swing.',
+      };
+  @override
+  String moodDescription(String key) => switch (key) {
+        'positive' => 'Her mood leans positive. She is more willing to respond and to share what she is thinking.',
+        'low' => 'Her mood is on the low side. She is settling down; normal tasks still run as usual.',
+        'off' => 'Turn it on to give her a current affect layer that shapes tone and stickers.',
+        'empty' => 'Her mood will appear here after the next appraisal.',
+        _ => 'Her mood leans gentle. She is still following the recent conversation, in no hurry to interrupt.',
+      };
+  @override
+  String get moodNoNewAppraisalTitle => 'No new appraisal yet.';
+  @override
+  String get moodNoNewAppraisalBody =>
+      'The evaluator is running, but there is no new appraisal yet. Her mood will appear here after the next one.';
+  @override
+  String get moodEvaluatorOffState => 'Evaluator is off';
+  @override
+  String get moodEvaluatorOffTitle => 'The evaluator is off.';
+  @override
+  String get moodEvaluatorOffBody =>
+      'The evaluator is off, so affect will not update. Turning on the affect system switch turns it on too.';
+  @override
+  String moodRecentCause(String cause) => 'Latest change from: $cause';
+  @override
+  String get moodNoRecentCause => 'No new emotional change yet';
+  @override
+  String get moodSettlesOverTime => 'Settles naturally over time';
+  @override
+  String get moodValenceLabel => 'Mood lean';
+  @override
+  String get moodArousalLabel => 'Activation';
+  @override
+  String moodValenceWord(String key) => switch (key) {
+        'high' => 'positive',
+        'low' => 'low',
+        _ => 'mild',
+      };
+  @override
+  String moodArousalWord(String key) => switch (key) {
+        'high' => 'active',
+        'low' => 'quiet',
+        _ => 'moderate',
+      };
+  @override
+  String moodArousalValue(int percent) => '$percent%';
+  @override
+  String get moodEmotionsTitle => 'Emotional mix';
+  @override
+  String get moodEmotionsCaption => '6 dimensions';
+  @override
+  String get moodEmotionsNote =>
+      'These are how she feels right now; they shift with what is happening, not a fixed personality.';
+  @override
+  String get moodEmotionsEmpty => 'No emotion dimensions to show yet.';
+  @override
+  String moodEmotion(String key) => switch (key) {
+        'joy' => 'Joy',
+        'distress' => 'Distress',
+        'concern' => 'Concern',
+        'irritation' => 'Irritation',
+        'warmth' => 'Warmth',
+        'shyness' => 'Shyness',
+        _ => key,
+      };
+  @override
+  String get moodTimelineTitle => 'Mood trend';
+  @override
+  String get moodRangeToday => 'Today';
+  @override
+  String get moodRangeWeek => 'Last 7 days';
+  @override
+  String get moodChartInfoToday => 'Compared with earlier today';
+  @override
+  String get moodChartInfoWeek => 'Compared with a week ago';
+  @override
+  String get moodChartFlat => 'Flat';
+  @override
+  String get moodChartEmptyToday => 'Not enough records today yet';
+  @override
+  String get moodChartEmptyWeek => 'Not enough records in the last 7 days yet';
+  @override
+  String moodChartDelta(bool up, String value) => '${up ? '↑' : '↓'} $value';
+  @override
+  String get moodFactorsTitle => 'Recent influences';
+  @override
+  String get moodFactorsCaption => 'From recent events';
+  @override
+  String get moodFactorsEmpty => 'No recent emotional influence yet.';
+  @override
+  String moodSource(String code) => switch (code) {
+        'task' => 'Task',
+        'discovery' => 'Exploration',
+        'chat' => 'Conversation',
+        _ => 'Other',
+      };
+  @override
+  String moodFactorMeta(String time, String source) => '$time · $source';
+  @override
+  String moodFactorEffect(String emotion, String strength) => '$emotion $strength';
+  @override
+  String get moodSheetTitle => 'State details';
+  @override
+  String get moodSheetBlurb => 'These numbers are just another way of showing how she feels right now.';
+  @override
+  String get moodSheetMoodLabel => 'Mood';
+  @override
+  String get moodSheetValence => 'Valence';
+  @override
+  String get moodSheetArousal => 'Arousal';
+  @override
+  String get moodSheetChangeMode => 'How affect changes';
+  @override
+  String get moodSheetHalfLife => 'Time half-life';
+  @override
+  String get moodSheetPrimaryLabel => 'Primary emotion';
+  @override
+  String get moodSheetRecentCause => 'Recent cause';
+  @override
+  String get moodSheetSnapshot => 'Snapshot';
+  @override
+  String get moodSheetSnapshotValue => 'Display only';
+  @override
+  String get moodSheetRequestLabel => 'Request · REQUEST';
+  @override
+  String get moodSheetRenderLine => 'Affect line in the request';
+  @override
+  String get moodSheetRenderLineMissing => 'Not injected (off, or the evaluator is off)';
+  @override
+  String get moodSheetStateTime => 'State timestamp';
+  @override
+  String get moodSheetStateTimeMissing => 'No appraisal yet';
+  @override
+  String get moodSheetPrincipleTitle => 'Design principle';
+  @override
+  String get moodSheetPrincipleBody =>
+      'Show only what you can read at a glance; finer numbers and event ids live here. The UI only displays, never changes how she really feels.';
+  @override
+  String get moodSheetClose => 'Close';
+  @override
+  String get moodFooterNote =>
+      'Emotions shape what she notices and how she speaks, but never change your tool authorization or task requirements.';
+  @override
+  String get moodEngineMark => 'AFFECT ENGINE';
+
+  // ── 亲密页（情绪页的第三个 tab）──────────────────────────────────────
+  @override
+  String get intimacyTitle => 'Intimacy';
+  @override
+  String get intimacySystem => 'Intimacy system';
+  @override
+  String get intimacyNote =>
+      'Her inner state right now; whether and how much she shows it is up to her, depending on the relationship and the setting.';
+  @override
+  String get intimacyDetailTooltip => 'View intimacy details';
+  @override
+  String get intimacyOffHint => 'Turn it on to record intimacy readings; nothing is shown while it is off.';
+  @override
+  String get intimacyPending => 'Saved config differs from the effective value — an env override, or a change not applied yet.';
+  @override
+  String get intimacyReadingsTitle => 'Readings';
+  @override
+  String get intimacyReadingsCaption => '0–100';
+  @override
+  String get intimacyPhaseCalm => 'Calm';
+  @override
+  String get intimacyPhaseWarm => 'Warm';
+  @override
+  String get intimacyPhaseTense => 'Tense';
+  @override
+  String get intimacyPhaseEstrus => 'Estrus';
+  @override
+  String get intimacyEstrusBadge => 'In estrus';
+  @override
+  String get intimacyLevelLabel => 'Upper limit';
+  @override
+  String get intimacyLevelNote => 'The upper limit caps how openly she shows it (default: obvious).';
+  @override
+  String get intimacyNoData => 'No readings yet';
+  @override
+  String intimacyMetric(String key) => switch (key) {
+        'intimacy' => 'Intimacy',
+        'desire' => 'Desire',
+        'satisfaction' => 'Satisfaction',
+        'restraint' => 'Restraint',
+        _ => key,
+      };
+  @override
+  String intimacyLevel(String key) => switch (key) {
+        'subtle' => 'Subtle',
+        'obvious' => 'Obvious',
+        'strong' => 'Strong',
+        _ => key,
+      };
+  @override
+  String intimacyLevelValue(String level) => 'Level: ${intimacyLevel(level)}';
+  @override
+  String get intimacyCausesTitle => 'Recent changes';
+  @override
+  String get intimacyCausesCaption => 'From recent events';
+  @override
+  String get intimacyCausesEmpty => 'No changes yet.';
+  @override
+  String intimacyCauseLabel(String label) => label.trim().isEmpty ? 'Recent event' : label;
+  @override
+  String get intimacyHistoryTitle => 'Recent trend';
+  @override
+  String get intimacyHistoryEmpty => 'Needs at least two points to draw a trend.';
+  @override
+  String get intimacyJustNow => 'just now';
+  @override
+  String intimacyMinutesAgo(int minutes) => '$minutes min ago';
+  @override
+  String intimacyHoursAgo(int hours) => '$hours h ago';
+  @override
+  String intimacyDaysAgo(int days) => '$days d ago';
+  @override
+  String intimacyCoolingDown(int minutes) => 'Cooling down, $minutes min left';
+  @override
+  String intimacyLastStopAt(String time) => 'Last time she held back: $time';
+  @override
+  String get intimacyOpenDetails => 'Raw line & request';
+  @override
+  String get intimacySheetTitle => 'Intimacy details';
+  @override
+  String get intimacySheetBlurb =>
+      'These numbers are just another way of showing what she feels and wants right now.';
+  @override
+  String get intimacyLineLabel => 'Raw line';
+  @override
+  String get intimacyRenderLineLabel => 'Intimacy line in the request';
+  @override
+  String get intimacyRenderLineMissing => 'Not injected (off, or not a private chat)';
+  @override
+  String get intimacyLineEmpty => 'No raw line yet';
+  @override
+  String get intimacyInvalidData => 'The API returned no displayable intimacy data. Try again.';
+  @override
+  String intimacyLoadFailed(String reason) => 'Could not read intimacy state: $reason';
+  @override
+  String intimacySaved(bool enabled, bool applied) => applied
+      ? (enabled ? 'Intimacy turned on; applies from the next round' : 'Intimacy turned off; applies from the next round')
+      : 'Saved; waiting to take effect';
+  @override
+  String intimacyLevelSaved(String level, bool applied) =>
+      applied ? 'Upper limit set to $level' : 'Saved; waiting to take effect';
+  @override
+  String intimacySaveFailed(String reason) => 'Could not save intimacy settings: $reason';
+
+  // ── 日志页：事件类型标签与摘要 ──
+  @override
+  String get logsTypeAffectAppraised => 'Affect appraisal';
+  @override
+  String get logsTypeStickerSent => 'Sticker sent';
+  @override
+  String get logsTypeStickerSkipped => 'Sticker skipped';
+  @override
+  String get logsTypeStickerHarvested => 'Sticker harvested';
+  @override
+  String get logsTypeStickerTagged => 'Sticker tagged';
+  @override
+  String get logsTypeStickerReviewed => 'Sticker reviewed';
+  @override
+  String logsAffectSummary(String reason, String emotion, String strength) => '$reason · $emotion $strength';
+  @override
+  String logsStickerSentSummary(String source, String tag, String position, int candidates) =>
+      '$source · ${tag.isEmpty ? 'no tag' : tag} · $position · $candidates candidates';
+  @override
+  String logsStickerTaggedSummary(List<String> tags, String confidence) =>
+      '${tags.isEmpty ? 'no tags' : tags.join(', ')} · confidence $confidence';
+  @override
+  String logsStickerSource(String source) => switch (source) {
+        'active' => 'active',
+        'passive' => 'passive',
+        _ => source,
+      };
+  @override
+  String logsStickerPosition(String position) => switch (position) {
+        'after' => 'after text',
+        'before' => 'before text',
+        'only' => 'standalone',
+        _ => position,
+      };
+  @override
+  String logsStickerHarvestResult(String result) => switch (result) {
+        'auto-approved' => 'auto-approved',
+        'pending' => 'pending review',
+        'rejected' => 'rejected',
+        _ => result,
+      };
+  @override
+  String logsStickerReviewAction(String action) => switch (action) {
+        'approve' => 'approve',
+        'reject' => 'reject',
+        'restore' => 'restore',
+        'delete' => 'delete',
+        'block' => 'disable',
+        _ => action,
+      };
+
+  @override
+  String get stickerTitle => 'Stickers';
+  @override
+  String get stickerBlurb => 'Let her express herself with images, with provenance and review for every one.';
+  @override
+  String get stickerTabLibrary => 'Library';
+  @override
+  String get stickerTabTagging => 'Tags';
+  @override
+  String get stickerTabReview => 'Review';
+  @override
+  String get stickerTabSettings => 'Settings';
+  @override
+  String get stickerTabEvents => 'Events';
+  @override
+  String get stickerUpload => 'Upload sticker';
+  @override
+  String get stickerUploadHint => 'PNG, JPEG, GIF or WebP, up to 8MB each. Tagging and preview come before approval.';
+  @override
+  String get stickerEnabled => 'Enable stickers';
+  @override
+  String get stickerHarvestEnabled => 'Auto-collect';
+  @override
+  String get stickerTaggingEnabled => 'Auto-tag';
+  @override
+  String get stickerHarvestProbability => 'Collection probability';
+  @override
+  String get stickerSettingsHint => 'Saved settings apply on the next tick or turn. Group chats still follow their channel switches.';
+  @override
+  String get stickerLibraryHint => 'Grouped by tag. Approved images can be retagged, disabled without deletion, or moved to rejected.';
+  @override
+  String get stickerTaggingHint => 'Each image keeps 1–2 tags, plus intensity, source and use count. Select Tags to edit.';
+  @override
+  String get stickerReviewHint => 'Pending images need approval before use. Restore rejected images or permanently delete them after confirmation.';
+  @override
+  String get stickerEventsHint => 'Sent, skipped, tagged, collected and reviewed records are all here for auditing.';
+  @override
+  String get stickerEmpty => 'No stickers yet';
+  @override
+  String get stickerEmptyHint => 'Upload an image first. With auto-collect enabled, eligible images may quietly enter review.';
+  @override
+  String get stickerInvalidData => 'The sticker index could not be read or the response was malformed. Try again.';
+  @override
+  String get stickerApprove => 'Approve';
+  @override
+  String get stickerReject => 'Reject';
+  @override
+  String get stickerRestore => 'Restore';
+  @override
+  String get stickerBlock => 'Disable';
+  @override
+  String get stickerDelete => 'Delete';
+  @override
+  String get stickerPurge => 'Delete permanently';
+  @override
+  String get stickerEditTags => 'Tags';
+  @override
+  String get stickerBatchApprove => 'Approve selected';
+  @override
+  String get stickerBatchReject => 'Reject selected';
+  @override
+  String get stickerConfirmDeleteTitle => 'Delete this sticker?';
+  @override
+  String get stickerConfirmDeleteBody => 'The image moves to rejected and can be restored later.';
+  @override
+  String get stickerConfirmPurgeBody => 'This cannot be undone. Only this rejected image is affected.';
+  @override
+  String get stickerSettingsSaved => 'Settings saved';
+  @override
+  String get stickerUploadDone => 'Tagging is ready for your preview and confirmation.';
+  @override
+  String get stickerNoEvents => 'No sticker events yet';
+  @override
+  String get stickerNoPending => 'No pending stickers';
+  @override
+  String get stickerNoRejected => 'No rejected stickers';
+  @override
+  String get stickerIntensityLabel => 'Intensity';
+  @override
+  String get stickerConfidence => 'Tag confidence';
+  @override
+  String stickerStats(int approved, int pending, int sent) => '$approved approved · $pending pending · $sent sent today';
+  @override
+  String stickerSource(String source) => switch (source) {
+        'owner' => 'Owner',
+        'collected' => 'Collected',
+        'plugin' => 'Plugin',
+        _ => source,
+      };
+  @override
+  String stickerIntensity(String intensity) => switch (intensity) {
+        'strong' => 'Strong',
+        'mild' => 'Mild',
+        _ => 'Obvious',
+      };
+  @override
+  String stickerStatus(String status) => switch (status) {
+        'pending' => 'Pending',
+        'approved' => 'Approved',
+        'rejected' => 'Rejected',
+        'blocked' => 'Disabled',
+        _ => status,
+      };
+  @override
+  String stickerUseCount(int count) => '$count uses';
+  @override
+  String stickerActionFailed(String reason) => 'Sticker action failed: $reason';
+  @override
+  String stickerBatchDone(int count) => '$count processed';
 }
 
 /// 按具体语言取文案表。[AppLanguage.system] 必须先经 [AppLanguage.resolve]。
@@ -9926,5 +11123,9 @@ const List<String> kScheduleWeekdayShort = ['日', '一', '二', '三', '四', '
 /// 页面拿它**判断**这次保存要不要用提醒色（`descNote.contains(...)`）：上屏的是服务端那句话
 /// 本身，不是这一串。它是**回执的词汇**（换英文界面服务端照旧写中文），所以不翻译。
 const String kExtDescNoteMarker = '只会有这个名字';
+
+/// 模型与审核共用的九标签；它们是数据键，不随界面语言翻译。
+const List<String> kStickerTags = ['开心', '难过', '担心', '生气', '亲近', '好奇', '无语', '得意', '害羞'];
+
 
 

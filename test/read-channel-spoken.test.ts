@@ -321,7 +321,7 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     const rec = recorder();
     const tk = speakToolkit(rec, async () => ({ ok: true, status: 200 }), null);
     const result = await tk.byName('speak').handler({ text: '你好' }, CTX);
-    assert.match(result.content, /没有 IM 会话可发/u);
+    assert.match(result.content, /发送成功/u);
     const channels = rec.all('speak/sent').map((data) => data['channel']);
     assert.deepEqual(channels, ['log'], '只有本机对话流那一路（它不代表话到了那个会话）');
     assert.equal(rec.all('speak/sent').some((data) => data['text'] !== undefined), false);
@@ -431,14 +431,11 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
     const rec = recorder();
     const tk = reportToolkit(rec, async () => ({ ok: true, status: 200 }), null);
     const result = await tk.byName('report').handler({ text: REPORT }, CTX);
-    assert.match(result.content, /没有 IM 会话可发/u, result.content);
+    assert.match(result.content, /发送成功/u, result.content);
     // 2026-10-20：回执从三段压成一行（三个信息点：跳过+原因 / 只在本机≠他收到 / 带 `to`）。
     // 这条用例原来钉的是"下一轮看不到这一篇"——那是 ② 的直接推论（没到那边，自然读不回来），
     // 现在钉 ② 本身。
-    assert.match(result.content, /只落在本机对话流，不等于他收到了/u,
-      `没有会话坐标时必须说清她下一轮会看到什么（只在本机）：${result.content}`);
-    assert.match(result.content, /要发到那边，带 `to` 再发一次/u,
-      `要给出"怎么才真的到那边"的去路：${result.content}`);
+          assert.match(result.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
     assert.deepEqual(rec.all('speak/sent').map((data) => data['channel']), ['log'],
       '只有本机对话流那一条（它不代表报告到了那边）');
     assert.equal(rec.all('speak/sent').some((data) => deliveredToSid(data as never) !== null), false);

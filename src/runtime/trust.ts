@@ -126,6 +126,61 @@ export function trustOfWake(
   }
 }
 
+/**
+ * 从联系人表里挑出「已知是用户的 id」：**单聊（c2c）键 + 标签里带用户名字**。
+ *
+ * 这是 `trustOfWake` 的第三个参数（`ownerIds`）的唯一来源。抽出来的理由：实时循环
+ * （`real-loop.ts`）与入站消息的插件权限（`main.ts` 的 `isOwnerMessage`）必须用**同一份**
+ * 用户 id 集合，否则会出现"她被允许听他的、插件指令却不认他"的自相矛盾。
+ */
+export function ownerIdsFrom(
+  contacts: Readonly<Record<string, string>> | ReadonlyMap<string, string>,
+  owner: string,
+): Set<string> {
+  const ids = new Set<string>();
+  const entries = contacts instanceof Map ? [...contacts.entries()] : Object.entries(contacts);
+  for (const [sid, name] of entries) {
+    const parts = sid.split(':');
+    if (parts[1] === 'c2c' && parts.length >= 3 && isOwnerLabel(name, owner)) {
+      ids.add(parts.slice(2).join(':'));
+    }
+  }
+  return ids;
+}
+
+/**
+ * 一条**入站消息**的发送者是不是用户（`message.received` 的 admin 过滤与聊天指令共用）。
+ *
+ * 判据不另写一份：把归一化后的入站字段还原成一条 `wake/channel`，直接问 `trustOfWake`——
+ * 与"她眼里谁是用户"同源（c2c 联系人表 + 已声明的用户 id）。
+ */
+export function isOwnerChannelMessage(
+  message: {
+    channel: string;
+    chatType: 'group' | 'private';
+    chatId: string;
+    senderId: string;
+  },
+  contacts: ReadonlyMap<string, string>,
+  owner: string,
+  ownerIds: ReadonlySet<string> = new Set<string>(),
+): boolean {
+  const event = {
+    type: 'wake/channel',
+    data: {
+      channel: message.channel,
+      // 群聊用 group 即可：trustOfWake 对非 c2c 只看 person 是否在 ownerIds 里
+      chatType: message.chatType === 'private' ? 'c2c' : 'group',
+      chatId: message.chatId,
+      person: message.senderId,
+      text: '',
+      messageId: '',
+      msgSeq: 0,
+    },
+  } as unknown as AppEvent;
+  return trustOfWake(event, contacts, owner, ownerIds) === 'owner';
+}
+
 /** 一批唤醒里取最严的那一档（一轮可能同时被"用户说话"与"群里有人 @"唤醒，按最不可信的算） */
 export function trustOfBatch(
   wakes: readonly AppEvent[],

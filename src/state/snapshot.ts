@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import type { EventLog } from '../log/event-log.js';
 import type { Projection } from '../log/types.js';
 import { applyEvent, finalizePressure } from './fold.ts';
+import type { FoldSkipHandler } from './fold.js';
 // 形状校验只有一处实现（投影缓存在用同一份判据），快照复用而不另写一套
 import { basicProjectionShape } from './projection-cache.ts';
 
@@ -43,9 +44,10 @@ export const SNAPSHOT_DIR_NAME = 'snapshots';
  * 用新算式），新账压在旧账上。丢弃旧版本快照的代价是首次启动做一次全量折叠，那是**换来
  * 一份能对账的账**，值得。
  *
- * 记账：v1 = 未扣缓存口径；v2 = 非缓存口径（`(input − cacheHit) + output`）。
+ * 记账：v1 = 未扣缓存口径；v2 = 非缓存口径（`(input − cacheHit) + output`）；v3 = Affect v2 投影形状；
+ * v4 = 独立 intimacy 投影形状。v4 不改变预算算式；旧派生状态整份丢弃重建。
  */
-export const SNAPSHOT_VERSION = 2;
+export const SNAPSHOT_VERSION = 5;
 /** 文件名前缀 */
 export const SNAPSHOT_FILE_PREFIX = 'snap-';
 const SNAPSHOT_FILE_RE = /^snap-(\d+)\.json$/u;
@@ -212,8 +214,10 @@ async function readSnapshotFile(
   if (!isRecord(parsed)) return { ok: false, reason: `${file} 顶层不是 JSON 对象` };
 
   const rawVersion = parsed['version'];
-  if (rawVersion !== undefined && rawVersion !== SNAPSHOT_VERSION) {
-    return { ok: false, reason: `${file} 的版本 ${String(rawVersion)} 不认识` };
+  // 缺失与过期一律丢弃：旧版信封可能没有这一格（历史文件），靠 shape 兜底会把
+  // "不知道哪一版写的派生状态"当合法输入；形状校验只认字段，不认口径。
+  if (rawVersion !== SNAPSHOT_VERSION) {
+    return { ok: false, reason: `${file} 的版本 ${String(rawVersion)} 不认识（缺失或过期）` };
   }
 
   const upToSeq = parsed['upToSeq'];
@@ -302,9 +306,13 @@ export async function loadLatestSnapshot(
  * 那属于调用方该拒绝的输入，本函数不做"领先就清日志"这类危险推断。
  * 本函数**原地修改** `snapshot.state`（刚从磁盘读出的独占对象，调用方不应再持有它）。
  */
-export async function foldFromSnapshot(log: EventLog, snapshot: LoadedSnapshot): Promise<Projection> {
+export async function foldFromSnapshot(
+  log: EventLog,
+  snapshot: LoadedSnapshot,
+  onSkip?: FoldSkipHandler,
+): Promise<Projection> {
   const projection = snapshot.state;
-  for await (const event of log.readRange(snapshot.upToSeq + 1)) applyEvent(projection, event);
+  for await (const event of log.readRange(snapshot.upToSeq + 1)) applyEvent(projection, event, onSkip);
   finalizePressure(projection);
   return projection;
 }

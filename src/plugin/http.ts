@@ -2,7 +2,7 @@ import { isAbsolute, win32 } from 'node:path';
 
 import type { PluginManager, PluginView } from './manager.js';
 
-export type PluginCommand = 'plugin-install' | 'plugin-confirm' | 'plugin-enable' | 'plugin-disable';
+export type PluginCommand = 'plugin-install' | 'plugin-confirm' | 'plugin-enable' | 'plugin-disable' | 'plugin-uninstall';
 export interface PluginHttpResult {
   status: number;
   body: unknown;
@@ -54,12 +54,21 @@ export function runPluginCommand(
       const installed = manager.install(sourceDir);
       return { status: 200, body: { ok: true, plugin: current(manager, {
         package: installed, state: 'untrusted', problems: [], requiresRestart: false,
+        permissions: installed.manifest.permissions, net: installed.manifest.netAllow,
+        marketId: null, marketVersion: null, pid: null, uptimeMs: 0,
+        runtime: { type: installed.manifest.runtime.type, entry: installed.manifest.runtime.entry ?? null, state: 'not-running', pid: null, uptimeMs: 0, restarts: 0 },
       }) } };
     }
 
     const id = text(payload, 'id');
     const contentHash = text(payload, 'contentHash');
     if (id === '' || contentHash === '') return failure('bad-request', '缺少 id 或 contentHash');
+    if (command === 'plugin-uninstall') {
+      // 卸载是**不可逆**的（包目录直接删）：进程由 manager 的同步收尸钩子先停掉，
+      // 这里只负责把"哪一份内容被删了"如实写进事件。不需要重启宿主——组合面下一拍自己会重算。
+      manager.uninstall(id, contentHash);
+      return { status: 200, body: { ok: true, uninstalled: { id, contentHash }, restartRequired: false } };
+    }
     if (command === 'plugin-confirm') manager.confirm(id, contentHash);
     else manager.setEnabled(id, contentHash, command === 'plugin-enable');
     const plugin = manager.list().find((item) => item.package.manifest.id === id && item.package.contentHash === contentHash);

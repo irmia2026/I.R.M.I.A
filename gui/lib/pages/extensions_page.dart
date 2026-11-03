@@ -26,7 +26,7 @@ import 'plugins_panel.dart';
 part 'extensions_kit.dart';
 
 /// 扩展页 —— 与 Web 端 #/extensions 同构，版式照 [ChannelsPage]：
-/// 左侧 260px 五项（技能 / Plugins / MCP / 内置工具 / Hooks）+ 右侧详情工作台；
+/// 左侧 260px 五项（技能 / 插件 / MCP / 内置工具 / Hooks）+ 右侧详情工作台；
 /// 窄窗（<900px）降级为「列表 ↔ 详情」单独视图，详情带「← 列表」返回入口。
 ///
 /// **为什么从"上面一排 tab、下面一列卡片"改成这个形状**：那排 tab 把四类东西压成三个
@@ -154,6 +154,8 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
 
   /// 正在整组开/关的工具组 id（一行在忙时其余开关暂不可点，避免连点出一串并发写）
   String? busyGroup;
+
+  /// 插件那一段在忙（安装/审核/启停都写盘，连点会出一串并发写）
   bool pluginBusy = false;
 
   /// 本机忽略集的**兜底副本**：服务端 `skills-ignored.json` 是唯一真相源，
@@ -220,6 +222,8 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
       if (!mounted) return;
       var view = res is Map<String, dynamic> ? res : null;
       if (key == 'plugins') {
+        // `/api/plugins` 回的是 `{items: [...]}`；解析失败（老服务端 / 坏响应）按"格式无法识别"
+        // 走三态里那一支，而不是把 null 当成"一个插件都没装"——那两件事在界面上必须分开。
         try {
           view = {'items': parsePluginsResponse(res)};
         } on FormatException {
@@ -245,6 +249,11 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     await Future.wait(_keys.map((key) => load(key)));
     if (mounted) setState(() => firstLoad = false);
   }
+
+  // ── 插件那一段的动作（安装 / 审核 / 启停）──
+  //
+  // 四条命令都带 X-Confirm（短语 = 命令名）：服务端那道门挡的是误触，界面上对应的
+  // 确认对话框在 `PluginsPanel` 里（审核与启停各一个），这里只负责"发出去 + 回执"。
 
   Future<void> _runPluginAction(Future<void> Function() action) async {
     if (pluginBusy) return;

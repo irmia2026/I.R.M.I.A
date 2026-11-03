@@ -62,6 +62,7 @@ const TOOLS = [
   { name: 'big', description: '返回一大段文本（测 blob 外置）', inputSchema: SCHEMA_CHARS },
   { name: 'fail', description: '总是返回 isError', inputSchema: SCHEMA_EMPTY },
   { name: 'slow', description: '延迟很久才回应（测超时与取消）', inputSchema: SCHEMA_MS },
+
 ];
 
 /**
@@ -87,6 +88,11 @@ const EXTRA_TOOLS = (() => {
   }
 })();
 if (EXTRA_TOOLS.length > 0) TOOLS.push(...EXTRA_TOOLS);
+// 图片工具**按需启用**：共享夹具的件数被别的用例钉着（4 件 / 两页），多一件会把它们带红。
+// 用 `FAKE_MCP_IMAGE_TOOL=1` 打开，只给"MCP 图片进上下文"那两条用例用。
+if (process.env.FAKE_MCP_IMAGE_TOOL === '1') {
+  TOOLS.push({ name: 'img', description: '返回一张 1x1 PNG（测 MCP 图片进上下文）', inputSchema: SCHEMA_EMPTY });
+}
 
 const LATE_TOOL = { name: 'late', description: 'list_changed 之后才出现的工具', inputSchema: SCHEMA_EMPTY };
 
@@ -99,6 +105,7 @@ function handleCall(message) {
   const args = params.arguments ?? {};
   const token = params._meta?.progressToken;
   mark('call', { name, args, id: message.id, meta: params._meta });
+  // 插件熔断器的"握手之后崩"那条判据要一个**确定性**的崩溃点：调用一到就 exit(7)
   if (process.env.FAKE_MCP_EXIT_ON_CALL === '1') process.exit(7);
 
   const envDelay = Number(process.env.FAKE_MCP_RESPOND_AFTER_MS ?? '0');
@@ -134,6 +141,21 @@ function handleCall(message) {
         jsonrpc: '2.0',
         id: message.id,
         result: { content: [{ type: 'text', text: '大'.repeat(chars) }] },
+      });
+      return;
+    }
+    if (name === 'img') {
+      // 1x1 透明 PNG（67 字节）：足够让宿主落盘并按 image/png 接进上下文
+      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: {
+          content: [
+            { type: 'text', text: '这是截图' },
+            { type: 'image', mimeType: 'image/png', data: png },
+          ],
+        },
       });
       return;
     }
@@ -186,6 +208,7 @@ function handle(message) {
   }
   if (message.method === 'tools/list') {
     listCount += 1;
+    // 把 tools/list 挂住（不回包）：验"握手窗口内的超时归 start，不算 crash/timeout"
     if (process.env.FAKE_MCP_HANG_LIST === '1') {
       mark('list', { n: listCount });
       return;

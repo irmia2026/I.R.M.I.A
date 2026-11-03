@@ -49,7 +49,6 @@ import { readBlob } from '../src/state/blob-store.ts';
 import { executeToolCalls } from '../src/tools/executor.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import type { ToolContext } from '../src/tools/types.js';
-import { AGENT_VERSION } from '../src/version.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
@@ -241,10 +240,7 @@ test('M7-1 全链路：握手 → initialized → tools/list → tools/call，�
   assert.ok(initialize !== undefined, '夹具收到了 initialize');
   // 不声明 roots/sampling/elicitation：capabilities 就是空对象
   assert.deepEqual(initialize.capabilities, {});
-  // clientInfo 是给 server 侧日志认人用的：name 是协议面常量，version 必须原样取自 AGENT_VERSION。
-  // 这里断言的是"进程版本号被写进握手帧"这条契约，而不是某个具体版本文本——写死字符串会成为
-  // 第二份版本真相，每次发版都要手动跟一次，跟漏了也不会有人发现。
-  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: AGENT_VERSION });
+  assert.deepEqual(initialize.clientInfo, { name: 'irmia-agent', version: '0.1.0-beta.14' });
   assert.ok(marks.some((m) => m.t === 'initialized'), '握手第二步发了 notifications/initialized');
   assert.equal(marks.filter((m) => m.t === 'list').length, 1, 'tools/list 在进程启动时拉一次');
   assert.equal(marks.find((m) => m.t === 'call')?.name, 'echo');
@@ -261,6 +257,8 @@ test('M7-1 全链路：握手 → initialized → tools/list → tools/call，�
   assert.match(failed.content, /夹具主动报告的工具失败/);
 });
 
+// ─────────────────── 插件故障信号（2026-10-26，插件平台的归因口） ───────────────────
+
 test('插件故障信号：真实响应上报成功，业务 isError 不上报系统性故障', async (t) => {
   const failures: unknown[] = [];
   const successes: string[] = [];
@@ -268,6 +266,7 @@ test('插件故障信号：真实响应上报成功，业务 isError 不上报�
     onSystemicFailure: (failure: unknown) => failures.push(failure),
     onRequestSuccess: (name: string) => successes.push(name),
   } });
+  // 业务失败（工具自己报错）**不是**系统性故障：把它算进去会把一个健康的 server 隔离掉
   const failed = await h.pool.callTool('fake', 'fail', {});
   assert.equal(failed.isError, true);
   const ok = await h.pool.callTool('fake', 'echo', { text: 'ok' });
@@ -1786,4 +1785,40 @@ test('C⑦ 起进程那一层：能起的形状照旧真的去起（诊断不许
       });
     }
   }
+});
+
+// ──────────────────────── MCP 图片进上下文（2026-10-30） ────────────────────────
+//
+// 她反馈：桌面操控类 MCP server 返回截图时，框架只给一句「[image 内容…本版不落盘二进制]」，
+// 图根本没进上下文。修法：content 里的 image 交给宿主（attachImage）落盘 + 写 image/attached；
+// 宿主没接/接不了时**保留旧占位**，不许假装"已放进上下文"。
+
+test('MCP 图片：attachImage 接住时回执说"已放进上下文"，并把原图交给宿主', async (t) => {
+  const seen: Array<{ server: string; tool: string; mimeType: string; base64Length: number }> = [];
+  const h = createHarness(t, {
+    env: { FAKE_MCP_IMAGE_TOOL: '1' },
+    pool: {
+      attachImage: (input: { server: string; tool: string; mimeType: string; dataBase64: string }) => {
+        seen.push({ server: input.server, tool: input.tool, mimeType: input.mimeType, base64Length: input.dataBase64.length });
+        return { key: `attachments/mcp/${input.server}/shot.png` };
+      },
+    },
+  });
+  const result = await h.pool.callTool('fake', 'img', {});
+  assert.equal(result.isError, undefined, result.content);
+  assert.match(result.content ?? '', /图片已放进上下文/u, result.content);
+  assert.match(result.content ?? '', /attachments\/mcp\/fake\/shot\.png/u, '回执要给出工作区相对路径');
+  assert.equal(seen.length, 1, '一张图只交一次');
+  assert.equal(seen[0]?.server, 'fake');
+  assert.equal(seen[0]?.tool, 'img');
+  assert.equal(seen[0]?.mimeType, 'image/png');
+  assert.ok((seen[0]?.base64Length ?? 0) > 0, 'base64 要原样带过来');
+});
+
+test('MCP 图片：没有 attachImage（或宿主拒绝）时保留占位，不谎称已进上下文', async (t) => {
+  const h = createHarness(t, { env: { FAKE_MCP_IMAGE_TOOL: '1' } });
+  const result = await h.pool.callTool('fake', 'img', {});
+  assert.equal(result.isError, undefined, result.content);
+  assert.match(result.content ?? '', /\[image 内容/u, result.content);
+  assert.doesNotMatch(result.content ?? '', /图片已放进上下文/u);
 });

@@ -297,7 +297,7 @@ export interface UpdateRunResult {
 /** 注入给 web 层的那两个口（`web/server.ts` 只认这个接口，不认实现） */
 export interface UpdateHost {
   view(): UpdateView;
-  checkNow(): Promise<UpdateRunResult>;
+  checkNow(options?: { manual?: boolean }): Promise<UpdateRunResult>;
   /**
    * 切通道（设置页 beta/stable）：**清掉节流状态**并立刻查一次。
    * 配置文件的写盘在 web 层（那里有 `withConfigDoc` 的那套校验/回滚），本方法只改**运行期**。
@@ -356,6 +356,7 @@ export class UpdateService {
   private timer: ReturnType<typeof setTimeout> | null = null;
   /** 在飞的那一次检查（并发调用共享它：两条链路同时到也不发两次请求） */
   private inFlight: Promise<void> | null = null;
+  private generation = 0;
   private stopped = false;
   private started = false;
 
@@ -463,6 +464,8 @@ export class UpdateService {
    * 失败回滚）写 `update.channel` 那一格；本方法只负责让运行期立刻生效。
    */
   async applyChannel(channel: UpdateChannel): Promise<UpdateRunResult> {
+    this.generation++;
+    this.inFlight = null;
     this.channel = channel;
     this.state = {
       ...emptyUpdateState(),
@@ -482,21 +485,24 @@ export class UpdateService {
   private perform(): Promise<void> {
     const running = this.inFlight;
     if (running !== null) return running;
+    const generation = this.generation;
+    const channel = this.channel;
     const run = (async (): Promise<void> => {
       const result = await checkForUpdate({
         currentVersion: this.options.currentVersion,
-        channel: this.channel,
+        channel,
         endpoint: this.options.endpoint,
         timeoutMs: this.options.timeoutMs ?? DEFAULT_UPDATE_TIMEOUT_MS,
         userAgent: this.options.userAgent ?? DEFAULT_UPDATE_USER_AGENT,
         ...(this.options.fetchImpl !== undefined ? { fetchImpl: this.options.fetchImpl } : {}),
       });
-      this.apply(result, this.now());
+      if (generation === this.generation) this.apply(result, this.now());
     })();
-    this.inFlight = run;
-    return run.finally(() => {
-      this.inFlight = null;
+    const tracked = run.finally(() => {
+      if (this.inFlight === tracked) this.inFlight = null;
     });
+    this.inFlight = tracked;
+    return tracked;
   }
 
   /** 把一次结果写进状态、落盘、留痕（顺序：状态 → 磁盘 → 事件 → 日志） */
@@ -590,3 +596,4 @@ export class UpdateService {
     this.schedule(Math.max(remaining, 1_000));
   }
 }
+

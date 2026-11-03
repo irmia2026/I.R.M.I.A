@@ -94,7 +94,7 @@ test('事件写盘失败时不提前改变本地状态', () => {
   assert.equal(manager.list()[0]?.state, 'untrusted');
 });
 
-test('同大小同 mtime 改写内容也逃不过内容哈希：list 报 invalid、确认启停被拒、不进 active', () => {
+test('同大小同 mtime 改写内容也逃不过内容哈希：确认启用被拒、停用仍可执行', () => {
   const { manager } = harness();
   const installed = manager.install(source());
   manager.confirm(installed.manifest.id, installed.contentHash);
@@ -121,7 +121,8 @@ test('同大小同 mtime 改写内容也逃不过内容哈希：list 报 invalid
   assert.equal(view?.state, 'invalid');
   assert.match(view?.problems.join('\n') ?? '', /contentHash mismatch/i);
   assert.throws(() => manager.confirm(installed.manifest.id, installed.contentHash), /contentHash mismatch/i);
-  assert.throws(() => manager.setEnabled(installed.manifest.id, installed.contentHash, false), /contentHash mismatch/i);
+  assert.throws(() => manager.setEnabled(installed.manifest.id, installed.contentHash, true), /contentHash mismatch/i);
+  assert.doesNotThrow(() => manager.setEnabled(installed.manifest.id, installed.contentHash, false));
   assert.equal(manager.active().length, 0);
 });
 

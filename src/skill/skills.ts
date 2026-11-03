@@ -102,7 +102,13 @@ export interface SkillCandidate {
   rootName: string;
   /** 正文行数（观测用：官方建议 <500 行） */
   bodyLines: number;
-  /** 来自已受信插件包时，信任由整包 hash 提供 */
+  /**
+   * 来自已受信插件包时，信任由**整包 hash** 提供（见 `trustCandidate`）。
+   *
+   * 为什么信任不落在单条 `skill/installed` 上：插件包由内容哈希寻址、不可变，确认一次整包
+   * 就是确认了它带进来的每个技能根；让每个技能再单独确认一遍既没有安全收益，也做不到
+   * （插件的技能包不会写 `skill/installed`）。
+   */
   packageHash?: string;
 }
 
@@ -537,6 +543,13 @@ export class SkillManager {
   private readonly compatBaseRoot: string | null;
   private readonly rootNames: readonly string[];
   private packageRoots: readonly PluginSkillRoot[];
+  /**
+   * 插件技能根的代次（每次 `setPackageRoots` 加一）。
+   *
+   * 消费方是索引的失效判据（`RealLoop.skillIndexSync` 的 ④）：根被装上/撤走之后，索引里
+   * 那一批技能名已经不对了，而这类变化**不写 `skill/installed`**（信任来自整包）——
+   * 没有这一格，缓存保护与"索引必须跟着执行面走"就无法同时成立。
+   */
   private packageRootsRevision = 1;
   private readonly entryTokens: number;
   private readonly totalTokens: number;
@@ -559,12 +572,15 @@ export class SkillManager {
     this.emit = options.emit ?? null;
   }
 
+  /** 换一批插件技能根（组合变了：启停/隔离会让技能根在运行期进进出出） */
   setPackageRoots(roots: readonly PluginSkillRoot[]): void {
     this.packageRoots = roots;
     this.packageRootsRevision += 1;
+    // 诊断去重表跟着清空：同一个根被撤走又装回来时，"读不到"那句话值得再说一次
     this.reported.clear();
   }
 
+  /** 插件技能根的代次（索引失效判据用；见字段注释） */
   get packageRevision(): number { return this.packageRootsRevision; }
 
   /**
@@ -573,7 +589,7 @@ export class SkillManager {
    *
    * `roots[0]` 是**写入面**（`skill-grant` 把获准装上的技能写进第一个根）——它必须是
    * `<dataDir>/skills`，哪怕那个目录今天还不存在：装技能时该建的是数据目录那一份，
-   * 而不是把新技能又装回安装目录（那正是「更新一次全没」的老路）。插件根**永远不进写入面**，
+   * 而不是把新技能又装回安装目录（那正是"更新一次全没"的老路）。插件根**永远不进写入面**，
    * 它们只读：包是不可变的，往那里写等于改内容哈希。
    */
   get roots(): string[] {
@@ -613,7 +629,8 @@ export class SkillManager {
     const rejected: SkillReject[] = [];
     const claimed = new Map<string, string>();
 
-    for (const root of this.rootPlan()) {
+    const plan = this.rootPlan();
+    for (const root of plan) {
       const packageHash = root.packageHash;
       let entries: string[];
       try {
@@ -765,6 +782,13 @@ export class SkillManager {
     return { state: 'trusted', detail: `已由 human 确认（${entry.ts}）` };
   }
 
+  /**
+   * 信任裁决（唯一入口）：插件包带进来的技能根**整包已受信**，其余走逐条 `skill/installed`。
+   *
+   * 为什么必须在 scan/catalog/pending/诊断四处共用一个裁决：`trustOf` 是公开面、只认
+   * `skill/installed` 事件，而插件技能永远不会写那条事件。四处各判一次的结果是界面
+   * 摆出「详情写着从未确认、条目却在索引里」——同一件事两个答案。
+   */
   private trustCandidate(candidate: SkillCandidate): SkillTrustVerdict {
     if (candidate.packageHash !== undefined) return { state: 'trusted', detail: `由已确认插件包 ${candidate.packageHash} 提供` };
     return this.trustOf(candidate.name, candidate.contentHash);

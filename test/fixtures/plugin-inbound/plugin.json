@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-inbound",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": ["messages.read", "state.plugin"],
+  "meta": { "title": "入站钩子演示", "author": "tests", "desc": "P1b e2e 夹具：message.received 的过滤/改写/丢弃/附加上下文/故障" }
+}

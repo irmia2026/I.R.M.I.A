@@ -879,6 +879,13 @@ export interface OneBotClientOptions {
    * （2026-10-11 修的"改了等于没改"那处缺陷就是这条线断了）。
    */
   onSelfId?: (id: string) => void;
+  /**
+   * **链路就绪**（P1b）：首次连上与每次断线重连后各触发一次。
+   *
+   * 触发点是 `markReady`——它是"链路活了"的唯一判据（`ready` 在断线时被清掉），
+   * 所以重连后下一条入站帧会再次走到这里。宿主用它给插件发 `channel.ready`。
+   */
+  onReady?: () => void;
 }
 
 /**
@@ -897,6 +904,7 @@ export class OneBotClient {
   private client: WsClient | null = null;
   private started = false;
   private stopping = false;
+  private generation = 0;
   private ready = false;
 
   private selfId = '';
@@ -986,10 +994,11 @@ export class OneBotClient {
     if (this.started) return;
     this.started = true;
     this.stopping = false;
-    void this.openOnce();
+    void this.openOnce(++this.generation);
   }
 
   stop(): void {
+    this.generation++;
     this.stopping = true;
     this.started = false;
     if (this.reconnectTimer !== null) {
@@ -1051,8 +1060,8 @@ export class OneBotClient {
     return { wsUrl: this.options.wsUrl, accessToken: this.options.accessToken ?? '' };
   }
 
-  private async openOnce(): Promise<void> {
-    if (this.stopping) return;
+  private async openOnce(generation = this.generation): Promise<void> {
+    if (this.stopping || generation !== this.generation) return;
     let url: string;
     try {
       const target = this.targetEndpoint();
@@ -1079,14 +1088,22 @@ export class OneBotClient {
        * 读到的是 null ⇒ 拿配置里那份（没有 token）去连 ⇒ 401；而下一秒重连时重读一次，
        * 那时配置已经在盘上了，token 就跟着上去了。没有这一步，空 token 会被固化到天荒地老。
        */
+      if (this.stopping || generation !== this.generation) return;
       this.endpointMemo?.invalidate();
       this.log.warn(`[OneBot] 连接失败（${maskAccessToken(url)}）：${messageOf(err)}`);
       this.scheduleReconnect();
       return;
     }
 
+    if (this.stopping || generation !== this.generation) {
+      client.close(1000, 'connection superseded');
+      return;
+    }
     this.client = client;
-    client.onMessage((message) => { this.handleIncoming(message.text); });
+    client.onMessage((message) => {
+      if (this.stopping || generation !== this.generation || this.client !== client) return;
+      this.handleIncoming(message.text);
+    });
     client.onError((err) => { this.log.warn(`[OneBot] 传输层错误：${err.message}`); });
     client.onClose((info) => {
       if (this.client !== client) return; // 已被替换（重连/停止）的旧连接，忽略它的收尾
@@ -1118,10 +1135,12 @@ export class OneBotClient {
     const human = delay < 1000 ? `${delay}ms` : `${Math.round(delay / 1000)}s`;
     const maxHuman = max < 1000 ? `${max}ms` : `${Math.round(max / 1000)}s`;
     this.log.warn(`[OneBot] ${human} 后重连（第 ${this.reconnectAttempts} 次，退避上限 ${maxHuman}）`);
+    const generation = this.generation;
     this.reconnectTimer = {
       id: this.timeout(() => {
+        if (this.stopping || generation !== this.generation) return;
         this.reconnectTimer = null;
-        void this.openOnce();
+        void this.openOnce(generation);
       }, delay),
     };
   }
@@ -1195,6 +1214,12 @@ export class OneBotClient {
       this.reconnectTimer = null;
     }
     this.log.info('[OneBot] 链路就绪，退避计数清零');
+    try {
+      this.options.onReady?.();
+    } catch (error) {
+      // 回调是宿主的：它坏了不该把链路层带崩（与 onSelfId 同一条纪律）
+      this.log.warn(`[OneBot] onReady 回调抛错（已吞掉）：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private dispatch(payload: Record<string, unknown>): void {
@@ -1308,7 +1333,9 @@ export class OneBotClient {
   private selfIdListener: ((id: string) => void) | null = null;
 
   private async fetchSelfId(): Promise<void> {
+    const generation = this.generation;
     const result = await this.call('get_login_info', {});
+    if (this.stopping || generation !== this.generation) return;
     if (!result.ok) {
       this.log.warn(`[OneBot] get_login_info 未拿到机器人 QQ 号：${result.reason}（群 @ 判定将依赖事件自带的 self_id）`);
       return;
@@ -1356,6 +1383,11 @@ export interface OneBotChannelOptions {
    * 装配之后也能改（宿主在两个通道上写 `onMessage` 就是这么做的）。两个入口都通到同一格。
    */
   onNotice?: (data: ChannelNoticeData) => void;
+  /**
+   * **链路就绪**（P1b）：首次连上与每次断线重连后各触发一次。
+   * 装配期给或装配后赋属性都行（与 `onMessage` 同一个口）。
+   */
+  onReady?: () => void;
 }
 
 /** OneBot 通道：客户端 + 发送封装的组合，对系统只暴露 `ChannelAdapter` 形状 */
@@ -1363,6 +1395,9 @@ export class OneBotChannel implements ChannelAdapter {
   readonly name = ONEBOT_CHANNEL_NAME;
 
   onMessage?: (event: WakeChannel['data']) => void;
+
+  /** 链路就绪口（见 `OneBotChannelOptions.onReady`；宿主装配后赋值） */
+  onReady?: () => void;
 
   /**
    * 群里动静（`notice` → `channel/notice`）的落地口。**与 `onMessage` 分开**：那条是"有人在说话"，
@@ -1424,6 +1459,11 @@ export class OneBotChannel implements ChannelAdapter {
         this.notices += 1;
         options.onNotice?.(data);
         this.onNotice?.(data);
+      },
+      // 链路就绪：装配期与装配后两个口都通到同一格（与 onWake/onNotice 同形）
+      onReady: () => {
+        options.onReady?.();
+        this.onReady?.();
       },
       onWake: (data) => {
         this.delivered += 1;

@@ -82,6 +82,10 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { initialAffect } from '../src/affect/engine.ts';
+import { defaultConfig } from '../src/config/config.ts';
+import { StickerRuntime } from '../src/stickers/runtime.ts';
+import { StickerStore } from '../src/stickers/store.ts';
 import { buildCatalogRegistry, HIDDEN_FROM_MODEL } from '../src/tools/catalog.ts';
 import { FS_ERROR_CODES } from '../src/tools/fs/index.ts';
 import { MAX_DESCRIPTION_TOKENS, estimateTokens } from '../src/tools/registry.ts';
@@ -254,6 +258,31 @@ test('工具清单：任何一件的描述都不许贴到硬门上（距硬门�
     + `——超了硬门不是"描述长一点"，是**这件工具静默消失**（registry.ts 的 MAX_DESCRIPTION_TOKENS）：`
     + '要么瘦身，要么把细节挪进参数描述（参数不进这份预算）',
   );
+});
+
+test('工具清单：贴纸接入后 speak 仍小于 60，完整工具 schema 守住 5500 与 30 余量', async (t) => {
+  const dir = tempDirSync('irmia-sticker-catalog-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const store = new StickerStore(dir);
+  store.init();
+  const config = defaultConfig(dir);
+  const stickerRuntime = new StickerRuntime({ store, config: () => config, affect: () => initialAffect(), emit: () => {} });
+  const { registry, problems } = await buildCatalogRegistry({
+    dataDir: dir,
+    timers: new TimerStore({ dir, fire: () => {} }),
+    emit: () => {},
+    destructiveEnabled: true,
+    stickerRuntime,
+  });
+  assert.deepEqual(problems, []);
+  const speak = registry.get('speak');
+  assert.ok(speak !== null);
+  assert.ok(estimateTokens(speak.description) < 60, `speak 描述 ${estimateTokens(speak.description)} token`);
+  const total = registry.catalogTokens({ includeDestructive: true });
+  assert.ok(total < 5500, `工具 schema ${total} token`);
+  assert.ok(5500 - total >= 30, `工具 schema 余量 ${5500 - total} token`);
+  t.diagnostic(`贴纸装配：speak 描述 ${estimateTokens(speak.description)} token；schema 总计 ${total}，余量 ${5500 - total}`);
+  assert.equal(registry.names().filter((name) => name.startsWith('sticker')).length, 0, '没有新增贴纸工具');
 });
 
 test('工具清单：常驻总量不许悄悄涨（防"文档与实测各说各话"复发）', async () => {

@@ -209,7 +209,10 @@ export class AuthStore {
   private readonly write: (line: string) => void;
   private readonly wait: (ms: number) => Promise<void>;
 
-  /** 盘上那份的解码结果；null = 还没设过密码（或文件读不懂，见 `load`） */
+  /**
+   * 盘上那份的解码结果；null = 还没设过密码（或文件读不懂，见 `load`）。
+   * 每次设置/改密码都换对象：异步验证以对象身份识别凭据代际，会话增删不换代。
+   */
   private file: AuthFileV1 | null = null;
   /** 遗留共享 token；null = 没有。设了密码之后恒为 null（那条路当场作废） */
   private legacyToken: string | null;
@@ -406,6 +409,13 @@ export class AuthStore {
 
     const salt = randomBytes(SCRYPT_SALT_BYTES);
     const derived = await scryptAsync(password, salt, SCRYPT_PARAMS);
+    // 另一条 setup 可能已经在派生期间完成；首次设置只允许一个请求提交。
+    if (this.file !== null) {
+      return {
+        ok: false, status: 409, code: 'already-initialized',
+        message: '这台实例已经设过密码了。忘记密码的处理办法：删掉 data/.auth.json 后重启进程，再设一次。',
+      };
+    }
     this.file = {
       v: 1,
       scrypt: { salt: salt.toString('hex'), ...SCRYPT_PARAMS },
@@ -440,6 +450,10 @@ export class AuthStore {
 
     const params = file.scrypt;
     const derived = await scryptAsync(password, Buffer.from(params.salt, 'hex'), params);
+    // 退避或派生期间改过密码：旧代际既不能签新票，也不能改变新代际的退避计数。
+    if (this.file !== file) {
+      return { ok: false, status: 401, code: 'bad-password', message: '密码不对。' };
+    }
     if (!equalHex(derived.toString('hex'), file.hash)) {
       this.noteFailure();
       const next = this.backoffMs();
@@ -490,6 +504,9 @@ export class AuthStore {
 
     const params = file.scrypt;
     const derived = await scryptAsync(oldPassword, Buffer.from(params.salt, 'hex'), params);
+    if (this.file !== file) {
+      return { ok: false, status: 401, code: 'bad-password', message: '当前密码不对。' };
+    }
     if (!equalHex(derived.toString('hex'), file.hash)) {
       this.noteFailure();
       return { ok: false, status: 401, code: 'bad-password', message: '当前密码不对。' };
@@ -499,6 +516,10 @@ export class AuthStore {
 
     const salt = randomBytes(SCRYPT_SALT_BYTES);
     const next = await scryptAsync(newPassword, salt, SCRYPT_PARAMS);
+    // 新密码派生同样会让出执行权，不能覆盖另一条已成功改密的请求。
+    if (this.file !== file) {
+      return { ok: false, status: 401, code: 'bad-password', message: '当前密码不对。' };
+    }
     const revoked = file.sessions.length;
     this.file = {
       v: 1,

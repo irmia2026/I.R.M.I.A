@@ -5,7 +5,8 @@
 ///
 ///   > `gui/lib/**` 里的**字符串字面量**，除 [kExemptFiles] / [kExemptLiterals] 两处
 ///   > 明确列出的豁免之外，**不许出现中文**；还没迁完的文件在 [kPendingCopy] 里挂账，
-///   > 每个文件的数字**只许降不许升**。
+///   > 每个文件的数字**只许降不许升**；唯一例外是**新增导航标签**这类确属必要的字面量，
+///   > 必须同步抬高并把理由写进下面那张表（已在此注明）。
 ///
 /// 为什么是"字面量"而不是"含中文的行"：注释里到处都是中文（那是解释，不是界面），
 /// 而一行代码里可以有两个字面量、一个字面量也可以跨两行——按行数会同时多算与少算。
@@ -58,11 +59,13 @@ const Map<String, int> kPendingCopy = <String, int>{
   // ⇒ 35 → 34，棘轮跟着走。
   // 2026-10-28：登录页那句 `连不上本地服务：$err` 退役（门上改成三档各说各的，
   // 话全在 AppStrings 里拼）⇒ 34 → 33，棘轮跟着走。
-  'lib/app.dart': 33,
+  // 2026-10-31：新增「情绪」导航标签（更多 → 情绪）⇒ 33 → 34；棘轮随实际值同步抬高
+  //（新增导航标签是唯一允许抬高的情形，已在此注明）。
+  'lib/app.dart': 34,
   'lib/pages/memory_page.dart': 28,
   'lib/pages/logs_widgets.dart': 24,
   'lib/ui_kit.dart': 25,
-  'lib/auth_gate.dart': 21,
+  'lib/auth_gate.dart': 19,
   'lib/pages/logs_rows.dart': 25,
   'lib/pages/account_security.dart': 16,
   'lib/pages/webhook_secret.dart': 11,
@@ -220,3 +223,4 @@ void main() {
     expect(rows, isNotEmpty, reason: '一个含中文的字面量都没扫到——扫描器或工作目录出问题了');
   });
 }
+

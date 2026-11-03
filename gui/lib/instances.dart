@@ -35,6 +35,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'backend_stop_marker.dart';
+import 'win_spawn.dart';
+
 import 'backend_stop.dart';
 // `GET /api/health` 的读数（选择页等就绪时那句"还在启动（阶段 …）"读它）
 import 'backend_probe.dart';
@@ -53,6 +56,13 @@ const int kInstanceStopTimeoutSeconds = 20;
 
 /// 新建实例时端口从哪个开始往上找（出厂端口，与 `backend_port.dart` 同值）
 const int kFirstInstancePort = 7788;
+
+/// **新建**实例的起始端口（2026-10-28）。
+///
+/// 为什么不是 7788：7788 是"默认实例"的端口（安装根的 `config.json` 写死的就是它）。
+/// 从 7788 开始找"空闲端口"会在默认实例**没在跑**的时候把它分给新实例，
+/// 于是两台抢同一个端口——谁先起谁占着，另一台永远起不来（"创建卡半天"）。
+const int kFirstSpawnedInstancePort = 7789;
 
 /// 「结束这个实例」的命令名：服务端 `CONFIRM_PHRASES` 的键，也是 `X-Confirm` 头要带的那半截
 /// （与 `src/web/server.ts` 同值）。
@@ -197,8 +207,13 @@ class InstanceEntry {
   /// `running` 由调用方现问一次（[InstanceProbe]）——`pid` 只是后端的自述，崩溃时它留着一
   /// 个死 pid，拿它当"在跑"会让人永远删不掉一个早就没了的实例；反过来拿它当"没在跑"则会
   /// 删掉一台活着的（那台的后端下次启动会把自己再登记回来，但界面上它"消失"过一次）。
-  static bool canDelete({required InstanceEntry entry, required bool running}) =>
-      !running && !entry.isDefault;
+  /// 能不能删：**只看它在不在跑**。
+  ///
+  /// 2026-10-26 改：原来还要求 `!isDefault`，结果一台已经停掉、数据目录都被挪走的旧条目
+  /// （它自己写着 isDefault）永远删不掉——按钮灰着，人只能看着它留在列表里。
+  /// "默认实例"只影响界面默认选谁，不该成为不可删除的理由；真正不能删的是**正在跑**的那台
+  /// （删了它就等于把正在用的数据目录塞进回收站）。
+  static bool canDelete({required InstanceEntry entry, required bool running}) => !running;
 
   @override
   String toString() => 'InstanceEntry($name · $address · pid=$pid${isDefault ? ' · default' : ''})';
@@ -385,9 +400,70 @@ String installRootOf(String entry) {
   return root.isEmpty ? Platform.pathSeparator : root;
 }
 
+String _normalizedPath(String value) {
+  var text = value.trim().replaceAll('/', '\\');
+  while (text.endsWith('\\')) {
+    text = text.substring(0, text.length - 1);
+  }
+  return text.toLowerCase();
+}
+
+/// 默认实例的数据目录：与后端 `defaultDataDirOf` 同一条口径——安装根 `config.json`
+/// 显式写的 `dataDir` 优先，否则 `<安装根>/data`。
+String? defaultInstanceDataDirOf(String entry) {
+  final root = installRootOf(entry);
+  if (root.isEmpty) return null;
+  final sep = Platform.pathSeparator;
+  final config = File('$root${sep}config.json');
+  try {
+    if (config.existsSync()) {
+      final raw = jsonDecode(config.readAsStringSync());
+      if (raw is Map && raw['dataDir'] is String) {
+        final value = (raw['dataDir'] as String).trim();
+        if (value.isNotEmpty) {
+          final absolute = RegExp(r'^[A-Za-z]:[\\/]').hasMatch(value)
+              || value.startsWith(r'\\')
+              || value.startsWith('/');
+          return absolute ? value : '$root$sep$value';
+        }
+      }
+    }
+  } catch (_) {
+    // 读不出来就按"没写 dataDir"处理——与后端 defaultDataDirOf 同一条兜底
+  }
+  return '$root${sep}data';
+}
+
+/// 这台实例自己的配置路径：默认实例用安装根那份，其余实例用 `<dataDir>/config.json`。
+/// 与 `packaging/launcher.mjs` 的 `--spawn-instance` 判据必须同形。
+String instanceConfigPathFor({required String entry, required String dataDir}) {
+  final sep = Platform.pathSeparator;
+  final defaultDir = defaultInstanceDataDirOf(entry);
+  final isDefault = defaultDir != null && _normalizedPath(defaultDir) == _normalizedPath(dataDir);
+  return isDefault ? '${installRootOf(entry)}${sep}config.json' : '$dataDir${sep}config.json';
+}
+
+/// 后端的命令行（唯一拼装；启动器不可用时也走这一份）。
+List<String> backendNodeArgs({
+  required String entry,
+  required String dataDir,
+  required int port,
+}) {
+  return <String>[
+    '--max-old-space-size=1024',
+    entry,
+    '--config',
+    instanceConfigPathFor(entry: entry, dataDir: dataDir),
+    '--data-dir',
+    dataDir,
+    '--port',
+    '$port',
+  ];
+}
+
 /// 拉起一个后端：返回 true = 进程真的起来了。
 ///
-/// `<nodeExe> --max-old-space-size=1024 <entry> --data-dir <dataDir> --port <port>`，
+/// `<nodeExe> --max-old-space-size=1024 <entry> --config <实例配置> --data-dir <dataDir> --port <port>`，
 /// 工作目录 = 安装根。`ProcessStartMode.detached`：**界面退出之后它要继续活着**
 /// （它是一台独立的实例，不是界面的子进程；不然"登出=结束实例"之外的所有路都会在关窗时被杀掉）。
 ///
@@ -406,17 +482,42 @@ Future<bool> launchBackend({
 }) async {
   if (nodeExe.trim().isEmpty || entry.trim().isEmpty || dataDir.trim().isEmpty) return false;
   if (port <= 0 || port > 65535) return false;
+  // ⚠ 2026-10-27：这里**不要**再用 `conhost.exe --headless` 包一层。
+  // 实测那一刻火绒把 node.exe 判成 ADV:Ransom/Genalocker.A 并**删了文件**
+  // （"无窗口控制台 + 大堆参数"正是勒索软件的常见形态）。直接用 node 起，
+  // 宁可偶尔冒一个控制台窗口，也不能让人被杀软删组件。
+  // 人把她叫起来 ⇒ 撤掉"别再自己起来"的标记，看护恢复"崩了就拉"
+  clearBackendStoppedMarker(dataDir);
+  final nodeArgs = backendNodeArgs(entry: entry, dataDir: dataDir, port: port);
+  // 走 FFI 的 CreateProcessW + CREATE_NO_WINDOW（见 lib/win_spawn.dart）：
+  // 既没有控制台窗口，也**不**套 conhost（那个形态 2026-10-27 被火绒判成勒索）。
+  if (Platform.isWindows) {
+    // 2026-10-28：**优先走启动器的 `--spawn-instance`**。
+    // 直接 CreateProcessW 起 node 时，子进程拿不到有效的 stdout/stderr 句柄，而后端
+    // 启动时会往 stdout 写日志 ⇒ 写第一行就崩（现场：登记表写进去了、端口也绑过，然后秒死，
+    // 界面这边只看到"一直没就绪"）。启动器用 **文件** 当 stdio，顺带把后端日志留全。
+    final root = installRootOf(entry);
+    final launcher = File('$root\\launcher.mjs');
+    if (launcher.existsSync()) {
+      final pid = spawnDetachedNoWindow(
+        exe: nodeExe,
+        args: <String>[launcher.path, '--spawn-instance', dataDir, '$port'],
+        workingDirectory: root,
+      );
+      if (pid > 0) return true;
+    }
+    final pid = spawnDetachedNoWindow(
+      exe: nodeExe,
+      args: nodeArgs,
+      workingDirectory: root,
+    );
+    if (pid > 0) return true;
+    // FFI 起不来（极老系统 / kernel32 取不到符号）⇒ 退回 dart:io，宁可多一个窗口
+  }
   try {
     final process = await Process.start(
       nodeExe,
-      <String>[
-        '--max-old-space-size=1024',
-        entry,
-        '--data-dir',
-        dataDir,
-        '--port',
-        '$port',
-      ],
+      nodeArgs,
       workingDirectory: installRootOf(entry),
       mode: ProcessStartMode.detached,
     );
@@ -627,4 +728,8 @@ Future<bool> writeAtomically(String path, String body) async {
     return false;
   }
 }
+
+
+
+
 

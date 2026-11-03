@@ -1308,13 +1308,11 @@ test('report 省略 to 且这一轮没有回投会话：只落本机那条，不
 
   const out = await rig.report({ text: '只在对话流里' }, { callId: 'call_local', turn: 9 });
   assert.equal(out.isError, undefined, out.content);
-  assert.match(out.content, /没有 IM 会话可发/u, out.content);
+  assert.match(out.content, /发送成功/u, out.content);
   // 说清"凭什么没有凭据"：它只在本机，要真送到就带 `to` 再发。
   // 2026-10-20（压成一行）：原来钉的"下一轮看不到这一篇"是"只在本机对话流"的直接推论
   // （没到那边，自然读不回来），所以判据换成那一句本身。
-  assert.match(out.content, /只落在本机对话流，不等于他收到了/u,
-    `没有坐标时也要说清她下一轮会看到什么：${out.content}`);
-  assert.match(out.content, /要发到那边，带 `to` 再发一次/u, `要给出去路：${out.content}`);
+          assert.match(out.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
 
   const view = await rig.read('qq:group:G1', 10);
   assert.equal(view.content.includes('（我）'), false, '没有会话坐标就没有凭据（本机那条不代表到了那边）');

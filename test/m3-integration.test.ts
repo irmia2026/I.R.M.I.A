@@ -756,9 +756,9 @@ test('F1（一）真 DsClient：持续 500 退避重试恰好 5 次，不无限�
   assert.ok(caught instanceof DsClientError, '必须抛出已分类的模型错误');
   assert.equal(caught.kind, 'server');
   assert.equal(caught.code, 'http_500');
-  assert.equal(caught.attempts, 5, '总共尝试 5 次（含首次）');
-  assert.equal(calls, 5, '接口只被打了 5 次');
-  assert.deepEqual(delays, [500, 1000, 2000, 4000], '指数退避：500ms 起、翻倍、上限 30s');
+  assert.equal(caught.attempts, 3, '总共尝试 3 次（含首次；2026-10-31 从 5 降到 3，避免一次坏请求把一拍拖 8 分钟）');
+  assert.equal(calls, 3, '接口只被打了 3 次');
+  assert.deepEqual(delays, [500, 1000], '指数退避：500ms 起、翻倍、上限 30s');
   assert.equal(client.failStreak, 1, '连续失败计数外抛给刹车层');
 });
 

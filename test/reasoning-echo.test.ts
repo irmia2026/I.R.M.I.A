@@ -1,5 +1,5 @@
 /**
- * v73 · 思维链**全量回传**（`src/model/render.ts` 的 `REASONING_ECHO_POLICY` / `reasoningEchoPlan` /
+ * v73 · 思维链**全量回传**（`src/model/render.ts` 的 `reasoningEchoMaxCharsFor, REASONING_ECHO_POLICY` / `reasoningEchoPlan` /
  * `enforceReasoningEchoIntegrity` / `assertReasoningEchoIntegrity`）
  * 这一版治的是 2026-10-20 那场"每轮 400、干着干着就停了"：
  * v68 的帽子只回传最近 3 条思维链，而历史里那些 assistant 条目一条都没少 ⇒
@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
-  NOW_LAYER_BANNER, REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity,
+  NOW_LAYER_BANNER, reasoningEchoMaxCharsFor, REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity,
   enforceReasoningEchoIntegrity, reasoningEchoOf, reasoningEchoPlan, render,
   type AssistantGroup, type InputItem, type RenderInput, type RenderPersona, type ReasoningEchoPolicy,
 } from '../src/model/render.ts';
@@ -161,9 +161,9 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 80（v78 关系档案改索引 → v79 http_get 换正文抽取器 → v80 read_channel 翻页一页的条数 50→15）', () => {
-    assert.equal(RENDER_VERSION, '80');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '80');
+  test('RENDER_VERSION 递到 85（v84 → v85 SELF_BRIEF 情绪与欲望）', () => {
+    assert.equal(RENDER_VERSION, '85');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '85');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {
@@ -194,7 +194,13 @@ describe('② 超硬上限：丢的是**整组**（正文 + 思维链 + 工具�
     return events;
   }
 
-  test('maxTotalChars 卡到只留最新 2 组 ⇒ 被丢的组**正文与思维链都不在**（不是只缺思维链）', () => {
+  test('回传上限跟压缩阈值缩放：200k→300k（与旧常量一致），450k→675k，边界夹住', () => {
+  assert.equal(reasoningEchoMaxCharsFor(200_000), REASONING_ECHO_POLICY.maxTotalChars);
+  assert.equal(reasoningEchoMaxCharsFor(450_000), 675_000);
+  assert.equal(reasoningEchoMaxCharsFor(1), 100_000);
+  assert.equal(reasoningEchoMaxCharsFor(9_999_999), 2_000_000);
+});
+test('maxTotalChars 卡到只留最新 2 组 ⇒ 被丢的组**正文与思维链都不在**（不是只缺思维链）', () => {
     const events = logOfToolSteps(['R1', 'R2', 'R3']); // 每组 2 字符，共 6
     const r = render(baseInput(events, { reasoningEcho: { maxTotalChars: 4 } }));
     const dump = inputText(r.input);

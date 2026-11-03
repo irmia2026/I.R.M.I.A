@@ -1,3 +1,6 @@
+// affect integration: requires applyOne switch and Projection.affect
+import { applyAppraised } from '../affect/engine.ts';
+import { applyIntimacyUpdated } from '../intimacy/state.ts';
 /**
  * Irmia Agent — 状态折叠
  * 与 docs/schema.md §8 对齐。两条铁律：
@@ -24,10 +27,18 @@ const DEDUPE_WINDOW = 1000;
 /** 距上次发言超过此时长（毫秒）计入压力 */
 const QUIET_PRESSURE_AFTER_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * 折叠时遇到**无法应用的 affect/appraised**（坏数据 / 未来版本）的回调。
+ *
+ * 只给重建路径用：一条坏账不该让整份日志折不出来、更不该让进程起不来。
+ * 回调由调用方决定怎么计数与记录；`fold` 本身保持纯函数（不打印、不写事件）。
+ */
+export type FoldSkipHandler = (event: AppEvent, error: unknown) => void;
+
 /** 全量折叠：从空投影开始应用整个事件序列 */
-export function fold(events: Iterable<AppEvent>): Projection {
+export function fold(events: Iterable<AppEvent>, onSkip?: FoldSkipHandler): Projection {
   const p = emptyProjection();
-  for (const e of events) applyEvent(p, e);
+  for (const e of events) applyEvent(p, e, onSkip);
   finalizePressure(p);
   return p;
 }
@@ -42,9 +53,9 @@ export function fold(events: Iterable<AppEvent>): Projection {
  * 注意它看的是 `parentCallId`，与「谁在写」无关：子代理自己的隔离投影应当调用 `applyOne`
  * （对它而言本层就是那条链）。
  */
-export function applyEvent(p: Projection, e: AppEvent): void {
+export function applyEvent(p: Projection, e: AppEvent, onSkip?: FoldSkipHandler): void {
   if (e.parentCallId !== undefined) applySubagentEvent(p, e);
-  else applyOne(p, e);
+  else applyOne(p, e, onSkip);
 }
 
 /**
@@ -139,11 +150,14 @@ function applyBudgetConsumed(p: Projection, e: AppEvent & { type: 'budget/consum
   // 从旧快照续算时这一行保证"这份累计是按哪一版折的"永远写的是**当前**这一版——
   // 而恢复层在采信快照之前已经校验过版本，所以这里不会有"半旧半新"的累计被贴上 v2 标签。
   p.budget.budgetVersion = BUDGET_ACCOUNTING_VERSION;
-  if (d.finishReason === 'failed') {
-    p.failStreak += 1;
-  } else {
-    p.failStreak = 0;
-    p.lastModelSuccessAt = e.ts;
+  // Ancillary affect appraisal must not alter heavy/runtime health probes.
+  if (d.affectEvaluation !== true) {
+    if (d.finishReason === 'failed') {
+      p.failStreak += 1;
+    } else {
+      p.failStreak = 0;
+      p.lastModelSuccessAt = e.ts;
+    }
   }
 }
 
@@ -200,11 +214,27 @@ function resumableOf(data: unknown): boolean {
 }
 
 /** 增量折叠：运行期把单条新事件应用进既有投影（原地修改） */
-export function applyOne(p: Projection, e: AppEvent): void {
+export function applyOne(p: Projection, e: AppEvent, onSkip?: FoldSkipHandler): void {
   if (e.seq > p.lastSeq) p.lastSeq = e.seq;
   if (p.firstEventAt === null) p.firstEventAt = e.ts;
 
   switch (e.type) {
+    case 'affect/appraised':
+      try {
+        p.affect = applyAppraised(p.affect,e.data);
+      } catch (error) {
+        // 坏数据 / 未来版本：不折、不中断，交给重建路径计数。运行期写入的事件都经过
+        // `makeAppraisedData` 校验，正常情况下走不到这里；这里防的是外部/旧日志。
+        onSkip?.(e, error);
+      }
+      break;
+    case 'intimacy/updated':
+      try {
+        p.intimacy = applyIntimacyUpdated(p.intimacy, e.data);
+      } catch (error) {
+        onSkip?.(e, error);
+      }
+      break;
     case 'turn/start':
       p.openTurn = { turn: e.data.turn, step: 0 };
       // 单轮步数与单步工具数随新 turn 归零（§4.6 单 turn / 单 step 两层刹车）。
@@ -472,7 +502,7 @@ export function applyOne(p: Projection, e: AppEvent): void {
       // config/changed、mcp/*、skill/*（含 v79 的 skill/seed：出厂技能首次复制进数据目录，
       // 纯装配账，投影里没有它的位置）、hook/*、speak/*、tool/zombie、
       // developer/message、step/end、alarm/sent、compaction/summary、persona/updated、
-      // image/trace——图片通道的留痕，纯观测，投影里没有它的位置）
+      // image/trace、sticker/*——图片与贴纸通道的留痕，纯观测，投影里没有它们的位置）
       // 不进投影。新增事件类型在此显式落进 default 是有意为之——不允许静默吞掉。
       break;
   }

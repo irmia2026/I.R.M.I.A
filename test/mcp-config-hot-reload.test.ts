@@ -109,9 +109,11 @@ function makePool(options: {
 
 // ──────────────────────── ① 白名单与"就地生效" ────────────────────────
 
-test('① 白名单：只有 `mcp.servers` 是热的；池级两格与其余字段照旧需要重启', () => {
-  assert.deepEqual([...HOT_RELOAD_FIELDS], ['mcp.servers'],
-    '名单里只该有申报的那一项——顺手多填一项就是一次没被拍板的取舍');
+test('① 白名单：MCP、情绪/亲密开关与贴纸配置是热的；池级两格与其余字段照旧需要重启', () => {
+  assert.deepEqual([...HOT_RELOAD_FIELDS], [
+    'mcp.servers', 'affect.enabled', 'affect.evaluatorEnabled', 'intimacy.', 'stickers.',
+    'channels.qqOfficial.stickers', 'channels.onebot.stickers',
+  ], '名单只该有申报的项——顺手多填一项就是一次没被拍板的取舍');
 
   assert.equal(classifyConfigField('mcp.servers'), 'hot', '声明面是热的');
   // 同段的两格**刻意不热**：它们是建池时的参数（换一份要不要重建采样器、上限要不要重设）

@@ -20,7 +20,7 @@ import { EventLog } from '../log/event-log.ts';
 import type {
   AppEvent, InputDeadLetter, InputRequeued, PendingInput, Projection, ToolResult, TurnEnd, WakeSource,
 } from '../log/types.js';
-import { applyEvent, finalizePressure, fold } from '../state/fold.ts';
+import { applyEvent, finalizePressure, fold, type FoldSkipHandler } from '../state/fold.ts';
 import { isCacheValid, loadProjectionCache, saveProjectionCache } from '../state/projection-cache.ts';
 import { foldFromSnapshot, loadLatestSnapshot } from '../state/snapshot.ts';
 import { TimerStore } from '../wake/timer-store.ts';
@@ -313,10 +313,50 @@ function emptyProjection(): Projection {
  * 全量折叠：流式读日志，逐条 applyOne，不整份事件入内存。
  * 与 fold(readAll()) 严格等价——fold 本身就是「空投影 + 逐条 applyOne + finalizePressure」。
  */
-async function foldFromLog(eventLog: EventLog): Promise<Projection> {
+async function foldFromLog(eventLog: EventLog, onSkip?: FoldSkipHandler): Promise<Projection> {
   const projection = fold([]);
-  for await (const event of eventLog.readAll()) applyEvent(projection, event);
+  for await (const event of eventLog.readAll()) applyEvent(projection, event, onSkip);
   return projection;
+}
+
+/** 重建期跳过的坏事件（只用于 repairs/诊断，不新增事件、不进投影） */
+interface SkippedFoldEvent {
+  seq: number;
+  type: string;
+  reason: string;
+}
+
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+/**
+ * 重建投影时收集无法应用的 affect / intimacy 事件，并在**重建完成后**一次性写进 repairs/日志。
+ *
+ * 为什么不在 `fold` 里直接打日志/写事件：fold 是纯函数（不读时钟、不写盘），
+ * 而且运行期也走 `applyOne`；让底层日志库决定"怎么报告"会把纯函数和宿主耦合起来。
+ * 计数与通报只属于恢复路径，所以由这一层收口。
+ */
+function skippedReporter(ctx: Ctx): { onSkip: FoldSkipHandler; report: () => void } {
+  const skipped: SkippedFoldEvent[] = [];
+  return {
+    onSkip: (event, error) => {
+      skipped.push({ seq: event.seq, type: event.type, reason: reasonOf(error) });
+    },
+    report: () => {
+      if (skipped.length === 0) return;
+      const seqs = skipped.map(item => item.seq);
+      const tail = seqs.length > 8 ? `${seqs.slice(0, 8).join(',')}…` : seqs.join(',');
+      const kinds = [...new Set(skipped.map(item => item.type))].join('/');
+      const line = `投影重建跳过 ${skipped.length} 条无法应用的 ${kinds}（seq ${tail}）`
+        + '：已按剩余事件重建，原事件仍留在日志里';
+      ctx.repairs.push(line);
+      ctx.log('warn', '投影重建跳过无法应用的事件', {
+        count: skipped.length,
+        events: skipped.slice(0, 8),
+      });
+    },
+  };
 }
 
 /**
@@ -328,26 +368,29 @@ async function foldFromLog(eventLog: EventLog): Promise<Projection> {
  * 压力（pressure）不在本函数内结算：它依赖"当前参照时刻"，由调用方在两种路径之后统一重算。
  */
 async function restoreProjection(ctx: Ctx, eventLog: EventLog): Promise<Projection> {
+  const skipped = skippedReporter(ctx);
   const snapshot = await loadLatestSnapshot(ctx.deps.dataDir);
+  let projection: Projection;
   if (snapshot === null) {
     ctx.log('info', '没有可用快照，投影由日志全量折叠');
-    return foldFromLog(eventLog);
-  }
-  if (snapshot.upToSeq > eventLog.latestSeq()) {
+    projection = await foldFromLog(eventLog, skipped.onSkip);
+  } else if (snapshot.upToSeq > eventLog.latestSeq()) {
     ctx.log('warn', '快照领先于日志末尾，已放弃快照改为全量折叠（日志可能被截断）', {
       snapshot: snapshot.file,
       upToSeq: snapshot.upToSeq,
       latestSeq: eventLog.latestSeq(),
     });
-    return foldFromLog(eventLog);
+    projection = await foldFromLog(eventLog, skipped.onSkip);
+  } else {
+    projection = await foldFromSnapshot(eventLog, snapshot, skipped.onSkip);
+    // 只记 info 不进 repairs：快照起算是正常加速路径，不是"这次启动做了补偿动作"
+    ctx.log('info', '投影由快照增量折叠', {
+      snapshot: snapshot.file,
+      fromSeq: snapshot.upToSeq,
+      lastSeq: projection.lastSeq,
+    });
   }
-  const projection = await foldFromSnapshot(eventLog, snapshot);
-  // 只记 info 不进 repairs：快照起算是正常加速路径，不是"这次启动做了补偿动作"
-  ctx.log('info', '投影由快照增量折叠', {
-    snapshot: snapshot.file,
-    fromSeq: snapshot.upToSeq,
-    lastSeq: projection.lastSeq,
-  });
+  skipped.report();
   return projection;
 }
 

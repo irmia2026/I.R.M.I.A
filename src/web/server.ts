@@ -68,6 +68,11 @@ import { StartupState, type ServerBootstrap } from './preflight.ts';
 import { decodeText } from '../util/bytes-text.ts';
 import { chooseRestartPath, parseRestartPath, restartReasonText, restartTraceLine, backendEntry, BUNDLED_NODE_REL, RESTART_FAILURE_REASONS, type RestartPath } from '../runtime/restart-chain.ts';
 import { deriveRequest } from '../runtime/agent-loop.ts';
+import { affectRulesForReplay, tryAffectLineForReplay } from '../affect/render.ts';
+import { intimacyRulesForReplay, tryIntimacyLineForReplay } from '../intimacy/render.ts';
+import type { ReasoningEchoPolicy } from '../model/render.ts';
+import { buildAffectView } from './affect-view.ts';
+import { buildIntimacyView } from './intimacy-view.ts';
 /**
  * `/stop` 的结局类型**只借型不借值**（`import type`）：本模块要的是那一格的形状
  * （`receipt` / `outcome` / `cleared` …），而判据与动作仍然只有 `real-loop` 一份实现
@@ -114,6 +119,17 @@ import {
   DEFAULT_HOOK_TIMEOUT_MS, HOOK_CONFIG_FILE_NAME, HOOK_POINTS, hookConfigPath, loadHookConfig,
   parseHookEntry, protectedHookPaths, type HookConfigEntry,
 } from '../hook/hooks.ts';
+// 插件平台的 HTTP 面（`/api/plugins` 与四条确认命令）：判据与回执形状全在 `plugin/http.ts`，
+// 这一层只做"路由 → 那一个函数"的转手（与 deps / update 那些端点同一条纪律：别在这里重判）。
+import { listPlugins, runPluginCommand } from '../plugin/http.ts';
+// 只在**第一次**访问市场端点时动态加载（`marketClient()`）：市场客户端静态依赖
+// `plugin/market.ts`，而后者依赖 `plugin/package-store.ts`；package-store → main → server
+// 这条既有链会让"server 静态 import 市场"在模块求值期形成一圈（market → package-store → main
+// → server → market），直接把 market.ts 的常量打进 TDZ。把它做成懒加载，市场没被用到时
+// 这条链根本不存在。
+import type { MarketHttpFetch, PluginMarketClient } from '../plugin/market-http.ts';
+import type { PluginManager } from '../plugin/manager.js';
+import type { PluginRuntimeComposition } from '../plugin/runtime.js';
 import type { EventLog } from '../log/event-log.js';
 import type { AppEvent, BudgetLayer, Projection, WakeSource } from '../log/types.js';
 import {
@@ -160,16 +176,14 @@ import { compactTimestamp } from '../tools/fs/text-codec.ts';
 import { estimateTokens } from '../tools/registry.ts';
 import type { ToolRegistry } from '../tools/registry.js';
 import type { TimerStore } from '../wake/timer-store.js';
-import type { PluginManager } from '../plugin/manager.js';
-import type { PluginRuntimeComposition } from '../plugin/runtime.js';
-import { AGENT_VERSION } from '../version.ts';
-import { listPlugins, runPluginCommand } from '../plugin/http.ts';
 import type { DepsManager } from '../deps/manager.js';
 import { DEP_NAMES, type DepName } from '../deps/probe.ts';
 import type { ManagedServiceStatus } from '../services/snowluma.js';
 import { AuthStore, UI_TOKEN_FILE } from './auth.ts';
 import { WebhookSecretStore, WEBHOOK_SECRET_FILE_NAME } from './webhook-secret.ts';
 import { sleepSync, writeFileAtomicSync } from './atomic.ts';
+import { STICKER_UPLOAD_BODY_MAX_BYTES, StickerServiceError } from '../stickers/service.ts';
+import type { StickerService } from '../stickers/service.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -480,10 +494,24 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 与 set-key 同级：门挡的是误触（按钮点错、脚本里循环调用）——轮换一次，所有
   // 还没换凭据的外部投递方**立刻开始收 401**，那是个需要点头的动作，不是一次顺手点击。
   'regenerate-webhook-token': 'regenerate-webhook-token',
+  // 插件（2026-10-26，插件平台）：四条都按危险操作处理，短语 = 命令名。
+  // 判据：install 把**外部代码**落进数据目录；confirm 把某一版内容哈希记成"人确认过"
+  // （信任一落，它带的技能、Hook 与 MCP server 就都进了执行面）；enable / disable 决定
+  // 这些东西此刻在不在执行面上。门挡的是误触（按钮点错、脚本里循环调用）。
   'plugin-install': 'plugin-install',
   'plugin-confirm': 'plugin-confirm',
   'plugin-enable': 'plugin-enable',
   'plugin-disable': 'plugin-disable',
+  // P1a（2026-10-29）：**删包目录**比启停更重——内容哈希一旦删掉，"人确认过这一份"的凭据
+  // 就没有了（重装同 id 同字节会得到同一个 hash，但信任事件仍然要人再点一次）。按危险操作处理。
+  'plugin-uninstall': 'plugin-uninstall',
+  // 从市场安装（2026-10-29）：它会把**外部代码**落进数据目录，且包的来源是网络。
+  // 与 plugin-install 同级按危险操作处理（短语 = 命令名）：门防误触，不防人；
+  // 真正的信任门仍是"装完是 untrusted，必须再 confirm"。
+  'plugin-market-install': 'plugin-market-install',
+  'sticker-delete': 'sticker-delete',
+  'stickers-purge': 'stickers-purge',
+  'sticker-harvest': null,
 };
 
 /**
@@ -709,6 +737,8 @@ export interface WebServerDeps {
   out?: ((line: string) => void) | undefined;
   /** 配置文件路径；缺省 `<cwd>/config.json`（与 main.ts 的 loadConfig 同基准） */
   configPath?: string | undefined;
+  /** 贴纸库、打标与审核；缺省时贴纸端点如实回 501 */
+  stickers?: StickerService | undefined;
   /** 人格被批准修改后的回调（宿主据此热更内存里的 PersonaAssets） */
   onPersonaUpdated?: (() => void) | undefined;
   /**
@@ -731,8 +761,22 @@ export interface WebServerDeps {
    * 界面上分不清"没有依赖"与"没接上依赖"是最没用的那种观测）。
    */
   deps?: DepsManager | undefined;
-  /** 本地插件管理器；未注入时插件读写接口均返回 501。 */
+  /**
+   * 本地插件管理器（`plugin/manager.ts`）；未注入时 `/api/plugins` 与四条 `plugin-*` 命令
+   * 一律回 501（"这条实例不提供插件管理"——与 `deps` 缺省同一个理由：分不清"没有"与
+   * "没接上"是最没用的那种观测）。
+   */
   plugins?: PluginManager | undefined;
+  /**
+   * 市场客户端的 fetch 覆盖点（测试注入；缺省全局 fetch）。生产路径只由
+   * `PluginMarketClient` 使用：它只 GET 配置里的索引地址（同源重定向除外），
+   * 不会拿任何调用方给的 URL 去联网。
+   */
+  marketFetch?: MarketHttpFetch | undefined;
+  /** 市场索引/包下载的时限覆盖点（缺省 10 秒；测试可缩短到几十毫秒来验超时路径） */
+  marketTimeoutMs?: number | undefined;
+  /** 市场临时目录父目录覆盖点（测试用；缺省 os.tmpdir） */
+  marketTempDir?: string | undefined;
   /**
    * 插件运行组合面（`composePluginRuntime` 的结果）。
    *
@@ -3116,6 +3160,11 @@ export function buildReplay(input: {
   // 于是少了「会话：」「点名：」这类要从事件/配置算出来的字段——重放出来的请求与当时发出去的不是
   // 同一份，复盘就白做（2026-10-02 修；`asks`/`injection` 也随之由同一个函数从事件算出来）。
   const request = deriveRequest({
+    affectLine: tryAffectLineForReplay(stepStart),
+    intimacyLine: tryIntimacyLineForReplay(stepStart),
+    affectRules: affectRulesForReplay(stepStart),
+    intimacyRules: intimacyRulesForReplay(stepStart),
+    reasoningEcho: reasoningEchoPolicyForReplay(stepStart),
     events: eventsBefore,
     persona: {
       identity: persona.identity,
@@ -3333,6 +3382,16 @@ class WebServerImpl implements WebServer {
   private readonly sseClients = new Set<ServerResponse>();
   /** webhook 专用凭据（B9）：`/webhook/*` 的唯一判据，与 `auth` 互不通用 */
   readonly webhookSecret: WebhookSecretStore;
+  /**
+   * 插件市场客户端（2026-10-29）：索引缓存、审阅视图与"从市场安装"的唯一实现。
+   *
+   * **懒加载**：第一次访问 `/api/plugins/market*` 或市场安装命令时才 `import()`。
+   * 它在创建时读一次配置（`plugins.marketEnabled` / `plugins.marketIndexUrl`），与
+   * `web.*` / `update.*` 同一条纪律：这两格是启动参数，改完要重启进程才接管。
+   */
+  private market: PluginMarketClient | null = null;
+  /** 同一拍里多个请求同时撞上市场：只加载/构造一次，别各拿一份索引缓存 */
+  private marketLoading: Promise<PluginMarketClient> | null = null;
 
   /** 已广播到的 seq：SSE 只推"新"事件，历史由 /api/events 拉 */
   private pumpedSeq = 0;
@@ -3959,6 +4018,20 @@ class WebServerImpl implements WebServer {
       return;
     }
 
+    if (path === '/api/stickers' || path.startsWith('/api/stickers/')) {
+      await this.handleStickers(req, res, url);
+      return;
+    }
+    if (path === '/api/config' && req.method === 'PATCH') {
+      await this.runCommand('config-update', req, res);
+      return;
+    }
+    if (path === '/api/commands/stickers-purge') {
+      if (req.method !== 'DELETE') throw new HttpError(405, 'method-not-allowed', '清理回收区只接受 DELETE /api/commands/stickers-purge');
+      await this.runCommand('stickers-purge', req, res);
+      return;
+    }
+
     // 写命令先分流：路径对了但方法不对应该是 405（而不是"未知接口"）——
     // "这个地址存在，但不是 GET"与"没这个地址"是两件事
     if (path.startsWith('/api/commands/')) {
@@ -4026,7 +4099,8 @@ class WebServerImpl implements WebServer {
         throw new HttpError(501, 'not-implemented', '没有注入更新检查宿主（UpdateService）：这条实例不提供更新检查');
       }
       // 手动 = 无视节流窗口（人的意图，不是后台任务）；节流只在自动那一拍生效
-      sendJson(res, 200, await update.checkNow());
+        // ⚠ 2026-10-26 修复：这里原来漏了 { manual: true }，于是「立即检查」被 12 小时节流挡住、点了等于没点。
+        sendJson(res, 200, await update.checkNow({ manual: true }));
       return;
     }
 
@@ -4057,9 +4131,36 @@ class WebServerImpl implements WebServer {
       return;
     }
 
+    // 插件市场（2026-10-29）：读索引 / 单插件审阅。两条都是 GET（只读外部索引，不改状态），
+    // 实现与错误形状全在 `plugin/market-http.ts`；这一层只做"路径 → 那一个方法"的转手。
+    // 关掉 `plugins.marketEnabled` 时客户端统一回 501 并说明"市场已关闭"（不是空列表：
+    // 空列表会被界面读成"市场里什么都没有"）。
+    if (path === '/api/plugins/market' || path.startsWith('/api/plugins/market/')) {
+      if (req.method !== 'GET') {
+        throw new HttpError(405, 'method-not-allowed', '插件市场只读：取索引用 GET /api/plugins/market，安装用 POST /api/commands/plugin-market-install');
+      }
+      const refresh = url.searchParams.get('refresh') === '1' || url.searchParams.get('refresh') === 'true';
+      const market = await this.marketClient();
+      if (path === '/api/plugins/market') {
+        const result = await market.indexView(refresh);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      let id: string;
+      try {
+        id = decodeURIComponent(path.slice('/api/plugins/market/'.length));
+      } catch {
+        throw notFound('市场插件 id 不是合法的 URL 编码', 'market-plugin-not-found');
+      }
+      const result = await market.pluginView(id, refresh);
+      sendJson(res, result.status, result.body);
+      return;
+    }
+
     if (req.method === 'GET') {
       switch (path) {
         case '/api/plugins': {
+          // 未注入 manager ⇒ 501（不是空列表）：空列表会被界面读成"一个插件都没装"
           const result = listPlugins(this.deps.plugins);
           sendJson(res, result.status, result.body);
           return;
@@ -4124,6 +4225,26 @@ class WebServerImpl implements WebServer {
         case '/api/budget':
           sendJson(res, 200, await this.budgetView(url));
           return;
+        case '/api/affect': {
+          sendJson(res, 200, buildAffectView({
+            config: this.deps.config,
+            configured: this.readAffectConfigured(),
+            projection: this.deps.projection,
+            events: await readAllEvents(this.deps.log),
+            now: this.deps.now().toISOString(),
+          }));
+          return;
+        }
+        case '/api/intimacy': {
+          sendJson(res, 200, buildIntimacyView({
+            config: this.deps.config,
+            configured: this.readIntimacyConfigured(),
+            projection: this.deps.projection,
+            events: await readAllEvents(this.deps.log),
+            now: this.deps.now().toISOString(),
+          }));
+          return;
+        }
         // 管控页的配置读取：默认返回**生效配置本体**（前端按点路径取值）；
         // 指纹放在响应头里，保证响应体形状与 config.json 的语义一一对应。
         //
@@ -4138,7 +4259,7 @@ class WebServerImpl implements WebServer {
         //
         // ★ **「现在跑的是什么」的判据只此一处**（2026-10-21，①）：**不带** `source` 的这一条
         // 就是它，`this.deps.config` 即进程启动那一刻读进来的那份（`models.*` 是 restart 级，
-        // 见 `config/watcher.ts` 的 `RESTART_REQUIRED_FIELDS`——热更名单里只有 `mcp.servers`）。
+        // 见 `config/watcher.ts` 的 `RESTART_REQUIRED_FIELDS`——MCP 段里只有 `mcp.servers` 热更）。
         // 设置页模型卡那行「现在跑的是 `<lane>=<model> @ <baseUrl>`」读的就是这里；盘上那份
         // （`?source=saved`）**不是**运行期真值，它只是"我保存下来的值"。
         // 两条读并排摆着，屏幕上才有"我存了什么"与"它此刻在用什么"这两个不同的读数。
@@ -4965,6 +5086,24 @@ class WebServerImpl implements WebServer {
     return { source: 'saved', config: overlayConfig(base, parsed) as unknown as AppConfig };
   }
 
+  private readAffectConfigured(): boolean {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.configPath, 'utf8'));
+      return readConfigPath(parsed, 'affect.enabled') === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private readIntimacyConfigured(): boolean {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.configPath, 'utf8'));
+      return readConfigPath(parsed, 'intimacy.enabled') === true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * 读**盘上**那份 `channels.onebot`（人刚保存的就是它）。
    *
@@ -5712,6 +5851,117 @@ class WebServerImpl implements WebServer {
   // ── 写命令 ──
 
   /**
+   * 取（必要时创建）插件市场客户端。
+   *
+   * 为什么是 `import()` 而不是顶层 import：见文件顶部那条注释——`market.ts` 静态依赖
+   * `package-store.ts`，而 package-store → main → server 的既有链会在模块图里形成一圈。
+   * 懒加载把"市场"从启动期模块图里摘出去：没用市场端点的实例根本不加载它。
+   */
+  private async marketClient(): Promise<PluginMarketClient> {
+    if (this.market !== null) return this.market;
+    if (this.marketLoading === null) {
+      this.marketLoading = import('../plugin/market-http.ts').then(({ PluginMarketClient: Client }) => new Client({
+        dataDir: this.deps.dataDir,
+        plugins: this.deps.config.plugins,
+        fetch: this.deps.marketFetch,
+        now: this.deps.now,
+        timeoutMs: this.deps.marketTimeoutMs,
+        tempDir: this.deps.marketTempDir,
+      })).then((client) => {
+        this.market = client;
+        return client;
+      }).catch((error: unknown) => {
+        // 加载失败不把这次失败永久记住：下一次请求还会重试一次（例如模块图被测试换掉）
+        this.marketLoading = null;
+        throw error;
+      });
+    }
+    return await this.marketLoading;
+  }
+
+  private async handleStickers(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const service = this.deps.stickers;
+    if (service === undefined) throw new HttpError(501, 'not-implemented', '这条实例没有装配贴纸服务');
+    const path = url.pathname;
+    try {
+      if (req.method === 'GET') {
+        if (path === '/api/stickers') {
+          sendJson(res, 200, service.list({
+            status: url.searchParams.get('status'), tag: url.searchParams.get('tag'),
+            source: url.searchParams.get('source'), page: url.searchParams.get('page'),
+          }));
+          return;
+        }
+        if (path === '/api/stickers/tags') {
+          const view = service.list();
+          sendJson(res, 200, { tags: view.tags, counts: view.counts });
+          return;
+        }
+        if (path === '/api/stickers/events') {
+          const rawLimit = Number(url.searchParams.get('limit') ?? '100');
+          const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(200, rawLimit) : 100;
+          const items = (await readAllEvents(this.deps.log)).filter((event) => event.type.startsWith('sticker/')).slice(-limit).reverse();
+          sendJson(res, 200, { items });
+          return;
+        }
+        if (path.startsWith('/api/stickers/')) {
+          const suffix = path.slice('/api/stickers/'.length);
+          let id: string;
+          try {
+            id = decodeURIComponent(suffix.endsWith('/image') ? suffix.slice(0, -'/image'.length) : suffix);
+          } catch {
+            throw notFound('贴纸 id 不是合法的 URL 编码', 'sticker-not-found');
+          }
+          if (suffix.endsWith('/image')) {
+            const image = service.image(id);
+            res.writeHead(200, {
+              'content-type': image.mime,
+              'content-length': image.bytes.length,
+              'cache-control': 'private, no-store',
+              'x-content-type-options': 'nosniff',
+            });
+            res.end(image.bytes);
+          } else {
+            sendJson(res, 200, service.entry(id));
+          }
+          return;
+        }
+      }
+      if (req.method === 'POST' && path === '/api/stickers') {
+        const body = await readBody(req, STICKER_UPLOAD_BODY_MAX_BYTES);
+        if (!body.ok) {
+          sendError(res, body.code === 'payload-too-large' ? 413 : 400, body.code, body.message);
+          return;
+        }
+        sendJson(res, 201, await service.upload(parseJsonObject(body.text)));
+        return;
+      }
+      if (req.method === 'PATCH' && path.startsWith('/api/stickers/')) {
+        const body = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
+        if (!body.ok) {
+          sendError(res, body.code === 'payload-too-large' ? 413 : 400, body.code, body.message);
+          return;
+        }
+        sendJson(res, 200, await service.review(decodeURIComponent(path.slice('/api/stickers/'.length)), parseJsonObject(body.text)));
+        return;
+      }
+      if (req.method === 'DELETE' && path.startsWith('/api/stickers/')) {
+        this.requireConfirm(req, 'sticker-delete');
+        sendJson(res, 200, await service.remove(decodeURIComponent(path.slice('/api/stickers/'.length))));
+        return;
+      }
+      throw new HttpError(405, 'method-not-allowed', '贴纸接口只支持 GET/POST/PATCH/DELETE');
+    } catch (err) {
+      if (err instanceof StickerServiceError) {
+        sendError(res, err.status, err.code, err.message);
+        return;
+      }
+      if (err instanceof URIError) throw badRequest('贴纸 id 不是合法的 URL 编码', 'invalid-sticker-id');
+      throw err;
+    }
+  }
+
+  /**
    * 危险操作的 `X-Confirm` 判据（**唯一实现**）。
    *
    * 为什么抽成一条方法：`/api/commands/*` 那条通道与 `stop-instance`（它为了"登出后还能停"
@@ -5765,8 +6015,19 @@ class WebServerImpl implements WebServer {
       case 'plugin-install':
       case 'plugin-confirm':
       case 'plugin-enable':
-      case 'plugin-disable': {
+      case 'plugin-disable':
+      case 'plugin-uninstall': {
+        // 回执与判据全在 `plugin/http.ts`（同一份实现，CLI/测试与这里读它）：本层只转手。
+        // 确认短语已经过了 `requireConfirm`（上面那一行），所以走到这里就是"人点过一次头"。
         const result = runPluginCommand(command, payload, this.deps.plugins);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      case 'plugin-market-install': {
+        // 从市场装：版本选择 / 下载校验 / 包身份 / 正式落盘全在 `plugin/market-http.ts`。
+        // 这里同样是"确认短语已过"之后才走到；安装完成仍为 untrusted，确认是下一条命令的事。
+        const market = await this.marketClient();
+        const result = await market.install(payload, this.deps.plugins);
         sendJson(res, result.status, result.body);
         return;
       }
@@ -6294,7 +6555,7 @@ class WebServerImpl implements WebServer {
       case 'config-update': {
         const result = await this.applyConfigUpdate(payload, phrases);
         // 生效那一份**这一刻还没变**：config-update 只写盘，热更由 `ConfigWatcher` 在 600ms
-        // 去抖后接管——今天名单里只有 `mcp.servers`，写它才会就地生效；名单外的字段要重启
+        // 去抖后接管——名单含 `mcp.servers` 与两个 affect 开关，写它们才会就地生效；名单外的字段要重启
         // （口径的唯一出处：`config/watcher.ts` 的 `HOT_RELOAD_FIELDS` / `HOT_RELOAD_POLICY`）。
         // 所以事件里记的是**生效配置**的指纹，另加 `requiresRestart: true` 把这层意思说出口。
         // 过去这里记的是盘上那份的新指纹，于是日志里写着"配置变了"，而进程还在按旧的跑
@@ -7853,6 +8114,24 @@ class WebServerImpl implements WebServer {
         sendJson(res, 200, { ok: true, seq, type: 'timer/cancelled', timerId });
         return;
       }
+      case 'stickers-purge': {
+        const service = this.deps.stickers;
+        if (service === undefined) throw new HttpError(501, 'not-implemented', '这条实例没有装配贴纸服务');
+        const id = payload['id'];
+        if (id !== undefined && (typeof id !== 'string' || id.trim() === '')) throw badRequest('id 要是非空贴纸 id');
+        sendJson(res, 200, await service.purge(typeof id === 'string' ? id : undefined));
+        return;
+      }
+      case 'sticker-harvest': {
+        const enabled = payload['enabled'];
+        if (typeof enabled !== 'boolean') throw badRequest('enabled 必须是布尔值');
+        const saved = await this.applyConfigUpdate({ fields: { 'stickers.harvest.enabled': enabled } }, phrases);
+        sendJson(res, 200, {
+          ok: true, enabled, fields: saved.fields, savedConfigHash: saved.configHash,
+          requiresRestart: !(this.deps.configReload?.() ?? false),
+        });
+        return;
+      }
       default:
         // CONFIRM_PHRASES 里登记过但这里没实现：显式报错，不做"尽力而为"
         throw new HttpError(501, 'not-implemented', `命令 ${command} 已登记但尚未实现`);
@@ -8954,6 +9233,11 @@ class WebServerImpl implements WebServer {
       //（群聊一律 `qq:group:<群id>`）。用户手里那张表却还是归一前填的 `qq:group-at:<群id>`
       // ——原样发出去，界面按 `qq:group:…` 查不到，群聊就一直显示「未命名会话」（实测第二次撞到）。
       contacts: Object.fromEntries([...contacts].map(([sid, name]) => [normalizeSid(sid), name])),
+      // **她写下的会话别名**（`aliases.md` 的 sid 段，sid → 名字）：与 contacts 分开两个字段。
+      // 为什么需要：界面原来只拿 contacts 查名字，于是"她认过人、用户没往 config 里填"的会话
+      // 在通道消息卡上全显示「未命名会话」（2026-10-30 实拍：qq:c2c:… 在 aliases.md 里有名字，卡片仍是未命名）。
+      // 键同样归一，理由同上一条。
+      aliases: Object.fromEntries([...aliases].map(([sid, alias]) => [normalizeSid(sid), alias.name])),
       // **群成员档案**（2026-10-04）：自动注册/人改过的人都在这儿，按群分组给界面用。
       // 与 contacts 分开：那份是"会话"的名字（键是 sid），这份是"群里的人"（键是 openid），
       // 群成员根本不是会话——他没私聊过她，也就没有 sid 可言。
@@ -9817,9 +10101,8 @@ interface McpProbeOutcome {
  * 事件日志是唯一真相源，宁可这条测试在日志里不留痕（结果直接回给点按钮的人）。
  */
 class McpProbeHost implements McpConnectionHost {
-  // 版本报 `AGENT_VERSION` 那一个真源（`src/version.ts`）：探测回执里报的版本必须与宿主
-  // 自报的一致，否则对端日志里会出现两个"同一个 IRMIA 的不同版本"。
-  readonly clientInfo = { name: 'irmia-agent', version: AGENT_VERSION };
+  // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.14' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;
@@ -10026,4 +10309,10 @@ export async function startWebServer(deps: WebServerDeps): Promise<WebServer> {
   const server = createWebServer(deps);
   await server.listen();
   return server;
+}
+
+/** 回放：新收据读当时的上限；老日志没有就交回出厂默认（300k）。 */
+function reasoningEchoPolicyForReplay(stepStart: {data: {reasoningEchoMaxChars?: number}}): Partial<ReasoningEchoPolicy> | null {
+  const value = stepStart.data.reasoningEchoMaxChars;
+  return typeof value === 'number' && Number.isFinite(value) ? {maxTotalChars: value} : null;
 }

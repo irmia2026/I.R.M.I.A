@@ -96,12 +96,14 @@ export type ToolZombieRecorder = (
 //
 // 钩子是**外部逻辑介入执行点**的通道，因此它的接口只有两个方向：
 //   • 进来的只有「这次调用是什么」（不含宿主内部状态）——钩子是外部进程，给它的是可序列化事实；
-//   • 出去的只有「决定与附加文本」——钩子不能改结果、不能改日志形状、不能改执行顺序。
+//   • 出去的只有「决定与附加文本」——钩子不能改日志形状、不能改执行顺序。
 //
 // 三条契约由实现方（src/hook/hooks.ts 的 HookRunner）保证，执行器只按接口调用：
 //   1. **绝不抛**：钩子超时/崩溃/输出非法一律折算成"无决定"，主流程继续（§4.19 第 2 条）。
 //   2. **PreToolUse 早于两阶段落库**：拒绝的调用连 `tool/call` 都不写（§4.19 第 5 条 / schema §4 不变量）。
 //   3. **PostToolUse 只能补上下文**：工具已经执行，`deny` 在那里没有回滚含义，只取附加文本。
+//      P1a 的一个受控例外：**代码级插件**的 `tool.after` 可以改写结果正文（`updatedResult`），
+//      语义被钉死为"结果已经产生、还没喂回模型之前"；外部进程钩子永远填不了那一格。
 
 /** PreToolUse / PostToolUse 的入参：解析后的调用事实 */
 export interface ToolHookRequest {
@@ -113,7 +115,7 @@ export interface ToolHookRequest {
   step: number;
 }
 
-/** PostToolUse 看到的结果摘要（工具已执行，钩子改不了它） */
+/** PostToolUse 看到的结果摘要（外部进程钩子改不了它；**代码级插件**可以，见 updatedResult） */
 export interface ToolResultView {
   status: string;
   isError: boolean;
@@ -121,7 +123,13 @@ export interface ToolResultView {
   durationMs: number;
 }
 
-/** 钩子决定。`deny` 只在 PreToolUse 有意义；`updatedInput` 只在 PreToolUse 被采纳 */
+/**
+ * 钩子决定。`deny` 只在 PreToolUse 有意义；`updatedInput` 只在 PreToolUse 被采纳。
+ *
+ * `updatedResult` 是 **P1a 代码级插件**专用的一格（`tool.after` 的语义：
+ * "结果已经产生、还没喂回模型之前"）。外部进程钩子（`hooks.json`）永远不会填它——
+ * 那类钩子的契约仍然是"只能补上下文"，两者的差别由实现方（HookRunner）把控。
+ */
 export interface ToolHookDecision {
   decision: 'allow' | 'deny';
   /** 拒绝理由：原样进 `policy/denied.reason` 与回给模型的文本 */
@@ -132,6 +140,8 @@ export interface ToolHookDecision {
   updatedInput?: unknown;
   /** 附加给后续上下文（已按上限截断）；经 onHookContext 交给调用方注入 */
   additionalContext?: string;
+  /** 改写后的工具结果（只认代码级插件；见上面的注释） */
+  updatedResult?: { content?: string; isError?: boolean };
 }
 
 /**
@@ -395,7 +405,7 @@ async function runGroup(
       callSeqs[index] = callSeq;
       // 阶段二：执行（可并发）
       const result = await executeOne(effective, callSeq, ctx);
-      // 阶段三：PostToolUse 钩子：工具已落地，钩子只能补上下文，改不了结果
+      // 阶段三：PostToolUse 钩子：工具已落地，钩子只能补上下文（代码级插件可改结果正文）
       slots[index] = await applyPostToolUse(effective, result, ctx);
     })();
 
@@ -500,7 +510,10 @@ async function applyPreToolUse(
 
 /**
  * PostToolUse：工具已执行，钩子只能补上下文（§4.19 第 4 条）。
- * 结果原样返回——`deny` 在这里没有回滚含义，采纳它才是伪造事实。
+ *
+ * 一个例外（P1a，2026-10-29）：**代码级插件**的 `tool.after` 可以改写结果正文/错误标记
+ * （`decision.updatedResult`）——它的语义被钉死为"结果已经产生、还没喂回模型之前"。
+ * 外部进程钩仍然只能补上下文；`deny` 在这里没有回滚含义，采纳它才是伪造事实。
  */
 async function applyPostToolUse(
   call: ToolCallRequest,
@@ -512,6 +525,7 @@ async function applyPostToolUse(
   // 解构调用会在钩子内部炸出 TypeError，而下面那个 catch 会让它变成一次静默的"没生效"。
   if (hooks === undefined || hooks.afterToolCall === undefined) return result;
 
+  let next = result;
   try {
     const parsed = parseArguments(call.arguments);
     const decision = await hooks.afterToolCall(
@@ -532,10 +546,18 @@ async function applyPostToolUse(
     if (decision.additionalContext !== undefined && ctx.onHookContext !== undefined) {
       ctx.onHookContext(decision.additionalContext, 'PostToolUse');
     }
+    if (decision.updatedResult !== undefined) {
+      const patch = decision.updatedResult;
+      next = {
+        ...result,
+        ...(typeof patch.content === 'string' ? { content: patch.content } : {}),
+        ...(typeof patch.isError === 'boolean' ? { isError: patch.isError } : {}),
+      };
+    }
   } catch {
     // 钩子故障吞掉：结果已经产生，钩子不能反过来影响它
   }
-  return result;
+  return next;
 }
 
 /** 命中标签并入拒绝理由：`policy/denied.rule` 只能取枚举值，具体是哪条钩子要能查得到 */

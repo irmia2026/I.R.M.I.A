@@ -20,9 +20,11 @@ import { fileURLToPath } from 'node:url';
 
 import { defaultConfig } from '../src/config/config.ts';
 import { EventLog } from '../src/log/event-log.ts';
-import { emptyProjection } from '../src/log/types.ts';
+import { defaultVisibility, emptyProjection, type AppEvent } from '../src/log/types.ts';
+import { PluginManager } from '../src/plugin/manager.ts';
 import type { PluginRuntimeComposition } from '../src/plugin/runtime.ts';
-import { AGENT_VERSION } from '../src/version.ts';
+// 宿主版号的唯一真源在 `main.ts`（发布脚本的版号位点表盯着那一行字面量；本仓库不建 version.ts）
+import { AGENT_VERSION } from '../src/main.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { startWebServer, type WebServer } from '../src/web/server.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
@@ -46,6 +48,7 @@ interface Fixture {
   dataDir: string;
   skillsRoot: string;
   pluginSkillsRoot: string;
+  manager: PluginManager;
   server: WebServer;
 }
 
@@ -98,6 +101,10 @@ async function setup(t: TestContext, options: { plugin?: boolean; conflict?: boo
   );
 
   const log = await EventLog.open(join(dataDir, 'events'));
+  const manager = new PluginManager(dataDir, (type, data) => {
+    const event = { seq: log.nextSeq(), ts: NOW.toISOString(), type, data, visibility: defaultVisibility(type) } as AppEvent;
+    log.append(event, { sync: true });
+  });
   const server = await startWebServer({
     log,
     projection: emptyProjection(),
@@ -110,6 +117,7 @@ async function setup(t: TestContext, options: { plugin?: boolean; conflict?: boo
     uiToken: TOKEN,
     configPath,
     port: 0,
+    plugins: manager,
     ...(options.plugin === true ? { pluginRuntime: () => compositionOf(pluginSkillsRoot) } : {}),
   });
   t.after(async () => {
@@ -121,7 +129,7 @@ async function setup(t: TestContext, options: { plugin?: boolean; conflict?: boo
       /* Windows 上偶发的句柄占用：清理失败不改变断言结论 */
     }
   });
-  return { dir, dataDir, skillsRoot, pluginSkillsRoot, server };
+  return { dir, dataDir, skillsRoot, pluginSkillsRoot, manager, server };
 }
 
 // ──────────────────────────────── ① §9 · skillsView ────────────────────────────────
@@ -258,5 +266,40 @@ test('mcp-test：探测宿主上报的 clientInfo.version = AGENT_VERSION（评�
   const initialize = journal.find((entry) => entry.t === 'initialize');
   assert.ok(initialize !== undefined, '握手确实发出去过');
   assert.equal(initialize.clientInfo?.name, 'irmia-agent');
-  assert.equal(initialize.clientInfo?.version, AGENT_VERSION, '探测宿主自报的版本必须是 src/version.ts 那一份');
+  assert.equal(initialize.clientInfo?.version, AGENT_VERSION, '探测宿主自报的版本必须是 main.ts 的 AGENT_VERSION 那一份');
+});
+
+// ──────────────────────────────── ④ `/api/plugins` 的审阅字段 ────────────────────────────────
+
+test('/api/plugins：每项带 permissions / net / runtime / 状态与市场来源 marketId', async (t) => {
+  const fx = await setup(t);
+  const source = join(fx.dir, 'market-plugin-source');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, 'plugin.json'), JSON.stringify({
+    apiVersion: 2,
+    id: 'market-view',
+    version: '1.2.0',
+    engine: { irmia: '>=0.1.0-beta.1' },
+    runtime: { type: 'node', entry: 'main.mjs' },
+    permissions: ['net', 'tools.define'],
+    net: { allow: ['api.example.com'] },
+  }, null, 2), 'utf8');
+  writeFileSync(join(source, 'main.mjs'), 'export async function activate(ctx) { ctx.log.info("view"); }\n', 'utf8');
+  const installed = fx.manager.install(source);
+  fx.manager.recordMarketOrigin(installed.manifest.id, installed.contentHash, {
+    marketId: 'market-view', version: '1.2.0', installedAt: NOW.toISOString(),
+  });
+
+  const response = await fetch(`${fx.server.url()}/api/plugins`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  const body = JSON.parse(text) as { items: Array<Record<string, unknown>> };
+  assert.equal(body.items.length, 1);
+  const item = body.items[0]!;
+  assert.equal(item.state, 'untrusted', '没确认过就不该被当成可信');
+  assert.deepEqual(item.permissions, ['net', 'tools.define']);
+  assert.deepEqual(item.net, ['api.example.com'], 'net 必须从包内 plugin.json 的 net.allow 读出');
+  assert.equal((item.runtime as { type?: string }).type, 'node');
+  assert.equal(item.marketId, 'market-view');
+  assert.equal(item.marketVersion, '1.2.0');
 });

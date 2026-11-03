@@ -35,6 +35,18 @@ const _typeLabels = <String, String>{
   'budget/consumed': '上下文归因',
 };
 
+/// 事件类型 → 人话标签：情绪/表情包那一族走 AppStrings（中英双语 + 可覆盖）；
+/// 其余类型**保持原样**（旧事件行的既有行为不动，`budget/consumed` 的人话名只在过滤菜单里用）。
+String _typeLabel(AppStrings s, String type) => switch (type) {
+      'affect/appraised' => s.logsTypeAffectAppraised,
+      'sticker/sent' => s.logsTypeStickerSent,
+      'sticker/skipped' => s.logsTypeStickerSkipped,
+      'sticker/harvested' => s.logsTypeStickerHarvested,
+      'sticker/tagged' => s.logsTypeStickerTagged,
+      'sticker/reviewed' => s.logsTypeStickerReviewed,
+      _ => type,
+    };
+
 // ─── 取值与格式化 ───
 
 int _int(Object? value) => value is num ? value.toInt() : 0;

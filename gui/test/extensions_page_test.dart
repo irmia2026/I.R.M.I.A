@@ -183,6 +183,7 @@ void main() {
     addTearDown(tester.view.reset);
     final api = _FakeApi({
       '/api/skills': skills,
+      // 插件那一段也要给：`_keys` 里它是一项，缺了会走 null ⇒ 那一屏红（与 grants 同一个道理）
       '/api/plugins': {'items': <dynamic>[]},
       '/api/mcp': mcp,
       '/api/tools': tools,

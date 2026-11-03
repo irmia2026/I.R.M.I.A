@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-py",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "python", "entry": "main.py" },
+  "permissions": ["tools.define", "state.plugin"],
+  "meta": { "title": "演示插件（Python）", "author": "tests", "desc": "P1a e2e 夹具：Python 运行器 + irmia_plugin shim" }
+}

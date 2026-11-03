@@ -23,6 +23,7 @@ import {
   readSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -445,6 +446,15 @@ function scanShard(
 
 // ──────────────────────────────── 写：一行一次、失败即回滚 ────────────────────────────────
 
+class ShardWriteError extends Error {
+  readonly rollbackSucceeded: boolean;
+
+  constructor(message: string, cause: unknown, rollbackSucceeded: boolean) {
+    super(message, { cause });
+    this.rollbackSucceeded = rollbackSucceeded;
+  }
+}
+
 /**
  * 把**一整行**写进分片；中途失败就把这次写进去的半截截掉（回滚到 `rollbackTo` 字节）。
  *
@@ -453,20 +463,21 @@ function scanShard(
  * ——进程继续跑，下一条事件接在半个行后面，于是分片**中间**留下"半个行 + 下一整行"。
  * 那一刻的代价是隐形的：本进程的 `readRange` 从此读不到那一段；下次启动 `scanShard` 把它当
  * 坏行 ⇒ **拒绝启动**。两道防线都在这里：
- *   ① 先拼成 Buffer 再一次 write——一行只有一次写系统调用（Windows 上 512 KB 以内是单次原子写）；
- *   ② 抛错之前 ftruncate 回写前长度——不许留半个行。回滚本身失败也不吞掉原始原因，两个都报。
+ *   ① 先拼成 Buffer，按显式偏移完成部分写入，回滚后重试不依赖文件游标；
+ *   ② 写入或 fsync 失败都先 ftruncate 回写前长度并同步回滚，回滚失败也保留原始原因。
  *
  * 导出只为让失败路径**可实测**（`test/event-log.test.ts`：只读 fd ⇒ 抛错且文件长度不变）。
  */
-export function writeShardLine(fd: number, line: string, rollbackTo: number): void {
+export function writeShardLine(fd: number, line: string, rollbackTo: number, sync = false): void {
   const buf = Buffer.from(line, 'utf8');
   let written = 0;
   try {
     while (written < buf.length) {
-      const n = writeSync(fd, buf, written, buf.length - written);
+      const n = writeSync(fd, buf, written, buf.length - written, rollbackTo + written);
       if (n <= 0) throw new Error(`写入只前进 ${n} 字节（磁盘满？）`);
       written += n;
     }
+    if (sync) fsyncSync(fd);
   } catch (cause) {
     let rollbackError: unknown = null;
     try {
@@ -480,7 +491,7 @@ export function writeShardLine(fd: number, line: string, rollbackTo: number): vo
       ? `已回滚到写前长度 ${rollbackTo}，半个行没留下`
       : `回滚也失败（${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}）：`
         + '分片里可能留下半个行，下次启动会自愈并写 log/repaired';
-    throw new Error(`分片写入失败（${detail}）：${reason}`, { cause });
+    throw new ShardWriteError(`分片写入失败（${detail}）：${reason}`, cause, rollbackError === null);
   }
 }
 
@@ -502,6 +513,7 @@ export class EventLog {
   private shard: Shard | null = null;
   private fd = -1;
   private closed = false;
+  private writeFailure: Error | null = null;
   private allocatedSeq: number;
   private lastAppendedSeq: number;
   private buffer: LogLine[] = [];
@@ -604,13 +616,13 @@ export class EventLog {
    * 分配后若该事件最终没写成（进程崩溃），就留下一个空洞——这是允许的（schema §12 不变量 1）。
    */
   nextSeq(): number {
-    this.assertOpen();
+    this.assertWritable();
     this.allocatedSeq += 1;
     return this.allocatedSeq;
   }
 
   append(event: AppEvent, options: AppendOptions): void {
-    this.assertOpen();
+    this.assertWritable();
     const seq = event.seq;
     if (!Number.isInteger(seq) || seq < 1) {
       throw new Error(`事件 seq 必须是 >= 1 的整数，收到 ${seq}`);
@@ -634,14 +646,49 @@ export class EventLog {
     } else {
       this.buffer.push(entry);
       this.bufferBytes += Buffer.byteLength(entry.line);
+      // 自动刷新失败时条目仍在缓冲中，seq 也必须保持已占用，不能重复接收同一条。
+      this.lastAppendedSeq = seq;
       if (this.bufferBytes >= BUFFER_FLUSH_BYTES) this.flushBuffer();
     }
     this.lastAppendedSeq = seq;
+    this.notifyAppend(event);
   }
+
+  /**
+   * 订阅"每一条刚落库的事件"（2026-10-29，插件平台的观察点）。
+   *
+   * 为什么挂在 EventLog 上而不是某个写入点：turn/start 与 tool/call 是 `AgentLoop` 自己
+   * 直接写日志的（不过 main 的 `append`），而插件钩子要的是**所有** turn/tool 事件，
+   * 包括子代理那一支。EventLog.append 是全部事件的唯一漏斗。
+   *
+   * 三条纪律：
+   *   · 回调**同步、fire-and-forget**：插件钩子可能要做 I/O，绝不能拖慢落库；
+   *   · 回调抛错**吞掉**：观测通道坏了不能反过来让日志写不进去；
+   *   · 只有显式订阅才触发（默认零开销）。
+   */
+  onAppend(listener: (event: AppEvent) => void): () => void {
+    this.appendListeners.push(listener);
+    return () => {
+      const index = this.appendListeners.indexOf(listener);
+      if (index >= 0) this.appendListeners.splice(index, 1);
+    };
+  }
+
+  private notifyAppend(event: AppEvent): void {
+    for (const listener of this.appendListeners) {
+      try {
+        listener(event);
+      } catch {
+        // 观测通道的自保：见 onAppend 的注释
+      }
+    }
+  }
+
+  private readonly appendListeners: Array<(event: AppEvent) => void> = [];
 
   /** 把内存缓冲统一落盘（观测类事件的 step 边界调用） */
   flush(): void {
-    this.assertOpen();
+    this.assertWritable();
     this.flushBuffer();
   }
 
@@ -701,27 +748,39 @@ export class EventLog {
   /** 落盘缓冲、关闭所有 fd。关闭后任何写操作抛错 */
   close(): void {
     if (this.closed) return;
-    this.flushBuffer();
-    if (this.fd >= 0) {
-      closeSync(this.fd);
-      this.fd = -1;
+    try {
+      if (this.writeFailure !== null) throw this.writeFailure;
+      this.flushBuffer();
+    } finally {
+      if (this.fd >= 0) {
+        closeSync(this.fd);
+        this.fd = -1;
+      }
+      for (const fd of this.readFds.values()) closeSync(fd);
+      this.readFds.clear();
+      this.closed = true;
     }
-    for (const fd of this.readFds.values()) closeSync(fd);
-    this.readFds.clear();
-    this.closed = true;
   }
 
   // ──────────────────────────────── 写路径 ────────────────────────────────
 
   /** 取得（必要时创建）活动分片。末尾若是崩溃留下的空分片则复用它 */
   private ensureActiveShard(nextSeq: number): Shard {
-    if (this.fd >= 0 && this.shard !== null) return this.shard;
+    if (this.fd >= 0 && this.shard !== null && (this.shard.lines > 0 || this.shard.startSeq === nextSeq)) return this.shard;
     const last = this.shards[this.shards.length - 1];
     if (last !== undefined && last.lines === 0 && last.startSeq === nextSeq) {
-      const fd = openSync(last.path, 'a');
+      const fd = openSync(last.path, 'r+');
       this.shard = last;
       this.fd = fd;
       return last;
+    }
+    if (last !== undefined && last.lines === 0) {
+      // 首条回滚后调用方可以跳过失败 seq；空片不能保留旧文件名再写入新的首条 seq。
+      if (this.fd >= 0) closeSync(this.fd);
+      this.fd = -1;
+      this.shard = null;
+      unlinkSync(last.path);
+      this.shards.pop();
     }
     const created = this.makeShard(nextSeq);
     const fd = this.openNewShard(created);
@@ -739,6 +798,7 @@ export class EventLog {
    * `shard.bytes`"记的，所以写失败时要把它一起撤掉，否则 `get()` 会从一个空位置开始扫。
    */
   private writeEntry(entry: LogLine, sync: boolean): void {
+    this.assertWritable();
     const bytes = Buffer.byteLength(entry.line);
     let shard = this.ensureActiveShard(entry.seq);
     // 空分片永不轮转，否则单条超限时会死循环；单条超大事件独占一个分片
@@ -751,12 +811,14 @@ export class EventLog {
     }
     try {
       // `shard.bytes` 恒等于活动分片文件的字节数（本类只有一个写者），所以它就是回滚点
-      writeShardLine(this.fd, entry.line, shard.bytes);
+      writeShardLine(this.fd, entry.line, shard.bytes, sync);
     } catch (cause) {
       if (checkpointed) shard.checkpoints.pop();
+      if (!(cause instanceof ShardWriteError) || !cause.rollbackSucceeded) {
+        this.writeFailure = new Error('事件日志写入状态不确定，已停止写入；请关闭并重新打开日志后恢复', { cause });
+      }
       throw cause;
     }
-    if (sync) fsyncSync(this.fd);
     shard.bytes += bytes;
     shard.lines += 1;
   }
@@ -775,9 +837,18 @@ export class EventLog {
   private flushBuffer(): void {
     if (this.buffer.length === 0) return;
     const pending = this.buffer;
-    this.buffer = [];
-    this.bufferBytes = 0;
-    for (const entry of pending) this.writeEntry(entry, false);
+    let written = 0;
+    let writtenBytes = 0;
+    try {
+      for (const entry of pending) {
+        this.writeEntry(entry, false);
+        written++;
+        writtenBytes += Buffer.byteLength(entry.line);
+      }
+    } finally {
+      this.buffer = pending.slice(written);
+      this.bufferBytes -= writtenBytes;
+    }
   }
 
   private makeShard(startSeq: number): Shard {
@@ -788,7 +859,8 @@ export class EventLog {
   /** 用 O_EXCL 创建：分片文件名必须唯一，撞名说明分片被外部改写 */
   private openNewShard(shard: Shard): number {
     try {
-      return openSync(shard.path, 'ax');
+      // Windows 的 append 句柄不能可靠 ftruncate；定位写入使失败回滚可用。
+      return openSync(shard.path, 'wx+');
     } catch (cause) {
       throw new Error(`无法创建分片 ${shard.file}：文件已存在或不可写`, { cause });
     }
@@ -915,6 +987,11 @@ export class EventLog {
 
   private assertOpen(): void {
     if (this.closed) throw new Error('事件日志已关闭');
+  }
+
+  private assertWritable(): void {
+    this.assertOpen();
+    if (this.writeFailure !== null) throw this.writeFailure;
   }
 }
 

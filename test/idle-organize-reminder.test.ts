@@ -375,8 +375,10 @@ test('隔离 · 本次没有动 `render.ts` 那条 6 拍判据（它仍由 maint
   // 动的是 `tools` 段（描述字节）与工具回执文本，与 6 拍判据同样无关，换代照旧递增。
   // v80（2026-10-23，**`read_channel` 翻页一页的条数 50 → 15**）：动的是 `tools` 段里那两个参数描述
   // （`before` / `limit` 里逐字的页大小），与 6 拍判据同样无关，换代照旧递增。
-  assert.equal(render.RENDER_VERSION, '80',
-    '当前这一代是 v80（read_channel 翻页一页的条数 50→15 那一批递的）；本批（A/B/C 三件）落地时是 71，没递');
+  // v81（2026-10-31，Affect v4：情绪行进此刻层末尾，开启时才加静态规则）递到 **81**。
+  // v82 扩展 speak 的贴纸参数与静态规则，工具 schema 和 instructions 同批换代。
+  assert.equal(render.RENDER_VERSION, '85',
+    '当前这一代是 v83（情绪行为表 + 亲密层）；本批（A/B/C 三件）落地时是 71，没递');
   assert.equal(SELF_ORGANIZE_REMINDER_TICKS, 2, '第一道：第 2 拍');
   assert.equal(SELF_ORGANIZE_SECOND_TICKS, 5, '第二道：累计第 5 拍');
   assert.equal(SELF_ORGANIZE_MAX_REMINDERS, 2, '一段安静期最多两次');

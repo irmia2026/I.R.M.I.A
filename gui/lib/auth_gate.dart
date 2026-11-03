@@ -408,8 +408,7 @@ class _SetupFormState extends State<_SetupForm> {
       progress: blocked
           ? s.gateBackendProgress(widget.state.backendWaitSeconds, widget.state.backendRetryCount)
           : null,
-      notice: '忘记密码？删掉 data/.auth.json 后重启主进程，再设一次。'
-          '密码只保存在本机，它挡的是「本机上别的程序」与「本地网页顺手打你的端口」，不是拿到你磁盘的人。',
+        notice: '忘记密码：删掉 data/.auth.json 后重启主进程，重设一次。',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -489,8 +488,7 @@ class _LoginFormState extends State<_LoginForm> {
       progress: blocked
           ? s.gateBackendProgress(widget.state.backendWaitSeconds, widget.state.backendRetryCount)
           : null,
-      notice: '忘记密码？删掉 data/.auth.json 后重启主进程，再设一次密码。'
-          '连续输错会退避（等几秒），但不会把谁永久锁在门外。',
+        notice: '忘记密码：删掉 data/.auth.json 后重启主进程，重设一次。',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -523,3 +521,4 @@ class _LoginFormState extends State<_LoginForm> {
     super.dispose();
   }
 }
+

@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-ts",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.ts" },
+  "permissions": ["tools.define"],
+  "meta": { "title": "演示插件（TS）", "author": "tests", "desc": "P1a e2e 夹具：.ts 入口直接跑（--experimental-strip-types）" }
+}

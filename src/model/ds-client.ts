@@ -86,7 +86,7 @@ export const MAX_STREAM_HARD_CAP_MS = 86_400_000;
 export const MIN_NONSTREAM_TIMEOUT_MS = 1_000;
 export const MAX_NONSTREAM_TIMEOUT_MS = 3_600_000;
 /** 连续失败上限，与 §4.6 失败刹车的默认阈值 5 同源 */
-export const DEFAULT_MAX_ATTEMPTS = 5;
+export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_BASE_DELAY_MS = 500;
 export const DEFAULT_MAX_DELAY_MS = 30_000;
 /**

@@ -34,7 +34,7 @@ import 'package:irmia_gui/ui_state.dart';
 ///   ⑥ 彻底登出（安全出口）：作废 → 停实例 → 清 token，三件都发生（顺序断言）、日志 `token=cleared`；
 ///   ⑦ 「忘记凭据」：只清本机 token——实例照跑、登记表一个字节都没动、不停实例；
 ///   ⑧ 切实例：baseUrl 与内存里的 token 都换成新的（旧 token 一次都不许再出现）；
-///   ⑨ 新建实例：目录非空要提示、端口从 7788 起找到 7789、就绪后进**首次设密码**；
+///   ⑨ 新建实例：目录非空要提示、端口从 7789 起找、就绪后进**首次设密码**；
 ///   ⑩ 删除：运行中 / 默认实例的删除按钮**不可用**（反向断言）；
 ///   ⑪ 改名：原名旁的小铅笔 → 对话框 → 写 `nameSource: "manual"`（后端此后永不覆盖）。
 ///
@@ -71,7 +71,8 @@ void main() {
       <String, dynamic>{
         'id': id,
         'name': name,
-        'dataDir': dataDir ?? '${tmp.path}\\data-$port',
+        // 2026-10-28：数据目录必须真的存在 —— 界面会把"目录已经没了"的条目当幽灵条目滤掉
+      'dataDir': dataDir ?? _ensureDir(tmp.path, 'data-$port'),
         'host': '127.0.0.1',
         'port': port,
         'pid': int.tryParse(pid) ?? 0,
@@ -513,7 +514,7 @@ void main() {
       if (state.gate == AuthGateKind.setup) break;
     }
 
-    expect(host.freePortFrom, <int>[7788], reason: '端口从 7788 起向上找');
+    expect(host.freePortFrom, <int>[7789], reason: '新建实例的端口从 7789 起向上找（7788 归默认实例）');
     expect(host.launched.single.port, 7789, reason: '选中的是第一个空闲端口 7789');
     expect(host.launched.single.dataDir, occupied.path, reason: '数据目录 = 人当场确认的那一个');
     expect(host.launched.single.nodeExe, 'D:\\agent\\tools\\node\\node.exe', reason: 'node 来自登记表');
@@ -674,7 +675,7 @@ Map<String, dynamic> _probeJson(String id, String name, int port,
     <String, dynamic>{
       'id': id,
       'name': name,
-      'dataDir': dataDir ?? 'D:\\agent\\data-$port',
+      'dataDir': dataDir ?? _ensureDir(Directory.systemTemp.path, 'irmia-probe-$port'),
       'port': port,
       'pid': 4321,
       'isDefault': isDefault,
@@ -838,4 +839,9 @@ class _FakeApi extends IrmiaApi {
     }
     return <String, dynamic>{'ok': true};
   }
+}
+/// 造一个**真的存在**的数据目录（用例里的实例条目要指向它，否则会被界面当幽灵条目滤掉）
+String _ensureDir(String parent, String leaf) {
+  final dir = Directory('$parent\\$leaf')..createSync(recursive: true);
+  return dir.path;
 }

@@ -36,6 +36,8 @@ import type { AgentLoopPersona } from '../runtime/agent-loop.js';
 import type { TaskBudgetGuard, TaskToolDeps } from '../runtime/subagent.js';
 import { createTaskTool, TASK_TOOL_NAME } from '../runtime/subagent.ts';
 import { createAdminTools } from './admin.ts';
+import type { StickerRuntime } from '../stickers/runtime.ts';
+import { withStickerSpeak } from '../stickers/speak.ts';
 import { createNetTools } from './net.ts';
 import { ANYSEARCH_SKILL_DIR, createWebSearchTool } from './web-search.ts';
 import { createPwshTool, LANG_INTERPRETERS, type LangDepProbeOutcome } from './pwsh.ts';
@@ -310,6 +312,8 @@ export interface ToolCatalogOptions {
   mentionMessage?: () => { sid: string; messageId: string } | null;
   /** 媒体投递口（`send_media` 用）：宿主注入 */
   mediaPoster?: MediaPoster;
+  /** 贴纸选择与发送运行期；省略时 speak 保持不带贴纸的既有行为 */
+  stickerRuntime?: StickerRuntime;
   /** 发言人（openid）→ 名字：read_channel 每行那个"谁"（不是会话名） */
   resolvePersonName?: (person: string) => string | null;
   /**
@@ -446,6 +450,9 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     // 用的是同一个配置值，两处各写一个数必然漂移
     ...(options.askHumanTimeoutMs === undefined ? {} : { askTimeoutMs: options.askHumanTimeoutMs }),
   });
+  const adminTools = adminKit.tools.map((tool) => tool.name === 'speak' && options.stickerRuntime !== undefined
+    ? withStickerSpeak(tool, options.stickerRuntime, options.currentWakeChannel ?? (() => null))
+    : tool);
 
   return [
     ...await buildFsTools({
@@ -592,7 +599,7 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     //   那条路**一条用例都不用改**——这正是"死代码保留"的可执行定义。
     //   `human/asked` 事件、审批卡、申请单（`mcp-grant`）那条链路与它**共用同一套事件**，
     //   一个字不动（那半边是活的）。
-    ...adminKit.tools.filter((tool) => tool.name !== 'ask_human'),
+    ...adminTools.filter((tool) => tool.name !== 'ask_human'),
     ...buildShellTools(options),
   ];
 }

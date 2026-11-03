@@ -75,7 +75,7 @@ void main() {
       expect(find.text('聊天'), findsOneWidget, reason: '默认中文：页头标题');
       expect(find.text('会话、消息来源与人工唤醒'), findsOneWidget);
       expect(
-        find.text('输入消息…（/reset 清空上下文、/dream 叫她整理记忆）'),
+        find.text('输入消息…'),
         findsOneWidget,
         reason: '输入框提示',
       );
@@ -87,7 +87,7 @@ void main() {
       expect(find.text('聊天'), findsNothing, reason: '旧的那句不许留在屏幕上');
       expect(find.text('Conversations, message sources, manual wake-up'), findsOneWidget);
       expect(
-        find.text('Type a message… (/reset clears context, /dream asks her to tidy up memory)'),
+        find.text('Type a message…'),
         findsOneWidget,
       );
     });

@@ -906,9 +906,8 @@ void main() {
         reason: '发送键与输入框同高对齐（垂直居中）');
     expect(sendRect.left, greaterThan(fieldRect.right), reason: '发送键在输入框右边');
 
-    // 占位文案不变
-    expect(find.text('输入消息…（/reset 清空上下文、/dream 叫她整理记忆）'), findsOneWidget,
-        reason: '占位文案这一轮不动');
+    // 占位文案只留一句「输入消息…」：/reset、/dream 仍可用，但提示不再占输入框
+    expect(find.text('输入消息…'), findsOneWidget, reason: '占位文案应为精简后的一句');
 
     // 聚焦：描边换主色（宽度走 Shape.focusWidth）
     await tester.tap(field);

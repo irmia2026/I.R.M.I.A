@@ -330,6 +330,152 @@ class IrmiaTheme {
   }
 }
 
+/// 情绪页（2026-10-31 设计稿）的取色、圆角、阴影与球体渐变。
+///
+/// 这里只放**数值**：版式在 `pages/mood_page.dart`，主题装配仍在 [IrmiaTheme]。
+/// 亮色模直接照设计稿取色（浅蓝灰卡片、19px 圆角、极细边框、柔和阴影）；
+/// 暗色模在页面侧按 `ColorScheme` 换一组可读的底与字，形状与色相语言不变。
+abstract final class MoodPalette {
+  /// 页面底色（设计稿 `--shell`）
+  static const Color shell = Color(0xFFF8FBFD);
+
+  /// 卡片底（设计稿 `--card`）
+  static const Color card = Color(0xFFFFFFFF);
+
+  /// 主文字（设计稿 `--ink`）
+  static const Color ink = Color(0xFF25394E);
+
+  /// 大标题那种更深的蓝（设计稿 `.hero h2`）
+  static const Color heading = Color(0xFF29465F);
+
+  /// 区块标题（设计稿 `.section-title`）
+  static const Color title = Color(0xFF38546D);
+
+  /// 次要文字（设计稿 `--muted`）
+  static const Color muted = Color(0xFF8191A3);
+
+  /// 更弱的一档（设计稿 `--muted-2`）
+  static const Color mutedSoft = Color(0xFFA0AEBB);
+
+  /// 发丝边框（设计稿 `--edge`）
+  static const Color edge = Color(0xFFE5EDF3);
+
+  /// 主色（设计稿 `--primary`）
+  static const Color primary = Color(0xFF658CBA);
+
+  /// 浅蓝软底（图标徽章、强调片）
+  static const Color primarySoft = Color(0xFFEAF3FB);
+
+  /// 轨道底色（设计稿 `.track`）
+  static const Color track = Color(0xFFF0F4F7);
+
+  /// stat pill / 浅底的描边
+  static const Color chipBorder = Color(0xFFEDF2F6);
+
+  /// stat pill 的底（设计稿 `.stat-pill` 的 `#f8fbfd`）
+  static const Color chipBg = Color(0xFFF8FBFD);
+
+  /// 影响条目悬停底（设计稿 `.factor:hover`）
+  static const Color hover = Color(0xFFF5F9FC);
+
+  /// 右侧详情浮层底（设计稿 `.sheet` 的 `#fdfefe`）
+  static const Color sheetBg = Color(0xFFFDFEFE);
+
+  /// 卡片圆角 19
+  static const double radius = 19;
+
+  /// 卡片阴影：0 15px 45px rgba(72,100,132,.06)
+  static const List<BoxShadow> cardShadow = <BoxShadow>[
+    BoxShadow(color: Color(0x0F486484), blurRadius: 45, offset: Offset(0, 15)),
+  ];
+
+  // 六维情绪色（设计稿每行 `--emotion-color`）
+  static const Color concern = Color(0xFF83A9CE);
+  static const Color warmth = Color(0xFFB4A5C3);
+  static const Color shyness = Color(0xFF8FBCB3);
+  static const Color joy = Color(0xFFD7B487);
+  static const Color distress = Color(0xFFAAB1C0);
+  static const Color irritation = Color(0xFFC5A6AA);
+
+  /// 六维在界面里的固定顺序（老后端 / 空态兜底用）：关切 / 温暖 / 害羞 / 喜悦 / 低落 / 烦躁。
+  /// 有读数时行序以 `GET /api/affect` 的 `emotions` 键序为准（后端换维度不必改前端）。
+  static const List<String> emotionOrder = <String>[
+    'concern',
+    'warmth',
+    'shyness',
+    'joy',
+    'distress',
+    'irritation',
+  ];
+
+  /// 某个维度的颜色；未知维度回主色（不崩、不静默画成透明）
+  static Color emotionColor(String key) => switch (key) {
+        'concern' => concern,
+        'warmth' => warmth,
+        'shyness' => shyness,
+        'joy' => joy,
+        'distress' => distress,
+        'irritation' => irritation,
+        _ => primary,
+      };
+
+  // 折线图（设计稿 #linePath / .chart-grid / #areaGradient）
+  static const Color chartLine = Color(0xFF83ACCC);
+  static const Color chartGrid = Color(0xFFEAF0F5);
+  static const Color chartAreaTop = Color(0x85C2DBED);
+  static const Color chartAreaBottom = Color(0x0FE9F4FB);
+  static const Color chartDeltaUp = Color(0xFF7FA8A2);
+  static const Color chartDeltaUpBg = Color(0xFFEEF8F5);
+  static const Color chartDeltaDown = Color(0xFFB597A2);
+  static const Color chartDeltaDownBg = Color(0xFFF9F1F4);
+
+  /// 详情浮层的遮罩（设计稿 rgba(27,50,78,.22)）
+  static const Color sheetMask = Color(0x381B324E);
+
+  // 影响条目的六种色相（设计稿 `colors` 表）
+  static const Color toneBlueBg = Color(0xFFEDF4FC);
+  static const Color toneBlue = Color(0xFF789EC3);
+  static const Color toneGoldBg = Color(0xFFFBF6ED);
+  static const Color toneGold = Color(0xFFC7A16F);
+  static const Color tonePurpleBg = Color(0xFFF5F1F8);
+  static const Color tonePurple = Color(0xFFA394BB);
+  static const Color toneGreenBg = Color(0xFFEEF8F5);
+  static const Color toneGreen = Color(0xFF8CACAA);
+  static const Color toneRoseBg = Color(0xFFFBF1F2);
+  static const Color toneRose = Color(0xFFBF959E);
+  static const Color toneGrayBg = Color(0xFFF1F3F7);
+  static const Color toneGray = Color(0xFF9DAAB8);
+
+  // 情绪球：按主导情绪换一组径向渐变（设计稿四套 `radial-gradient`）
+  static const List<Color> orbSteady = <Color>[
+    Color(0xFFFBFFFF), Color(0xFFE8F5FF), Color(0xFFB7D9F3), Color(0xFF83B3DB), Color(0xFF5B89B4),
+  ];
+  static const List<Color> orbJoy = <Color>[
+    Color(0xFFFFFEFC), Color(0xFFFBF3E5), Color(0xFFECDBC4), Color(0xFFCCBCDA), Color(0xFF97AECF),
+  ];
+  static const List<Color> orbConcern = <Color>[
+    Color(0xFFF8FFFE), Color(0xFFD4EDE9), Color(0xFFAACDCC), Color(0xFF78A6B7), Color(0xFF617D9E),
+  ];
+  static const List<Color> orbIrritation = <Color>[
+    Color(0xFFFFFAFB), Color(0xFFF0DCE9), Color(0xFFC6BED9), Color(0xFF91A0C4), Color(0xFF677DA8),
+  ];
+  static const List<double> orbSteadyStops = <double>[0, .17, .45, .68, 1];
+  static const List<double> orbJoyStops = <double>[0, .16, .42, .72, 1];
+  static const List<double> orbConcernStops = <double>[0, .20, .48, .71, 1];
+  static const List<double> orbIrritationStops = <double>[0, .21, .45, .69, 1];
+
+  /// 按主导情绪挑球体渐变：平稳蓝 / 喜悦金 / 关切青 / 烦躁玫紫。
+  ///
+  /// 关切这一档也覆盖害羞——两者在色相上最接近（青绿），共用一套不会多出第五种球；
+  /// 温暖与低落不在四套演示色里，回平稳蓝。
+  static (List<Color>, List<double>) orbGradient(String? dominant) => switch (dominant) {
+        'joy' => (orbJoy, orbJoyStops),
+        'concern' || 'shyness' => (orbConcern, orbConcernStops),
+        'irritation' => (orbIrritation, orbIrritationStops),
+        _ => (orbSteady, orbSteadyStops),
+      };
+}
+
 /// **暗主题那两处的形态**——用户 2026-10-05 的原话（两句，第二句把范围又收了一格）：
 ///
 ///   > 「暗主题时。发送按钮和气泡改成白色描边不就行了。改其他的干嘛？」

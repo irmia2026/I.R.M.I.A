@@ -35,6 +35,8 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { evaluateCandidate, type AffectLightClient } from '../src/affect/evaluator.ts';
+import { evaluateIntimacy } from '../src/intimacy/evaluator.ts';
 import { InjectionJudge } from '../src/channel/injection-judge.ts';
 import { TopicSummarizer } from '../src/channel/topic.ts';
 import { loadConfig } from '../src/config/config.ts';
@@ -42,12 +44,16 @@ import { EventLog } from '../src/log/event-log.ts';
 import { emptyProjection, type AppEvent, type Projection } from '../src/log/types.ts';
 import type { DsClient, DsRequest, DsResponse, DsStreamResult } from '../src/model/ds-client.ts';
 import { DsClientError } from '../src/model/ds-client.ts';
+import { completePluginModel } from '../src/plugin/model-call.ts';
 import { maintainMemory } from '../src/persona/memory-maintain.ts';
 import { runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
+import { StickerStore } from '../src/stickers/store.ts';
+import { StickerTagger } from '../src/stickers/tagger.ts';
 import { createVisionTools } from '../src/tools/vision.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
+import { pngBytes, stickerModelResponse } from './helpers/sticker-fixtures.ts';
 
 // ──────────────────────────────── 脚手架 ────────────────────────────────
 
@@ -443,12 +449,85 @@ async function driveHeavyFallback(t: TestContext): Promise<DsRequest[]> {
 }
 
 /**
+ * 插件的 `ctx.model.complete`（P1a）：一次 light、一次 heavy。
+ *
+ * 档位不是插件给的——它在 `src/plugin/model-call.ts` 的 `PLUGIN_MODEL_EFFORTS` 里定死
+ * （light → low / heavy → high）。这一条就是钉"插件触发的那一发也有人在表里管档"。
+ */
+async function drivePluginModel(_t: TestContext): Promise<DsRequest[]> {
+  const requests: DsRequest[] = [];
+  const client = {
+    generate: async (request: DsRequest): Promise<DsResponse> => {
+      requests.push(request);
+      return {
+        status: 'completed',
+        outputItems: [{ type: 'message', id: 'm-plugin', text: 'ok' }],
+        usage: { inputTokens: 3, outputTokens: 1, cachedTokens: 0, reasoningTokens: 0 },
+        incompleteReason: null,
+        model: 'fake',
+        responseId: null,
+        durationMs: 1,
+      } as unknown as DsResponse;
+    },
+  } as unknown as DsClient;
+  await completePluginModel(client, { tier: 'light', messages: [{ role: 'user', content: 'hi' }] });
+  await completePluginModel(client, { tier: 'heavy', messages: [{ role: 'user', content: 'hi' }] });
+  return requests;
+}
+
+/**
  * 调用点清单：**每一处模型调用一行**，写清它在源码哪里、应当发什么档。
  *
  * `efforts` 是"这一次驱动会发出几条请求、每条各应是什么档"——请求条数变了说明调用点
  * 的行为变了，这张表就得跟着改（这条断言是刻意的，不是脆）。
  * 新加一处模型调用 ⇒ 先过下面那条源码扫描（会红），再来这里加一行。
  */
+async function driveAffectEvaluator(_t: TestContext): Promise<DsRequest[]> {
+  const requests: DsRequest[] = [];
+  const client = {
+    generate: async (request: DsRequest) => {
+      requests.push(request);
+      return {
+        outputItems: [{ type: 'message', text: '{"r":1,"s":0,"u":0,"g":0,"b":0,"n":0,"z":0,"c":0,"q":1}' }],
+      };
+    },
+  } as unknown as AffectLightClient;
+  await evaluateCandidate({
+    candidate: { sourceSeq: 1, kind: 'direct_message', text: '今天遇到了一个困难', sourceWeight: 1, actor: 'owner' },
+    nowMs: NOW.getTime(), client,
+  });
+  return requests;
+}
+
+async function driveIntimacyEvaluator(_t: TestContext): Promise<DsRequest[]> {
+  const requests: DsRequest[] = [];
+  const client = {
+    generate: async (request: DsRequest) => {
+      requests.push(request);
+      return {outputItems: [{type: 'message', text: '{"intent":"neutral","strength":0.1}'}]};
+    },
+  } as unknown as Parameters<typeof evaluateIntimacy>[0]['client'];
+  await evaluateIntimacy({text: '今天有点累', client});
+  return requests;
+}
+
+async function driveStickerTagger(_t: TestContext): Promise<DsRequest[]> {
+  const store = new StickerStore(tmpRoot('irmia-sticker-effort-'), () => NOW);
+  store.init();
+  const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'collected' });
+  const requests: DsRequest[] = [];
+  const client = {
+    generate: async (request: DsRequest) => {
+      requests.push(request);
+      return stickerModelResponse('{"tags":["开心"],"intensity":"obvious","confidence":0.9,"note":"微笑"}');
+    },
+  };
+  await new StickerTagger({ client, store, model: 'vision-test' }).tag({
+    stickerId: imported.entry.id, bytes: pngBytes(), mime: 'image/png',
+  });
+  return requests;
+}
+
 interface ModelCallSite {
   /** 源码落点（与扫描结果对得上） */
   source: string;
@@ -459,6 +538,24 @@ interface ModelCallSite {
 }
 
 const MODEL_CALL_SITES: ModelCallSite[] = [
+  {
+    source: 'src/stickers/tagger.ts',
+    where: 'stickers/tagger.ts（贴纸视觉打标，light）',
+    drive: driveStickerTagger,
+    efforts: ['low'],
+  },
+  {
+    source: 'src/affect/evaluator.ts',
+    where: 'affect/evaluator.ts（情绪评价器，light）',
+    drive: driveAffectEvaluator,
+    efforts: ['low'],
+  },
+  {
+    source: 'src/intimacy/evaluator.ts',
+    where: 'intimacy/evaluator.ts（亲密意图判别，light）',
+    drive: driveIntimacyEvaluator,
+    efforts: ['low'],
+  },
   {
     source: 'src/channel/injection-judge.ts',
     where: 'channel/injection-judge.ts（注入判定，light）',
@@ -494,6 +591,12 @@ const MODEL_CALL_SITES: ModelCallSite[] = [
     where: 'runtime/agent-loop.ts（v73 的 400 自救那一处，heavy）',
     drive: driveHeavyFallback,
     efforts: ['high', 'high'],
+  },
+  {
+    source: 'src/plugin/model-call.ts',
+    where: 'plugin/model-call.ts（插件 ctx.model.complete：light→low、heavy→high）',
+    drive: drivePluginModel,
+    efforts: ['low', 'high'],
   },
 ];
 
@@ -550,17 +653,22 @@ function scanModelCallSites(): Array<[string, number]> {
 }
 
 test('② 清单是全的：源码里每一处模型调用都有人在表里认领', () => {
-  // 文件 → 该文件里模型调用出现几次。`main.ts` 那一处是 **vision 的适配器**：它把
-  // `VisionGenerateRequest` 原样转给 DsClient，档位不是在它那里定的（在 tools/vision.ts），
-  // 但它确实是一句调用——扫到就得有人在表里认领，不能让它悄悄多出来。
+  // 文件 → 该文件里模型调用出现几次。`main.ts` 两处都是 light 适配器：分别转给
+  // tools/vision 与 stickers/tagger；档位由这两处定义，适配器只转交请求，不另开模型通道。
   const expected: Array<[string, number]> = [
+    ['src/affect/evaluator.ts', 1],
     ['src/channel/injection-judge.ts', 1],
     ['src/channel/topic.ts', 1],
-    ['src/main.ts', 1],
+    ['src/intimacy/evaluator.ts', 1],
+    ['src/main.ts', 2],
     ['src/persona/memory-maintain.ts', 1],
+    // P1a：插件触发的模型调用（`ctx.model.complete`）。档位在 `PLUGIN_MODEL_EFFORTS` 定死，
+    // 表里另有一行（light→low、heavy→high）来钉它，所以它不是"新冒出来没人管"的一处。
+    ['src/plugin/model-call.ts', 1],
     // 2 = 主循环那一处 + v73 的 400 自救那一处（同一个文件、两处 `.stream(`）；
     // 两处都在下面 `MODEL_CALL_SITES` 里各有一行（各自断言 heavy/high）。
     ['src/runtime/agent-loop.ts', 2],
+    ['src/stickers/tagger.ts', 1],
     ['src/tools/vision.ts', 1],
   ];
 

@@ -438,8 +438,8 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     // v61：这些段**不再进 `SELF_BRIEF`**（用户新稿把它们并进了自己的 §§5/8）⇒ 旧口径的
     // "在 SELF_BRIEF 里只出现一次"改为**容器自洽 + 新结构不变**两条：容器里各一次，
     // 而装置自述本身仍是 11 节（结构锁在 `self-brief.test.ts`）。
-    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 17,
-      'v65：用户重排后按 `##` 分节共 17 节（自述 10 + 工作规范 7）');
+    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 18,
+      'v85：新增「情绪与欲望」后按 `##` 分节共 18 节（自述 11 + 工作规范 7）');
     assert.ok(memory!.endsWith(REAL_RETREAT_TEXT), 'H（退要是真的退）就是 ⑦ 段的段末');
     // **改动 J**：那句框架定性要留，且位置是"I 那两块之后、H 之前"（用户点明的落点）。
     assert.ok(memory!.includes(FRAMEWORK_DEFAULT_TEXT), 'J 那句框架定性必须在 ⑦ 段里');
@@ -474,8 +474,8 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     for (let i = 1; i < TAIL.length; i += 1) {
       assert.ok(memory!.indexOf(TAIL[i - 1]!) < memory!.indexOf(TAIL[i]!), `第 ${i} 段与第 ${i + 1} 段的先后顺序`);
     }
-    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 17,
-      'v65：用户重排后按 `##` 分节共 17 节（自述 10 + 工作规范 7）；旧"18 段"口径已随 v61 退场');
+    assert.equal(SELF_BRIEF.split('\n## ').length - 1, 18,
+      'v85：新增「情绪与欲望」后按 `##` 分节共 18 节（自述 11 + 工作规范 7）');
 
     // 用户那句话的五层意思，逐条落在文本里
     assert.ok(MAINTENANCE_RULE_TEXT.includes('只有你在维护'), '① 唯一维护源是她');
@@ -562,9 +562,10 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     // 与工具回执文本，`instructions` 一个字节没改；换代照旧递增。
     // **v80 是"`read_channel` 翻页一页的条数 50 → 15"那一批**（2026-10-23）：动的是 `tools` 段里
     // 两个参数描述（页大小逐字在里面），`instructions` 一个字节没改；换代照旧递增。
-    // ——当前这一代就是它。换代之后这个数要一起改，而**改它的理由必须是"换了一代"**——
-    // 所以断言里那句理由写成"当前这一代就是它"，免得下一个人把它读成"这句话只许属于 51"。
-    assert.equal(RENDER_VERSION, '80', '模板换代就必须递增：一次设计内的全 miss');
+    // **v81 是 Affect v4 接线**（2026-10-31）：情绪行位于此刻层末尾，只有开启时才加静态规则。
+    // 关闭态请求字节不变；开启时接受一次设计内的前缀 miss。
+    // **v82 是 speak 贴纸接线**：两个可选参数与三条静态规则同批进入工具 schema / instructions。
+    assert.equal(RENDER_VERSION, '85', '模板换代就必须递增：一次设计内的全 miss');
     const rendered = render(renderInput());
     // v61：装置自述**逐字置换**后，这一句的落点从旧的 ⑦ 段容器搬进新稿的 §6（口径不变、措辞是
     // 用户的原文）⇒ 这条按新正文重锚，**不是放宽**：它照样要求"这一口径真的进 instructions"。

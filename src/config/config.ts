@@ -88,6 +88,13 @@ export const DEFAULT_ASK_HUMAN_TIMEOUT_MIN = 30;
 export const DEFAULT_ONEBOT_WS_URL = 'ws://127.0.0.1:3001';
 /** 默认 OneBot access_token 环境变量名（与 QQ 同理：配置里只放名字） */
 export const DEFAULT_ONEBOT_ACCESS_TOKEN_ENV = 'ONEBOT_ACCESS_TOKEN';
+/**
+ * 插件市场索引的出厂地址（`plugins.marketIndexUrl` 的代码默认值）。
+ *
+ * 它是**唯一**会被市场客户端 GET 的索引地址；市场协议见 docs/plugin-platform-p1-design.md §6。
+ * 指向官网那一个静态 JSON——没有我们自己的后端，也不带任何实例标识。
+ */
+export const DEFAULT_MARKET_INDEX_URL = 'https://irmia.me/plugins/index.json';
 /** 注释键前缀：以它开头的键在加载时被递归忽略 */
 export const COMMENT_PREFIX = '$';
 /** 环境变量名形状：用来把「把密钥值误填进 apiKeyEnv」当场抓出来 */
@@ -536,6 +543,29 @@ export interface UpdateConfig {
 export type UpdateChannel = 'beta' | 'stable';
 
 /**
+ * 插件市场（2026-10-29 加，协议见 `docs/plugin-platform-p1-design.md` 六）。
+ *
+ * 两格的分工：
+ *   · `marketEnabled`：**默认开**。出厂就该能"从市场装一个插件"——它是插件平台这条链路
+ *     唯一的生态入口，关掉之后 `/api/plugins/market` 一律 501、安装命令被拒。**已装的插件
+ *     不受它影响**（启停与运行期完全不读这一格），所以关它是"不再逛市场"，不是"停用插件"。
+ *     为什么默认开而不是默认关：市场只是一个静态 `index.json` + 静态包，真正把外部代码
+ *     放进执行面的仍是**人看权限/网络 → 点确认 → 点启用**那三步（`untrusted` 起步），
+ *     市场这一格只决定"能不能取那份索引"，不构成信任。
+ *   · `marketIndexUrl`：索引的完整地址。客户端只 GET 这一个地址（同源重定向除外），
+ *     不跟随索引/包里的任意 URL 去浏览；包的地址与 sha256 **只从索引读**，请求体不许覆盖。
+ *
+ * 两格都是**启动期读一次**的配置：市场客户端在第一次访问市场端点时读它们，
+ * 之后一直用同一份；改完要重启进程才接管。
+ */
+export interface PluginsConfig {
+  /** 市场总开关：false = 取索引/安装一律 501；已装插件照旧可用（默认 true） */
+  marketEnabled: boolean;
+  /** 市场索引 index.json 的完整地址（默认官方站点那一个；改成别人才会连别人） */
+  marketIndexUrl: string;
+}
+
+/**
  * 信任范围（2026-10-04 用户拍板）：她的活动边界有多宽。
  *
  * ⚠️ **与本文件别处的 "trust" 不是一回事**，两个词在仓库里各有所指，别混：
@@ -854,6 +884,8 @@ export interface ChannelsConfig {
      * 一起看——看了也不一定说话（要不要发言由她自己定）。0 = 不攒，每条都唤醒。
      */
     groupBatchMinutes: number;
+    /** 群聊是否允许发送贴纸；缺省 false。私聊不受这一格影响。 */
+    stickers: boolean;
   };
   /**
    * OneBot 11 通道（NapCat / go-cqhttp 等协议端的正向 WebSocket）。默认关闭。
@@ -867,6 +899,8 @@ export interface ChannelsConfig {
     wsUrl: string;
     /** access_token 所在环境变量名 */
     tokenEnv: string;
+    /** 群聊是否允许发送贴纸；缺省 false。私聊不受这一格影响。 */
+    stickers: boolean;
     /**
      * **由框架拉起的协议端**（可选）。有这一段就由框架负责启动它，并且**接管 wsUrl 与 token**——
      * 两者从协议端自己的配置（`config/onebot.json`）里读，不需要人在两边各填一遍
@@ -1000,13 +1034,49 @@ export interface McpConfig {
    * **什么时候该用配置、什么时候该进默认表**：默认表只放通用启动器；专有工具走配置。
    * 判断标准是"这个名字对**别人**是不是也是同一个程序、同一个语义"——是，才可能进默认表。
    *
-   * **改这一格要重启才生效**（2026-10-18 复量改准）：热更名单里**只有** `mcp.servers`
+   * **改这一格要重启才生效**（2026-10-18 复量改准）：MCP 段里**只有** `mcp.servers` 热更
    * （`config/watcher.ts` 的 `HOT_RELOAD_FIELDS` / `HOT_RELOAD_POLICY`），前缀按整字段匹配，
    * `mcp.extraLaunchers` 不在其中——`classifyConfigField('mcp.extraLaunchers')` 返回
    * `unknown`，而"名单外 = 必须重启"。放行口参与的是**启动期的解析**，重启后按新名单生效；
    * 写坏了那份配置也过不了解析 ⇒ 按"保留旧配置继续跑"处置（见 watcher 文件头）。
    */
   extraLaunchers: string[];
+}
+
+export interface AffectConfig {
+  enabled: boolean;
+  evaluatorEnabled: boolean;
+}
+
+export type IntimacyMaxLevel = 'subtle' | 'obvious' | 'strong';
+
+/**
+ * 亲密/情欲层（独立于情绪）：**只对用户 1:1 私聊**生效，默认关闭。
+ * `privateOnly` 是硬边界，配置成 false 直接报错（不是可选项）。
+ */
+export interface IntimacyConfig {
+  enabled: boolean;
+  maxLevel: IntimacyMaxLevel;
+  spontaneousChance: number;
+  privateOnly: true;
+}
+
+export interface StickersConfig {
+  enabled: boolean;
+  passiveProbability: number;
+  minTurnsBetween: number;
+  groups: boolean;
+  rejectedRetentionDays: number;
+  harvest: {
+    enabled: boolean;
+    probability: number;
+    maxGlobalPerHour: number;
+  };
+  tagging: {
+    enabled: boolean;
+    maxPerHour: number;
+    concurrency: number;
+  };
 }
 
 /** 生效的配置全量。人可读、可 JSON 序列化、无循环引用，可直接参与指纹计算 */
@@ -1021,6 +1091,9 @@ export interface AppConfig {
   budget: BudgetConfig;
   wake: WakeConfig;
   vision: VisionConfig;
+  affect: AffectConfig;
+  intimacy: IntimacyConfig;
+  stickers: StickersConfig;
   speak: SpeakConfig;
   persona: PersonaConfig;
   tools: ToolsConfig;
@@ -1044,6 +1117,8 @@ export interface AppConfig {
   web: WebConfig;
   /** 更新检查（只 GET 一个静态 JSON；默认查官方站点的 beta 通道，可关） */
   update: UpdateConfig;
+  /** 插件市场（取索引 / 安装的唯一配置来源；默认开，关掉后市场端点一律 501） */
+  plugins: PluginsConfig;
   /** IANA 时区名（operations.md §2：budget/rollover 的"今日"按它解释） */
   timezone: string;
 }
@@ -1269,6 +1344,22 @@ function buildDefaults(dir: string): AppConfig {
     //   · rssSample：真 = 每个 server 启动后异步采一次它的 RSS（**整棵进程树**）——观测面要的"谁在吃内存"。
     //   · extraLaunchers：额外放行的启动器命令名（出厂空 = 只有默认表 + 环境变量那两格）。
     //     出厂**必须留空**：填一个具体名字等于替使用者放行一个他可能根本没有的程序。
+    affect: { enabled: false, evaluatorEnabled: false },
+    intimacy: {
+      enabled: false,
+      maxLevel: 'obvious',
+      spontaneousChance: 0.04,
+      privateOnly: true,
+    },
+    stickers: {
+      enabled: true,
+      passiveProbability: 0.12,
+      minTurnsBetween: 4,
+      groups: false,
+      rejectedRetentionDays: 7,
+      harvest: { enabled: true, probability: 0.15, maxGlobalPerHour: 50 },
+      tagging: { enabled: true, maxPerHour: 20, concurrency: 1 },
+    },
     mcp: { servers: [], maxInFlight: 8, rssSample: true, extraLaunchers: [] },
     // 默认一个路径都不指定：探测的三段顺序里"用户指定"是显式干预，
     // 默认值必须是"没干预"，否则框架自装目录与 PATH 就永远轮不到
@@ -1282,11 +1373,13 @@ function buildDefaults(dir: string): AppConfig {
         useMarkdown: true,
         clientSecretEnv: DEFAULT_QQ_CLIENT_SECRET_ENV,
         groupBatchMinutes: DEFAULT_QQ_GROUP_BATCH_MINUTES,
+        stickers: false,
       },
       onebot: {
         enabled: false,
         wsUrl: DEFAULT_ONEBOT_WS_URL,
         tokenEnv: DEFAULT_ONEBOT_ACCESS_TOKEN_ENV,
+        stickers: false,
       },
     },
     alerts: { rateLimitMin: 30 },
@@ -1303,6 +1396,18 @@ function buildDefaults(dir: string): AppConfig {
       channel: 'beta',
       endpoint: 'https://irmia.me/releases/latest.json',
     },
+    // 插件市场（2026-10-29）：**默认开**——出厂就能"从市场装一个插件"，这是插件平台这条生态
+    // 入口的默认值；市场只是一个静态索引 + 静态包，真正的信任门仍是人确认那一步（装完是
+    // untrusted，必须人工 confirm 才能 enable），所以打开它不等于替人信任任何代码。
+    // 关掉之后：`/api/plugins/market` 与市场安装命令一律 501（会说明"市场已关闭"），
+    // **已装插件的启停/运行不受影响**；改这一格要重启进程才接管。
+    // ⚠️ 两个值都写**字面量**（不写常量引用）：出包脚本 Read-CodeDefaults 按正则抓字段默认值，
+    // 写成常量引用会抓不到（与 update 那三格同一条纪律）；上面注释里也不写"字段名 + 冒号 +
+    // 字面量"的形状，否则它会按行序把注释当成默认值（2026-10-11 真栽过一次）。
+    plugins: {
+      marketEnabled: true,
+      marketIndexUrl: 'https://irmia.me/plugins/index.json',
+    },
     timezone: systemTimezone(),
   };
 }
@@ -1310,6 +1415,21 @@ function buildDefaults(dir: string): AppConfig {
 /** 默认配置（经同一套校验，保证默认值自身合法——默认配置是自检过的配置） */
 export function defaultConfig(dir: string): AppConfig {
   return parseAppConfig({}, resolve(dir));
+}
+
+export function affectEnabled(
+  config: AppConfig,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const fromConfig = config.affect?.enabled === true;
+  const override = env['IRMIA_AFFECT_ENABLED'];
+  if (override === undefined || override.trim() === '') return fromConfig;
+  const value = override.trim().toLowerCase();
+  // 只认明确的开/关；拼错的值（`enable`、`ture`）不静默压过配置——回退到配置，
+  // 界面再用 `configured != enabled` 那条提示解释"环境变量没生效"。
+  if (['1', 'true', 'on', 'yes'].includes(value)) return true;
+  if (['0', 'false', 'off', 'no'].includes(value)) return false;
+  return fromConfig;
 }
 
 // ──────────────────────────────── 文档读取与注释 ────────────────────────────────
@@ -1321,6 +1441,16 @@ function isPlainObject(value: JsonValue | undefined): value is JsonObject {
 /** 「她被怎么称呼」最多几个词、每个词多长：填成"整个群名"或贴一整段话都没有意义 */
 export const MENTION_KEYWORD_MAX = 20;
 export const MENTION_KEYWORD_LEN_MAX = 24;
+
+function pickIntimacyLevel(
+  raw: JsonValue | undefined,
+  where: string,
+  fallback: IntimacyConfig['maxLevel'],
+): IntimacyConfig['maxLevel'] {
+  if (raw === undefined || raw === null) return fallback;
+  if (raw === 'subtle' || raw === 'obvious' || raw === 'strong') return raw;
+  throw new ConfigError(`${where} 只能是 subtle / obvious / strong，收到 ${describeValue(raw)}`, where);
+}
 
 /**
  * 解析 `channels.mentionKeywords`：**宽容但不猜**。
@@ -1723,15 +1853,61 @@ function defaultDocument(dir: string): JsonObject {
         appIdEnv: d.channels.qqOfficial.appIdEnv,
         useMarkdown: d.channels.qqOfficial.useMarkdown,
         clientSecretEnv: d.channels.qqOfficial.clientSecretEnv,
+        stickers: d.channels.qqOfficial.stickers,
       },
       onebot: {
         enabled: d.channels.onebot.enabled,
         wsUrl: d.channels.onebot.wsUrl,
         tokenEnv: d.channels.onebot.tokenEnv,
+        stickers: d.channels.onebot.stickers,
         // managed 只在写了的时候带上：它一出现就意味着"框架接管启动"，
         // 归一化时凭空补一个默认值，会把"用外部协议端"悄悄变成"框架接管"
         ...(d.channels.onebot.managed === undefined ? {} : { managed: d.channels.onebot.managed }),
       },
+    },
+    stickers: {
+      $comment: [
+        '私聊默认允许贴纸；群聊还要 channels.<x>.stickers=true 才发。enabled=false 时主动/被动都停用。',
+        '被动默认 p=0.12、连续 4 轮未发且主导情绪 >=0.35 才候选；groups 是群功能总开关，默认关。',
+        '静默采收默认 p=0.15，0=关闭；enabled=false 也可关闭。私聊只收用户图，自我回声不收。',
+        '打标默认开，单小时 20 张、并发 1；关闭后仍可入 inbox，但全部待审。拒绝图默认保留 7 天。',
+      ],
+      enabled: d.stickers.enabled,
+      passiveProbability: d.stickers.passiveProbability,
+      minTurnsBetween: d.stickers.minTurnsBetween,
+      groups: d.stickers.groups,
+      rejectedRetentionDays: d.stickers.rejectedRetentionDays,
+      harvest: {
+        enabled: d.stickers.harvest.enabled,
+        probability: d.stickers.harvest.probability,
+        maxGlobalPerHour: d.stickers.harvest.maxGlobalPerHour,
+      },
+      tagging: {
+        enabled: d.stickers.tagging.enabled,
+        maxPerHour: d.stickers.tagging.maxPerHour,
+        concurrency: d.stickers.tagging.concurrency,
+      },
+    },
+    affect: {
+      $comment: [
+        '情绪系统默认关闭；enabled 只控制状态渲染，evaluatorEnabled 另控制 light 评价调用（也默认关闭）。',
+        'IRMIA_AFFECT_ENABLED=1/true/on/yes 可强制开启，0/false/off/no 可强制关闭；环境变量优先于本文件。',
+        '两个开关都在每轮装配时读取；评价器未开启时仍可读既有投影，但不会新写 affect/appraised。',
+      ],
+      enabled: d.affect.enabled,
+      evaluatorEnabled: d.affect.evaluatorEnabled,
+    },
+    intimacy: {
+      $comment: [
+        '亲密/情欲层：独立于情绪，默认关闭；状态只从用户来源更新，动态行按开关全局注入。',
+        'maxLevel：subtle / obvious / strong（默认 obvious）是表现上限，不是自动档位。',
+        'spontaneousChance：neutral 轮次的自主触发概率（默认 0.04）。',
+        'privateOnly 固定 true；配置成 false 会被拒绝。',
+      ],
+      enabled: d.intimacy.enabled,
+      maxLevel: d.intimacy.maxLevel,
+      spontaneousChance: d.intimacy.spontaneousChance,
+      privateOnly: true,
     },
     alerts: {
       $comment: [
@@ -1799,6 +1975,12 @@ function pickInt(
   if (n < min || n > max) {
     throw new ConfigError(`${where} 必须在 ${min}..${max} 之间，收到 ${n}`, where);
   }
+  return n;
+}
+
+function pickProbability(raw: JsonValue | undefined, where: string, fallback: number): number {
+  const n = pickNumber(raw, where, fallback);
+  if (n < 0 || n > 1) throw new ConfigError(`${where} 必须在 0..1 之间，收到 ${n}`, where);
   return n;
 }
 
@@ -1927,6 +2109,30 @@ function pickUpdateEndpoint(raw: JsonValue | undefined, where: string, fallback:
       `${where} 必须以 http:// 或 https:// 开头（它要指向一个 latest.json，收到 ${JSON.stringify(url)}）`,
       where,
     );
+  }
+  return url;
+}
+
+/** 市场索引地址：必须是非空的 http(s) 地址（相对路径不接受——它必须指向一个真站点） */
+function pickMarketIndexUrl(raw: JsonValue | undefined, where: string, fallback: string): string {
+  const url = pickNonEmptyString(raw, where, fallback);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ConfigError(
+      `${where} 必须是完整的 http(s) 地址（市场索引 index.json 的地址，收到 ${JSON.stringify(url)}）`,
+      where,
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ConfigError(
+      `${where} 必须以 http:// 或 https:// 开头（市场索引 index.json 的地址，收到 ${JSON.stringify(url)}）`,
+      where,
+    );
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new ConfigError(`${where} 里不能带用户名/密码（收到 ${JSON.stringify(url)}）`, where);
   }
   return url;
 }
@@ -2138,6 +2344,7 @@ function parseOneBotChannel(raw: JsonValue | undefined, base: ChannelsConfig['on
     enabled: pickBoolean(obj['enabled'], 'channels.onebot.enabled', base.enabled),
     wsUrl: pickOneBotWsUrl(obj['wsUrl'], 'channels.onebot.wsUrl') ?? base.wsUrl,
     tokenEnv: pickEnvName(obj['tokenEnv'], 'channels.onebot.tokenEnv', base.tokenEnv),
+    stickers: pickBoolean(obj['stickers'], 'channels.onebot.stickers', false),
     ...(managed === undefined ? {} : { managed }),
   };
 }
@@ -2151,6 +2358,7 @@ function parseQqOfficialChannel(raw: JsonValue | undefined, base: ChannelsConfig
     clientSecretEnv: pickEnvName(obj['clientSecretEnv'], 'channels.qqOfficial.clientSecretEnv', base.clientSecretEnv),
     // 0 合法（= 不攒批，每条都唤醒），所以下限是 0；上限 1440（一天）——再大就不是「攒一会儿」了
     groupBatchMinutes: pickInt(obj['groupBatchMinutes'], 'channels.qqOfficial.groupBatchMinutes', base.groupBatchMinutes, 0, 1440),
+    stickers: pickBoolean(obj['stickers'], 'channels.qqOfficial.stickers', false),
   };
   const apiBase = pickHttpUrlOptional(obj['apiBase'], 'channels.qqOfficial.apiBase');
   if (apiBase !== undefined) out.apiBase = apiBase;
@@ -2304,6 +2512,57 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     ),
   };
 
+  const affectRaw = objectOr(doc['affect'], 'affect');
+  const affect: AffectConfig = {
+    enabled: pickBoolean(affectRaw['enabled'], 'affect.enabled', base.affect.enabled),
+    evaluatorEnabled: pickBoolean(
+      affectRaw['evaluatorEnabled'], 'affect.evaluatorEnabled', base.affect.evaluatorEnabled,
+    ),
+  };
+
+  const intimacyRaw = objectOr(doc['intimacy'], 'intimacy');
+  if (intimacyRaw['privateOnly'] !== undefined && intimacyRaw['privateOnly'] !== true) {
+    throw new ConfigError(
+      'intimacy.privateOnly 固定为 true：这一层只允许用户 1:1 私聊；配置成 false 被拒绝',
+      'intimacy.privateOnly',
+    );
+  }
+  const intimacy: IntimacyConfig = {
+    enabled: pickBoolean(intimacyRaw['enabled'], 'intimacy.enabled', base.intimacy.enabled),
+    maxLevel: pickIntimacyLevel(intimacyRaw['maxLevel'], 'intimacy.maxLevel', base.intimacy.maxLevel),
+    spontaneousChance: pickProbability(
+      intimacyRaw['spontaneousChance'], 'intimacy.spontaneousChance', base.intimacy.spontaneousChance,
+    ),
+    privateOnly: true,
+  };
+
+  const stickersRaw = objectOr(doc['stickers'], 'stickers');
+  const harvestRaw = objectOr(stickersRaw['harvest'], 'stickers.harvest');
+  const taggingRaw = objectOr(stickersRaw['tagging'], 'stickers.tagging');
+  const stickers: StickersConfig = {
+    enabled: pickBoolean(stickersRaw['enabled'], 'stickers.enabled', base.stickers.enabled),
+    passiveProbability: pickProbability(
+      stickersRaw['passiveProbability'], 'stickers.passiveProbability', base.stickers.passiveProbability,
+    ),
+    minTurnsBetween: pickInt(stickersRaw['minTurnsBetween'], 'stickers.minTurnsBetween', base.stickers.minTurnsBetween, 0),
+    groups: pickBoolean(stickersRaw['groups'], 'stickers.groups', base.stickers.groups),
+    rejectedRetentionDays: pickInt(
+      stickersRaw['rejectedRetentionDays'], 'stickers.rejectedRetentionDays', base.stickers.rejectedRetentionDays, 0, 365,
+    ),
+    harvest: {
+      enabled: pickBoolean(harvestRaw['enabled'], 'stickers.harvest.enabled', base.stickers.harvest.enabled),
+      probability: pickProbability(harvestRaw['probability'], 'stickers.harvest.probability', base.stickers.harvest.probability),
+      maxGlobalPerHour: pickInt(
+        harvestRaw['maxGlobalPerHour'], 'stickers.harvest.maxGlobalPerHour', base.stickers.harvest.maxGlobalPerHour, 1,
+      ),
+    },
+    tagging: {
+      enabled: pickBoolean(taggingRaw['enabled'], 'stickers.tagging.enabled', base.stickers.tagging.enabled),
+      maxPerHour: pickInt(taggingRaw['maxPerHour'], 'stickers.tagging.maxPerHour', base.stickers.tagging.maxPerHour, 1),
+      concurrency: pickInt(taggingRaw['concurrency'], 'stickers.tagging.concurrency', base.stickers.tagging.concurrency, 1, 8),
+    },
+  };
+
   const speakRaw = objectOr(doc['speak'], 'speak');
   const speak: SpeakConfig = {
     typingEffect: pickBoolean(speakRaw['typingEffect'], 'speak.typingEffect', base.speak.typingEffect),
@@ -2431,6 +2690,14 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     endpoint: pickUpdateEndpoint(updateRaw['endpoint'], 'update.endpoint', base.update.endpoint),
   };
 
+  // 插件市场（2026-10-29）：缺省即出厂值；地址不是 http(s) / 带凭据就当场报错
+  //（"我填了镜像却不生效"与"它偷偷连了别的地址"都属于配了不生效，比启动失败难查）。
+  const pluginsRaw = objectOr(doc['plugins'], 'plugins');
+  const plugins: PluginsConfig = {
+    marketEnabled: pickBoolean(pluginsRaw['marketEnabled'], 'plugins.marketEnabled', base.plugins.marketEnabled),
+    marketIndexUrl: pickMarketIndexUrl(pluginsRaw['marketIndexUrl'], 'plugins.marketIndexUrl', base.plugins.marketIndexUrl),
+  };
+
   // 上下文审计：只影响"要不要记一条哨兵事件"，与运行行为无关，所以两个阈值都夹在合法区间里
   const auditRaw = objectOr(doc['contextAudit'], 'contextAudit');
   const contextAudit: ContextAuditConfig = {
@@ -2460,8 +2727,8 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
   // 缺 mcp 段 = 合法的"没声明任何 server"，不是错误。
   const mcp: McpConfig = readMcpConfig(doc['mcp']);
   return {
-    schemaVersion, dataDir, models, budget, wake, vision, speak, persona, tools, mcp, deps, channels,
-    alerts, contextAudit, web, update, timezone, trust,
+    schemaVersion, dataDir, models, budget, wake, vision, affect, intimacy, stickers, speak, persona, tools, mcp, deps, channels,
+    alerts, contextAudit, web, update, plugins, timezone, trust,
   };
 }
 

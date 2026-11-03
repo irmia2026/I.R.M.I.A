@@ -379,3 +379,26 @@ test('切通道：错误方法 ⇒ 405；没认证 ⇒ 401', async (t) => {
   assert.equal(noAuth.status, 401);
   assert.equal(fx.requests(), 0);
 });
+
+test('POST /api/update/check：节流窗口内的**手动**检查仍然真去查（2026-10-26 事故：漏了 manual，按钮点了等于没点）', async (t) => {
+  const fx = await setup(t);
+  // 第一次：真的查一次，节流状态随之写上（checkedAt = 现在、nextAllowedAt = +12h）
+  const first = await call(fx.base, '/api/update/check', { method: 'POST' }, fx.token);
+  assert.equal((first.body as Record<string, unknown>)['performed'], true);
+  assert.equal(fx.requests(), 1);
+
+  // 第二次：仍在 12 小时窗口内 —— 但这是**人点的**，必须放行、必须再打一次假站点
+  const second = await call(fx.base, '/api/update/check', { method: 'POST' }, fx.token);
+  assert.equal(second.status, 200);
+  const outcome = second.body as Record<string, unknown>;
+  assert.equal(outcome['skipped'], undefined, '不许再出现 skipped=throttled');
+  assert.equal(outcome['performed'], true, '手动检查必须无视节流窗口');
+  assert.equal(fx.requests(), 2, '第二次也真的发了请求');
+
+  // 而**自动**那一拍仍然照旧被节流挡住（两条链路不许一起松）
+  const auto = await fx.update.checkNow({ manual: false });
+  assert.equal(auto.performed, false);
+  assert.equal(auto.skipped, 'throttled');
+  assert.equal(fx.requests(), 2, '自动检查在窗口内没发请求');
+});
+

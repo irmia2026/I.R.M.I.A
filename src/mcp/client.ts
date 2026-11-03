@@ -60,7 +60,6 @@ import { blobPointerText } from '../model/render.ts';
 import {
   DEFAULT_BLOB_PREVIEW_CHARS, DEFAULT_BLOB_THRESHOLD_TOKENS, offloadIfLarge,
 } from '../state/blob-store.ts';
-import { AGENT_VERSION } from '../version.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -75,16 +74,10 @@ export const MCP_NAME_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 export const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
-/**
- * clientInfo（握手时上报；server 侧日志靠它辨认调用方）。
- *
- * version 直接取 `AGENT_VERSION`，不在这里另抄一份：这个字段的真实用途是让 server 侧日志
- * 认出调用方是哪个版本的客户端。手抄的那份一旦漏改，排障时就会把新版客户端认成旧版，
- * 而且没有任何地方会报错——单一来源至少让"版本号是多少"只有一个答案。
- */
+/** clientInfo（握手时上报；server 侧日志靠它辨认调用方）。version 与 main.ts 的 AGENT_VERSION 同步 */
 export const DEFAULT_CLIENT_INFO: { readonly name: string; readonly version: string } = {
   name: 'irmia-agent',
-  version: AGENT_VERSION,
+  version: '0.1.0-beta.14',
 };
 
 /** 每请求软超时：progress 通知可重置这个时钟 */
@@ -662,6 +655,14 @@ export interface McpProcess {
 
 export type McpProcessSpawner = (entry: McpServerEntry) => McpProcess;
 
+/**
+ * 一条**系统性**故障的信号（插件平台接进来的一格，2026-10-26）。
+ *
+ * 为什么从池里往外报：插件熔断器要按"贡献"计数，而它只能看见池里发生的事。这四个类别
+ * （start / protocol / crash / timeout）都是"这个 server 自身坏了"的事实——业务性失败
+ * （工具不存在、参数不合法、被拒绝）刻意**不**从这里出，那些是调用方的问题，不该把一个
+ * 健康的 server 隔离掉（判据见 `plugin/failures.ts` 的 `isSystemicPluginFailure`）。
+ */
 export interface McpSystemicFailure {
   serverName: string;
   category: 'start' | 'protocol' | 'crash' | 'timeout';
@@ -671,6 +672,19 @@ export interface McpSystemicFailure {
 export interface McpClientPoolOptions {
   servers: readonly McpServerEntry[];
   emit: McpEventEmitter;
+  /**
+   * MCP 工具结果里的图片（content 里 type=image）交给**宿主**落盘并接进上下文。
+   *
+   * 为什么不在客户端里直接写文件：客户端不知道工作区在哪儿、也不知道"图片直通"这个开关
+   * （config.vision.imagesToContext）与事件可见性表——那些是宿主的事实。
+   * 返回 `{ key }`（工作区相对路径）= 已经放进上下文；返回 null = 没接（保留文本占位并说明）。
+   */
+  attachImage?: (input: {
+    server: string;
+    tool: string;
+    mimeType: string;
+    dataBase64: string;
+  }) => { key: string } | null;
   /** 数据目录：blob 外置落 <dataDir>/blobs/ */
   dataDir: string;
   /** 工具注册目标；不传则只维护内部清单（CLI 重建场景不落注册表） */
@@ -732,7 +746,16 @@ export interface McpClientPoolOptions {
   spawner?: McpProcessSpawner;
   /** 日志出口（stderr、协议错误、注册问题）；默认丢弃，绝不写 stdout */
   onLog?: (line: string) => void;
+  /**
+   * 系统性故障信号的出口（插件熔断器用）：start / protocol / crash / timeout 四类。
+   *
+   * 缺省丢弃 = 不接插件平台的实例行为完全不变。
+   */
   onSystemicFailure?: (failure: McpSystemicFailure) => void;
+  /**
+   * 一次**成功**的 `tools/call` 回执（按 server 名）：熔断器据此把"其实已经好了"的
+   * 半开贡献恢复回去，不必等半开探针那一拍。
+   */
   onRequestSuccess?: (serverName: string) => void;
   now?: () => number;
 }
@@ -1191,6 +1214,12 @@ export interface McpConnectionHost {
   onListChangedRefresh(conn: McpConnection): void;
   onConnectionExit(conn: McpConnection, code: number | null, signal: string | null): void;
   onProtocolViolation(conn: McpConnection, detail: string): void;
+  /**
+   * 每请求软超时触发的那一刻（可选口子；2026-10-26 加，插件熔断器用）。
+   *
+   * 为什么单独给一条：超时之后宿主还要走"取消 → 宽限 → 重启"那条序列，而**判据**发生在
+   * 这一刻——熔断器要记的是"这个 server 超时了"，不是"它后来被重启了"。
+   */
   onRequestTimeout?(conn: McpConnection, method: string): void;
   gracefulCancel(conn: McpConnection, requestId: number, reason: string): void;
   /**
@@ -1226,6 +1255,13 @@ export class McpConnection {
   private stopReported = false;
 
   private readyFlag = false;
+  /**
+   * 握手（initialize → （有 tools 能力时）tools/list）走完了吗？
+   *
+   * 插件熔断器只认**握手之后**的 crash / protocol / timeout：进程在 `initialize` 阶段就死，
+   * 走的是 `noteStartFailure` 那条路（类别 start），两处都记会被数两遍。tools/list 被故意
+   * 挂住（`FAKE_MCP_HANG_LIST`）时它仍是 `false` ⇒ 那次超时归 "start"，不归 "timeout"。
+   */
   handshakeCompleted = false;
   private toolsCache: McpToolInfo[] = [];
   /** 最近一次 tools/list 的如实小结（页数 / 件数 / 有没有截断）——回执与日志共读这一份 */
@@ -1595,6 +1631,7 @@ export class McpConnection {
     } else {
       await this.refreshTools();
     }
+    // 只有走过上面整段才算"握手完成"（tools/list 超时/失败时它保持 false）
     this.handshakeCompleted = true;
   }
 
@@ -1831,6 +1868,7 @@ export class McpConnection {
       kind: 'error',
       error: new McpRequestTimeoutError(this.serverName, pending.method, pending.timeoutMs, hardCapHit),
     });
+    // 判据发生在**这一刻**（不是后面宽限/重启那一刻）：插件熔断器据此记一次 timeout
     this.host.onRequestTimeout?.(this, pending.method);
     // 超时即杀的第一半：先把取消告诉 server（规范要求的通知）
     this.writeNotification('notifications/cancelled', {
@@ -1942,12 +1980,19 @@ export class McpClientPool implements McpConnectionHost {
     startMs: number | null; rssMb: number | null; rssSource: McpRssSource; rssProcesses: number | null;
     inFlightPeak: number; lastReclaimedAtMs: number | null; lastStopReason: McpStopReason | null;
   }>();
-  private readonly resourceSamples = new Set<Promise<void>>();
   /** 整池在飞（池级背压的计数器；进出成对，见 `callTool`） */
   private inFlightTotal = 0;
+  /**
+   * 在飞的资源采样任务：关机时等它们收场。
+   *
+   * 为什么要等：采样要 spawn 一个进程树、读 RSS，写一条 `mcp/server-resource` 事件。不等的话
+   * 关机后它们可能仍在写日志（或撞上已关闭的 EventLog）——"进程退了但日志还在长"。
+   */
+  private readonly resourceSamples = new Set<Promise<void>>();
   private readonly registryRef: ToolRegistry | undefined;
   private readonly emitEvent: McpEventEmitter;
   private readonly dataDir: string;
+  private readonly attachImage: NonNullable<McpClientPoolOptions['attachImage']> | undefined;
   private readonly defaultIdleReclaimMs: number;
   private readonly maxInFlight: number;
   readonly maxInFlightPerServer: number;
@@ -2003,6 +2048,7 @@ export class McpClientPool implements McpConnectionHost {
     this.nowFn = options.now ?? (() => Date.now());
     this.emitEvent = options.emit;
     this.dataDir = options.dataDir;
+    this.attachImage = options.attachImage;
     this.registryRef = options.registry;
 
     for (const entry of options.servers) {
@@ -2386,6 +2432,7 @@ export class McpClientPool implements McpConnectionHost {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       const rendered = await this.renderToolResult(conn, toolName, result);
+      // 一次真的成功：熔断器据此把这条 server 的半开状态恢复回去（判据在 circuit-breaker）
       this.requestSuccess(serverName);
       return rendered;
     } catch (err) {
@@ -2456,6 +2503,7 @@ export class McpClientPool implements McpConnectionHost {
       reports.push(...await this.reapOne(conn, 'shutdown'));
     }
     this.connections.clear();
+    // 资源采样在飞的也等掉：它们的收尾要写事件（日志可能马上被关）
     await Promise.all(this.resourceSamples);
     return reports;
   }
@@ -2626,6 +2674,7 @@ export class McpClientPool implements McpConnectionHost {
    *     那条路走的是 `startConnection` 的 catch。
    */
   private noteStartFailure(name: string, err: unknown): void {
+    // 起不来 = 一次系统性故障（类别 start）：插件熔断器按贡献计数，判据在它那边
     this.systemicFailure({ serverName: name, category: 'start', message: errorText(err) });
     const now = this.nowFn();
     const previous = this.failures.get(name);
@@ -2709,6 +2758,7 @@ export class McpClientPool implements McpConnectionHost {
         inFlightPeak: peak,
       });
     })();
+    // 记在册上：`shutdown()` 要等它收场（它要写事件，而日志随时会被关）
     this.resourceSamples.add(task);
     void task.finally(() => { this.resourceSamples.delete(task); });
   }
@@ -2934,7 +2984,8 @@ export class McpClientPool implements McpConnectionHost {
     }
     const record = result as Record<string, unknown>;
     const parts = Array.isArray(record['content']) ? record['content'] : [];
-    let text = parts.map(renderContentPart).filter((part) => part !== '').join('\n\n');
+    const renderedParts = parts.map((part) => this.renderContentPartWithImages(conn, toolName, part));
+    let text = renderedParts.filter((part) => part !== '').join('\n\n');
     if (text === '' && record['structuredContent'] !== undefined) {
       text = safeJson(record['structuredContent']);
     }
@@ -2960,6 +3011,29 @@ export class McpClientPool implements McpConnectionHost {
       return errorResult(body, MCP_ERROR_CODES.toolError);
     }
     return okResult(body);
+  }
+
+  /**
+   * content[] 里的一段 → 给模型看的文本；**图片走宿主**：能接就落盘 + 写 `image/attached`，
+   * 接不了就退回旧占位（并说清为什么），绝不假装"已放进上下文"。
+   */
+  private renderContentPartWithImages(conn: McpConnection, toolName: string, part: unknown): string {
+    if (typeof part === 'object' && part !== null) {
+      const record = part as Record<string, unknown>;
+      if (record['type'] === 'image') {
+        const mimeType = typeof record['mimeType'] === 'string' ? record['mimeType'] : '';
+        const dataBase64 = typeof record['data'] === 'string' ? record['data'] : '';
+        if (this.attachImage !== undefined && mimeType !== '' && dataBase64 !== '') {
+          const attached = this.attachImage({ server: conn.serverName, tool: toolName, mimeType, dataBase64 });
+          if (attached !== null) {
+            const kb = Math.max(1, Math.round((dataBase64.length * 3) / 4 / 1024));
+            return `[图片已放进上下文：${attached.key}（${mimeType}，约 ${kb} KB）]`;
+          }
+        }
+        return renderContentPart(part);
+      }
+    }
+    return renderContentPart(part);
   }
 
   private mapCallError(conn: McpConnection, toolName: string, err: unknown, timeoutMs: number): ToolHandlerResult {
@@ -3033,6 +3107,8 @@ export class McpClientPool implements McpConnectionHost {
 
   /** 连接异常退出（非主动关停）：从池里摘掉并如实上报 crashed */
   onConnectionExit(conn: McpConnection, code: number | null, signal: string | null): void {
+    // 只有**握手之后**的崩溃才算系统性故障：握手窗口里死掉由 `noteStartFailure` 记 start，
+    // 两处都记会被数两遍（判据见 `McpConnection.handshakeCompleted`）
     if (!conn.shutdownStarted && conn.handshakeCompleted) this.systemicFailure({ serverName: conn.serverName, category: 'crash', message: `process exited code=${code ?? 'null'} signal=${signal ?? 'null'}` });
     this.detach(conn);
     if (conn.shutdownStarted) return;
@@ -3059,13 +3135,18 @@ export class McpClientPool implements McpConnectionHost {
   }
 
   /**
-   * 取消宽限：发出 cancelled 之后给 server 一点收敛时间。宽限内没有回应（也不退出）的连接
-   * 判定失效——这就是"超时即杀"的落点：不配合取消的 server 不能留在池里继续接调用。
+   * 每请求软超时：只有握手之后的超时才算是"这个 server 坏了"（握手窗口里由 start 那条路记）。
+   *
+   * 与 `onProtocolViolation` 同一个理由：重启由关机序列承担，这里只负责**归因**。
    */
   onRequestTimeout(conn: McpConnection, method: string): void {
     if (conn.handshakeCompleted) this.systemicFailure({ serverName: conn.serverName, category: 'timeout', message: `${method} timed out` });
   }
 
+  /**
+   * 取消宽限：发出 cancelled 之后给 server 一点收敛时间。宽限内没有回应（也不退出）的连接
+   * 判定失效——这就是"超时即杀"的落点：不配合取消的 server 不能留在池里继续接调用。
+   */
   gracefulCancel(conn: McpConnection, requestId: number, reason: string): void {
     void this.runGracefulCancel(conn, requestId, reason);
   }

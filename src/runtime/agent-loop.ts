@@ -1,3 +1,5 @@
+import { affectReceipt } from '../affect/adapter.ts';
+import type { PreparedAffect } from '../affect/types.js';
 /**
  * Irmia Agent — 循环引擎（turn / step 双层，M2 核心整合件）
  *
@@ -57,7 +59,7 @@ import { isDsClientError, isReasoningEchoRejection } from '../model/ds-client.ts
 // 判据（`serverRejectionOf`）与脱敏/区段口径都在那个模块里，本文件只负责"什么时候写、写哪份"。
 import { rejectRecordOf, serverRejectionOf } from '../model/reject-record.ts';
 import type { HistoryAppendBaseline, MachineFacts, MaintenanceWindowNote, PinnedWake, RenderChannelContext, RenderImageRef, RenderPersona, RenderedRequest, TurnBlockFacts, UsageFacts } from '../model/render.js';
-import { RENDER_VERSION, assertReasoningEchoIntegrity, clipTaskTitle, historyAppendCheckOf, reasoningEchoBudgetOf, render, renderWake, stateBytesOf, wakeTitle } from '../model/render.ts';
+import { REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity, clipTaskTitle, historyAppendCheckOf, reasoningEchoBudgetOf, render, renderWake, stateBytesOf, wakeTitle } from '../model/render.ts';
 import type { ReasoningEchoDropGroup, ReasoningEchoPolicy, ReasoningEchoRepair } from '../model/render.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import {
@@ -503,6 +505,21 @@ export interface AgentLoopBudget {
 export type CompactionWarning = NonNullable<CompactionDecision['data']['warning']>;
 
 export interface AgentLoopDeps {
+  /** Host-controlled light evaluator. Never changes wake/heartbeat gating. */
+  affectBeforeStep?: (args:{turn:number;step:number;firstStep:boolean;wakeEvents:readonly AppEvent[];events:readonly AppEvent[];signal?:AbortSignal})=>Promise<void>;
+  /** Owner-source light intimacy judgement; host runs it once per turn on firstStep. */
+  intimacyBeforeStep?: (args:{turn:number;step:number;firstStep:boolean;wakeEvents:readonly AppEvent[];events:readonly AppEvent[];signal?:AbortSignal})=>Promise<void>;
+  /** Pure derived state at recorded step time. */
+  affectForStep?: (now:string)=>PreparedAffect | null;
+  /** Independent layer; host returns the line whenever the feature is enabled. */
+  intimacyForStep?: (now:string)=>string | null;
+  /** Optional receipt metadata for replay/GUI diagnostics. */
+  intimacyMetaForStep?: (now:string)=>{estrus:boolean;phase:'calm'|'warm'|'tense'|'estrus'} | null;
+  /** 静态规范是否进 instructions：宿主按 config 开关给（运行期），回放另走收据。 */
+  affectRulesEnabled?: boolean;
+  intimacyRulesEnabled?: boolean;
+  /** 本进程生效的思维链回传上限（随 persona.compactionThresholdTokens 缩放）。 */
+  reasoningEcho?: Partial<ReasoningEchoPolicy> | null;
   /** 事件写入：本模块所有落库都经它（承诺类 sync: true） */
   log: EventLog;
   /** 模型客户端 */
@@ -996,6 +1013,11 @@ export interface TurnTiming {
  * `wakeEvent` 取该 turn 认领的首条输入（仅首 step）。
  */
 export interface RequestDerivation {
+  affectLine?: string | null;
+  intimacyLine?: string | null;
+  /** 静态规范是否进前缀（看 config.enabled；回放读 step 收据） */
+  affectRules?: boolean;
+  intimacyRules?: boolean;
   persona: AgentLoopPersona;
   /** 进模型清单的工具（registry.listForModel 的结果） */
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
@@ -1283,6 +1305,10 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     // 为什么挪进去：上下文归因要把 input 的每一段都数清楚，插播是最后一段——在装配点之外
     // 追加，归因的"合计"就会比真正的请求少一段（2026-10-03）。
     softHint: input.softHint ?? null,
+    affectLine: input.affectLine ?? null,
+    intimacyLine: input.intimacyLine ?? null,
+    ...(input.affectRules === undefined ? {} : {affectRules: input.affectRules}),
+    ...(input.intimacyRules === undefined ? {} : {intimacyRules: input.intimacyRules}),
     // 上一步的此刻层（v66）：由 `TurnRunner` 逐 step 现取（见 `previousNow`），
     // 渲染层据此逐字段比对、逐字节不变的那些不发。缺省 null ⇒ 每个字段都发
     // （重放/子代理/诊断那些旧调用点因此与引入这一版之前逐字节相同）。
@@ -1411,6 +1437,9 @@ export class TurnRunner {
    * 也不是"重新渲染一遍上个时刻"：这一格与真正发出去的那一份同一次调用产出，不落库、不进历史。
    */
   private previousNow = '';
+  private currentAffectLine: string | null = null;
+  private currentIntimacyLine: string | null = null;
+  private currentIntimacyMeta: {estrus:boolean;phase:'calm'|'warm'|'tense'|'estrus'} | null = null;
 
   /**
    * **上一 step 的历史段基线**（v76，P4 中段改写不变量；只在本 turn 内有效）。
@@ -1732,6 +1761,20 @@ export class TurnRunner {
     // **送进这一份请求的输入＝她看见了**：中途插进来的唤醒在这里销账（见 claimDeliveredInputs）
     this.claimDeliveredInputs();
     const step = this.step;
+    if (this.deps.affectBeforeStep !== undefined) {
+      // The host may append internal affect events. A failed evaluation must never block heavy.
+      try { await this.deps.affectBeforeStep({turn:this.turn,step,firstStep,wakeEvents:this.wakeEvents,events:this.events,...(this.deps.signal ? { signal: this.deps.signal } : {})}); } catch { /* fail open */ }
+      if (this.deps.signal?.aborted === true) return {kind:'aborted',cause:this.abortCause()};
+      // Light appraisal spent tokens after the outer guard: check current budget before heavy.
+      const budgetAfterAffect = this.deps.budget?.checkBeforeStep(this.projection) ?? null;
+      if (budgetAfterAffect !== null) return budgetAfterAffect;
+    }
+    if (this.deps.intimacyBeforeStep !== undefined && firstStep) {
+      try { await this.deps.intimacyBeforeStep({turn:this.turn,step,firstStep,wakeEvents:this.wakeEvents,events:this.events,...(this.deps.signal ? { signal: this.deps.signal } : {})}); } catch { /* fail open */ }
+      if (this.deps.signal?.aborted === true) return {kind:'aborted',cause:this.abortCause()};
+      const budgetAfterIntimacy = this.deps.budget?.checkBeforeStep(this.projection) ?? null;
+      if (budgetAfterIntimacy !== null) return budgetAfterIntimacy;
+    }
     // now 只取一次：渲染用它，step/start 的 ts 也用它 —— 重建请求时读回这个值即可复现
     const now = this.deps.now();
     const model = this.deps.ds.modelFor(this.lane);
@@ -1748,6 +1791,10 @@ export class TurnRunner {
       : { event: wake, beforeSeq: this.turnStartSeq };
     const wakeEvent = firstStep ? wake : null;
     const softHint = mergeHints(this.deps.budget?.softHint?.(this.projection) ?? null, this.drainHookContext());
+    const affectPrepared = this.deps.affectForStep?.(now) ?? null;
+    this.currentAffectLine = affectPrepared?.renderedLine ?? null;
+    this.currentIntimacyLine = this.deps.intimacyForStep?.(now) ?? null;
+    this.currentIntimacyMeta = this.deps.intimacyMetaForStep?.(now) ?? null;
 
     // `let` 而不是 `const`：400 自救会重建一份（全量）请求，后面记账要用**真发出去的那一份**
     let request = this.deriveAt({ wakeEvent, pinnedWake, step, now, model, softHint });
@@ -1761,6 +1808,16 @@ export class TurnRunner {
       lane: this.lane,
       renderVersion: RENDER_VERSION,
       personaHash: this.deps.persona.personaHash,
+      ...(affectPrepared === null ? {} : {affect:affectReceipt(affectPrepared)}),
+      ...(this.currentIntimacyLine === null ? {} : {
+        intimacy: {
+          version:1, atMs: Date.parse(now), renderedLine: this.currentIntimacyLine,
+          ...(this.currentIntimacyMeta === null ? {} : this.currentIntimacyMeta),
+        },
+      }),
+      ...(this.deps.affectRulesEnabled === true ? {affectRules:true} : {}),
+      ...(this.deps.intimacyRulesEnabled === true ? {intimacyRules:true} : {}),
+      ...(this.deps.reasoningEcho?.maxTotalChars == null ? {} : {reasoningEchoMaxChars: this.deps.reasoningEcho.maxTotalChars}),
       // **本步用的通道显示名**（2026-10-22）：与 `renderVersion` / `personaHash` 同一类指纹——
       // "这一份请求当时装配时，宿主给她配的名字是什么"。值取的就是刚递给 `deriveAt` 的**同一份**
       // （`this.deps.channelRender`，见 `deriveAt` 里那一格），所以重放读它 = 当时那份字节，
@@ -3381,6 +3438,11 @@ export class TurnRunner {
     const tools = this.deps.registry.listForModel(options);
     this.noteToolInventory(tools, options, args.step);
     const rendered = deriveRequest({
+      affectLine: this.currentAffectLine,
+      intimacyLine: this.currentIntimacyLine,
+      affectRules: this.deps.affectRulesEnabled === true,
+      intimacyRules: this.deps.intimacyRulesEnabled === true,
+      reasoningEcho: this.deps.reasoningEcho ?? null,
       persona: this.deps.persona,
       tools,
       timezone: this.deps.timezone,
@@ -3805,6 +3867,8 @@ export interface CompactionDecisionInput {
   turnStartSeq: number | null;
   /** `null` 与"没有这一格"同义：压缩没配（子代理等宿主不要求压缩），判定停在第一道门 */
   cfg: HandoffOptions & { thresholdTokens: number } | null;
+  /** 思维链回传字符上限（随压缩阈值缩放；缺省 = 出厂 300k，给旧调用点） */
+  echoMaxChars?: number;
 }
 
 /**
@@ -3842,7 +3906,11 @@ export function compactionDecision(input: CompactionDecisionInput): CompactionDe
    * 而回传字符早就顶穿 300K、渲染层每笔都在挤最老的组 ⇒ 压缩线**根本没被叫到**。
    * 把字符这一侧接上压缩线，"顶穿"就从"渲染层每笔微调"变成"一次遮蔽点把它整段移走"。
    */
-  const echo = reasoningEchoBudgetOf(events, maxSummaryCoverage(events));
+  const echo = reasoningEchoBudgetOf(
+    events,
+    maxSummaryCoverage(events),
+    input.echoMaxChars === undefined ? REASONING_ECHO_POLICY : { ...REASONING_ECHO_POLICY, maxTotalChars: input.echoMaxChars },
+    );
   const echoOver = echo.limit !== null && echo.chars > echo.limit;
   const base = {
     turn, historyTokens, thresholdTokens,

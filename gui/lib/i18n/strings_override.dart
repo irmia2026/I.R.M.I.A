@@ -887,8 +887,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'settingsUnknownReason': s.settingsUnknownReason,
     'settingsSeeOfficialDocs': s.settingsSeeOfficialDocs,
     'settingsWebhookCurlTokenPlaceholder': s.settingsWebhookCurlTokenPlaceholder,
-    'settingsWebhookCurlSampleText': s.settingsWebhookCurlSampleText,
-    'chanSourceQqOfficial': s.chanSourceQqOfficial,
+    'settingsWebhookCurlSampleText': s.settingsWebhookCurlSampleText,    'chanSourceQqOfficial': s.chanSourceQqOfficial,
     'chanEventInboundWake': s.chanEventInboundWake,
     'chanEventFile': s.chanEventFile,
     'chanAlertExit': s.chanAlertExit,
@@ -987,8 +986,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'chanFeedEmpty': s.chanFeedEmpty,
     'chanSourceExternal': s.chanSourceExternal,
     'chanEventGeneric': s.chanEventGeneric,
-    'chanJoinWords': s.chanJoinWords,
-    'schedNotProjection': s.schedNotProjection,
+    'chanJoinWords': s.chanJoinWords,    'schedNotProjection': s.schedNotProjection,
     'schedCancelTitle': s.schedCancelTitle,
     'schedCancelPlan': s.schedCancelPlan,
     'schedBuiltToast': s.schedBuiltToast,
@@ -1094,8 +1092,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'schedCatRoutine': s.schedCatRoutine,
     'schedActionSelf': s.schedActionSelf,
     'schedActionNotify': s.schedActionNotify,
-    'schedActionDraft': s.schedActionDraft,
-    'extSectionSkills': s.extSectionSkills,
+    'schedActionDraft': s.schedActionDraft,    'extSectionSkills': s.extSectionSkills,
     'extSectionSkillsBlurb': s.extSectionSkillsBlurb,
     'extSectionMcpBlurb': s.extSectionMcpBlurb,
     'extSectionTools': s.extSectionTools,
@@ -1312,6 +1309,141 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'settingsProtocolOfficialProject': s.settingsProtocolOfficialProject,
     'settingsProtocolOfficialSite': s.settingsProtocolOfficialSite,
     'settingsProtocolLicenseRow': s.settingsProtocolLicenseRow,
+    'affectTitle': s.affectTitle,
+    'affectSystem': s.affectSystem,
+    'affectInvalidData': s.affectInvalidData,
+    'affectPending': s.affectPending,
+    // 情绪页（2026-10-31 设计稿）：只列无参 getter；带参的那一族由覆盖层原样委托。
+    'moodPageEyebrow': s.moodPageEyebrow,
+    'moodHeading': s.moodHeading,
+    'moodTagline': s.moodTagline,
+    'moodDetailTooltip': s.moodDetailTooltip,
+    'moodHeroTitle': s.moodHeroTitle,
+    'moodUpdatedJustNow': s.moodUpdatedJustNow,
+    'moodAffectOff': s.moodAffectOff,
+    'moodNoNewAppraisalTitle': s.moodNoNewAppraisalTitle,
+    'moodNoNewAppraisalBody': s.moodNoNewAppraisalBody,
+    'moodEvaluatorOffState': s.moodEvaluatorOffState,
+    'moodEvaluatorOffTitle': s.moodEvaluatorOffTitle,
+    'moodEvaluatorOffBody': s.moodEvaluatorOffBody,
+    'moodNoRecentCause': s.moodNoRecentCause,
+    'moodSettlesOverTime': s.moodSettlesOverTime,
+    'moodValenceLabel': s.moodValenceLabel,
+    'moodArousalLabel': s.moodArousalLabel,
+    'moodEmotionsTitle': s.moodEmotionsTitle,
+    'moodEmotionsCaption': s.moodEmotionsCaption,
+    'moodEmotionsNote': s.moodEmotionsNote,
+    'moodEmotionsEmpty': s.moodEmotionsEmpty,
+    'moodTimelineTitle': s.moodTimelineTitle,
+    'moodRangeToday': s.moodRangeToday,
+    'moodRangeWeek': s.moodRangeWeek,
+    'moodChartInfoToday': s.moodChartInfoToday,
+    'moodChartInfoWeek': s.moodChartInfoWeek,
+    'moodChartFlat': s.moodChartFlat,
+    'moodChartEmptyToday': s.moodChartEmptyToday,
+    'moodChartEmptyWeek': s.moodChartEmptyWeek,
+    'moodFactorsTitle': s.moodFactorsTitle,
+    'moodFactorsCaption': s.moodFactorsCaption,
+    'moodFactorsEmpty': s.moodFactorsEmpty,
+    'moodSheetTitle': s.moodSheetTitle,
+    'moodSheetBlurb': s.moodSheetBlurb,
+    'moodSheetMoodLabel': s.moodSheetMoodLabel,
+    'moodSheetValence': s.moodSheetValence,
+    'moodSheetArousal': s.moodSheetArousal,
+    'moodSheetChangeMode': s.moodSheetChangeMode,
+    'moodSheetHalfLife': s.moodSheetHalfLife,
+    'moodSheetPrimaryLabel': s.moodSheetPrimaryLabel,
+    'moodSheetRecentCause': s.moodSheetRecentCause,
+    'moodSheetSnapshot': s.moodSheetSnapshot,
+    'moodSheetSnapshotValue': s.moodSheetSnapshotValue,
+    'moodSheetRequestLabel': s.moodSheetRequestLabel,
+    'moodSheetRenderLine': s.moodSheetRenderLine,
+    'moodSheetRenderLineMissing': s.moodSheetRenderLineMissing,
+    'moodSheetStateTime': s.moodSheetStateTime,
+    'moodSheetStateTimeMissing': s.moodSheetStateTimeMissing,
+    'moodSheetPrincipleTitle': s.moodSheetPrincipleTitle,
+    'moodSheetPrincipleBody': s.moodSheetPrincipleBody,
+    'moodSheetClose': s.moodSheetClose,
+    'moodFooterNote': s.moodFooterNote,
+    'moodEngineMark': s.moodEngineMark,
+    // 亲密页（情绪页第三个 tab）那一族：无参、可覆盖
+    'intimacyTitle': s.intimacyTitle,
+    'intimacySystem': s.intimacySystem,
+    'intimacyNote': s.intimacyNote,
+    'intimacyDetailTooltip': s.intimacyDetailTooltip,
+    'intimacyOffHint': s.intimacyOffHint,
+    'intimacyPending': s.intimacyPending,
+    'intimacyReadingsTitle': s.intimacyReadingsTitle,
+    'intimacyReadingsCaption': s.intimacyReadingsCaption,
+    'intimacyPhaseCalm': s.intimacyPhaseCalm,
+    'intimacyPhaseWarm': s.intimacyPhaseWarm,
+    'intimacyPhaseTense': s.intimacyPhaseTense,
+    'intimacyPhaseEstrus': s.intimacyPhaseEstrus,
+    'intimacyEstrusBadge': s.intimacyEstrusBadge,
+    'intimacyLevelLabel': s.intimacyLevelLabel,
+    'intimacyLevelNote': s.intimacyLevelNote,
+    'intimacyNoData': s.intimacyNoData,
+    'intimacyCausesTitle': s.intimacyCausesTitle,
+    'intimacyCausesCaption': s.intimacyCausesCaption,
+    'intimacyCausesEmpty': s.intimacyCausesEmpty,
+    'intimacyHistoryTitle': s.intimacyHistoryTitle,
+    'intimacyHistoryEmpty': s.intimacyHistoryEmpty,
+    'intimacyJustNow': s.intimacyJustNow,
+    'intimacyOpenDetails': s.intimacyOpenDetails,
+    'intimacySheetTitle': s.intimacySheetTitle,
+    'intimacySheetBlurb': s.intimacySheetBlurb,
+    'intimacyLineLabel': s.intimacyLineLabel,
+    'intimacyRenderLineLabel': s.intimacyRenderLineLabel,
+    'intimacyRenderLineMissing': s.intimacyRenderLineMissing,
+    'intimacyLineEmpty': s.intimacyLineEmpty,
+    'intimacyInvalidData': s.intimacyInvalidData,
+    // 日志页：事件类型标签（无参、可覆盖）
+    'logsTypeAffectAppraised': s.logsTypeAffectAppraised,
+    'logsTypeStickerSent': s.logsTypeStickerSent,
+    'logsTypeStickerSkipped': s.logsTypeStickerSkipped,
+    'logsTypeStickerHarvested': s.logsTypeStickerHarvested,
+    'logsTypeStickerTagged': s.logsTypeStickerTagged,
+    'logsTypeStickerReviewed': s.logsTypeStickerReviewed,
+    'stickerTitle': s.stickerTitle,
+    'stickerBlurb': s.stickerBlurb,
+    'stickerTabLibrary': s.stickerTabLibrary,
+    'stickerTabTagging': s.stickerTabTagging,
+    'stickerTabReview': s.stickerTabReview,
+    'stickerTabSettings': s.stickerTabSettings,
+    'stickerTabEvents': s.stickerTabEvents,
+    'stickerUpload': s.stickerUpload,
+    'stickerUploadHint': s.stickerUploadHint,
+    'stickerEnabled': s.stickerEnabled,
+    'stickerHarvestEnabled': s.stickerHarvestEnabled,
+    'stickerTaggingEnabled': s.stickerTaggingEnabled,
+    'stickerHarvestProbability': s.stickerHarvestProbability,
+    'stickerSettingsHint': s.stickerSettingsHint,
+    'stickerLibraryHint': s.stickerLibraryHint,
+    'stickerTaggingHint': s.stickerTaggingHint,
+    'stickerReviewHint': s.stickerReviewHint,
+    'stickerEventsHint': s.stickerEventsHint,
+    'stickerEmpty': s.stickerEmpty,
+    'stickerEmptyHint': s.stickerEmptyHint,
+    'stickerInvalidData': s.stickerInvalidData,
+    'stickerApprove': s.stickerApprove,
+    'stickerReject': s.stickerReject,
+    'stickerRestore': s.stickerRestore,
+    'stickerBlock': s.stickerBlock,
+    'stickerDelete': s.stickerDelete,
+    'stickerPurge': s.stickerPurge,
+    'stickerEditTags': s.stickerEditTags,
+    'stickerBatchApprove': s.stickerBatchApprove,
+    'stickerBatchReject': s.stickerBatchReject,
+    'stickerConfirmDeleteTitle': s.stickerConfirmDeleteTitle,
+    'stickerConfirmDeleteBody': s.stickerConfirmDeleteBody,
+    'stickerConfirmPurgeBody': s.stickerConfirmPurgeBody,
+    'stickerSettingsSaved': s.stickerSettingsSaved,
+    'stickerUploadDone': s.stickerUploadDone,
+    'stickerNoEvents': s.stickerNoEvents,
+    'stickerNoPending': s.stickerNoPending,
+    'stickerNoRejected': s.stickerNoRejected,
+    'stickerIntensityLabel': s.stickerIntensityLabel,
+    'stickerConfidence': s.stickerConfidence,
 };
 
 /// 可覆盖的键（懒加载一次：= [AppStrings] 的全部无参 getter）
@@ -1395,10 +1527,9 @@ class OverriddenStrings extends AppStrings {
   @override
   String get retry => overrides['retry'] ?? base.retry;
 
-  // 插件平台这批文案是后加的，第一版漏了整组 —— 少一条这个类就编不过
-  // （Dart 的非抽象类必须实现全部成员）。按本文件的规矩分开处理：
-  //   · 无参 getter 能被人改 => 先看 overrides 再回 base
-  //   · 带参句子语序由实现决定 => 原样委托给 base
+  // 插件平台这批文案按本文件的规矩分开处理：
+  //   · 无参 getter 能被人改 ⇒ 先看 overrides 再回 base（键表里也补了同名 17 条）；
+  //   · 带参句子语序由实现决定 ⇒ 原样委托给 base。
   @override
   String get extSectionPlugins => overrides['extSectionPlugins'] ?? base.extSectionPlugins;
   @override
@@ -1463,6 +1594,7 @@ class OverriddenStrings extends AppStrings {
   String extPluginCircuitReason(String reason) => base.extPluginCircuitReason(reason);
   @override
   String extPluginRetryAt(String at) => base.extPluginRetryAt(at);
+
   @override
   String get cancel => overrides['cancel'] ?? base.cancel;
   @override
@@ -4620,4 +4752,372 @@ class OverriddenStrings extends AppStrings {
   @override
   String updateSwitchFailed(String reason) =>
       base.updateSwitchFailed(reason);
+
+  @override
+  String get affectTitle => overrides['affectTitle'] ?? base.affectTitle;
+  @override
+  String get affectSystem => overrides['affectSystem'] ?? base.affectSystem;
+  @override
+  String get affectInvalidData => overrides['affectInvalidData'] ?? base.affectInvalidData;
+  @override
+  String get affectPending => overrides['affectPending'] ?? base.affectPending;
+
+  // ── 情绪页（2026-10-31 设计稿）──────────────────────────────────────
+  // 无参 getter：覆盖值优先；带参句子一律原样委托（参数没有可填的位置，见文件头第 1 条）。
+  @override
+  String get moodPageEyebrow => overrides['moodPageEyebrow'] ?? base.moodPageEyebrow;
+  @override
+  String get moodHeading => overrides['moodHeading'] ?? base.moodHeading;
+  @override
+  String get moodTagline => overrides['moodTagline'] ?? base.moodTagline;
+  @override
+  String get moodDetailTooltip => overrides['moodDetailTooltip'] ?? base.moodDetailTooltip;
+  @override
+  String get moodHeroTitle => overrides['moodHeroTitle'] ?? base.moodHeroTitle;
+  @override
+  String get moodUpdatedJustNow => overrides['moodUpdatedJustNow'] ?? base.moodUpdatedJustNow;
+  @override
+  String get moodAffectOff => overrides['moodAffectOff'] ?? base.moodAffectOff;
+  @override
+  String moodUpdatedMinutesAgo(int minutes) => base.moodUpdatedMinutesAgo(minutes);
+  @override
+  String moodState(String key) => base.moodState(key);
+  @override
+  String moodHeadline(String key) => base.moodHeadline(key);
+  @override
+  String moodDescription(String key) => base.moodDescription(key);
+  @override
+  String get moodNoNewAppraisalTitle => overrides['moodNoNewAppraisalTitle'] ?? base.moodNoNewAppraisalTitle;
+  @override
+  String get moodNoNewAppraisalBody => overrides['moodNoNewAppraisalBody'] ?? base.moodNoNewAppraisalBody;
+  @override
+  String get moodEvaluatorOffState => overrides['moodEvaluatorOffState'] ?? base.moodEvaluatorOffState;
+  @override
+  String get moodEvaluatorOffTitle => overrides['moodEvaluatorOffTitle'] ?? base.moodEvaluatorOffTitle;
+  @override
+  String get moodEvaluatorOffBody => overrides['moodEvaluatorOffBody'] ?? base.moodEvaluatorOffBody;
+  @override
+  String moodRecentCause(String cause) => base.moodRecentCause(cause);
+  @override
+  String get moodNoRecentCause => overrides['moodNoRecentCause'] ?? base.moodNoRecentCause;
+  @override
+  String get moodSettlesOverTime => overrides['moodSettlesOverTime'] ?? base.moodSettlesOverTime;
+  @override
+  String get moodValenceLabel => overrides['moodValenceLabel'] ?? base.moodValenceLabel;
+  @override
+  String get moodArousalLabel => overrides['moodArousalLabel'] ?? base.moodArousalLabel;
+  @override
+  String moodValenceWord(String key) => base.moodValenceWord(key);
+  @override
+  String moodArousalWord(String key) => base.moodArousalWord(key);
+  @override
+  String moodArousalValue(int percent) => base.moodArousalValue(percent);
+  @override
+  String get moodEmotionsTitle => overrides['moodEmotionsTitle'] ?? base.moodEmotionsTitle;
+  @override
+  String get moodEmotionsCaption => overrides['moodEmotionsCaption'] ?? base.moodEmotionsCaption;
+  @override
+  String get moodEmotionsNote => overrides['moodEmotionsNote'] ?? base.moodEmotionsNote;
+  @override
+  String get moodEmotionsEmpty => overrides['moodEmotionsEmpty'] ?? base.moodEmotionsEmpty;
+  @override
+  String moodEmotion(String key) => base.moodEmotion(key);
+  @override
+  String get moodTimelineTitle => overrides['moodTimelineTitle'] ?? base.moodTimelineTitle;
+  @override
+  String get moodRangeToday => overrides['moodRangeToday'] ?? base.moodRangeToday;
+  @override
+  String get moodRangeWeek => overrides['moodRangeWeek'] ?? base.moodRangeWeek;
+  @override
+  String get moodChartInfoToday => overrides['moodChartInfoToday'] ?? base.moodChartInfoToday;
+  @override
+  String get moodChartInfoWeek => overrides['moodChartInfoWeek'] ?? base.moodChartInfoWeek;
+  @override
+  String get moodChartFlat => overrides['moodChartFlat'] ?? base.moodChartFlat;
+  @override
+  String get moodChartEmptyToday => overrides['moodChartEmptyToday'] ?? base.moodChartEmptyToday;
+  @override
+  String get moodChartEmptyWeek => overrides['moodChartEmptyWeek'] ?? base.moodChartEmptyWeek;
+  @override
+  String moodChartDelta(bool up, String value) => base.moodChartDelta(up, value);
+  @override
+  String get moodFactorsTitle => overrides['moodFactorsTitle'] ?? base.moodFactorsTitle;
+  @override
+  String get moodFactorsCaption => overrides['moodFactorsCaption'] ?? base.moodFactorsCaption;
+  @override
+  String get moodFactorsEmpty => overrides['moodFactorsEmpty'] ?? base.moodFactorsEmpty;
+  @override
+  String moodSource(String code) => base.moodSource(code);
+  @override
+  String moodFactorMeta(String time, String source) => base.moodFactorMeta(time, source);
+  @override
+  String moodFactorEffect(String emotion, String strength) => base.moodFactorEffect(emotion, strength);
+  @override
+  String get moodSheetTitle => overrides['moodSheetTitle'] ?? base.moodSheetTitle;
+  @override
+  String get moodSheetBlurb => overrides['moodSheetBlurb'] ?? base.moodSheetBlurb;
+  @override
+  String get moodSheetMoodLabel => overrides['moodSheetMoodLabel'] ?? base.moodSheetMoodLabel;
+  @override
+  String get moodSheetValence => overrides['moodSheetValence'] ?? base.moodSheetValence;
+  @override
+  String get moodSheetArousal => overrides['moodSheetArousal'] ?? base.moodSheetArousal;
+  @override
+  String get moodSheetChangeMode => overrides['moodSheetChangeMode'] ?? base.moodSheetChangeMode;
+  @override
+  String get moodSheetHalfLife => overrides['moodSheetHalfLife'] ?? base.moodSheetHalfLife;
+  @override
+  String get moodSheetPrimaryLabel => overrides['moodSheetPrimaryLabel'] ?? base.moodSheetPrimaryLabel;
+  @override
+  String get moodSheetRecentCause => overrides['moodSheetRecentCause'] ?? base.moodSheetRecentCause;
+  @override
+  String get moodSheetSnapshot => overrides['moodSheetSnapshot'] ?? base.moodSheetSnapshot;
+  @override
+  String get moodSheetSnapshotValue => overrides['moodSheetSnapshotValue'] ?? base.moodSheetSnapshotValue;
+  @override
+  String get moodSheetRequestLabel => overrides['moodSheetRequestLabel'] ?? base.moodSheetRequestLabel;
+  @override
+  String get moodSheetRenderLine => overrides['moodSheetRenderLine'] ?? base.moodSheetRenderLine;
+  @override
+  String get moodSheetRenderLineMissing =>
+      overrides['moodSheetRenderLineMissing'] ?? base.moodSheetRenderLineMissing;
+  @override
+  String get moodSheetStateTime => overrides['moodSheetStateTime'] ?? base.moodSheetStateTime;
+  @override
+  String get moodSheetStateTimeMissing =>
+      overrides['moodSheetStateTimeMissing'] ?? base.moodSheetStateTimeMissing;
+  @override
+  String get moodSheetPrincipleTitle => overrides['moodSheetPrincipleTitle'] ?? base.moodSheetPrincipleTitle;
+  @override
+  String get moodSheetPrincipleBody => overrides['moodSheetPrincipleBody'] ?? base.moodSheetPrincipleBody;
+  @override
+  String get moodSheetClose => overrides['moodSheetClose'] ?? base.moodSheetClose;
+  @override
+  String get moodFooterNote => overrides['moodFooterNote'] ?? base.moodFooterNote;
+  @override
+  String get moodEngineMark => overrides['moodEngineMark'] ?? base.moodEngineMark;
+
+  // 亲密页那一族：无参 getter 看覆盖，带参句子原样委托（与上面同一套规矩）
+  @override
+  String get intimacyTitle => overrides['intimacyTitle'] ?? base.intimacyTitle;
+  @override
+  String get intimacySystem => overrides['intimacySystem'] ?? base.intimacySystem;
+  @override
+  String get intimacyNote => overrides['intimacyNote'] ?? base.intimacyNote;
+  @override
+  String get intimacyDetailTooltip => overrides['intimacyDetailTooltip'] ?? base.intimacyDetailTooltip;
+  @override
+  String get intimacyOffHint => overrides['intimacyOffHint'] ?? base.intimacyOffHint;
+  @override
+  String get intimacyPending => overrides['intimacyPending'] ?? base.intimacyPending;
+  @override
+  String get intimacyReadingsTitle => overrides['intimacyReadingsTitle'] ?? base.intimacyReadingsTitle;
+  @override
+  String get intimacyReadingsCaption => overrides['intimacyReadingsCaption'] ?? base.intimacyReadingsCaption;
+  @override
+  String get intimacyPhaseCalm => overrides['intimacyPhaseCalm'] ?? base.intimacyPhaseCalm;
+  @override
+  String get intimacyPhaseWarm => overrides['intimacyPhaseWarm'] ?? base.intimacyPhaseWarm;
+  @override
+  String get intimacyPhaseTense => overrides['intimacyPhaseTense'] ?? base.intimacyPhaseTense;
+  @override
+  String get intimacyPhaseEstrus => overrides['intimacyPhaseEstrus'] ?? base.intimacyPhaseEstrus;
+  @override
+  String get intimacyEstrusBadge => overrides['intimacyEstrusBadge'] ?? base.intimacyEstrusBadge;
+  @override
+  String get intimacyLevelLabel => overrides['intimacyLevelLabel'] ?? base.intimacyLevelLabel;
+  @override
+  String get intimacyLevelNote => overrides['intimacyLevelNote'] ?? base.intimacyLevelNote;
+  @override
+  String get intimacyNoData => overrides['intimacyNoData'] ?? base.intimacyNoData;
+  @override
+  String get intimacyCausesTitle => overrides['intimacyCausesTitle'] ?? base.intimacyCausesTitle;
+  @override
+  String get intimacyCausesCaption => overrides['intimacyCausesCaption'] ?? base.intimacyCausesCaption;
+  @override
+  String get intimacyCausesEmpty => overrides['intimacyCausesEmpty'] ?? base.intimacyCausesEmpty;
+  @override
+  String get intimacyHistoryTitle => overrides['intimacyHistoryTitle'] ?? base.intimacyHistoryTitle;
+  @override
+  String get intimacyHistoryEmpty => overrides['intimacyHistoryEmpty'] ?? base.intimacyHistoryEmpty;
+  @override
+  String get intimacyJustNow => overrides['intimacyJustNow'] ?? base.intimacyJustNow;
+  @override
+  String get intimacyOpenDetails => overrides['intimacyOpenDetails'] ?? base.intimacyOpenDetails;
+  @override
+  String get intimacySheetTitle => overrides['intimacySheetTitle'] ?? base.intimacySheetTitle;
+  @override
+  String get intimacySheetBlurb => overrides['intimacySheetBlurb'] ?? base.intimacySheetBlurb;
+  @override
+  String get intimacyLineLabel => overrides['intimacyLineLabel'] ?? base.intimacyLineLabel;
+  @override
+  String get intimacyRenderLineLabel => overrides['intimacyRenderLineLabel'] ?? base.intimacyRenderLineLabel;
+  @override
+  String get intimacyRenderLineMissing =>
+      overrides['intimacyRenderLineMissing'] ?? base.intimacyRenderLineMissing;
+  @override
+  String get intimacyLineEmpty => overrides['intimacyLineEmpty'] ?? base.intimacyLineEmpty;
+  @override
+  String get intimacyInvalidData => overrides['intimacyInvalidData'] ?? base.intimacyInvalidData;
+  @override
+  String intimacyMetric(String key) => base.intimacyMetric(key);
+  @override
+  String intimacyLevel(String key) => base.intimacyLevel(key);
+  @override
+  String intimacyLevelValue(String level) => base.intimacyLevelValue(level);
+  @override
+  String intimacyCauseLabel(String label) => base.intimacyCauseLabel(label);
+  @override
+  String intimacyMinutesAgo(int minutes) => base.intimacyMinutesAgo(minutes);
+  @override
+  String intimacyHoursAgo(int hours) => base.intimacyHoursAgo(hours);
+  @override
+  String intimacyDaysAgo(int days) => base.intimacyDaysAgo(days);
+  @override
+  String intimacyCoolingDown(int minutes) => base.intimacyCoolingDown(minutes);
+  @override
+  String intimacyLastStopAt(String time) => base.intimacyLastStopAt(time);
+  @override
+  String intimacyLoadFailed(String reason) => base.intimacyLoadFailed(reason);
+  @override
+  String intimacySaved(bool enabled, bool applied) => base.intimacySaved(enabled, applied);
+  @override
+  String intimacyLevelSaved(String level, bool applied) => base.intimacyLevelSaved(level, applied);
+  @override
+  String intimacySaveFailed(String reason) => base.intimacySaveFailed(reason);
+
+  @override
+  String get logsTypeAffectAppraised => overrides['logsTypeAffectAppraised'] ?? base.logsTypeAffectAppraised;
+  @override
+  String get logsTypeStickerSent => overrides['logsTypeStickerSent'] ?? base.logsTypeStickerSent;
+  @override
+  String get logsTypeStickerSkipped => overrides['logsTypeStickerSkipped'] ?? base.logsTypeStickerSkipped;
+  @override
+  String get logsTypeStickerHarvested => overrides['logsTypeStickerHarvested'] ?? base.logsTypeStickerHarvested;
+  @override
+  String get logsTypeStickerTagged => overrides['logsTypeStickerTagged'] ?? base.logsTypeStickerTagged;
+  @override
+  String get logsTypeStickerReviewed => overrides['logsTypeStickerReviewed'] ?? base.logsTypeStickerReviewed;
+  @override
+  String logsAffectSummary(String reason, String emotion, String strength) =>
+      base.logsAffectSummary(reason, emotion, strength);
+  @override
+  String logsStickerSentSummary(String source, String tag, String position, int candidates) =>
+      base.logsStickerSentSummary(source, tag, position, candidates);
+  @override
+  String logsStickerTaggedSummary(List<String> tags, String confidence) =>
+      base.logsStickerTaggedSummary(tags, confidence);
+  @override
+  String logsStickerSource(String source) => base.logsStickerSource(source);
+  @override
+  String logsStickerPosition(String position) => base.logsStickerPosition(position);
+  @override
+  String logsStickerHarvestResult(String result) => base.logsStickerHarvestResult(result);
+  @override
+  String logsStickerReviewAction(String action) => base.logsStickerReviewAction(action);
+
+  @override
+  String stickersLoadFailed(String error) => base.stickersLoadFailed(error);
+  @override
+  String affectSaved(bool enabled, bool applied) => base.affectSaved(enabled, applied);
+  @override
+  String affectSaveFailed(String reason) => base.affectSaveFailed(reason);
+  @override
+  String affectLoadFailed(String reason) => base.affectLoadFailed(reason);
+  @override
+  String affectReason(String code) => base.affectReason(code);
+  @override
+  String get stickerTitle => overrides['stickerTitle'] ?? base.stickerTitle;
+  @override
+  String get stickerBlurb => overrides['stickerBlurb'] ?? base.stickerBlurb;
+  @override
+  String get stickerTabLibrary => overrides['stickerTabLibrary'] ?? base.stickerTabLibrary;
+  @override
+  String get stickerTabTagging => overrides['stickerTabTagging'] ?? base.stickerTabTagging;
+  @override
+  String get stickerTabReview => overrides['stickerTabReview'] ?? base.stickerTabReview;
+  @override
+  String get stickerTabSettings => overrides['stickerTabSettings'] ?? base.stickerTabSettings;
+  @override
+  String get stickerTabEvents => overrides['stickerTabEvents'] ?? base.stickerTabEvents;
+  @override
+  String get stickerUpload => overrides['stickerUpload'] ?? base.stickerUpload;
+  @override
+  String get stickerUploadHint => overrides['stickerUploadHint'] ?? base.stickerUploadHint;
+  @override
+  String get stickerEnabled => overrides['stickerEnabled'] ?? base.stickerEnabled;
+  @override
+  String get stickerHarvestEnabled => overrides['stickerHarvestEnabled'] ?? base.stickerHarvestEnabled;
+  @override
+  String get stickerTaggingEnabled => overrides['stickerTaggingEnabled'] ?? base.stickerTaggingEnabled;
+  @override
+  String get stickerHarvestProbability => overrides['stickerHarvestProbability'] ?? base.stickerHarvestProbability;
+  @override
+  String get stickerSettingsHint => overrides['stickerSettingsHint'] ?? base.stickerSettingsHint;
+  @override
+  String get stickerLibraryHint => overrides['stickerLibraryHint'] ?? base.stickerLibraryHint;
+  @override
+  String get stickerTaggingHint => overrides['stickerTaggingHint'] ?? base.stickerTaggingHint;
+  @override
+  String get stickerReviewHint => overrides['stickerReviewHint'] ?? base.stickerReviewHint;
+  @override
+  String get stickerEventsHint => overrides['stickerEventsHint'] ?? base.stickerEventsHint;
+  @override
+  String get stickerEmpty => overrides['stickerEmpty'] ?? base.stickerEmpty;
+  @override
+  String get stickerEmptyHint => overrides['stickerEmptyHint'] ?? base.stickerEmptyHint;
+  @override
+  String get stickerInvalidData => overrides['stickerInvalidData'] ?? base.stickerInvalidData;
+  @override
+  String get stickerApprove => overrides['stickerApprove'] ?? base.stickerApprove;
+  @override
+  String get stickerReject => overrides['stickerReject'] ?? base.stickerReject;
+  @override
+  String get stickerRestore => overrides['stickerRestore'] ?? base.stickerRestore;
+  @override
+  String get stickerBlock => overrides['stickerBlock'] ?? base.stickerBlock;
+  @override
+  String get stickerDelete => overrides['stickerDelete'] ?? base.stickerDelete;
+  @override
+  String get stickerPurge => overrides['stickerPurge'] ?? base.stickerPurge;
+  @override
+  String get stickerEditTags => overrides['stickerEditTags'] ?? base.stickerEditTags;
+  @override
+  String get stickerBatchApprove => overrides['stickerBatchApprove'] ?? base.stickerBatchApprove;
+  @override
+  String get stickerBatchReject => overrides['stickerBatchReject'] ?? base.stickerBatchReject;
+  @override
+  String get stickerConfirmDeleteTitle => overrides['stickerConfirmDeleteTitle'] ?? base.stickerConfirmDeleteTitle;
+  @override
+  String get stickerConfirmDeleteBody => overrides['stickerConfirmDeleteBody'] ?? base.stickerConfirmDeleteBody;
+  @override
+  String get stickerConfirmPurgeBody => overrides['stickerConfirmPurgeBody'] ?? base.stickerConfirmPurgeBody;
+  @override
+  String get stickerSettingsSaved => overrides['stickerSettingsSaved'] ?? base.stickerSettingsSaved;
+  @override
+  String get stickerUploadDone => overrides['stickerUploadDone'] ?? base.stickerUploadDone;
+  @override
+  String get stickerNoEvents => overrides['stickerNoEvents'] ?? base.stickerNoEvents;
+  @override
+  String get stickerNoPending => overrides['stickerNoPending'] ?? base.stickerNoPending;
+  @override
+  String get stickerNoRejected => overrides['stickerNoRejected'] ?? base.stickerNoRejected;
+  @override
+  String get stickerIntensityLabel => overrides['stickerIntensityLabel'] ?? base.stickerIntensityLabel;
+  @override
+  String get stickerConfidence => overrides['stickerConfidence'] ?? base.stickerConfidence;
+  @override
+  String stickerStats(int approved, int pending, int sent) => base.stickerStats(approved, pending, sent);
+  @override
+  String stickerSource(String source) => base.stickerSource(source);
+  @override
+  String stickerIntensity(String intensity) => base.stickerIntensity(intensity);
+  @override
+  String stickerStatus(String status) => base.stickerStatus(status);
+  @override
+  String stickerUseCount(int count) => base.stickerUseCount(count);
+  @override
+  String stickerActionFailed(String reason) => base.stickerActionFailed(reason);
+  @override
+  String stickerBatchDone(int count) => base.stickerBatchDone(count);
 }

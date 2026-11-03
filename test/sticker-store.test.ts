@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import test, { type TestContext } from 'node:test';
+
+import { StickerStore } from '../src/stickers/store.ts';
+import { pngBytes } from './helpers/sticker-fixtures.ts';
+import { tempDirSync } from './helpers/temp-dirs.ts';
+
+function rig(t: TestContext) {
+  const dir = tempDirSync('irmia-sticker-store-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const store = new StickerStore(dir, () => new Date('2026-10-31T04:00:00.000Z'));
+  store.init();
+  return store;
+}
+
+test('store：初始化两个包，导入待审、内容哈希去重、批准后移动原图', (t) => {
+  const store = rig(t);
+  assert.deepEqual(store.listPacks().map((pack) => pack.packId).sort(), ['collected', 'owner-stickers']);
+  const bytes = pngBytes(16, 16);
+  const imported = store.importSticker({ bytes, mime: 'image/png', source: 'collected' });
+  assert.equal(imported.duplicate, false);
+  assert.equal(imported.entry.status, 'pending');
+  assert.ok(existsSync(store.entryPath('collected', imported.entry.file)));
+  assert.equal(store.importSticker({ bytes, mime: 'image/png', source: 'collected' }).duplicate, true);
+  assert.equal(store.listEntries().length, 1);
+
+  const approved = store.applyTagging(imported.entry.id, { tags: ['开心'], intensity: 'obvious', confidence: 0.9, note: '测试' }, true);
+  assert.equal(approved.status, 'approved');
+  assert.ok(approved.file.startsWith('cache/'));
+  assert.ok(existsSync(store.entryPath('collected', approved.file)));
+  assert.equal(store.candidates('开心').length, 1);
+});
+
+test('store：最近十张去重、同图三十天三次上限与今日计数', (t) => {
+  const store = rig(t);
+  const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'owner' });
+  store.applyTagging(imported.entry.id, { tags: ['开心'], intensity: 'obvious', confidence: 1, note: '' }, true);
+  for (let i = 0; i < 3; i++) store.recordSent(imported.entry.id, new Date(`2026-10-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`));
+  assert.equal(store.candidates('开心', new Date('2026-10-15T00:00:00.000Z')).length, 0, '三十天三次后不再候选');
+  assert.equal(store.sentToday(new Date('2026-10-03T00:00:00.000Z')), 1);
+});
+
+test('store：拒绝保留原图、恢复回库、彻底删除只清 rejected', (t) => {
+  const store = rig(t);
+  const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'collected' });
+  store.review(imported.entry.id, 'reject');
+  const rejected = store.findById(imported.entry.id)!.entry;
+  assert.ok(rejected.file.includes('rejected'));
+  assert.equal(rejected.rejectedAt, '2026-10-31T04:00:00.000Z');
+  assert.ok(existsSync(store.entryPath('collected', rejected.file)));
+  store.review(imported.entry.id, 'restore');
+  assert.equal(store.findById(imported.entry.id)?.entry.status, 'approved');
+  assert.equal(store.findById(imported.entry.id)?.entry.rejectedAt, undefined);
+  store.review(imported.entry.id, 'delete');
+  assert.equal(store.purgeRejected(), 1);
+  assert.equal(store.findById(imported.entry.id), null);
+});
+
+test('store：打标与采收限流状态可从 state.json 重建', (t) => {
+  const store = rig(t);
+  assert.equal(store.consumeTagging(new Date('2026-10-31T04:00:00.000Z'), 1), true);
+  assert.equal(store.consumeTagging(new Date('2026-10-31T04:30:00.000Z'), 1), false);
+  assert.equal(store.consumeHarvest('qq:c2c:owner', new Date('2026-10-31T04:00:00.000Z'), 1, 1), true);
+  assert.equal(store.harvestAllowed('qq:c2c:owner', new Date('2026-10-31T04:30:00.000Z'), 1, 1), false);
+  const state = JSON.parse(readFileSync(`${store.root}/state.json`, 'utf8')) as { tagging: { callsMs: number[] } };
+  assert.equal(state.tagging.callsMs.length, 1);
+});

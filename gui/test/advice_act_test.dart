@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:irmia_gui/api.dart';
 import 'package:irmia_gui/app.dart';
-import 'package:irmia_gui/pages/extensions_page.dart';
 import 'package:irmia_gui/pages/overview_page.dart';
 import 'package:irmia_gui/theme.dart';
 import 'package:irmia_gui/ui_state.dart';
@@ -99,144 +98,51 @@ void main() {
     return state;
   }
 
-  Finder actBtn(String id) => find.byKey(ValueKey('advice-act-$id'));
+  Finder actBtn(String id) => find.byKey(ValueKey('advice-act-'));
 
-  testWidgets('① 四个动作各自摆出服务端给的按钮文案', (tester) async {
+  testWidgets('① 非死信建议一条都不摆（2026-10-26 口径：那块只留给死信）', (tester) async {
     await pumpOverview(tester, _routes(suggestions: [
       _advice(id: 'review-stale', title: '3 项待确认已超 3 天', act: 'goto-review', actLabel: '去处理', level: 'warn'),
-      _advice(id: 'cache-hit-low', title: '缓存命中率偏低：3.2%', act: 'open-budget', actLabel: '看预算'),
+      _advice(id: 'cache-hit-low', title: '缓存命中率偏低：3.2%', act: 'open-budget', actLabel: '看预算', level: 'warn'),
       _advice(id: 'archive-stale', title: '日志已 9 天未归档', act: 'goto-tools', actLabel: '去工具组'),
       _advice(id: 'persona-stale', title: '人格已 30 天没有演化', act: 'goto-persona', actLabel: '看人格'),
     ]));
 
-    expect(actBtn('review-stale'), findsOneWidget);
-    expect(actBtn('cache-hit-low'), findsOneWidget);
-    expect(actBtn('archive-stale'), findsOneWidget);
-    expect(actBtn('persona-stale'), findsOneWidget);
-    // 文案就是 actLabel 原文（界面不另编一套：同一件事在日志与卡面上得叫同一个名字）
-    for (final label in ['去处理', '看预算', '去工具组', '看人格']) {
-      expect(find.text(label), findsOneWidget, reason: '「$label」该原样出现在它的那张卡上');
+    // 整段不出现：小标题不在、卡片不在、那四句标题也不在
+    expect(find.text('建议'), findsNothing, reason: '没有死信时这块不该占版面');
+    for (final id in ['review-stale', 'cache-hit-low', 'archive-stale', 'persona-stale']) {
+      expect(find.byKey(ValueKey('advice-$id')), findsNothing);
     }
   });
 
-  testWidgets('② open-budget → 日志页；goto-persona → 人格配置页', (tester) async {
-    final state = await pumpOverview(tester, _routes(suggestions: [
-      _advice(id: 'cache-hit-low', title: '缓存命中率偏低', act: 'open-budget', actLabel: '看预算'),
-      _advice(id: 'persona-stale', title: '人格 30 天没动', act: 'goto-persona', actLabel: '看人格'),
-    ]));
-    expect(state.pageId, 'overview');
-
-    await tester.tap(actBtn('cache-hit-low'));
-    await tester.pump();
-    expect(state.pageId, 'logs', reason: '预算面板在日志页的第一个 tab（概览）里');
-
-    await tester.tap(actBtn('persona-stale'));
-    await tester.pump();
-    expect(state.pageId, 'persona');
-  });
-
-  testWidgets('③ goto-tools → 扩展页，且落在「内置工具」那一段（不是页首）', (tester) async {
-    final routes = _routes(suggestions: [
-      _advice(id: 'archive-stale', title: '日志已 9 天未归档', act: 'goto-tools', actLabel: '去工具组'),
-    ]);
-    final state = await pumpOverview(tester, routes);
-
-    await tester.tap(actBtn('archive-stale'));
-    await tester.pump();
-    expect(state.pageId, 'extensions');
-
-    // 真的开一页扩展页（同一个 state）：落点提示会被它取走，直接选到「内置工具」
-    tester.view.physicalSize = const Size(1400, 900);
-    await tester.pumpWidget(const SizedBox());
-    await tester.pumpWidget(MaterialApp(
-      theme: IrmiaTheme.light(),
-      home: Scaffold(body: ExtensionsPage(state: state)),
+  testWidgets('② 有死信才出现：一张卡 + 重投/丢弃两颗按钮', (tester) async {
+    await pumpOverview(tester, _routes(
+      suggestions: [
+        _advice(id: 'archive-stale', title: '日志已 9 天未归档', act: 'goto-tools', actLabel: '去工具组'),
+        _advice(id: 'dead-letters', title: '死信队列非空（1）', act: 'goto-review', actLabel: '去处理', level: 'warn'),
+      ],
+      deadLetters: [
+        {'inputSeq': 42, 'reason': 'channel offline', 'at': '2026-10-26T00:00:00Z'},
+      ],
     ));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
 
-    expect(
-      find.text('随程序一起来的工具：按组开关，关掉即从她的清单里拿掉'),
-      findsOneWidget,
-      reason: '落点提示要生效：详情该停在「内置工具」那一项，而不是默认的「技能」',
-    );
-    // 取走即清：再进一次这一页时不该又跳一次（用的是左侧导航那条路）
-    expect(state.takeSectionFor('extensions'), isNull);
+    expect(find.text('建议'), findsOneWidget);
+    expect(find.byKey(const ValueKey('advice-dead-letters')), findsOneWidget);
+    expect(find.byKey(const ValueKey('advice-archive-stale')), findsNothing);
   });
 
-  testWidgets('④ goto-review 的落点在本页：没有待确认卡时如实说一句', (tester) async {
-    final state = await pumpOverview(tester, _routes(suggestions: [
-      _advice(id: 'review-stale', title: '3 项待确认已超 3 天', act: 'goto-review', actLabel: '去处理', level: 'warn'),
-    ]));
-    // 投影里 needsReview 是空的 ⇒ 本页没有那张卡可以滚过去
-    await tester.tap(actBtn('review-stale'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
+  testWidgets('③ 死信那条不摆 act 按钮（它自己有重投/丢弃，混在一张卡上只会点错）', (tester) async {
+    await pumpOverview(tester, _routes(
+      suggestions: [
+        _advice(id: 'dead-letters', title: '死信队列非空（1）', act: 'goto-review', actLabel: '去处理', level: 'warn'),
+      ],
+      deadLetters: [
+        {'inputSeq': 7, 'reason': 'channel offline', 'at': '2026-10-26T00:00:00Z'},
+      ],
+    ));
 
-    expect(find.text('现在没有待确认的调用'), findsOneWidget, reason: '不假装跳过去了：卡不在就直说');
-    expect(state.pageId, 'overview', reason: '它本来就不该切页');
-    await tester.pump(const Duration(seconds: 4)); // toast 计时器收尾
-  });
-
-  testWidgets('④b goto-review 的另一半：有待确认卡时滚过去（不切页、也不谎报"没有"）', (tester) async {
-    final state = await pumpOverview(
-      tester,
-      _routes(
-        suggestions: [
-          _advice(id: 'review-stale', title: '3 项待确认已超 3 天', act: 'goto-review', actLabel: '去处理', level: 'warn'),
-        ],
-        reviewItems: [
-          {'callId': 'call-7', 'name': 'safe_write', 'at': '2026-09-28T02:00:00.000Z'},
-        ],
-      ),
-    );
-    // 待确认卡就在本页（建议区上面）：落点是"滚过去"，不是"切页"
-    expect(find.text('待确认 1 项'), findsOneWidget);
-
-    await tester.tap(actBtn('review-stale'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
-
-    expect(find.text('现在没有待确认的调用'), findsNothing, reason: '卡在的时候不许说"没有"');
-    expect(state.pageId, 'overview', reason: '落点在本页');
-    expect(find.text('待确认 1 项'), findsOneWidget, reason: '那张卡还在原处，只是被滚进了视野');
-  });
-
-  testWidgets('⑤ 认不出的 act 一颗按钮都不摆；死信那条也不摆（它自己有重投/丢弃）', (tester) async {
-    await pumpOverview(
-      tester,
-      _routes(
-        suggestions: [
-          _advice(id: 'whatever', title: '一条还没有动作的建议', act: 'no-such-act', actLabel: '点我'),
-          _advice(id: 'dead-letters', title: '死信队列非空（1）', act: 'goto-review', actLabel: '去处理', level: 'warn'),
-        ],
-        deadLetters: [
-          {'inputSeq': 42, 'claimCount': 3, 'at': '2026-10-05T03:12:00.000Z'},
-        ],
-      ),
-    );
-
-    // 认不出的 act：不摆按钮（摆一颗不知道去哪儿的按钮比不摆更糟）
-    expect(actBtn('whatever'), findsNothing);
-    expect(find.text('点我'), findsNothing);
-    // 死信那条：服务端也给 act，但它自己有按条决定的两颗按钮，这里不重复摆
     expect(actBtn('dead-letters'), findsNothing);
-    expect(find.byKey(const ValueKey('dead-requeue-42')), findsOneWidget);
-    expect(find.byKey(const ValueKey('dead-discard-42')), findsOneWidget);
-  });
-
-  testWidgets('⑥ 回归：没有 act 的建议卡不摆按钮，卡面点击仍是老行为（去人格配置）', (tester) async {
-    final state = await pumpOverview(tester, _routes(suggestions: [
-      // 服务端没有给它 act/actLabel（老形状；本页合成的 `persona-seed` 也是这一类）
-      _advice(id: 'legacy-note', title: '一条没有动作的旧建议'),
-    ]));
-
-    expect(actBtn('legacy-note'), findsNothing, reason: '没有 act 就没有按钮可摆');
-    expect(find.text('去处理'), findsNothing, reason: '别拿兜底文案凭空造一颗按钮出来');
-
-    // 老行为一个字没改：卡面点击去人格配置
-    await tester.tap(find.byKey(const ValueKey('advice-legacy-note')));
-    await tester.pump();
-    expect(state.pageId, 'persona', reason: '没有 act 的卡：点卡面照旧去人格配置');
+    expect(find.byKey(const ValueKey('advice-dead-letters')), findsOneWidget);
   });
 }
+

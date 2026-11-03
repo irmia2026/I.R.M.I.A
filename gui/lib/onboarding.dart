@@ -594,7 +594,11 @@ class _OnboardingHostState extends State<OnboardingHost> {
     // 三态：false = 没问过（文件不在也算这一档：真·首次安装）；true = 问过；
     // null = 记录坏了。未知按"不弹"处理——手动通道（首页「配置引导」）照样能开，
     // 见 [_openManually]。
-    final askedBefore = await loadFlag(kOnboardingDoneFlag);
+    //
+    // 2026-10-26：这个标志改成**按实例作用域**（后缀是她的数据目录）。
+    // 原来一台机器只有一份，于是"新建一台实例"直接继承了老实例的"已经引导过"，
+    // 新实例第一次打开什么都不问、落在空白运行情况页（实测就是这样）。
+    final askedBefore = await loadFlag(onboardingFlagKeyOf(widget.state));
     if (!mounted) return;
     final force = Platform.environment[kForceOnboardingEnv];
     // 强制口子下不必读现状：它要答的问题是"这张卡长什么样、四步走得通吗"，
@@ -629,7 +633,7 @@ class _OnboardingHostState extends State<OnboardingHost> {
         fromFirstRun: fromFirstRun,
       );
       // 只有"首次那条路"才写「问过了」：手动打开不动它（见 [_openManually]）
-      if (fromFirstRun) await saveFlag(kOnboardingDoneFlag, true);
+        if (fromFirstRun) await saveFlag(onboardingFlagKeyOf(widget.state), true);
       if (!mounted) return;
       final strings = IrmiaStrings.read(context);
       IrmiaToast.show(
@@ -3521,3 +3525,23 @@ List<({String route, String envName})> _noSlotRoutes(Object? resp) {
   }
   return out;
 }
+
+/// 「引导问过了」这个标志的**键**：一台实例一份（后缀是她的数据目录）。
+///
+/// 为什么必须按实例隔离：标志原来是一台机器一份，"新建实例"会直接继承老实例的
+/// "已经引导过"，于是新实例第一次打开什么都不问（2026-10-26 实测）。
+/// 读与写**必须**都走这一个函数，否则会出现"写了另一台实例的键、这台永远不弹"。
+String onboardingFlagKeyOf(AppState state) {
+  final scope = (onboardingFlagScopeOverride ?? state.knownDataDir).trim();
+  return scope.isEmpty ? kOnboardingDoneFlag : '$kOnboardingDoneFlag@$scope';
+}
+
+/// **测试注入点**：把作用域钉成确定值（`''` = 旧行为，只用 `onboarding-done`）。
+///
+/// 正常运行时是 null（按当前实例的数据目录算）。用例需要它，是因为测试里的
+/// `AppState` 没有"当前实例"，`knownDataDir` 会去读本机真实的登记表——同一个用例
+/// 在不同机器上就会算出不同的键。生产路径不读这个变量。
+@visibleForTesting
+String? onboardingFlagScopeOverride;
+
+

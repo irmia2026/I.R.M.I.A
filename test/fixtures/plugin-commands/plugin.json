@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-commands",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": ["commands.define", "state.plugin"],
+  "meta": { "title": "聊天指令演示", "author": "tests", "desc": "P1b e2e 夹具：注册指令、别名、args 校验、admin 权限、冲突与 keepInContext" }
+}

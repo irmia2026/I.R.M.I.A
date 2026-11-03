@@ -13,18 +13,25 @@
  * 编译输出由 rewriteRelativeImportExtensions 改回 .js。
  */
 
-import { AGENT_VERSION } from './version.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
 // 值导入：工具侧写入点的**可见性判据**（表说 model 的事件省略可见性即抛，见它的注释）
-import { resolveEventVisibility } from './log/types.ts';
+import { contextImageMediaType, resolveEventVisibility } from './log/types.ts';
 import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channel/inbox.ts';
+// P1b 的入站唯一收口：过滤链 → 指令 → 原有唤醒/信箱分流（语义全在模块文件头）
+import { InboundPipeline } from './channel/inbound.ts';
+import { StickerHarvester } from './stickers/harvest.ts';
+import { StickerRuntime } from './stickers/runtime.ts';
+import { StickerService } from './stickers/service.ts';
+import { StickerStore } from './stickers/store.ts';
+import { StickerTagger } from './stickers/tagger.ts';
 import { ManagedProtocolService, readEndpointFromConfig, resolveServiceDir } from './services/snowluma.ts';
 import { normalizeSid, parseAliases } from './channel/sessions.ts';
+import { isOwnerChannelMessage, ownerIdsFrom } from './runtime/trust.ts';
 import { createNotifier } from './alert/notifier.ts';
 import { notifyStartupRecoveryDetailed, restoreStartupAlertWindow } from './alert/startup.ts';
 import {
@@ -37,11 +44,12 @@ import { ensureMemorySeeds } from './persona/memory-maintain.ts';
 import { ensureMemoryIndex } from './persona/memory-injection.ts';
 import { DsClient, type DsResponse } from './model/ds-client.ts';
 import type { SwitchDecision } from './model/transport/registry.ts';
-import { McpClientPool, type McpClientPoolOptions, type McpDeclarationChange } from './mcp/client.ts';
+import { makeMcpImageAttacher } from './mcp/attach-image.ts';
+import { McpClientPool, type McpClientPoolOptions, type McpDeclarationChange, type McpServerEntry } from './mcp/client.ts';
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
 import type { ToolRegistry } from './tools/registry.ts';
-import type { InputNotifyPoster, MediaPoster, ReplyPoster } from './tools/admin.js';
+import type { InputNotifyPoster, MediaPoster, MediaRequest, ReplyPoster } from './tools/admin.js';
 import { SkillManager, planSkillRoots, type SkillRootRef } from './skill/skills.ts';
 import { ensureSkillsSeed, SKILLS_DIR_NAME } from './skill/seed.ts';
 // 路径比较（大小写 / 分隔符 / 尾部空格点的归一）只有一处实现：见 `tools/boundary.ts` 的文件头
@@ -98,11 +106,18 @@ import {
   type GuiGuard, type GuiGuardRecord,
 } from './runtime/gui-guard.ts';
 import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
+// 插件平台（2026-10-26）：管理器、组合面、熔断器与半开探针。装配全在本文件；
+// 判据各自在模块里（`plugin/*.ts` 的注释指着每一处"为什么这样写"）。
 import { PluginManager, type PluginView } from './plugin/manager.ts';
 import { PluginCircuitBreaker } from './plugin/circuit-breaker.ts';
 import { composePluginMcp } from './plugin/contributions.ts';
 import { PluginProbeCancelledError, type PluginFailure } from './plugin/failures.ts';
-import { composePluginRuntime, mapPluginMcpOwners, mergeMcpDeclarations, pluginProtectedPaths, type PluginRuntimeComposition } from './plugin/runtime.ts';
+import {
+  composePluginRuntime, mapPluginMcpOwners, mergeMcpDeclarations, pluginProtectedPaths, type PluginRuntimeComposition,
+} from './plugin/runtime.ts';
+import { PluginHost, type PluginOutboundMedia } from './plugin/host-services.ts';
+import { completePluginModel } from './plugin/model-call.ts';
+import { parseReplyUrlAny, replyUrlForWake } from './tools/admin.ts';
 import { allEventsOf } from './state/event-snapshot.ts';
 import { EVENT_LOG_DIR_NAME, TIMER_FILE_NAME, recover, type RecoverResult } from './runtime/recover.ts';
 import { TimerStore } from './wake/timer-store.ts';
@@ -117,6 +132,7 @@ import {
 // 那一道闸的**调用入口**（判据只一份，见 `channel/self-message-gate.ts` 的文件头）
 import { channelGate } from './channel/self-message-gate.ts';
 import { createWorkspaceMediaPoster } from './channel/media-poster.ts';
+import { findQqAppIdConflict } from './channel/qq-app-id-guard.ts';
 import { createInputNotifyPoster } from './channel/input-notify.ts';
 import {
   ONEBOT_REPLY_SCHEME, OneBotChannel, createOneBotReplyPoster,
@@ -137,7 +153,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export { AGENT_VERSION } from './version.ts';
+export const AGENT_VERSION = '0.1.0-beta.14';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -610,6 +626,71 @@ function contentKey(prefix: string, text: string): string {
 }
 
 /**
+ * 插件交出来的媒体 → 通道层的 `MediaRequest`。
+ *
+ * `base64` 是插件唯一能"自带字节"的写法：它没有整机文件系统，宿主也不允许它把任意路径
+ * 交给通道（那会绕过受保护路径那道门）。`path` 在 host-services 里已经被解析成插件数据目录
+ * 内的绝对路径。
+ */
+function mediaRequestOf(media: PluginOutboundMedia): MediaRequest {
+  return {
+    fileType: media.fileType ?? 1,
+    ...(media.url === undefined ? {} : { url: media.url }),
+    ...(media.path === undefined ? {} : { path: media.path }),
+    ...(media.base64 === undefined ? {} : { data: Buffer.from(media.base64, 'base64') }),
+    ...(media.name === undefined ? {} : { name: media.name }),
+  };
+}
+
+/**
+ * 给模型客户端套一层插件钩子（`model.request` / `model.response`）。
+ *
+ * 为什么用 Proxy 而不是改 `agent-loop.ts`：`ds.stream()` 是所有请求的唯一出口，而 agent-loop
+ * 是个 30 万字节的大文件——在它的调用点插一行，与在这里包一层，语义完全一样，但前者的
+ * 回归面大得多。代理只拦这两个方法，其余方法原样绑回去（`subscribeRetry` 那些还要靠 this）。
+ *
+ * `model.request` **内联等待**（设计稿：可以改系统后缀，最长 2s）；`model.response` 是旁路
+ * （响应已经到手，插件只观察）。两条都不能让插件把一轮请求卡死。
+ */
+function instrumentModelClient(client: DsClient, host: PluginHost): DsClient {
+  return new Proxy(client, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof value !== 'function') return value;
+      if (property !== 'stream' && property !== 'generate') return (value as (...args: never[]) => unknown).bind(target);
+      return async (request: Record<string, unknown>, ...rest: unknown[]) => {
+        const lane = typeof request['lane'] === 'string' ? request['lane'] : undefined;
+        const model = typeof request['model'] === 'string' ? request['model'] : undefined;
+        const instructions = typeof request['instructions'] === 'string' ? request['instructions'] : undefined;
+        let effective = request;
+        try {
+          const suffix = await host.modelRequestSuffix({
+            ...(lane === undefined ? {} : { lane }),
+            ...(model === undefined ? {} : { model }),
+            ...(instructions === undefined ? {} : { instructions }),
+          });
+          if (suffix !== '') {
+            effective = { ...request, instructions: instructions === undefined || instructions === '' ? suffix : `${instructions}\n${suffix}` };
+          }
+        } catch {
+          // 钩子故障按"没有改动"继续：host-services 已经把原因写进宿主日志
+        }
+        // 先把请求发出去（拿到在飞的 Promise），再报 `model.waiting`——语义是"已经在等模型了"。
+        // **fire-and-forget**：它是给"正在输入"这类 UX 用的信号，绝不能拖慢或失败掉一次真实请求。
+        const pending = (value as (...args: unknown[]) => Promise<unknown>).call(target, effective, ...rest);
+        host.noteModelWaiting({
+          ...(lane === undefined ? {} : { lane }),
+          ...(model === undefined ? {} : { model }),
+        });
+        const response = await pending;
+        host.noteModelResponse(response);
+        return response;
+      };
+    },
+  }) as DsClient;
+}
+
+/**
  * vision 的用量账**落库那一跳**（2026-10-21 从 `runMain` 里抽出来；抽的唯一理由是**可测**）。
  *
  * `runMain` 那边只留"为什么这条账只能由宿主写"那一段（`recordVisionUsage` 的注释），记账本体在这里：
@@ -621,15 +702,16 @@ function contentKey(prefix: string, text: string): string {
  */
 export function appendVisionConsumption(
   deps: { log: RecoverResult['log']; projection: RecoverResult['projection']; now: () => Date },
-  response: DsResponse,
+  response: DsResponse | null,
   turn: number,
   step: number,
+  options: { origin?: string; lane?: 'light' | 'heavy'; stickerTagging?: boolean; model?: string } = {},
 ): void {
   const { log, projection, now } = deps;
-  const usage = response.usage;
-  const inputTokens = usage.inputTokens;
-  const outputTokens = usage.outputTokens;
-  const cacheHit = Math.max(0, Math.min(usage.cachedTokens, inputTokens));
+  const usage = response?.usage;
+  const inputTokens = usage?.inputTokens ?? 0;
+  const outputTokens = usage?.outputTokens ?? 0;
+  const cacheHit = Math.max(0, Math.min(usage?.cachedTokens ?? 0, inputTokens));
   const event = {
     seq: log.nextSeq(),
     ts: now().toISOString(),
@@ -637,32 +719,28 @@ export function appendVisionConsumption(
     data: {
       turn,
       step,
-      lane: 'light',
-      // 模型名取响应里那一格（`DsResponse.model`），不猜——工具请求里那个可以是别名
-      model: response.model,
+      lane: options.lane ?? 'light',
+      model: response?.model ?? options.model ?? 'unknown',
       inputTokens,
       outputTokens,
       cacheHitTokens: cacheHit,
       cacheMissTokens: Math.max(0, inputTokens - cacheHit),
-      // 思维链 token：**每次都写**（没产思维链就是 0），见 log/types.ts 的字段注释
-      reasoningTokens: usage.reasoningTokens,
-      // 这一发实际用的协议（协议回退 C-3）：**有就带、没有就不写**（不猜、不默认成 'responses'）。
-      // 它不进请求体 ⇒ 不动 RENDER_VERSION。
-      ...(response.protocol === undefined ? {} : { protocol: response.protocol }),
-      // 对端没给 usage ⇒ 四格是补出来的 0（"预算少算"的判据；只在真缺时写这一格）
-      ...(response.usageMissing === true ? { usageMissing: true as const } : {}),
-      // 这一格是"这次 HTTP 往返"的量，`DsResponse` 自己带着，不必在这里读表
-      durationMs: response.durationMs,
+      reasoningTokens: usage?.reasoningTokens ?? 0,
+      ...(response?.protocol === undefined ? {} : { protocol: response.protocol }),
+      ...(response?.usageMissing === true ? { usageMissing: true as const } : {}),
+      ...(options.stickerTagging === true ? { stickerTagging: true as const } : {}),
+      durationMs: response?.durationMs ?? 0,
       retryCount: 0,
-      finishReason: response.status === 'completed'
-        ? 'completed'
-        : (response.incompleteReason === 'max_output_tokens' ? 'max_output_tokens' : 'failed'),
-      // 观测字段：本条写入之前的**内存投影**当日累计 + 本条（口径见 log/types.ts 该字段注释）
+      finishReason: response === null
+        ? 'failed'
+        : (response.status === 'completed'
+          ? 'completed'
+          : (response.incompleteReason === 'max_output_tokens' ? 'max_output_tokens' : 'failed')),
       tokensTodayAccum: projection.budget.tokensToday + inputTokens + outputTokens,
     },
     // `budget/consumed` 在 schema 表里是 internal ⇒ **一个字节都不进她的上下文**
     visibility: 'internal',
-    origin: 'tools/vision',
+    origin: options.origin ?? 'tools/vision',
   } as unknown as AppEvent;
   log.append(event, { sync: false });
   applyOne(projection, event);
@@ -923,6 +1001,27 @@ export function createPluginProbe(deps: PluginProbeDeps): PluginProbeHandle {
   };
 
   return { probe, cancelAll };
+}
+
+/**
+ * turn 边界钩子的**唯一实现**：踢一脚就走，**不等** `drain()` 收场。
+ *
+ * 为什么必须不等（B2，与作者确认过的行为修正）：`drain()` 会 `flushApply()`（把隔离/恢复
+ * 落到组合面与 MCP 池上）+ 对"隔离到期"的插件跑**网络探针**。它出现在 turn 收尾的
+ * `finally` 里，而下一批输入要等这一拍结束才认领 —— await 它等于让一次探活（最长 15s，
+ * 硬顶 30s）挡住下一轮对话。
+ *
+ * 正确形状是"踢一脚就走"：调度出去、把拒绝吃掉（否则会变成 unhandled rejection），
+ * 本函数立刻 resolve。熔断器自己有 1s 的定时器兜底，晚一拍落地不影响任何判据。
+ */
+export function pluginTurnBoundary(
+  getBreaker: () => { drain: () => Promise<void> } | null,
+): () => Promise<void> {
+  return async () => {
+    const breaker = getBreaker();
+    if (breaker === null) return;
+    breaker.drain().catch(() => undefined);
+  };
 }
 
 export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
@@ -1261,58 +1360,6 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     return event;
   };
 
-  const pluginManager = new PluginManager(dataDir, (type, data) => {
-    append(type, data, 'internal');
-  });
-  pluginManager.setEvents(await allEventsOf(log));
-  let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
-  let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
-  let circuitBreaker: PluginCircuitBreaker | null = null;
-  let replacePluginHooks: (entries: Parameters<HookRunner['setEntries']>[0]) => void = () => {};
-  let replacePluginSkills: (roots: PluginRuntimeComposition['skillRoots']) => void = () => {};
-  for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
-  const mcpDeclarations = (): readonly import('./mcp/client.js').McpServerEntry[] => {
-    pluginMcpOwners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
-    try {
-      return mergeMcpDeclarations(config.mcp.servers, pluginRuntime.mcpServers);
-    } catch (error) {
-      write(`[插件] MCP 声明冲突，保留内置配置：${describeError(error)}`);
-      return config.mcp.servers;
-    }
-  };
-  let runtimeApplyChain: Promise<unknown> = Promise.resolve();
-  const applyRuntimeDeclarations = <T>(action: (declarations: () => readonly import('./mcp/client.js').McpServerEntry[]) => Promise<T>): Promise<T> => {
-    const run = runtimeApplyChain.then(async () => await action(mcpDeclarations));
-    runtimeApplyChain = run.catch(() => undefined);
-    return run;
-  };
-  const applyPluginRuntime = (): Promise<void> => applyRuntimeDeclarations(async (currentDeclarations) => {
-    pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
-    const owners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
-    pluginMcpOwners = owners;
-    replacePluginSkills(pluginRuntime.skillRoots);
-    replacePluginHooks(pluginRuntime.hookEntries);
-    await mcpPoolRef.pool?.applyDeclarations(currentDeclarations());
-    for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
-  });
-  const mcpPluginFailure = (serverName: string, category: PluginFailure['category'], message: string): PluginFailure | null => {
-    const owner = pluginMcpOwners.get(serverName);
-    if (owner === undefined) return null;
-    return { ...owner, contributionKind: 'mcp', contributionName: serverName, category, message };
-  };
-  /**
-   * 半开探针：只探熔断器记下的那一条贡献，并给它一份独立的短预算。
-   *
-   * 判据与分支都在模块级的 `createPluginProbe`（那里能脱离 `runMain` 验）；这里只做装配，
-   * 顺手把"在飞的探测池"句柄留给退出流程，好在停熔断器之前先让探针 fast-fail。
-   */
-  const pluginProbe = createPluginProbe({
-    list: () => pluginManager.list(),
-    dataDir,
-    extraLaunchers: config.mcp.extraLaunchers,
-    write,
-  });
-
   /**
    * 同 [append]，但**把分配到的 seq 交给载荷构造器**。
    *
@@ -1339,6 +1386,92 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     log.append(event, { sync: true });
     return event;
   };
+
+  /**
+   * ──────────────────── 插件平台（2026-10-26）────────────────────
+   *
+   * 三件事在这里定下来，其余全在模块里：
+   *   ① **管理器**：生命周期（确认/启停/隔离）只从日志重放，所以先把已有事件喂给它；
+   *   ② **组合面**（`PluginRuntimeComposition`）：执行器、模型索引、重放、管理 API 共用的
+   *      那一份快照 —— 任何一处现拼一份，迟早出现"能调、索引里没有"；
+   *   ③ **声明面的合并口**（`mcpDeclarations`）：`config.json` + 已启用插件贡献的 server。
+   *      池与索引都从这里读同一份：两处各读一种，就会出现"插件 server 能调、索引不写它"。
+   *
+   * 装配在这里（`append` 之后、MCP 池之前）：插件要先知道历史，`protectedPaths` 要它那一格，
+   * 而池与循环要它给声明面与组合摘要。
+   */
+  /**
+   * 插件宿主的**先空后填**格子（P1a，2026-10-29）。
+   *
+   * 为什么不能直接 `const pluginHost = new PluginHost(...)`：管理器的 emit 回调在构造时就要
+   * 引用宿主（热启停靠事件驱动），而宿主又要用管理器（找包、标"已生效"、自动停用）。
+   * 这个环靠一格间接引用解开：回调里读 `pluginHostRef.host`，填充发生在下面装配宿主时。
+   */
+  const pluginHostRef: { host: PluginHost | null } = { host: null };
+  const pluginManager = new PluginManager(dataDir, (type, data) => {
+    append(type, data, 'internal');
+    // 热生命周期：进程的起停由插件宿主跟着事件走（P0 的声明式包没有进程，这条是空转）。
+    // 注意顺序：**先落库再动手**——"启用过"这一事实必须在任何副作用之前成立。
+    pluginHostRef.host?.onLifecycleEvent(type, data as Record<string, unknown>);
+  });
+  pluginManager.setEvents(await allEventsOf(log));
+  let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
+  let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
+  let circuitBreaker: PluginCircuitBreaker | null = null;
+  let replacePluginHooks: (entries: Parameters<HookRunner['setEntries']>[0]) => void = () => {};
+  let replacePluginSkills: (roots: PluginRuntimeComposition['skillRoots']) => void = () => {};
+  for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
+  const mcpDeclarations = (): readonly McpServerEntry[] => {
+    pluginMcpOwners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
+    try {
+      return mergeMcpDeclarations(config.mcp.servers, pluginRuntime.mcpServers);
+    } catch (error) {
+      // 重名是**配置冲突**，不是"插件坏了"：保留内置那一份并如实说一句（不能因为一个重名
+      // 让整池起不来——那会把无关的 server 一起拖下水）。
+      write(`[插件] MCP 声明冲突，保留内置配置：${describeError(error)}`);
+      return config.mcp.servers;
+    }
+  };
+  // 组合面的应用是**串行**的：`applyPluginRuntime` 会重算声明面并让池重连，两拍并发会把
+  // "先加后删"叠成池自己都说不清的中间态。
+  let runtimeApplyChain: Promise<unknown> = Promise.resolve();
+  const applyRuntimeDeclarations = <T>(action: (declarations: () => readonly McpServerEntry[]) => Promise<T>): Promise<T> => {
+    const run = runtimeApplyChain.then(async () => await action(mcpDeclarations));
+    runtimeApplyChain = run.catch(() => undefined);
+    return run;
+  };
+  const applyPluginRuntime = (): Promise<void> => applyRuntimeDeclarations(async (currentDeclarations) => {
+    pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
+    const owners = mapPluginMcpOwners(config.mcp.servers, pluginRuntime.packages, config.mcp.extraLaunchers);
+    pluginMcpOwners = owners;
+    replacePluginSkills(pluginRuntime.skillRoots);
+    replacePluginHooks(pluginRuntime.hookEntries);
+    await mcpPoolRef.pool?.applyDeclarations(currentDeclarations());
+    for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
+  });
+  /**
+   * MCP 池报上来的一次系统性故障 → 插件熔断器的输入。
+   *
+   * `pluginMcpOwners` 是"这个 server 名是哪个插件贡献的"的唯一映射：不在表里的（内置 server）
+   * 返回 null ⇒ 熔断器根本不参与内置 server 的故障处置（它只管插件）。
+   */
+  const mcpPluginFailure = (serverName: string, category: PluginFailure['category'], message: string): PluginFailure | null => {
+    const owner = pluginMcpOwners.get(serverName);
+    if (owner === undefined) return null;
+    return { ...owner, contributionKind: 'mcp', contributionName: serverName, category, message };
+  };
+  /**
+   * 半开探针：只探熔断器记下的那一条贡献，并给它一份独立的短预算。
+   *
+   * 判据与分支都在模块级的 `createPluginProbe`（那里能脱离 `runMain` 验）；这里只做装配，
+   * 顺手把"在飞的探测池"句柄留给退出流程，好在停熔断器之前先让探针 fast-fail。
+   */
+  const pluginProbe = createPluginProbe({
+    list: () => pluginManager.list(),
+    dataDir,
+    extraLaunchers: config.mcp.extraLaunchers,
+    write,
+  });
 
   const takeover = lockState.takeover;
   if (takeover !== null) {
@@ -1412,14 +1545,24 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 全仓没有测试覆盖，所以"启动到底按哪一档跑、事件落不落"这段被抽成可测函数
    * （`test/temp-sweep.test.ts` 的"启动接线"用例）。这里只留装配。
    */
+  // 2026-10-28：这一扫**不再拦启动**。
+  // 实测（全新数据目录、本机 %TEMP% 有几千个条目）：它一个吃掉 7.4 秒——新建实例要 8.9 秒
+  // 才好，其中 7.4 秒耗在这里（`IRMIA_TEMP_SWEEP=off` 时 1.4 秒就 ready）。
+  // 它是**清垃圾**，不属于"能不能开始干活"：推迟到就绪之后再跑，语义不变
+  // （同一个 plan、同一处 append、同一个事件），只是不再让人对着启动画面等。
   const sweepPlan = planTempSweep(process.env);
-  await runStartupTempSweep({
-    plan: sweepPlan,
-    log: write,
-    append: (type, data, visibility) => {
-      append(type, data, visibility);
-    },
-  });
+  const sweepTimer = setTimeout(() => {
+    void runStartupTempSweep({
+      plan: sweepPlan,
+      log: write,
+      append: (type, data, visibility) => {
+        append(type, data, visibility);
+      },
+    }).catch(() => {
+      // runStartupTempSweep 自己吞异常；这里兜底，别让未处理的 rejection 带走进程
+    });
+  }, 15_000);
+  sweepTimer.unref?.();
 
   // 后台任务管理器（design §4.21 jobs）：pwsh 的 runInBackground 从这里进出，
   // 共用它一个实例——job/* 与 wake/job 事件只有这一个写入点。
@@ -1686,7 +1829,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    */
   const qqReplyPoster = qqChannel === null ? null : createChannelReplyPoster(channels);
   const onebotReplyPoster = onebotChannel === null ? null : createOneBotReplyPoster(channels);
-  const replyPoster: ReplyPoster | null = qqReplyPoster === null && onebotReplyPoster === null
+  const baseReplyPoster: ReplyPoster | null = qqReplyPoster === null && onebotReplyPoster === null
     ? null
     : {
         async post(target, text) {
@@ -1746,13 +1889,15 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 每一项都指得出它的定义处，不再手写同义字面量。
   const protectedPaths: readonly string[] = [
     ...protectedHookPaths(dataDir),
+    // 插件包存储（`data/plugins/packages`）：整包哈希就是信任凭据，她**读**它可以
+    //（要看自己有哪些插件），但改它等于改一份已被确认的内容 ⇒ 写入口一律拒绝。
     ...pluginProtectedPaths(dataDir),
     keysPath(dataDir),                                    // data/.keys.json：模型与通道密钥
     join(dataDir, AUTH_FILE_NAME),                        // data/.auth.json：界面密码与会话凭据
     join(dataDir, WEBHOOK_SECRET_FILE_NAME),              // data/.webhook-secret.json：webhook 专用凭据
     join(dataDir, UI_TOKEN_FILE),                         // data/.ui-token：遗留共享 token（只读兼容）
   ];
-  const mediaPoster: MediaPoster | null = channels.size === 0
+  const baseMediaPoster: MediaPoster | null = channels.size === 0
     ? null
     : createWorkspaceMediaPoster({
       dataDir,
@@ -1760,6 +1905,200 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       channels,
       protectedPaths,
     });
+
+  /**
+   * ──────────────────── 代码级插件运行宿主（P1a，2026-10-29）────────────────────
+   *
+   * 三件事在这里接起来，其余全在 `plugin/host-services.ts`：
+   *   ① **工具目录**：插件注册的工具进的是同一个 `ToolRegistry`（晚绑定：目录在下面才造好）；
+   *   ② **出站消息**：`ctx.chat.send` 与 `reply.decorate`/`message.sent` 共用下面这两个
+   *      投递口（文本与媒体），所以"插件主动发的话"与"她发的话"走同一条路、同一套凭据门；
+   *   ③ **模型**：`ctx.model.complete` 走同一个 `DsClient`（下面给的是惰性取值——`ds` 稍后才建），
+   *      并复用 vision 那条记账口把 token 计入当日预算。
+   *
+   * 权限在调用那一刻判：宿主这一层只提供"能力出口"，判据在 host-services 里逐方法过。
+   */
+  const pluginToolSink: { current: { register: (definition: Parameters<ToolRegistry['register']>[0]) => void; unregister: (name: string) => void } | null } = { current: null };
+  /** 投递口与模型客户端的**先空后填**格子：它们在宿主之后才装配/构造，回调发生在运行期 */
+  const outboundRef: { reply: ReplyPoster | null; media: MediaPoster | null } = { reply: null, media: null };
+  const pluginModelClientRef: { current: DsClient | null } = { current: null };
+  const pluginHost = new PluginHost({
+    dataDir,
+    write,
+    emit: (type, data) => { append(type, data, 'internal'); },
+    tools: {
+      register: (definition) => {
+        const sink = pluginToolSink.current;
+        if (sink === null) throw new Error('工具目录尚未就绪，插件工具注册被拒');
+        sink.register(definition);
+      },
+      unregister: (name) => { pluginToolSink.current?.unregister(name); },
+    },
+    bridge: {
+      recordFailure: (id, contentHash, reason, category) => pluginManager.recordFailure(id, contentHash, reason, category),
+      markRuntimeApplied: (id, contentHash) => pluginManager.markRuntimeApplied(id, contentHash),
+      applyComposition: () => { void applyPluginRuntime(); },
+      autoDisable: (id, contentHash, reason) => {
+        try {
+          pluginManager.setEnabled(id, contentHash, false);
+        } catch (error) {
+          write(`[插件] 自动停用 ${id} 失败：${describeError(error)}`);
+        }
+        write(`[插件] ${id} 已自动停用：${reason}`);
+      },
+      packageOf: (id, contentHash) => pluginManager.list()
+        .find((view) => view.package.manifest.id === id && view.package.contentHash === contentHash)?.package ?? null,
+      alert: (input) => {
+        void notifier.alert({ category: input.category, level: 'warn', title: input.title, body: input.body })
+          .catch((error: unknown) => { write(`[插件] 告警没发出去（不影响插件本身）：${describeError(error)}`); });
+      },
+    },
+    // 出站消息：与 speak 同一条回投地址（当前会话），受通道能力限制
+    sendChat: async (_plugin, message) => {
+      const wake = realLoopRef.current?.wakeChannel() ?? null;
+      if (wake === null) return { ok: false, reason: '当前没有正在处理的会话，插件消息没有回投地址' };
+      if (message.text === undefined && message.media === undefined) return { ok: false, reason: '没有要发的内容' };
+      const target = { url: replyUrlForWake(wake), idempotencyKey: `plugin-${Date.now()}` };
+      if (outboundRef.reply === null) return { ok: false, reason: '没有可用通道（回投口未装配）' };
+      if (message.text !== undefined) {
+        const outcome = await outboundRef.reply.post(target, message.text);
+        if (!outcome.ok) return { ok: false, reason: outcome.reason };
+      }
+      if (message.media !== undefined) {
+        if (outboundRef.media === null) return { ok: false, reason: '没有可用媒体通道' };
+        const outcome = await outboundRef.media.post(target, mediaRequestOf(message.media));
+        if (!outcome.ok) return { ok: false, reason: outcome.reason };
+      }
+      return { ok: true };
+    },
+    // 会话读取（`chat.read`）：与 `read_channel` 同一个宿主口（只读最近 limit 条）
+    readChat: async (_plugin, request) => {
+      const loopNow = realLoopRef.current;
+      const wake = loopNow?.wakeChannel() ?? null;
+      if (loopNow === null || wake === null) return [];
+      const sid = `${wake.channel}:${wake.chatType}:${wake.chatId}`;
+      return await loopNow.readChannelMessages(sid, request.limit);
+    },
+    // 模型：同一个 DsClient、同一份当日预算。tier → lane 的映射只有这一处。
+    completeModel: async (_plugin, request) => {
+      const client = pluginModelClientRef.current;
+      if (client === null) throw new Error('模型通道尚未就绪');
+      const { reply, response } = await completePluginModel(client, request);
+      // token 计入当日账（与 vision 同一条落库口；turn/step 填 0 = "不属于某一轮"）
+      try {
+        appendVisionConsumption({ log, projection: recovery.projection, now }, response, 0, 0, { origin: 'plugin', lane: request.tier });
+      } catch (error) {
+        write(`[插件] 插件模型用量的记账失败（不影响返回）：${describeError(error)}`);
+      }
+      return reply;
+    },
+    currentSessionId: () => {
+      const wake = realLoopRef.current?.wakeChannel() ?? null;
+      return wake === null ? null : `${wake.channel}:${wake.chatType}:${wake.chatId}`;
+    },
+    /**
+     * 「这条消息的发送者是用户吗」——`message.received` 的 admin 过滤与 `admin` 权限的
+     * 聊天指令共用这一格。判据**不在 main 里另写**：`trust.ts` 的 `isOwnerChannelMessage`
+     * 直接复用 `trustOfWake`（c2c 联系人表里的用户名字 + 已声明的用户 id），
+     * 与"她眼里谁是用户"同一份口径。
+     */
+    isOwnerMessage: (message) => isOwnerChannelMessage(
+      message,
+      new Map(Object.entries(config.persona.contacts)),
+      config.persona.owner,
+      ownerIdsFrom(config.persona.contacts, config.persona.owner),
+    ),
+  });
+  pluginHostRef.host = pluginHost;
+  // 管理视图与卸载：pid/uptime 从宿主读；删目录之前先在宿主里收尸（同步口）
+  pluginManager.setRuntimeStatusProvider((id, contentHash) => pluginHost.status(id, contentHash));
+  pluginManager.setUninstallHook((id, contentHash) => { pluginHost.killForUninstall(id, contentHash); });
+
+  /**
+   * `turn.start` / `turn.end` 的观察点：**事件驱动**（fire-and-forget）。
+   *
+   * 为什么不改 `agent-loop.ts`：turn 事件是循环层直接写 `EventLog` 的（不过 main 的 append），
+   * 而 `EventLog.onAppend` 是全部事件的唯一漏斗（含子代理那一支）。代价是这两个钩子
+   * **不阻塞 turn**——P1a 的定级就是"观察 + 旁路"，不是"能改写这一轮"。
+   */
+  log.onAppend((event) => {
+    if (event.type !== 'turn/start' && event.type !== 'turn/end') return;
+    const data = event.data as Record<string, unknown>;
+    const turn = typeof data['turn'] === 'number' ? data['turn'] : 0;
+    if (event.type === 'turn/start') {
+      pluginHost.noteTurn('turn.start', { turn, seq: event.seq });
+      return;
+    }
+    pluginHost.noteTurn('turn.end', {
+      turn,
+      seq: event.seq,
+      spoke: data['spoke'] === true,
+      reason: typeof data['reason'] === 'object' && data['reason'] !== null
+        ? String((data['reason'] as Record<string, unknown>)['kind'] ?? '')
+        : '',
+    });
+  });
+
+  /**
+   * **出站装饰与回执**：所有"她要发出去的话/媒体"都从这里过（`speak`、`send_media`、
+   * 插件自己的 `ctx.chat.send` 也是同一对投递口）。
+   *
+   * 为什么包在投递口而不是通道里：通道是平台相关的（OneBot / 官方），一处一处挂
+   * `reply.decorate` 就等于"哪条通道忘了挂，哪条通道的插件就失效"。投递口是与平台无关的
+   * 唯一收口。
+   */
+  const wrapReplyPoster = (inner: ReplyPoster): ReplyPoster => ({
+    async post(target, text) {
+      const where = parseReplyUrlAny(target.url);
+      const decorated = await pluginHost.decorateReply({
+        ...(where.ok ? { channel: where.channel, chatId: where.chatId } : {}),
+        text,
+      });
+      const outcome = await inner.post(target, decorated.text);
+      pluginHost.noteMessageSent({ channel: where.ok ? where.channel : 'unknown', chatId: where.ok ? where.chatId : '', ok: outcome.ok, text: decorated.text });
+      for (const media of decorated.extraMedia) {
+        if (outboundRef.media === null) continue;
+        try {
+          const receipt = await outboundRef.media.post(target, mediaRequestOf(media));
+          if (!receipt.ok) write(`[插件] 附加媒体没发出去：${receipt.reason}`);
+        } catch (error) {
+          write(`[插件] 附加媒体投递异常：${describeError(error)}`);
+        }
+      }
+      return outcome;
+    },
+  });
+  const wrapMediaPoster = (inner: MediaPoster): MediaPoster => ({
+    async post(target, media) {
+      const where = parseReplyUrlAny(target.url);
+      if (pluginHost.hasHook('reply.decorate')) {
+        const decorated = await pluginHost.decorateReply({
+          ...(where.ok ? { channel: where.channel, chatId: where.chatId } : {}),
+          text: '',
+        });
+        for (const extra of decorated.extraMedia) {
+          try {
+            const receipt = await inner.post(target, mediaRequestOf(extra));
+            if (!receipt.ok) write(`[插件] reply.decorate 的附加媒体没发出去：${receipt.reason}`);
+          } catch (error) {
+            write(`[插件] reply.decorate 的附加媒体投递异常：${describeError(error)}`);
+          }
+        }
+      }
+      const outcome = await inner.post(target, media);
+      pluginHost.noteMessageSent({ channel: where.ok ? where.channel : 'unknown', chatId: where.ok ? where.chatId : '', ok: outcome.ok });
+      return outcome;
+    },
+  });
+  /**
+   * 下游拿到的是**包过一层**的投递口：运行期所有出站消息都经过插件钩子。
+   * 没有插件订阅时这两个包装只是一次空判，不改变任何既有行为。
+   */
+  const replyPoster: ReplyPoster | null = baseReplyPoster === null ? null : wrapReplyPoster(baseReplyPoster);
+  const mediaPoster: MediaPoster | null = baseMediaPoster === null ? null : wrapMediaPoster(baseMediaPoster);
+  outboundRef.reply = replyPoster;
+  outboundRef.media = mediaPoster;
+
   let toolRegistry: ToolRegistry | undefined;
   // destructive 工具的开关（三态）归一到布尔：true 或非空名单都表示「开着」——
   // 名单模式的逐件过滤由注册表的 includeDestructive 负责，装配层只需知道要不要把它们造出来。
@@ -1830,7 +2169,20 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    */
   // 阶段播报（`/api/health` 的 `phase`）：接下来是 MCP 池与工具注册表的装配
   startupState.setPhase('mcp');
+  const mcpAttachImage = makeMcpImageAttacher({
+    dataDir,
+    enabled: config.vision.imagesToContext === true,
+      append: (data) => {
+        append(
+          'image/attached',
+          { key: data.key, mime: data.mime },
+          resolveEventVisibility('image/attached', 'model'),
+        );
+      },
+      onSkip: (reason) => { write(`[MCP] 图片没进上下文：${reason}`); },
+    });
   const mcpPool = new McpClientPool({
+    // 声明面 = `config.json` + 已启用插件贡献的 server（同一个合并口，索引读的也是它）
     servers: mcpDeclarations(),
     // 生命周期事件落 mcp/server-started / mcp/server-stopped（internal）：
     // 界面「扩展 → MCP」的运行期状态就是从这两条折出来的（mcpView）
@@ -1841,7 +2193,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // `vision_read` / `speak` 那两个洞的形状，见 resolveEventVisibility 的注释）。
     emit: (type, data) => { append(type, data, resolveEventVisibility(type, 'internal')); },
     dataDir,
-    now: () => now().getTime(),
+    /**
+     * MCP 工具结果里的图片（2026-10-30 修）：落 `workspace/attachments/mcp/<server>/` 并写
+     * `image/attached`——渲染层看到它就把图作为 input_image 注入下一次请求。
+     * 为什么要经过宿主：工作区路径、"图片直通"开关（config.vision.imagesToContext）与
+     * 事件可见性表都只在这儿；客户端不该猜。
+     */
+    attachImage: mcpAttachImage,
     onLog: (line) => { write(`[MCP] ${line}`); },
     // 两格池级参数（2026-10-10 接线，出厂值在 config.ts 的 mcp 段）：
     //   · maxInFlight = **整池**在飞上限（超限如实拒绝、不排队；极多 server + 子代理并发时往上调，
@@ -1850,17 +2208,29 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     //     IRMIA_MCP_RSS_SAMPLE 比它优先，见 client.ts 的 resolveRssSampler）。
     maxInFlight: config.mcp.maxInFlight,
     rssSample: config.mcp.rssSample,
+    // 熔断器要按**真实时钟**判"隔离到期"，所以池的 `now` 与它同源（`now()` 是宿主唯一时钟）
+    now: () => now().getTime(),
+    /**
+     * 系统性故障的归因口（插件平台）：只有**插件贡献的** server 会被折成插件失败，
+     * 内置 server 的故障照旧只走池自己的退避与日志（`mcpPluginFailure` 返回 null）。
+     */
     onSystemicFailure: (signal) => {
       const failure = mcpPluginFailure(signal.serverName, signal.category, signal.message);
       if (failure !== null) circuitBreaker?.noteFailure(failure);
     },
+    /** 一次真的成功 ⇒ 把这条 server 的半开状态恢复回去（不必等探针那一拍） */
     onRequestSuccess: (serverName) => {
       const failure = mcpPluginFailure(serverName, 'timeout', '');
       if (failure !== null) circuitBreaker?.noteSuccess(failure);
     },
   });
   mcpPoolRef.pool = mcpPool;
-  circuitBreaker = new PluginCircuitBreaker({ manager: pluginManager, now: () => now().getTime(), apply: applyPluginRuntime, probe: pluginProbe.probe });
+  circuitBreaker = new PluginCircuitBreaker({
+    manager: pluginManager,
+    now: () => now().getTime(),
+    apply: applyPluginRuntime,
+    probe: pluginProbe.probe,
+  });
   if (config.mcp.servers.length === 0) {
     write('[MCP] config.json 里没有声明任何 server（mcp.servers[] 为空）：'
       + '`mcp` 工具照常在她手里，调用时会如实说"没有已声明的 server"');
@@ -1941,6 +2311,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 失败也不吞：catch 里如实写一行。
     void (async () => {
       try {
+        // 池的重连也走**串行链**：插件组合变化（`applyPluginRuntime`）与配置热更都是"改声明面"，
+        // 两条路并发会让池看到两种顺序交错的声明面。
         const declChange = await applyRuntimeDeclarations(async (currentDeclarations) => await mcpPool.applyDeclarations(currentDeclarations()));
         const declarations = mcpDeclarations();
         const touched = declChange.added.length + declChange.removed.length + declChange.changed.length;
@@ -1950,7 +2322,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
           write('[MCP] 声明面变了但每个 server 的内容都一样（多半只调了次序）：不重连、不通报');
           return;
         }
-        const note = mcpReloadNoteOf(declChange, declarations.length);
+        const note = mcpReloadNoteOf(declChange, config.mcp.servers.length);
         const event = append('wake/manual', {
           note,
           // 与 web 侧 `wakeForMcpChange` 同一格：界面据此把它渲染成**框架卡片**而不是"用户说的话"
@@ -1977,6 +2349,37 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     })();
   });
   configWatcher.start();
+
+  const stickerStore = new StickerStore(dataDir, now);
+  stickerStore.init();
+  const emitStickerEvent = (type: string, data: unknown): void => {
+    const event = appendWithSeq(type, () => data, 'internal');
+    applyOne(recovery.projection, event);
+    finalizePressure(recovery.projection, event.ts);
+  };
+  const stickerVisionClient: import('./tools/vision.js').VisionModelClient = {
+    generate: async (request) => {
+      const client = pluginModelClientRef.current;
+      if (client === null) throw new Error('视觉模型尚未接线');
+      return await client.generate(request);
+    },
+  };
+  const stickerTagger = new StickerTagger({
+    client: stickerVisionClient,
+    store: stickerStore,
+    model: config.models.light.model,
+    enabled: () => config.stickers.tagging.enabled,
+    maxPerHour: () => config.stickers.tagging.maxPerHour,
+    concurrency: () => config.stickers.tagging.concurrency,
+    onUsage: (response) => appendVisionConsumption(
+      { log, projection: recovery.projection, now }, response, 0, 0,
+      { origin: 'stickers/tagger', stickerTagging: true, model: config.models.light.model },
+    ),
+    emit: emitStickerEvent,
+  });
+  const stickerService = new StickerService({
+    store: stickerStore, tagger: stickerTagger, config: () => config, emit: emitStickerEvent,
+  });
 
   if (apiKey !== null) {
     const ds = new DsClient({
@@ -2055,6 +2458,9 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         }
       },
     });
+    // 模型客户端就位：插件宿主的惰性格子填上（`ctx.model.complete` 与循环走**同一个**实例）
+    pluginModelClientRef.current = ds;
+    const pluginModelClient = instrumentModelClient(ds, pluginHost);
     /**
      * 工具侧的事件写入点。
      *
@@ -2158,10 +2564,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const builtinHookEntries = hookConfig.entries.filter((entry) => entry.enabled !== false);
     const hookDisabled = hookConfig.entries.length - builtinHookEntries.length;
     const hooks = new HookRunner({
+      // 内置条目 + 插件贡献的条目（组合面已经滤掉 `enabled:false` 与越界 cwd）
       entries: [...builtinHookEntries, ...pluginRuntime.hookEntries],
       emit: (fired) => {
         emit('hook/fired', { hook: fired.hook, outcome: fired.outcome,
           ...(fired.pluginId === undefined ? {} : { pluginId: fired.pluginId, contentHash: fired.contentHash, contributionName: fired.contributionName }) });
+        // 插件 Hook 的复核**不走半开探针**（见 circuit-breaker 的 drainOnce）：这条真实执行
+        // 结果就是复核结果——成功即恢复，失败即记一次（再连着失败就按退避进隔离）。
         if (fired.pluginId === undefined || fired.contentHash === undefined || fired.contributionName === undefined) return;
         const failure: PluginFailure = { pluginId: fired.pluginId, contentHash: fired.contentHash, contributionKind: 'hook',
           contributionName: fired.contributionName, category: fired.outcome === 'timeout' ? 'hook-timeout' : 'hook-error', message: `Hook ${fired.outcome}` };
@@ -2171,7 +2580,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       onNote: (text) => { write(`[Hook] ${text}`); },
       // 投影摘要是活数据：每次 fork 前现取，不缓存（钩子看到的必须当时那一刻的事实）
       digest: () => digestProjection(recovery.projection),
+      // 代码级插件的 `tool.before` / `tool.after` 与外部进程钩子共用同一个执行点：
+      // 顺序是"外部钩子先（可拒绝）→ 插件后（只能追加）"，合并规则在 HookRunner 里。
+      pluginToolHooks: {
+        before: async (request) => await pluginHost.tapToolBefore(request),
+        after: async (request, result) => await pluginHost.tapToolAfter(request, result),
+      },
     });
+    // 组合变了就地换条目（HookRunner 被 executor 与循环按引用持有：换实例等于把新钩子挂在没人读的地方）
     replacePluginHooks = (entries) => { hooks.setEntries([...builtinHookEntries, ...entries]); };
     if (hooks.size > 0) {
       write(`[Hook] ${hookConfigPath(dataDir)} 已装配 ${hooks.size} 条钩子`
@@ -2220,11 +2636,20 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
      * （子代理的工具集是父的子集，就该照着调用那一刻的注册表现算）。
      */
     const registryRef: { registry: ToolRegistry | null } = { registry: null };
+    const stickerRuntime = new StickerRuntime({
+      store: stickerStore,
+      config: () => config,
+      affect: () => recovery.projection.affect,
+      ...(mediaPoster === null ? {} : { mediaPoster }),
+      emit: emitStickerEvent,
+      now,
+    });
     const catalog = await buildCatalogRegistry({
       dataDir,
       timers,
       emit,
       visionClient,
+      stickerRuntime,
       // vision 的用量账落点（2026-10-11）：工具层只交事实（原样的 `DsResponse` 与它那一步的
       // turn/step），写事件这件事在这里做——工具层没有 `log`/`nextSeq()`，这正是那 64 次
       // 真实请求零记账的原因（见 `recordVisionUsage` 那一篇注释）。
@@ -2312,7 +2737,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         if (live === null) return null;
         return {
           log,
-          ds,
+          // 子代理的模型调用也要能被插件看见（同一个代理实例；不是每一支各包一层）
+          ds: pluginModelClient,
           registry: live,
           projection: recovery.projection,
           persona,
@@ -2361,6 +2787,23 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     registry.setDisabled(config.tools.disabled);
     // 单件工具注册失败必须说出来：静默少一件能力，比启动失败更难查（§4.18 的描述预算）
     for (const problem of catalog.problems) write(`[工具] 未注册（已跳过）：${problem}`);
+    /**
+     * **插件工具目录晚绑定**：宿主在装配期就造好了，而工具注册表到这一行才存在。
+     * 代码插件的 `activate()` 发生在下面 `startEnabled` 里，晚于这一行，所以拿到的是真表。
+     * 覆盖注册：重启插件会重新注册同名工具，`replace: true` 是"同一身份的新 handler"。
+     */
+    pluginToolSink.current = {
+      register: (definition) => { registry.register(definition, { replace: true }); },
+      unregister: (name) => { registry.unregister(name); },
+    };
+    // 代码级插件起来（P0 的声明式包在 startEnabled 里被跳过）：必须在 loop.start() 之前，
+    // 否则第一轮请求的工具清单里可能还没有它们。
+    if (pluginManager.active().some((pkg) => pkg.manifest.runtime.type !== 'declarative')) {
+      const startedAt = Date.now();
+      await pluginHost.startEnabled(pluginManager.active());
+      const running = pluginManager.active().filter((pkg) => pluginHost.status(pkg.manifest.id, pkg.contentHash).state === 'running').length;
+      write(`[插件] 代码级插件已就绪：${running} 个进程（${Date.now() - startedAt}ms）`);
+    }
 
     /**
      * 技能系统（design §4.19）：技能根 = **数据目录**（`<dataDir>/skills`、`<dataDir>/.agents/skills`），
@@ -2382,6 +2825,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const skills = new SkillManager({
       baseRoot: dataDir,
       compatBaseRoot: launchCwd,
+      // 插件贡献的技能根（只读、带 packageHash ⇒ 整包信任）：排在所有内置根之后
       packageRoots: pluginRuntime.skillRoots,
       out: write,
       emit: (type, data, visibility) => {
@@ -2389,16 +2833,19 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       },
     });
     for (const line of skills.startupWarnings()) write(line);
+    // 组合变了就地换根（同上：SkillManager 被循环与 web 视图按引用持有）
     replacePluginSkills = (roots) => { skills.setPackageRoots(roots); };
 
     loop = new RealLoop({
       log, dataDir, projection: recovery.projection, now,
       timezone: config.timezone ?? 'Asia/Shanghai',
-      ds, registry, persona, config, out: write,
+      ds: pluginModelClient, registry, persona, config, out: write,
+      // MCP 索引与池读**同一份**合并声明面（config + 已启用插件）
       mcpDeclarations,
       // 插件组合变了 ⇒ 常驻索引必须在下一拍失效（否则撤走的 server 会留在模型索引里）
       pluginRevision: () => pluginRuntime.revision,
-      onTurnBoundary: async () => { await circuitBreaker?.drain(); },
+      // turn 边界：**踢一脚就走**（不等 drain，见 `pluginTurnBoundary` 的注释）
+      onTurnBoundary: pluginTurnBoundary(() => circuitBreaker),
       // 版本号（`runtime/restart` 的通报里要说"你现在跑的是哪一版"）：给的是**同一个常量**
       // ——`session/start.version` 写的也是它。循环自己不去盘上读 `package.json`：
       // 版本号的唯一真相源就是这一行（见它的注释），多读一处就是多一个会漂的口径。
@@ -2411,6 +2858,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       selfMessages: selfIdentity,
       // 执行点钩子（§4.19）：三个执行点一次装配全部生效（工具两点走执行器，Wake 走循环）
       hooks,
+      stickerRuntime,
       // 每日记忆整理（design §4.17）：布防与 payload 识别都读这张表
       timers,
       // `%TEMP%` 兜底扫（2026-10-21）：每日整理那一拍顺带跑一次。开关在这个进程里只读一次
@@ -2474,6 +2922,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     toolRegistry = observed.registry;
     toolRegistry.setDisabled(config.tools.disabled);
     for (const problem of observed.problems) write(`[工具] 未注册（已跳过）：${problem}`);
+    // 假循环下也把代码级插件拉起来：界面要看得见它们的工具与状态（这一支不会派发工具，
+    // 所以插件的工具 handler 不会被调用；状态/日志/聊天钩子仍按各自的实际条件工作）
+    pluginToolSink.current = {
+      register: (definition) => { toolRegistry!.register(definition, { replace: true }); },
+      unregister: (name) => { toolRegistry!.unregister(name); },
+    };
+    await pluginHost.startEnabled(pluginManager.active());
     write(`[模型] 未找到 API key（设环境变量 ${config.models.heavy.apiKeyEnv}，或在设置页把密钥写进 data/.keys.json），降级为假循环`);
     write(`[工具] 假循环下仍装配 ${toolRegistry.listForModel({}).length} 件工具供界面查看与开关（不会被执行）`);
   }
@@ -2550,9 +3005,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
        *
        * 不传的话 web 侧按 `join(process.cwd(), 'config.json')` 自己猜一个——`--config`
        * 指到别处时，界面会把改动写进**另一份文件**，而进程读的还是原来那份：
-       * 屏幕上「已保存」、行为一点没变。判据只有一处（这里给的就是 `loadConfig` 读过的那条）。
+       * 屏幕上"已保存"、行为一点没变。判据只有一处（这里给的就是 `loadConfig` 读过的那条）。
        */
       configPath: loadedConfig.path,
+      stickers: stickerService,
+      // 插件管理器：`GET /api/plugins` 与四条 plugin-* 命令的宿主
       plugins: pluginManager,
       // 管理视图（/api/skills、/api/mcp）要看到插件贡献：给的是函数，读的永远是当下这一份组合
       pluginRuntime: () => pluginRuntime,
@@ -2735,20 +3192,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 那一段——全仓只此一处）。命中就整条丢掉：她自己的话有 `speak/sent` 那条凭据，
    * `read_channel` 里照旧以 `（我）` 出现，与这里丢掉的这个**副本**是两回事。
    */
-  const onChannelMessage = (data: WakeChannel['data']): void => {
-    // 我自己发出去的那条（平台推回来的副本）：不落库、不注册群成员、不计未读。
-    // 放在所有分支**之前**：连下面那条关键词判定都不必做——它本来就不是"别人说的话"。
-    // 判据是 `channelGate`（唯一一处实现，见 channel/self-message-gate.ts 的文件头）——
-    // 它读的是 `selfIdentity`：**此刻**知道的那一份（运行期学到的标识当场算数）。
-    if (channelGate(data, selfIdentity)) {
-      /**
-       * 认出来了就**留一行痕**：这是"平台把我自己的话推回来了"唯一的现场凭据
-       * （原先一个字都不记，于是"她怎么变成群友了"只能靠翻事件日志反推）。
-       * 只记通道 + 那条的 id 前 12 位：够把一条对上，不抄正文、不抄标识。
-       */
-      write(`[通道] 收到一条我自己发的消息（${data.channel}），已按"自己的回声"丢弃：不落库、不注册成员、不计未读`);
-      return;
-    }
+  /**
+   * **原有分流**（P1a 之前的全部行为）：没有插件订阅/指令时走它；插件层出异常时也回退到它。
+   *
+   * 这条函数存在的理由只有一条：**绝不因为插件坏了而丢用户消息**。它是同步的、没有 await，
+   * 与改造前逐字相同（`test/channel-onebot-c2c-wake.test.ts` 那条真链路靠的就是它）。
+   */
+  const handleInboundLegacy = (data: WakeChannel['data']): void => {
     // 文本提及（关键词）也算"在叫她"：判据在分流器里，这里只把**结论**记进事件
     // （`mentionsMe` 让渲染层说出"提到了你"而不是"@ 了你"——她据此判断该怎么接）。
     // **只有群聊才有"提及"这回事**：私聊里人家本来就在跟她说话，句子里带上名字是常事，
@@ -2767,6 +3217,103 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       (seq) => ({ ...data, msgSeq: msgSeqOf(data, seq) }),
       'internal',
     );
+  };
+
+  /**
+   * P1b 的入站收口：过滤链 → 指令 → 原有分流。
+   *
+   * 只有"真的有插件订阅/指令"时才走异步管线（并**串行**处理，保证同一个会话先到先 wake）；
+   * 没有插件时仍然走上面的同步快路径，行为与 P1a 逐字相同。
+   */
+  const stickerHarvester = new StickerHarvester({
+    store: stickerStore,
+    tagger: stickerTagger,
+    probability: () => config.stickers.harvest.enabled ? config.stickers.harvest.probability : 0,
+    maxGlobalPerHour: () => config.stickers.harvest.maxGlobalPerHour,
+    now,
+    emit: emitStickerEvent,
+  });
+  const harvestQuietly = (data: WakeChannel['data']): void => {
+    void stickerHarvester.harvest(data, {
+      owner: isOwnerChannelMessage(
+        { channel: data.channel, chatType: data.chatType === 'c2c' ? 'private' : 'group', chatId: data.chatId, senderId: data.person },
+        new Map(Object.entries(config.persona.contacts)),
+        config.persona.owner,
+        ownerIdsFrom(config.persona.contacts, config.persona.owner),
+      ),
+    }).catch(() => {
+      emitStickerEvent('sticker/harvested', { chatType: data.chatType, sha256: '', result: 'rejected', reason: 'internal-error' });
+    });
+  };
+
+  const inboundPipeline = new InboundPipeline({
+    plugins: pluginHost,
+    shouldWake: (data) => shouldWakeForChannelMessage(data, { watchedSids: watchedSidsOf(), mentionKeywords }),
+    isMentioned: (text) => mentionsKeyword(text, mentionKeywords),
+    wake: (data) => { loop.wake({ type: 'wake/channel', data }); },
+    inbox: (data) => {
+      appendWithSeq('channel/message', (seq) => ({ ...data, msgSeq: msgSeqOf(data, seq) }), 'internal');
+    },
+    // 指令回话：走与 speak 同一个回投口（reply.decorate / message.sent 也照常经过它）
+    reply: async (reply, data) => {
+      const target = { url: replyUrlForWake(data), idempotencyKey: `plugin-command-${Date.now()}` };
+      if (reply.text !== undefined) {
+        if (replyPoster === null) throw new Error('没有可用文本通道');
+        const outcome = await replyPoster.post(target, reply.text);
+        if (!outcome.ok) throw new Error(outcome.reason);
+      }
+      if (reply.media !== undefined) {
+        if (mediaPoster === null) throw new Error('没有可用媒体通道');
+        const outcome = await mediaPoster.post(target, mediaRequestOf(reply.media));
+        if (!outcome.ok) throw new Error(outcome.reason);
+      }
+    },
+    log: write,
+  });
+  const wantsInboundPlugins = (): boolean => pluginHost.hasInboundSubscriptions() || pluginHost.hasCommands();
+  /** 入站串行链：只有插件接管时才用；失败绝不阻断后续消息 */
+  let inboundChain: Promise<void> = Promise.resolve();
+
+  const onChannelMessage = (data: WakeChannel['data']): void => {
+    // 我自己发出去的那条（平台推回来的副本）：不落库、不注册群成员、不计未读。
+    // 放在所有分支**之前**：连下面那条关键词判定都不必做——它本来就不是"别人说的话"。
+    // 判据是 `channelGate`（唯一一处实现，见 channel/self-message-gate.ts 的文件头）——
+    // 它读的是 `selfIdentity`：**此刻**知道的那一份（运行期学到的标识当场算数）。
+    if (channelGate(data, selfIdentity)) {
+      /**
+       * 认出来了就**留一行痕**：这是"平台把我自己的话推回来了"唯一的现场凭据
+       * （原先一个字都不记，于是"她怎么变成群友了"只能靠翻事件日志反推）。
+       * 只记通道 + 那条的 id 前 12 位：够把一条对上，不抄正文、不抄标识。
+       */
+      write(`[通道] 收到一条我自己发的消息（${data.channel}），已按"自己的回声"丢弃：不落库、不注册成员、不计未读`);
+      return;
+    }
+    harvestQuietly(data);
+    if (!wantsInboundPlugins()) {
+      handleInboundLegacy(data);
+      return;
+    }
+    inboundChain = inboundChain.then(async () => {
+      let failed = false;
+      try {
+        await inboundPipeline.handle(data);
+      } catch (error) {
+        // 宿主自身的兜底（插件层的错误在 host-services 里已经逐条吞掉）：**按原有流程继续**，
+        // 宁可多一条"插件没生效"，也不能让这条消息消失。
+        failed = true;
+        write(`[插件] 入站处理异常，按原有流程继续：${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (failed) {
+        try {
+          handleInboundLegacy(data);
+        } catch (error) {
+          write(`[插件] 入站兜底也失败了：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }).catch((error: unknown) => {
+      // 串行链本身不许断：一次意外只丢这一条的处理记录，后续消息必须继续被处理。
+      write(`[插件] 入站串行链异常（后续消息继续）：${error instanceof Error ? error.message : String(error)}`);
+    });
   };
 
   /**
@@ -2794,10 +3341,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   if (qqChannel !== null) {
     qqChannel.onMessage = onChannelMessage;
     qqChannel.onNotice = onChannelNotice;
+    // `channel.ready`（P1b）：通道自己每次 READY/RESUMED（含断线重连）都会回到这个口；
+    // 插件宿主的 `noteChannelReady` 是 fire-and-forget，不阻塞网关状态机。
+    qqChannel.onReady = () => { pluginHost.noteChannelReady({ channel: qqChannel.name }); };
   }
   if (onebotChannel !== null) {
     onebotChannel.onMessage = onChannelMessage;
     onebotChannel.onNotice = onChannelNotice;
+    onebotChannel.onReady = () => { pluginHost.noteChannelReady({ channel: onebotChannel.name }); };
   }
 
   const timerSource = new TimerWakeSource(timers, loop, now);
@@ -2960,7 +3511,20 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     await pluginProbe.cancelAll();
     await circuitBreaker?.stop();
     await runtimeApplyChain;
+    // `stop()` 会等本拍收场（turn 边界钩子在这里落地）：不 await 就等于让退出与
+    // "还在写日志的那一拍"赛跑（`log.close()` 就在下面几行）。
     await loop.stop();
+
+    /**
+     * 代码级插件的进程必须在**日志关掉之前**收干净：它们可能正在写 `ctx.log` 或
+     * `plugin/unloaded` 钩子，而这些都要落库。顺序放在 loop.stop 之后、MCP 池之前：
+     * 循环先停（不再派发工具），插件再有秩序地退出。
+     */
+    try {
+      await pluginHost.stopAll('shutdown');
+    } catch (err) {
+      write(`[退出] 插件进程停止失败：${describeError(err)}`);
+    }
 
     // MCP server 是**别人的进程**：框架拉起来的就得由框架收尸（与上面协议端同一条纪律）。
     // 走池自己的关机序列，收不掉时如实说出是哪几个——"留了一个孤儿进程"必须看得见。
@@ -3008,11 +3572,21 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
 
   // ── 起拍 ──
+  // 熔断器先于循环起拍：它那 1s 的定时器是半开探针的兜底（turn 边界只负责"踢一脚"）
   circuitBreaker?.start();
   loop.start();
   // 保活跟着主循环起拍（`start()` 会**先跑一拍**：布防当场就有一次"界面在不在"的读数）
   guiGuardRef.guard?.start();
   write(`[运行] 唤醒源 ${sources.length} 个已布防（日志目录 ${EVENT_LOG_DIR_NAME}/），假循环整装待发`);
+
+  /**
+   * `host.ready`：插件/循环/工具面/web 服务都已就位，宿主算"就绪"。
+   *
+   * 放在这里而不是 `startPackage` 里：一次宿主生命周期只该有**一次**就绪信号；插件热启用
+   * 晚于这一刻时不会补发（插件若要做启动探测应当同时处理 `plugin.loaded` 这种后到事件）。
+   * 调用本身是 fire-and-forget（observe 点），不阻塞 `runMain` 返回。
+   */
+  pluginHost.noteHostReady();
 
   return { dataDir, loop, sources, recovery, config, persona, webServer, stop };
 }
@@ -3038,6 +3612,16 @@ function createQqChannelIfConfigured(
       .filter((name) => name !== '').join('、');
     write(`[通道/QQ] 已启用但密钥未配置：${missing}；适配器未启动（配置里只写变量名，值放进程环境或设置页的本地密钥文件）`);
     return null;
+  }
+  // 同一个 bot 被两台实例同时连接会互相抢 inbound 事件。这里只拒绝**本实例的 QQ 官方通道**，
+  // 不阻止实例启动（OneBot/界面/其它通道仍可用）；日志里点名另一台实例，但不打印 appId。
+  if (dataDir !== null) {
+    const conflict = findQqAppIdConflict({ dataDir, appId });
+    if (conflict !== null) {
+      write(`[通道/QQ] 另一台实例「${conflict.name}」（端口 ${conflict.port}）已经在使用同一个 bot：`
+        + '本实例不启用 QQ 官方通道，避免两台抢同一批事件；请为其中一台换 App ID，或停掉另一台');
+      return null;
+    }
   }
   const log = {
     info: (line: string) => { write(line); },

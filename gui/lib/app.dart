@@ -3,7 +3,7 @@
 // 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
 // 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
 import 'dart:async';
-import 'dart:io' show Directory;
+import 'dart:io' show Directory, Platform;
 import 'shell/tray.dart';
 
 import 'package:flutter/foundation.dart' show listEquals;
@@ -21,6 +21,7 @@ import 'backend_port.dart';
 import 'backend_probe.dart';
 // 「退出全部」真的停后端那一步（端口 → pid → taskkill 树），判据与代价见那个文件
 import 'backend_stop.dart';
+import 'backend_stop_marker.dart';
 // 「这次是我主动退的，别把我拉回来」（协议见 docs/gui-guard.md §3）
 import 'gui_quit.dart';
 // 待批的**那一份数据**（风险分级 / 判据 / 顺序 / 轮询）与右下角那一摞卡
@@ -43,6 +44,7 @@ import 'pages/channels_page.dart';import 'pages/chat_page.dart';
 import 'pages/extensions_page.dart';
 import 'pages/logs_page.dart';
 import 'pages/memory_page.dart';
+import 'pages/mood_page.dart';
 import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
 import 'pages/schedule_page.dart';
@@ -213,7 +215,7 @@ class IrmiaApp extends StatefulWidget {
   State<IrmiaApp> createState() => _IrmiaAppState();
 }
 
-/// 页面条目：导航与页面宿主共用同一份定义（一级六项 + 底部「更多」的二级项），
+/// 页面条目：导航与页面宿主共用同一份定义（一级七项 + 底部「更多」的二级项），
 /// 一律按 id 定位页面而不是下标——增删或重排页面时不会错位。
 class PageEntry {
   const PageEntry({
@@ -237,13 +239,15 @@ class PageEntry {
 /// 默认落点：运行情况（壳的常驻首页）
 const defaultPageId = 'overview';
 
-/// 一级入口：只放高频功能。
+/// 一级入口：只放高频功能
+/// （运行情况 / 聊天 / 日程 / 情绪 / 人格 / 扩展 / 消息适配器）。
 ///
 /// ⚠ 条数与判据的变更史（值得留着，免得下一个人照着旧规矩把「日程」挪走）：
 /// `docs/gui-design.md` §3 原来钉的是"**保持五项**"，而用户 2026-10 明确要一页「日程」
-/// （设计稿 `Agent 近期安排 · 周历与清单.html`）——**那条判据被推翻了**，现在是六项。
-/// 被推翻的只是"五项"这个数；"一级只放高频功能、低频进「更多」"这条仍然有效
-/// （所以记忆/日志/设置还在二级）。
+/// （设计稿 `Agent 近期安排 · 周历与清单.html`）——**那条判据被推翻了**。
+/// 2026-11 的调整：情绪从「更多」上移一级；人格 / 扩展 / 消息适配器 随后也移回一级，
+/// 只把记忆 / 日志 / 设置 留在「更多」。
+/// 被推翻的只是具体条数；"一级只放高频功能、低频进「更多」"这条仍然有效。
 final navPages = <PageEntry>[
   PageEntry(
     id: 'overview',
@@ -267,18 +271,18 @@ final navPages = <PageEntry>[
     builder: (state) => SchedulePage(state: state),
   ),
   PageEntry(
+    id: 'mood',
+    label: '情绪',
+    icon: Icons.self_improvement_outlined,
+    solidIcon: Icons.self_improvement_rounded,
+    builder: (state) => MoodPage(state: state),
+  ),
+  PageEntry(
     id: 'persona',
-    label: '人格配置',
+    label: '人格',
     icon: Icons.person_outline_rounded,
     solidIcon: Icons.person_rounded,
     builder: (state) => PersonaPage(state: state),
-  ),
-  PageEntry(
-    id: 'channels',
-    label: '消息适配器',
-    icon: Icons.swap_horiz_rounded,
-    solidIcon: Icons.swap_horiz_rounded,
-    builder: (state) => ChannelsPage(state: state),
   ),
   PageEntry(
     id: 'extensions',
@@ -286,6 +290,13 @@ final navPages = <PageEntry>[
     icon: Icons.extension_outlined,
     solidIcon: Icons.extension_rounded,
     builder: (state) => ExtensionsPage(state: state),
+  ),
+  PageEntry(
+    id: 'channels',
+    label: '消息适配器',
+    icon: Icons.swap_horiz_rounded,
+    solidIcon: Icons.swap_horiz_rounded,
+    builder: (state) => ChannelsPage(state: state),
   ),
 ];
 
@@ -749,6 +760,9 @@ class AppState extends ChangeNotifier {
   bool ready = false;
   /// 门上画哪一态（只在 `ready == false` 时有意义）
   AuthGateKind gate = AuthGateKind.checking;
+
+  /// 启动那一趟是否已经决定"直接进默认实例"还是"先给选择页"（只判一次）
+  bool _startupInstanceResolved = false;
   /// 门上那行错误（密码不对、两次不一致、连不上…）；空 = 没问题
   String gateError = '';
   /// 门上的**中性提示**（"现在该去哪一扇门、为什么换了门"）；空 = 不显示。
@@ -1099,6 +1113,9 @@ class AppState extends ChangeNotifier {
   /// 收口）——原来那种"10 秒 periodic + 另起一条快档"是两条链打同一个端点。
   Timer? _dashboardTick;
 
+  /// 情绪事件版次：人格页只在它变化时重读 /api/affect，不新增轮询。
+  int affectRevision = 0;
+
   /// 事件流的订阅（`GET /api/events/stream`）。与日志页/聊天页同一条端点，换个住处而已。
   StreamSubscription<Map<String, dynamic>>? _eventsSub;
   /// 事件流断了之后重连的那一拍
@@ -1137,6 +1154,29 @@ class AppState extends ChangeNotifier {
     // 之间来回跳（真机上一条连接失败要一两秒，跳得更明显）。
     _gateRetry?.cancel();
     _gateRetry = null;
+
+    // 2026-10-28：**开机（或界面重启）时不止一台实例 ⇒ 先让人选**。
+    // 原来这里直接按端口文件（`server.json` 指向默认实例）连上去，于是"输完密码就进了
+    // 最早那台"，后面新建的根本没机会选。现在只在**启动这一趟**改道；从选择页进来的
+    // （`fromPicker: true`）与各种重试都不受影响。
+    // 判据里排除 `flutter test`：测试进程读的是**真实**的 `%APPDATA%\Irmia\instances.json`
+    // （多数用例不覆盖它），那里面本来就有好几台实例 ⇒ 一律落到选择页，把"设密码/登录"
+    // 那几百条用例全带偏。这不是产品分歧，只是"测试环境没有"启动语义。
+    final underTest = Platform.environment['FLUTTER_TEST'] == 'true';
+    if (!fromPicker && !underTest && !_startupInstanceResolved) {
+      _startupInstanceResolved = true;
+      final live = InstanceBook.load().entries
+          .where((e) => e.dataDir.trim().isNotEmpty && Directory(e.dataDir).existsSync())
+          .toList();
+      if (live.length > 1) {
+        gate = AuthGateKind.picker;
+        ready = false;
+        unawaited(refreshInstances());
+        notifyListeners();
+        return;
+      }
+    }
+
     // 每一拍都先看一眼端口文件（后端起来时会写它）：只采纳"文件"这一档，见 [_adoptPortFromFile]
     _adoptPortFromFile();
     gateAttempt += 1;
@@ -1469,6 +1509,9 @@ class AppState extends ChangeNotifier {
     // ② 等端口消失（≤20 秒）
     final waited = await _awaitPortGone(port);
     _lifeLog('[life] close instance=$name stop=$stop waited=${waited}s token=kept');
+    // ③ 记下"人停的"：看护脚本（计划任务）看到这个标记就不再自动拉起她
+    //    （2026-10-28：没有它时，退出实例一分钟内后端又被拉起来，还触发了杀软）
+    markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'close-instance');
     // ③ 回选择页。只清**内存**里那张票与壳里的状态；盘上那一份是这条路的全部意义，留着。
     _resetForGate(withToken: true);
     gate = AuthGateKind.picker;
@@ -1540,6 +1583,8 @@ class AppState extends ChangeNotifier {
     // ③ 等端口消失（≤20 秒），再清本地凭据
     final waited = await _awaitPortGone(port);
     _lifeLog('[life] logout instance=$name stop=$stop waited=${waited}s token=cleared');
+    // 记下"人停的"：看护脚本看到标记就不再自动拉起（2026-10-28 那次报毒的直接诱因）
+    markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'logout');
     // 盘上那一份**这一台**的凭据要清掉（"登出之后界面还能自己进去"才是真的问题）。
     // 先清文件、再清内存：反过来的话上面那次 `sessions.clear(key)` 就找不到 id 了。
     if (key != null) sessions.clear(key);
@@ -1713,7 +1758,20 @@ class AppState extends ChangeNotifier {
     if (_disposed) return;
     notifyListeners();
     final book = InstanceBook.load();
-    final entries = book.entries;
+    // 幽灵条目（数据目录已经不在了）不摆出来：那是"跑过一次性实例（测试/临时目录）"
+    // 留下的残骸，摆出来只会让人以为自己建过一堆没见过的实例（2026-10-28 现场）。
+    final all = book.entries;
+    final entries = all
+        .where((e) => e.dataDir.trim().isEmpty || Directory(e.dataDir).existsSync())
+        .toList();
+    final ghosts = all.where((e) => !entries.contains(e)).toList();
+    if (ghosts.isNotEmpty) {
+      // removeById 自己就是"现读 → 只删这一条 → 原子写回"，不用另存
+      for (final ghost in ghosts) {
+        await book.removeById(ghost.id);
+      }
+      guiLog.write('[life] pruned ghost instances=${ghosts.length}');
+    }
     final running = <String, bool>{};
     // 逐条"本机有没有这一台的票"：与判活一起算完，页面那一帧就拿得到全部判据
     final tokens = <String, bool>{};
@@ -1925,13 +1983,29 @@ class AppState extends ChangeNotifier {
         pickerProblem = InstanceGateProblem.noLauncher;
         return;
       }
-      final port = await instances.freePort(kFirstInstancePort, '127.0.0.1');
+      // **不要**从 7788 开始找空闲端口：那是"默认实例"的端口。
+      // 2026-10-28 现场：退出登录后默认实例的后端停了，7788 在"端口探测"里是空的，
+      // 于是新实例被分到 7788 —— 两台抢同一个端口，谁先起谁占着，另一台永远起不来
+      // （表现就是"创建卡半天"）。现在从 7789 起，并跳过登记表里已经有主的端口。
+      final taken = InstanceBook.load().entries.map((e) => e.port).toSet();
+      int from = kFirstSpawnedInstancePort;
+      int? port;
+      while (true) {
+        final candidate = await instances.freePort(from, '127.0.0.1');
+        if (candidate == null) break;
+        if (!taken.contains(candidate)) {
+          port = candidate;
+          break;
+        }
+        from = candidate + 1;
+      }
       if (port == null) {
         pickerProblem = InstanceGateProblem.portUnavailable;
         return;
       }
       pickerPort = port;
       notifyListeners();
+      guiLog.write('[life] create name=$cleanName dir=$targetDir port=$port');
       final ok = await instances.launch(
         nodeExe: launcher.nodeExe,
         entry: launcher.entry,
@@ -1940,6 +2014,7 @@ class AppState extends ChangeNotifier {
         port: port,
       );
       if (!ok) {
+        guiLog.write('[life] create launch-failed dir=$targetDir port=$port');
         pickerProblem = InstanceGateProblem.launchFailed;
         pickerProblemDetail = launcher.nodeExe;
         return;
@@ -1954,6 +2029,8 @@ class AppState extends ChangeNotifier {
       pickerWaitSeconds = 0;
       pickerWaitPhase = '';
       var elapsed = 0;
+        // 进程根本没起来（端口既没实例应答、也没有健康应答）连续这么久 ⇒ 别再让人干等
+        var deadSeconds = 0;
       try {
         while (DateTime.now().isBefore(deadline)) {
           await Future<void>.delayed(const Duration(seconds: 1));
@@ -1965,7 +2042,15 @@ class AppState extends ChangeNotifier {
             break;
           }
           pickerWaitSeconds = elapsed;
-          pickerWaitPhase = await _readWaitPhase('127.0.0.1', port);
+          final phase = await _readWaitPhase('127.0.0.1', port);
+          pickerWaitPhase = phase;
+          // 端口既没有实例应答、也没有健康应答 ⇒ 大概率进程已经死了（端口被抢、被杀软拦）。
+          // 连续 15 秒这样就直接说清，而不是把"等 180 秒"摆给人看（2026-10-28 现场）。
+          deadSeconds = phase.isEmpty ? deadSeconds + 1 : 0;
+          if (elapsed % 3 == 0 || deadSeconds >= 15) {
+            guiLog.write('[life] create wait port=$port elapsed=${elapsed}s phase=$phase dead=$deadSeconds');
+          }
+          if (deadSeconds >= 15) break;
           if (_disposed) break;
           notifyListeners();
         }
@@ -1973,6 +2058,7 @@ class AppState extends ChangeNotifier {
         pickerWaiting = false;
         if (!_disposed) notifyListeners();
       }
+      if (created == null) guiLog.write('[life] create not-ready dir=$targetDir port=$port waited=${elapsed}s');
       if (created == null) {
         pickerProblem = InstanceGateProblem.notReady;
         pickerProblemDetail = '$port';
@@ -2792,7 +2878,17 @@ class AppState extends ChangeNotifier {
       unawaited(refreshUpdate());
       return;
     }
-    if (!isTurnSignalEvent(event['type']?.toString())) return;
+    final type = event['type']?.toString();
+    final data = event['data'];
+    final fields = data is Map ? data['fields'] : null;
+    final affectConfig = type == 'config/changed' && fields is List &&
+        fields.any((field) => field.toString().startsWith('affect.'));
+    if (type == 'affect/appraised' || affectConfig) {
+      affectRevision += 1;
+      if (!_disposed) notifyListeners();
+      return;
+    }
+    if (!isTurnSignalEvent(type)) return;
     if (_disposed || !ready) return;
     // 新的一段动静（本来没有信号 → 现在有）：**这一下要立刻读**，不能等合并窗口——
     // 她刚开口的那一刻正是最该跟手的一下（之后连串来的事件才走合并）。
@@ -2969,6 +3065,8 @@ class AppState extends ChangeNotifier {
     try {
       final data = await api.get('/api/stats/dashboard');
       stats = data is Map<String, dynamic> ? data : null;
+    } on ApiStaleRequest {
+      return false;
     } on ApiAuthError catch (err) {
       // 凭据不作数了：**回登录态**（401 自愈已经在 IrmiaApi 里试过一轮重读 + 重试）。
       if (!_disposed) _requireAuth(err);
@@ -3305,3 +3403,5 @@ class AskCardData {
 /// 这里过去是 `TokenGate`——一张"粘贴启动时输出的 token"的卡片。它随着本地认证换成密码
 /// 一起退休了：用户要的是「不需要 token，首次启动的时候要求用户设置密码就行了」。
 /// 门本身（含"这道门防的是什么"那段如实说明）搬去了 auth_gate.dart，视觉沿用同一套。
+
+

@@ -11,7 +11,7 @@ import 'package:irmia_gui/pages/overview_page.dart';
 import 'package:irmia_gui/theme.dart';
 import 'package:irmia_gui/ui_state.dart';
 
-/// 壳的布局冒烟：侧边栏（品牌 + 一级六入口 + 底部「更多」折叠组）必须真的渲染出来。
+/// 壳的布局冒烟：侧边栏（品牌 + 一级七入口 + 底部「更多」折叠组）必须真的渲染出来。
 /// 背景：真机截图里侧边栏一度看起来是空白灰带，用测试锁死它的存在。
 void main() {
   late Directory tmpDir;
@@ -61,7 +61,7 @@ void main() {
     }
   }
 
-  testWidgets('侧边栏渲染品牌区、一级六项与「更多」', (tester) async {
+  testWidgets('侧边栏渲染品牌区、一级七项与「更多」', (tester) async {
     final state = makeState();
     await pumpShell(tester, state);
 
@@ -69,19 +69,31 @@ void main() {
     // 回退成产品名的短写（见 her_name.dart）：空着会让人以为界面坏了，猜一个名字更糟。
     expect(find.text(kProductNameShort), findsOneWidget, reason: '读不到名字时品牌区显示产品名');
     expect(find.text('伊尔弥亚'), findsNothing, reason: '谁都不该再写死这个名字');
-    // 六项 = 原五項 + 用户 2026-10 要的「日程」（那条"必须保持五项"的判据已被推翻，
-    // 见 app.dart 里 navPages 上方的注释）
-    expect(navPages.length, 6, reason: '一级入口应为六项');
+    // 一级不是固定条数：2026-10 加「日程」，2026-11 情绪上移、人格/扩展/消息适配器回到一级。
+    // 判据是"一级只放高频功能"（见 app.dart 里 navPages 上方的注释）。
+    expect(navPages.length, 7, reason: '一级入口应为七项');
     expect(navPages.first.id, 'overview', reason: '首位应是运行情况');
-    expect(navPages[2].id, 'schedule', reason: '「日程」应排在聊天与人格配置之间');
+    expect(navPages[2].id, 'schedule', reason: '「日程」应排在聊天与情绪之间');
+    expect(navPages[3].id, 'mood', reason: '「情绪」应排在日程与人格之间');
+    expect(navPages.last.id, 'channels', reason: '「消息适配器」应在一级末位');
 
     // 导航项：文案可能同时出现在页面标题里（如"运行情况"），至少一个在侧边栏
     for (final page in navPages) {
       expect(find.text(page.label), findsWidgets, reason: '缺少一级入口：${page.label}');
     }
 
+    // 人格 / 扩展 / 消息适配器 已回到一级：定位件应在侧栏里
+    expect(find.byKey(const ValueKey('nav-persona')), findsOneWidget,
+        reason: '人格应回到一级');
+    expect(find.byKey(const ValueKey('nav-extensions')), findsOneWidget,
+        reason: '扩展应回到一级');
+    expect(find.byKey(const ValueKey('nav-channels')), findsOneWidget,
+        reason: '消息适配器应回到一级');
+
     // 低频项收进折叠组：未展开时不在侧边栏出现
     expect(find.text('更多'), findsOneWidget);
+    expect(find.byKey(const ValueKey('nav-memory')), findsNothing,
+        reason: '记忆已收进「更多」，不再占一级位置');
     expect(find.text('日志'), findsNothing, reason: '日志已收进「更多」，不再占一级位置');
     expect(find.text('设置'), findsNothing, reason: '设置只应在「更多」里出现一次');
 
@@ -127,8 +139,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('日志'), findsOneWidget, reason: '展开后应出现二级项');
-    expect(find.text('设置'), findsOneWidget, reason: '展开后应出现二级项');
+    for (final page in morePages) {
+      expect(find.text(page.label), findsWidgets, reason: '展开后应出现二级入口：${page.label}');
+    }
 
     await tester.tap(find.text('日志'));
     await tester.pump(const Duration(milliseconds: 300));

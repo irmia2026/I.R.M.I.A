@@ -32,19 +32,23 @@ void main() {
     expect(IrmiaTheme.danger, const Color(0xFFE03131));
   });
 
-  test('一级入口六项：运行情况在首位、日程排在聊天与人格配置之间', () {
-    // 条数从五项变六项的由来：用户 2026-10 要一页「日程」，推翻了 docs/gui-design.md §3
-    // 原来那句"保持五项"（见 app.dart 里 navPages 上方的注释）。
+  test('一级七项、其余收进「更多」：顺序与注册表稳定', () {
+    // 条数不是判据：一级只放高频功能。2026-11 情绪上移后，人格 / 扩展 / 消息适配器也
+    // 移回一级，只把记忆 / 日志 / 设置留在「更多」（见 app.dart 里 navPages 上方的注释）。
     expect(navPages.map((p) => p.id).toList(), [
       'overview',
       'chat',
       'schedule',
+      'mood',
       'persona',
-      'channels',
       'extensions',
+      'channels',
     ]);
     expect(morePages.map((p) => p.id).toList(), ['memory', 'logs', 'settings']);
     expect(allPages.length, navPages.length + morePages.length);
+    expect(pageEntryById('persona')?.label, '人格');
+    expect(pageEntryById('extensions')?.label, '扩展');
+    expect(pageEntryById('channels')?.label, '消息适配器');
   });
 
   test('注册表按 id 唯一定位，默认页在表内', () {

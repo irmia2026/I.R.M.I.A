@@ -1,0 +1,10 @@
+{
+  "apiVersion": 2,
+  "id": "demo-node",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "config": "config.schema.json",
+  "permissions": ["tools.define", "hooks.tool", "hooks.turn", "chat.send", "state.plugin", "files"],
+  "meta": { "title": "演示插件（JS）", "author": "tests", "desc": "P1a e2e 夹具：注册工具、tool.after 改写、reply.decorate、plugin.error 观察" }
+}

@@ -17,6 +17,7 @@ import {
   ConfigError,
   DEFAULT_MEMORY_MAINTAIN_CRON,
   DEFAULT_STATE_BUDGET_BYTES,
+  affectEnabled,
   applyUpgradeChain,
   canonicalConfigJson,
   configHash,
@@ -1325,4 +1326,61 @@ test('lightLaneKeyPolicy：本格有值用它；没有时只有"两格同端点"
     models: { ...sameEndpoint.models, light: { ...sameEndpoint.models.light, baseUrl: 'https://api.other.example' } },
   };
   assert.equal(lightLaneKeyPolicy(splitEndpoint, null), 'none');
+});
+
+test('affect：总开关与评价器默认关闭，配置可读，环境变量优先', async (t) => {
+  const dir = await freshDir(t);
+  const disabled = defaultConfig(dir);
+  assert.deepEqual(disabled.affect, { enabled: false, evaluatorEnabled: false });
+  assert.equal(affectEnabled(disabled, {}), false);
+  assert.equal(affectEnabled(disabled, { IRMIA_AFFECT_ENABLED: '1' }), true);
+
+  await writeRawConfig(dir, { affect: { enabled: true, evaluatorEnabled: true } });
+  const enabled = (await loadConfig(dir)).config;
+  assert.equal(enabled.affect.enabled, true);
+  assert.equal(enabled.affect.evaluatorEnabled, true);
+  assert.equal(affectEnabled(enabled, {}), true);
+  assert.equal(affectEnabled(enabled, { IRMIA_AFFECT_ENABLED: '0' }), false);
+  // 拼错的值不该静默把开关关掉：回退到配置
+  assert.equal(affectEnabled(enabled, { IRMIA_AFFECT_ENABLED: 'enable' }), true);
+  assert.equal(affectEnabled(disabled, { IRMIA_AFFECT_ENABLED: 'ture' }), false);
+
+  await writeRawConfig(dir, { affect: { enabled: 'yes' } });
+  await assert.rejects(() => loadConfig(dir), /affect\.enabled/u);
+});
+
+test('stickers：私聊开/群聊关与采收打标默认值、配置覆盖和概率校验', async (t) => {
+  const dir = await freshDir(t);
+  const defaults = defaultConfig(dir);
+  assert.equal(defaults.stickers.enabled, true);
+  assert.equal(defaults.stickers.groups, false);
+  assert.equal(defaults.stickers.passiveProbability, 0.12);
+  assert.equal(defaults.stickers.minTurnsBetween, 4);
+  assert.equal(defaults.stickers.harvest.probability, 0.15);
+  assert.equal(defaults.stickers.tagging.maxPerHour, 20);
+  assert.equal(defaults.stickers.tagging.concurrency, 1);
+  assert.equal(defaults.stickers.rejectedRetentionDays, 7);
+  assert.equal(defaults.channels.onebot.stickers, false);
+  assert.equal(defaults.channels.qqOfficial.stickers, false);
+
+  await writeRawConfig(dir, {
+    stickers: {
+      groups: true,
+      harvest: { probability: 0.25, maxGlobalPerHour: 3 },
+      tagging: { maxPerHour: 2, concurrency: 2 },
+      rejectedRetentionDays: 0,
+    },
+    channels: { onebot: { stickers: true }, qqOfficial: { stickers: true } },
+  });
+  const loaded = (await loadConfig(dir)).config;
+  assert.equal(loaded.stickers.groups, true);
+  assert.equal(loaded.stickers.harvest.probability, 0.25);
+  assert.equal(loaded.stickers.harvest.maxGlobalPerHour, 3);
+  assert.equal(loaded.stickers.tagging.concurrency, 2);
+  assert.equal(loaded.stickers.rejectedRetentionDays, 0);
+  assert.equal(loaded.channels.onebot.stickers, true);
+  assert.equal(loaded.channels.qqOfficial.stickers, true);
+
+  await writeRawConfig(dir, { stickers: { harvest: { probability: 1.2 } } });
+  await assert.rejects(() => loadConfig(dir), /stickers\.harvest\.probability/u);
 });

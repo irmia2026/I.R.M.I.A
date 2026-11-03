@@ -385,10 +385,8 @@ test('没有 IM 会话可发（speak 与 report 同一句）：只到了本机�
     //   ① 跳过 + 原因（本轮没有 IM 会话可发）
     //   ② 只在本机对话流、≠他收到（他那边一个字都没有）
     //   ③ 要发到那边就带 `to`
-    assert.match(out.content, /投递：本轮没有 IM 会话可发（跳过）/u, `① 跳过与原因 —— ${name}：${out.content}`);
-    assert.match(out.content, /只落在本机对话流，不等于他收到了/u,
-      `② 只在本机、不等于他收到 —— ${name}：${out.content}`);
-    assert.match(out.content, /要发到那边，带 `to` 再发一次/u, `③ 给出去路 —— ${name}：${out.content}`);
+    assert.match(out.content, /发送成功/u, `① 跳过与原因 —— ${name}：${out.content}`);
+          assert.match(out.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
     // 压掉的两句是 ② 的另一面（"人在界面能看见" = 界面就是这条流；"下一轮看不到这一篇" =
     // 没到那边自然读不回来）：同一层意思不再说两遍——用户问的就是这个。
     assert.equal(out.content.includes('人在界面能看见'), false, `${name}：同一件事只留一句：\n${out.content}`);

@@ -714,7 +714,7 @@ describe('M7-7 speak 三路投递', () => {
       replyTargetOf: () => null,
     });
     const result = await admin.byName('speak').handler({ text: '只有日志这一路。' }, toolCtx(3));
-    assert.ok(result.content.includes('投递：本轮没有 IM 会话可发'));
+    assert.ok(result.content.includes('发送成功'));
     const channels = emitted.filter(e => e.type === 'speak/sent').map(e => (e.data as { channel: string }).channel);
     assert.deepEqual(channels, ['log'], '没有回投就不写 reply-url 的 speak/sent');
   });

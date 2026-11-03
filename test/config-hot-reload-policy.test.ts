@@ -3,8 +3,8 @@
  *
  * 为什么单开一份用例（REVIEW P1-30）：这句话过去被手抄在五个地方（README、docs/ARCHITECTURE、
  * `config/config.ts`、`log/types.ts`、`web/server.ts`），最后抄成两种相反的结论——四处说
- * "全部字段都要重启（热更白名单是空的）"，而真值一直是 `HOT_RELOAD_FIELDS = ['mcp.servers']`
- * 且**刻意不重建** MCP 常驻索引。现在只剩一处常量，这份用例盯住"常量与名单不许分岔"：
+ * "全部字段都要重启（热更白名单是空的）"，而真值是 `HOT_RELOAD_FIELDS` 中申报的字段热更
+ * （MCP 声明与两个情绪开关），且**刻意不重建** MCP 常驻索引。现在只剩一处常量，这份用例盯住"常量与名单不许分岔"：
  *   · 名单加了字段而那句口径没跟着改 ⇒ 红（否则又是两份说法）；
  *   · 有人把 `mcp.extraLaunchers` 之类误当成热更字段 ⇒ 红（它不在名单里，`classifyConfigField`
  *     给的是 `unknown`，而"名单外 = 必须重启"）；
@@ -22,8 +22,15 @@ import {
 } from '../src/config/watcher.ts';
 
 describe('HOT_RELOAD_FIELDS · 今天的热更名单', () => {
-  test('只有 mcp.servers 一项（改这一条 = 改口径，要同批改 README/docs/ARCHITECTURE/那份常量）', () => {
-    assert.deepEqual([...HOT_RELOAD_FIELDS], ['mcp.servers']);
+  test('MCP、情绪/亲密开关与贴纸配置（改这一条 = 改口径，要同批改 README/docs/ARCHITECTURE/那份常量）', () => {
+    assert.deepEqual([...HOT_RELOAD_FIELDS], [
+      'mcp.servers', 'affect.enabled', 'affect.evaluatorEnabled', 'intimacy.', 'stickers.',
+      'channels.qqOfficial.stickers', 'channels.onebot.stickers',
+    ]);
+    assert.equal(classifyConfigField('affect.enabled'), 'hot');
+    assert.equal(classifyConfigField('affect.evaluatorEnabled'), 'hot');
+    assert.equal(classifyConfigField('stickers.harvest.probability'), 'hot');
+    assert.equal(classifyConfigField('channels.onebot.stickers'), 'hot');
   });
 });
 

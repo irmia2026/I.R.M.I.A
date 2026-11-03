@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { AppEvent, AppEventType } from '../log/types.js';
@@ -16,18 +16,63 @@ export interface PluginCircuitView {
   lastError: string;
   strikes: number;
 }
+/** 进程运行面的只读视图（declarative 包永远是 not-applicable） */
+export interface PluginRuntimeView {
+  type: string;
+  entry: string | null;
+  state: string;
+  pid: number | null;
+  uptimeMs: number;
+  restarts: number;
+}
 export interface PluginView {
   package: PluginPackage;
   state: PluginState;
   problems: string[];
   requiresRestart: boolean;
+  /** 清单里声明的权限（界面上让人看清"它要什么"） */
+  permissions: readonly string[];
+  /**
+   * 清单里的网络白名单（`net.allow`；没写 = 空表 = 什么都放行不了）。
+   *
+   * 单独从 `package.manifest.netAllow` 摊平到视图上，是因为安装审阅要看的是"它要访问什么"，
+   * 而界面不该为了这一格去理解整份清单的结构（权限与网络必须并排展示才算一次完整审阅）。
+   */
+  net: readonly string[];
+  /**
+   * 这份内容是不是从市场装的（来源 id / 版本）。不是市场装的 = null。
+   *
+   * 记录方式是一份**包外**的旁路文件（`<dataDir>/plugins/state/market-origins.json`）：
+   * 包内文件会改变内容哈希（`sha256` 与内容寻址都对不上），事件日志又只在受影响时才写。
+   * 它只描述"这份哈希从哪来"，**不是信任凭据**——信任仍只由 `plugin/installed` 事件回答。
+   */
+  marketId: string | null;
+  marketVersion: string | null;
+  /** 出站视图的扁平读数（`runtime` 里也有一份，界面按习惯取哪个都行） */
+  pid: number | null;
+  uptimeMs: number;
+  runtime: PluginRuntimeView;
   circuit?: PluginCircuitView;
 }
 export type PluginEventSink = (type: AppEventType, data: AppEvent['data']) => void;
 
+/** 市场来源记录（只用于视图归属；不是信任凭据，也不参与任何执行期判定） */
+export interface PluginMarketOrigin {
+  readonly marketId: string;
+  readonly version: string;
+  /** 安装时的时间戳（ISO）；只给人看"这份是什么时候从市场落的" */
+  readonly installedAt: string;
+}
+
 interface Lifecycle { trusted: boolean; enabled: boolean; circuit?: PluginCircuitView | undefined }
 const keyOf = (id: string, hash: string): string => `${id}\0${hash}`;
 const asString = (value: unknown): string => typeof value === 'string' ? value : '';
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** 市场来源表的键：与生命周期表分开（它按 id@hash 落文件、可读性比 NUL 拼接重要）。 */
+const originKeyOf = (id: string, hash: string): string => `${id}@${hash}`;
+const MARKET_ORIGINS_FILE = 'market-origins.json';
 
 /** 生命周期表的键是 id 与内容哈希拼起来的：取「同 id」前缀一律走它，别把分隔符写成字面量。 */
 const idPrefixOf = (id: string): string => keyOf(id, '');
@@ -40,6 +85,10 @@ export class PluginManager {
   private versions = new Map<string, string>();
   private readonly dataDir: string;
   private readonly emit: PluginEventSink;
+  /** 运行面状态提供者（main 注入 pluginHost.status）：界面据此显示 pid / uptime */
+  private runtimeStatus: ((id: string, contentHash: string) => PluginRuntimeView) | null = null;
+  /** 删目录之前的同步收尸（kill 进程、撤贡献）；`uninstall` 是同步命令，不能 await */
+  private uninstallHook: ((id: string, contentHash: string) => void) | null = null;
   /**
    * 扫描结果缓存：key 是包目录，value = 只 stat 的指纹 + 扫描结果（或失败原因）。
    *
@@ -65,10 +114,32 @@ export class PluginManager {
    * 下一轮 `active()` 便直接跳过它、冲突随之消失、说明也跟着没了——视图会一拍两拍地闪。
    */
   private readonly versionTrims = new Map<string, string>();
+  /**
+   * 市场来源表（惰性读盘）：键是 `id@contentHash`，值是"从哪个市场 id / 版本装的"。
+   *
+   * 为什么是旁路文件而不是包内文件/事件：包内文件会改变整包内容哈希（`sha256` 与内容寻址
+   * 都会对不上）；事件则只在信任/启停时写，而"从市场装的"这件事发生在 `confirm` 之前。
+   * 这份记录只服务管理视图，**不参与任何执行期判定**，写坏了最坏结果只是 marketId 显示为空。
+   */
+  private origins: Map<string, PluginMarketOrigin> | null = null;
 
   constructor(dataDir: string, emit: PluginEventSink = () => {}) {
     this.dataDir = dataDir;
     this.emit = emit;
+  }
+
+  setRuntimeStatusProvider(provider: (id: string, contentHash: string) => PluginRuntimeView): void {
+    this.runtimeStatus = provider;
+  }
+
+  /**
+   * 删包目录之前的同步收尸口。
+   *
+   * 为什么是同步：`uninstall` 由 HTTP 命令层**同步**调用（回执形状与其它三条 `plugin-*`
+   * 一致），而"进程还开着就删包目录"是 Windows 上必留垃圾的一步。`kill` 本身不需要 await。
+   */
+  setUninstallHook(hook: (id: string, contentHash: string) => void): void {
+    this.uninstallHook = hook;
   }
 
   setEvents(events: readonly AppEvent[]): void {
@@ -104,6 +175,76 @@ export class PluginManager {
 
   install(sourceDir: string): PluginPackage { return installPluginPackage(sourceDir, this.dataDir); }
 
+  /** 记下"这份内容哈希是从市场哪个 id / 版本装的"；写盘失败不抛出（它只是视图归属）。 */
+  recordMarketOrigin(id: string, contentHash: string, origin: PluginMarketOrigin): void {
+    if (!/^[a-z0-9-]{1,64}$/.test(id) || !/^[a-f0-9]{64}$/.test(contentHash)) return;
+    if (!/^[a-z0-9-]{1,64}$/.test(origin.marketId) || origin.version === '' || origin.version.length > 128) return;
+    const origins = this.originsOf();
+    origins.set(originKeyOf(id, contentHash), {
+      marketId: origin.marketId,
+      version: origin.version,
+      installedAt: origin.installedAt,
+    });
+    this.persistOrigins();
+  }
+
+  /** 某一份内容的市场来源；不是市场装 / 还没记录 ⇒ null。 */
+  marketOriginOf(id: string, contentHash: string): PluginMarketOrigin | null {
+    return this.originsOf().get(originKeyOf(id, contentHash)) ?? null;
+  }
+
+  private originsPath(): string {
+    return join(this.dataDir, 'plugins', 'state', MARKET_ORIGINS_FILE);
+  }
+
+  /**
+   * 惰性读盘。文件缺失 / 坏 JSON / 条目形状不对都按"没有记录"处理：
+   * 来源只是一格展示信息，不该让整个插件列表因为一份旁路文件读不出来而失败。
+   */
+  private originsOf(): Map<string, PluginMarketOrigin> {
+    if (this.origins !== null) return this.origins;
+    const loaded = new Map<string, PluginMarketOrigin>();
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.originsPath(), 'utf8'));
+      const raw = isRecord(parsed) && Array.isArray(parsed['origins']) ? parsed['origins'] : [];
+      for (const item of raw) {
+        if (!isRecord(item)) continue;
+        const id = asString(item['id']);
+        const contentHash = asString(item['contentHash']);
+        const marketId = asString(item['marketId']);
+        const version = asString(item['version']);
+        const installedAt = asString(item['installedAt']);
+        if (!/^[a-z0-9-]{1,64}$/.test(id) || !/^[a-f0-9]{64}$/.test(contentHash)) continue;
+        if (!/^[a-z0-9-]{1,64}$/.test(marketId) || version === '') continue;
+        loaded.set(originKeyOf(id, contentHash), { marketId, version, installedAt });
+      }
+    } catch {
+      /* 文件不存在 / 坏 JSON：空表就是正确结论 */
+    }
+    this.origins = loaded;
+    return loaded;
+  }
+
+  private persistOrigins(): void {
+    if (this.origins === null) return;
+    const origins = [...this.origins].map(([key, value]) => {
+      const separator = key.lastIndexOf('@');
+      return {
+        id: key.slice(0, separator),
+        contentHash: key.slice(separator + 1),
+        marketId: value.marketId,
+        version: value.version,
+        installedAt: value.installedAt,
+      };
+    }).sort((left, right) => compareCodePoint(left.id, right.id) || compareCodePoint(left.contentHash, right.contentHash));
+    try {
+      mkdirSync(join(this.dataDir, 'plugins', 'state'), { recursive: true });
+      writeFileSync(this.originsPath(), `${JSON.stringify({ version: 1, origins }, null, 2)}\n`, 'utf8');
+    } catch {
+      /* 写不进去只影响 marketId 显示：绝不让它把一次已完成的安装变成失败 */
+    }
+  }
+
   confirm(id: string, contentHash: string): void {
     const plugin = this.requirePackage(id, contentHash);
     if (this.state(id, contentHash).trusted) return;
@@ -113,7 +254,8 @@ export class PluginManager {
   }
 
   setEnabled(id: string, contentHash: string, enabled: boolean): void {
-    this.requirePackage(id, contentHash);
+    if (enabled) this.requirePackage(id, contentHash);
+    else this.packageAddress(id, contentHash);
     const state = this.lifecycle.get(keyOf(id, contentHash));
     if (!state?.trusted) throw new Error(`Plugin ${id}@${contentHash} must be confirmed before enablement`);
     if (state.enabled === enabled) return;
@@ -131,9 +273,61 @@ export class PluginManager {
     this.lifecycle.set(keyOf(id, contentHash), { ...state, enabled });
   }
 
-  recordFailure(id: string, contentHash: string, reason: string): void {
-    this.requirePackage(id, contentHash);
-    this.emit('plugin/failed', { id, contentHash, reason });
+  recordFailure(id: string, contentHash: string, reason: string, category?: string): void {
+    // Recording a process failure must remain possible when that process changed
+    // its package. This operation never grants trust or executes package bytes.
+    this.packageAddress(id, contentHash);
+    this.emit('plugin/failed', { id, contentHash, reason, ...(category === undefined ? {} : { category }) });
+  }
+
+  /**
+   * 运行面已经按这份日志生效（热启停完成）。
+   *
+   * 为什么要有它：`requiresRestart` 的判据是"内存态说的"与"日志重放说的"不一致。
+   * 代码插件的 enable/disable 是**热**的（进程当场起停），所以进程起来之后必须把
+   * `runtimeEnabled` 对齐，否则界面会永远显示"重启后生效"——而 P1a 的整个卖点就是不重启。
+   * declarative 包不走这里，它们照旧保留 P0 的"重启待生效"。
+   */
+  markRuntimeApplied(id: string, contentHash: string): void {
+    const key = keyOf(id, contentHash);
+    const state = this.lifecycle.get(key);
+    if (state === undefined) return;
+    this.runtimeEnabled.set(key, state.enabled);
+  }
+
+  /**
+   * 卸载：kill（同步口）→ 事件 → 删目录 → 清生命周期。
+   *
+   * 事件写在删目录**之前**：`plugin/uninstalled.path` 是"它原来在哪"的唯一凭据，
+   * 目录删完再写就只能写一句没有落点的话。
+   */
+  uninstall(id: string, contentHash: string): void {
+    const rootDir = this.packageAddress(id, contentHash);
+    if (!existsSync(rootDir) && !this.lifecycle.has(keyOf(id, contentHash))) throw new Error(`Plugin ${id}@${contentHash} not found`);
+    const version = this.versions.get(keyOf(id, contentHash)) ?? this.versionForRemoval(rootDir);
+    try {
+      this.uninstallHook?.(id, contentHash);
+    } catch (error) {
+      // 收尸失败不阻止删目录：留一半文件比留一个已不可信的包更糟
+      this.emit('plugin/failed', { id, contentHash, reason: `卸载前停止进程失败：${error instanceof Error ? error.message : String(error)}` });
+    }
+    this.assertRemovalPath(rootDir, id);
+    this.emit('plugin/uninstalled', { id, version, contentHash, path: rootDir, by: 'human' });
+    rmSync(rootDir, { recursive: true, force: true });
+    try {
+      // 同 id 下没有别的版本时，把空的 id 目录也收掉（`discover` 会跳过它，但它不该留在盘上）
+      rmdirSync(join(pluginPackagesRoot(this.dataDir), id));
+    } catch {
+      /* 还有别的版本 / 已被删：都不是错误 */
+    }
+    const key = keyOf(id, contentHash);
+    this.lifecycle.delete(key);
+    this.versions.delete(key);
+    this.runtimeEnabled.delete(key);
+    this.scans.delete(rootDir);
+    this.assemblyProblems.delete(rootDir);
+    this.versionTrims.delete(rootDir);
+    if (this.originsOf().delete(originKeyOf(id, contentHash))) this.persistOrigins();
   }
 
   quarantine(failure: PluginFailure, count: number, retryAt: string, failedAt: string): void {
@@ -202,7 +396,7 @@ export class PluginManager {
         problems.push(error instanceof Error ? error.message : String(error));
         plugin = { rootDir: candidate.rootDir, contentHash: candidate.hash, fileCount: 0, totalBytes: 0,
           manifest: { apiVersion: 1, id: candidate.id, version: this.versions.get(key) ?? '0.0.0',
-            engine: { irmia: '>=0.0.0' }, contributions: { skills: [] }, permissions: [] } };
+            engine: { irmia: '>=0.0.0' }, contributions: { skills: [] }, permissions: [], netAllow: [], runtime: { type: 'declarative' } } };
       }
       const assembled = this.assemblyProblems.get(candidate.rootDir);
       if (assembled !== undefined) problems.push(assembled);
@@ -210,8 +404,20 @@ export class PluginManager {
       // 裁剪说明在状态算完后再追加：它只说明「这一轮组合没收你」，不该把合法包标成 invalid
       const trimmed = this.versionTrims.get(candidate.rootDir);
       if (trimmed !== undefined) problems.push(trimmed);
-      return { package: plugin, state, problems, requiresRestart: lifecycle.enabled !== (this.runtimeEnabled.get(key) ?? false),
-        ...(lifecycle.circuit !== undefined ? { circuit: lifecycle.circuit } : {}) };
+      const runtime = this.runtimeStatus?.(candidate.id, candidate.hash)
+        ?? { type: plugin.manifest.runtime.type, entry: plugin.manifest.runtime.entry ?? null, state: 'not-running', pid: null, uptimeMs: 0, restarts: 0 };
+      const origin = this.marketOriginOf(candidate.id, candidate.hash);
+      return {
+        package: plugin, state, problems, requiresRestart: lifecycle.enabled !== (this.runtimeEnabled.get(key) ?? false),
+        permissions: plugin.manifest.permissions,
+        net: plugin.manifest.netAllow,
+        marketId: origin?.marketId ?? null,
+        marketVersion: origin?.version ?? null,
+        pid: runtime.pid,
+        uptimeMs: runtime.uptimeMs,
+        runtime,
+        ...(lifecycle.circuit !== undefined ? { circuit: lifecycle.circuit } : {}),
+      };
     });
   }
 
@@ -321,6 +527,32 @@ export class PluginManager {
     if (plugin.manifest.id !== id) throw new Error(`Plugin id mismatch: ${plugin.manifest.id}`);
     this.assemblyProblems.delete(rootDir);
     return plugin;
+  }
+
+  /** Safe management address; stopping/removing a bad package must not trust its bytes. */
+  private packageAddress(id: string, hash: string): string {
+    if (!/^[a-z0-9-]{1,64}$/.test(id) || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid plugin id or contentHash');
+    return join(pluginPackagesRoot(this.dataDir), id, hash);
+  }
+
+  private assertRemovalPath(rootDir: string, id: string): void {
+    const root = pluginPackagesRoot(this.dataDir);
+    const idDir = join(root, id);
+    for (const dir of [join(this.dataDir, 'plugins'), root, idDir, rootDir]) {
+      try {
+        const stat = lstatSync(dir);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Plugin management path must be a real directory');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  }
+
+  private versionForRemoval(rootDir: string): string {
+    // Unconfirmed damaged packages may not have lifecycle metadata yet. The
+    // version is diagnostic only; never parse or validate the damaged manifest.
+    const cached = this.scans.get(rootDir)?.plugin?.manifest.version;
+    return cached ?? '0.0.0';
   }
 
   private discover(): { id: string; hash: string; rootDir: string }[] {

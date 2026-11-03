@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "greeting": { "type": "string", "default": "hello", "description": "打招呼用的词（P1a 只读默认值）" },
+    "retries": { "type": "number", "default": 2 },
+    "verbose": { "type": "boolean", "default": false },
+    "mode": { "type": "string", "enum": ["fast", "safe"], "default": "safe" }
+  }
+}

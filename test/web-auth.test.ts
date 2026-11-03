@@ -516,6 +516,90 @@ test('改密码会落一条 auth/password-set 事实（action=change、失效了
   assert.equal(changes[0]!.visibility, 'internal');
 });
 
+test('改密码撤销在途旧代际登录：不能补签会话，也不能改变新代际退避', async (t) => {
+  const dir = tempDirSync('irmia-auth-inflight-login-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let resume = () => {};
+  const paused = new Promise<void>((resolve) => { resume = resolve; });
+  let waitsToPause = 2;
+  const s = new AuthStore({
+    dataDir: dir, now: () => T0, legacyToken: null,
+    wait: async () => {
+      if (waitsToPause > 0) {
+        waitsToPause -= 1;
+        await paused;
+      }
+    },
+  });
+  const initial = await s.setup(GOOD_PASSWORD);
+  assert.ok(initial.ok);
+  // 两条登录已捕获旧凭据，但尚未验密码；正确/错误密码都不能干涉新代际。
+  const pending = [s.login(GOOD_PASSWORD), s.login('wrong-before-rotation')];
+  const changed = await s.changePassword(GOOD_PASSWORD, 'new-rotation-password');
+  assert.ok(changed.ok);
+  await s.login('wrong-after-rotation');
+  await s.login('wrong-after-rotation');
+  assert.equal(s.backoffMs(), 500);
+  const persisted = readFileSync(join(dir, AUTH_FILE_NAME), 'utf8');
+
+  resume();
+  for (const late of await Promise.all(pending)) {
+    assert.deepEqual(late, { ok: false, status: 401, code: 'bad-password', message: '密码不对。' });
+  }
+  assert.equal(s.backoffMs(), 500, '旧代际不能清零或累加新代际失败计数');
+  assert.equal(s.sessionCount, 1, '改密码后只保留当场签发的新会话');
+  assert.equal(s.authenticate(initial.token).ok, false);
+  assert.equal(s.authenticate(changed.token).ok, true);
+  assert.equal(readFileSync(join(dir, AUTH_FILE_NAME), 'utf8'), persisted, '迟到登录不得写入凭据库');
+  assert.equal(store(dir, () => T0).authenticate(changed.token).ok, true, '重新加载后同样只接受新会话');
+  assert.equal((await s.login(GOOD_PASSWORD)).ok, false);
+  assert.equal((await s.login('new-rotation-password')).ok, true);
+});
+
+test('并发首次设密码只允许一个请求提交，另一个不能覆盖已签发的凭据', async (t) => {
+  const dir = tempDirSync('irmia-auth-setup-race-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const s = store(dir, () => T0);
+  const passwords = [GOOD_PASSWORD, 'competing-setup-password'];
+  const results = await Promise.all(passwords.map((password) => s.setup(password)));
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  const winnerIndex = results.findIndex((result) => result.ok);
+  const winner = results[winnerIndex]!;
+  const loser = results[1 - winnerIndex]!;
+  assert.ok(winner.ok);
+  assert.ok(!loser.ok);
+  assert.equal(loser.status, 409);
+  assert.equal(loser.code, 'already-initialized');
+  assert.match(loser.message, /已经设过密码/u);
+  assert.equal(s.sessionCount, 1);
+  const reopened = store(dir, () => T0);
+  assert.equal(reopened.authenticate(winner.token).ok, true);
+  assert.equal((await reopened.login(passwords[1 - winnerIndex]!)).ok, false);
+  assert.equal((await reopened.login(passwords[winnerIndex]!)).ok, true);
+});
+
+test('并发改密码只允许一个请求提交，迟到的旧密码验证不能覆盖新凭据', async (t) => {
+  const dir = tempDirSync('irmia-auth-password-race-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const s = store(dir, () => T0);
+  const initial = await s.setup(GOOD_PASSWORD);
+  assert.ok(initial.ok);
+  const passwords = ['first-new-password', 'second-new-password'];
+  const results = await Promise.all(passwords.map((password) => s.changePassword(GOOD_PASSWORD, password)));
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  const winnerIndex = results.findIndex((result) => result.ok);
+  const winner = results[winnerIndex]!;
+  const loser = results[1 - winnerIndex]!;
+  assert.ok(winner.ok);
+  assert.deepEqual(loser, { ok: false, status: 401, code: 'bad-password', message: '当前密码不对。' });
+  assert.equal(s.sessionCount, 1);
+  assert.equal(s.authenticate(initial.token).ok, false);
+  const reopened = store(dir, () => T0);
+  assert.equal(reopened.authenticate(winner.token).ok, true, '胜出的改密会话落盘后仍有效');
+  assert.equal((await reopened.login(passwords[1 - winnerIndex]!)).ok, false);
+  assert.equal((await reopened.login(passwords[winnerIndex]!)).ok, true);
+});
+
 // ──────────────────────────────── ⑤ 退避 ────────────────────────────────
 
 test('退避的时间表：第 1 次不罚，之后 500→1s→2s→4s→8s 封顶', async (t) => {

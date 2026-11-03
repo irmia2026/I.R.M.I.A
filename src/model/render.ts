@@ -32,6 +32,17 @@ import { estimateTokens } from '../tools/registry.ts';
 /**
  * 渲染模板版本：任何模板变更必须递增并接受一次缓存全 miss。
  *
+ * v83（**情绪表达与亲密层**，2026-11-02）：情绪行改为三档行为指令 + 混合情绪；新增独立亲密层
+ *      （仅 enabled 且用户 1:1 私聊时追加静态规范与「亲密：」字段）。关闭/群聊/他人的字节不变。
+ *
+ * v82（**speak 贴纸参数与静态规则**，2026-10-31）：只扩展现有 speak 的 sticker/stickerPos 与 self-brief
+ *      三句静态规则，不新增工具。工具 schema 与冻结 instructions 变一次，接受一次设计内前缀 miss；
+ *      之后标签枚举与静态规则保持稳定，选图与概率只走数据/事件，不改请求前缀。
+ *
+ * v81（**Affect v4 接线**，2026-10-31）：情绪行只在此刻层末尾追加；开启时才把固定情绪使用规范
+ *      加进 instructions。关闭态请求字节与 v80 完全一致；首次开启会一次性改变缓存前缀，
+ *      之后情绪变化只影响此刻层尾部，不重写历史。回放与 GUI 预览都读 step/start 收据，不按现态补写。
+ *
  * v80（**`read_channel` 翻页一页的条数 50 → 15**，2026-10-23 用户的一句「50 条太多了」）：
  *      改的是 `tools/admin.ts` 的 `READ_CHANNEL_PAGE_SIZE`（50 → 15）——这个数**逐字**出现在
  *      `read_channel` 的两个参数描述里（`before` 的「一页 15 条」、`limit` 的「翻页一页 15」），
@@ -2098,7 +2109,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '80';
+export const RENDER_VERSION = '85';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -2307,6 +2318,8 @@ const NOW_LABEL = {
   task: '当前任务',
   maintenance: '维护窗口',
   budget: '预算提醒',
+  intimacy: '亲密',
+  affect: '情绪',
 } as const;
 
 /**
@@ -2349,7 +2362,7 @@ export const NOW_LAYER_FIELD_LABELS: readonly string[] = Object.values(NOW_LABEL
  * 字段仍在"，反面钉"不在清单里的不变字段照旧不发"（别把这份清单读成"增量作废"）。
  */
 export const NOW_MUST_KEEP_LABELS: readonly string[] = Object.freeze([
-  NOW_LABEL.asks, NOW_LABEL.sessions, NOW_LABEL.channel,
+  NOW_LABEL.asks, NOW_LABEL.sessions, NOW_LABEL.channel, NOW_LABEL.intimacy, NOW_LABEL.affect,
 ]);
 
 /** {@link NOW_MUST_KEEP_LABELS} 的查表形态（`renderNowLayer` 的判据；清单是唯一真源） */
@@ -2598,6 +2611,13 @@ export interface PinnedWake {
 }
 
 export interface RenderInput {
+  /** Engine-derived, already receipted string; NEVER read current state during replay. */
+  affectLine?: string | null;
+  /** Independent private intimacy layer; host gates it to enabled + owner 1:1 only. */
+  intimacyLine?: string | null;
+  /** 兼容老收据/老调用点：规范已搬进 SELF_BRIEF，这两个开关不再影响 instructions。 */
+  affectRules?: boolean;
+  intimacyRules?: boolean;
   events: AppEvent[];
   persona: RenderPersona;
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
@@ -3025,6 +3045,9 @@ export function historyAppendCheckOf(
   };
 }
 
+// 情绪/亲密规范已搬进 SELF_BRIEF（缓存前缀，免费常驻）；这里的条件静态后缀已删除。
+// 保留 RenderInput.affectRules / intimacyRules 只为老收据与调用方兼容：它们不再影响字节。
+
 // ── 主入口 ──
 
 export function render(input: RenderInput): RenderedRequest {
@@ -3055,6 +3078,7 @@ export function render(input: RenderInput): RenderedRequest {
   if (wakeEvent !== null && wakeEvent.seq > builtAtSeq) builtAtSeq = wakeEvent.seq;
   if (input.pinnedWake != null && input.pinnedWake.event.seq > builtAtSeq) builtAtSeq = input.pinnedWake.event.seq;
 
+  // 规范在 SELF_BRIEF；开关不再改系统前缀，affectRules/intimacyRules 仅为回放兼容保留。
   const instructions = renderInstructions(persona);
   // 思维链回传的帽子（v68）：这里归一一次，交给 `renderEvents` 执行（判据在 `reasoningEchoOf`）。
   // 生产三条路都不传 ⇒ 出厂帽子；同一份日志因此渲染出同一份请求（可重放/可预览）。
@@ -3244,6 +3268,8 @@ export function render(input: RenderInput): RenderedRequest {
     // **逐字段比对，不变就不发**（见 renderNowLayer 的说明）。缺省 null = 没有参照
     // （本轮第 1 步，或重放/子代理那些旧调用点）⇒ 每个字段都发。
     input.previousNowLayer ?? null,
+    input.intimacyLine ?? null,
+    input.affectLine ?? null,
   );
   // 整层都被省掉（每个字段都与上一步逐字节相同）时**不推这条 item**：不写空壳、不留一行
   // 只有一个段头的 developer 消息（她读到的会是"框架又说了句没用的话"）。
@@ -3599,6 +3625,8 @@ function renderNowLayer(
   stateBytes: number | null,
   stateBudgetBytes: number | null,
   previousNowLayer: string | null,
+  intimacyLine: string | null,
+  affectLine: string | null,
 ): { text: string; full: string } {
   /** 一个字段：`label` 是它的稳定标签（比对与诊断用），`text` 是**含前导分隔**的正文 */
   interface NowField { label: string; text: string }
@@ -3696,6 +3724,9 @@ function renderNowLayer(
   // 标签就是这件事的全部开关（边界见 `stateBudgetReminder` 与 `nowFieldsOf` 的注释）。
   const reminder = stateBudgetReminder(stateBytes, stateBudgetBytes);
   if (reminder !== null) push(NOW_LABEL.budget, reminder);
+  // Intimacy sits immediately before affect; both stay at the suffix so a change is suffix-local.
+  if (intimacyLine !== null && intimacyLine !== '') push(NOW_LABEL.intimacy, intimacyLine);
+  if (affectLine !== null && affectLine !== '') push(NOW_LABEL.affect, affectLine);
 
   // **完整的那一层**（v69）：这一步"本来该说什么"的全文——**未经增量裁剪**。它是下一步的
   // 比对基线（`RenderedRequest.nowLayerFull`）：基线必须是"上一步完整的这一层"，不能是
@@ -4680,6 +4711,17 @@ export interface ReasoningEchoPolicy {
 }
 
 /** 出厂口径：**总字符硬上限 300,000 + 区外照旧全传**（依据见 {@link ReasoningEchoPolicy}） */
+/**
+ * 思维链回传字符上限随**上下文/压缩阈值**缩放：1 token ≈ 1.5 字符。
+ *
+ * 出厂压缩线 200k token ⇒ 300k 字符（与旧常量逐字节相同）；用户把压缩线调到 450k
+ * ⇒ 675k 字符，不再出现"上下文放大了、回传帽子还是 300k"的错位。
+ * 下界 100k 防止阈值调小后每轮都在丢思维链；上界 2M 防止误配把请求撑爆。
+ */
+export function reasoningEchoMaxCharsFor(compactionThresholdTokens: number): number {
+  const tokens = Number.isFinite(compactionThresholdTokens) ? compactionThresholdTokens : 200_000;
+  return Math.min(2_000_000, Math.max(100_000, Math.round(tokens * 1.5)));
+}
 export const REASONING_ECHO_POLICY: ReasoningEchoPolicy = Object.freeze({
   maxTotalChars: 300_000,
   outOfRegion: 'keep',
@@ -6187,6 +6229,13 @@ export type ExternalEventData = {
    */
   chatId?: string;
   attachments?: ReadonlyArray<{ type: string; url?: string; name?: string; text?: string }>;
+  /**
+   * 插件在 `message.received` 里追加的上下文（P1b）。
+   *
+   * 空/缺省 = 这条消息没有插件附加上下文，渲染字节与 P1a 逐字相同；有值时渲染在
+   * `[/external_event]` 之后（框架的声音，与注入预警同一个位置）。
+   */
+  pluginContext?: string;
 };
 
 /**
@@ -6263,7 +6312,12 @@ export function renderExternalEvent(
   // （`budget/consumed.cacheBreak` 会如实报出来）。
   const given = (note ?? '').trim();
   const resolved = given === '' ? ruleNoteFor(data.text, data, warnExempt) : given;
-  return resolved === null ? block : `${block}\n${resolved}`;
+  const withNote = resolved === null ? block : `${block}\n${resolved}`;
+  // 插件附加上下文（P1b）：与预警同一条纪律——框外、框架的声音、有上限。
+  // 没有这一格时逐字节等于改前（旧日志/没有插件订阅的那些消息完全不受影响）。
+  const pluginContext = typeof data.pluginContext === 'string' ? data.pluginContext.trim() : '';
+  if (pluginContext === '') return withNote;
+  return `${withNote}\n\n[插件上下文] ${clipWithNote(pluginContext, EXTERNAL_TEXT_MAX_CHARS)}`;
 }
 
 /** 事件 → 它的通道 messageId（只有通道消息有；别的类型返回空串，取不到备注也是对的） */

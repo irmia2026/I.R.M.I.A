@@ -460,8 +460,13 @@ const DYNAMIC_EMIT_SITES: readonly string[] = [
   siteKey('src/tools/catalog.ts', 'type'),
   // 钩子运行器的回调（收一个对象，可见性由构造它的 main.ts 那一处决定）
   siteKey('src/hook/hooks.ts', '{ hook: point, outcome: run.outcome, ...(compiled.raw.plugin === undefined ? {} : { pluginId: compiled.raw.plugin.id, contentHash: compiled.raw.plugin.contentHash, contributionName: compiled.raw.plugin.contributionName, }) }'),
-  // 插件生命周期写入统一经 PluginEventSink，main.ts 显式使用 internal
+  // 插件生命周期写入统一经 PluginEventSink（第一实参是三元表达式 ⇒ 扫描器看不见字面量类型），
+  // 可见性由 main.ts 构造 manager 时那一处显式给（`append(type, data, 'internal')`）
   siteKey('src/plugin/manager.ts', "enabled ? 'plugin/enabled' : 'plugin/disabled'"),
+  // 代码级插件宿主（P1a）：`this.options.emit(type, data)` 只写 `plugin/*` 运行面事件
+  // （crashed / restarted / runtime-started / contribution-isolated…），它们在
+  // `EVENT_VISIBILITY` 里全部是 internal，宿主构造时那一处也显式给了 'internal'
+  siteKey('src/plugin/host-services.ts', 'type'),
   // `JobManager#emit(event, visibility, sync)`：可见性是**必填形参**（不是可省略的那个洞）
   siteKey('src/runtime/job-manager.ts', "{ type: 'job/started', data: { jobId: job.jobId, command: job.command, turn: job.turn } }"),
   siteKey('src/runtime/job-manager.ts', "{ type: 'job/finished', data: { jobId: job.jobId, exitCode: job.exitCode, outputRef: JSON.stringify(output) } }"),

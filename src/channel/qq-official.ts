@@ -739,6 +739,11 @@ export interface QqGatewayOptions {
    * 而它建判据的时刻早于本网关学到东西（2026-10-11 修的"改了等于没改"就是这条线断了）。
    */
   onSelfId?: (id: string) => void;
+  /**
+   * **网关就绪**（P1b）：READY 与 RESUMED 各触发一次——断线重连后 RESUMED/READY
+   * 会再次走到这里，所以"重连要能再次触发"不需要另记状态。
+   */
+  onReady?: () => void;
 }
 
 interface TimerHandle { id: unknown }
@@ -1068,6 +1073,16 @@ export class QqGateway {
     }
   }
 
+  /** 网关就绪回调（READY / RESUMED 两个点；断线重连会再次触发） */
+  private notifyReady(): void {
+    try {
+      this.options.onReady?.();
+    } catch (error) {
+      // 回调是宿主的：它坏了不该把网关状态机带崩
+      this.log.warn(`[QQ/网关] onReady 回调抛错（已吞掉）：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private onHello(data: Record<string, unknown> | null): void {
     const interval = readNumber(data, 'heartbeat_interval');
     if (interval !== null && interval > 0) {
@@ -1093,6 +1108,7 @@ export class QqGateway {
       this.reconnectAttempts = 0;
       this.log.info(`[QQ/网关] READY，session ${this.sessionId === '' ? '（未下发）' : this.sessionId}`);
       this.startHeartbeat();
+      this.notifyReady();
       return;
     }
     if (eventType === 'RESUMED') {
@@ -1100,6 +1116,7 @@ export class QqGateway {
       this.reconnectAttempts = 0;
       this.log.info('[QQ/网关] RESUMED：漏掉的会话事件已补发');
       this.startHeartbeat();
+      this.notifyReady();
       return;
     }
     if (eventType === '') return;
@@ -2080,6 +2097,11 @@ export interface ChannelAdapter {
   stop(): void;
   /** 收到一条通道消息（已转成 wake/channel 的 data 形状） */
   onMessage?: (event: WakeChannel['data']) => void;
+  /**
+   * 链路就绪（P1b）：首次连上 + 每次断线重连后触发。宿主用它给插件发 `channel.ready`。
+   * 可选：没有这个能力的适配器（或还没装配）就是不发，宿主不做第二份判断。
+   */
+  onReady?: () => void;
   /** 回投：chatType + chatId + 文本；msgId/msgSeq 给定时走被动回复 */
   sendText(chatType: QqChatType, chatId: string, text: string, options?: SendTextOptions): Promise<SendOutcome>;
   /**
@@ -2129,6 +2151,11 @@ export interface QqOfficialChannelOptions {
    * 网关自己身上（它的 `options` 在构造时定下），而通道不再转一手——见下面构造里那句注释。
    */
   onSelfId?: (id: string) => void;
+  /**
+   * **网关就绪**（P1b）：首次 READY 与每次重连后的 READY/RESUMED 都触发。
+   * 装配期给或装配后赋属性都行（与 `onWake` / `onSelfId` 同一个口）。
+   */
+  onReady?: () => void;
 }
 
 /** QQ 官方通道：凭证 + 网关 + 发送器三件套的组合，对系统只暴露 ChannelAdapter 形状 */
@@ -2159,6 +2186,9 @@ export class QqOfficialChannel implements ChannelAdapter {
    */
   onNotice?: (data: ChannelNoticeData) => void;
 
+  /** 网关就绪口（见 `QqOfficialChannelOptions.onReady`；宿主装配后赋值） */
+  onReady?: () => void;
+
   constructor(options: QqOfficialChannelOptions) {
     this.appId = options.appId;
     this.log = options.log ?? { info: () => {}, warn: () => {} };
@@ -2185,6 +2215,10 @@ export class QqOfficialChannel implements ChannelAdapter {
       // 这一条**不经过**通道实例上的属性：网关在构造时就建好了，而"学到"是运行期的事，
       // 中间再加一层转手只会多一个"宿主改了属性但网关不知道"的失效点。
       ...(options.onSelfId === undefined ? {} : { onSelfId: options.onSelfId }),
+      onReady: () => {
+        options.onReady?.();
+        this.onReady?.();
+      },
       onWake: (data) => {
         this.delivered += 1;
         this.onMessage?.(data);

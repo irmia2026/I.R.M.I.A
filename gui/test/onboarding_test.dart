@@ -212,7 +212,9 @@ void main() {
       }
       unawaited(response.close());
     });
-    state = AppState(api: IrmiaApi(baseUrl: 'http://127.0.0.1:${server.port}'));
+    // 作用域钉成空串：测试里的 AppState 没有"当前实例"，否则键会随本机登记表变化
+          onboardingFlagScopeOverride = '';
+          state = AppState(api: IrmiaApi(baseUrl: 'http://127.0.0.1:${server.port}'));
   });
 
   tearDown(() async {
@@ -1358,3 +1360,4 @@ void main() {
     });
   });
 }
+

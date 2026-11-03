@@ -13,8 +13,9 @@
  * 需要重启的字段只写 `warnings`（提示重启），**不写 `config/changed`**：
  * 那个事件的含义是「已生效」，写它就必须真的生效了。
  *
- * 名单现在**只有一项**：`mcp.servers`（2026-10-10 加，MCP 声明面热更）。
- * 为什么是它、代价是什么、为什么失败能全身而退，逐条写在 `HOT_RELOAD_FIELDS` 的注释里。
+ * 名单现有 `mcp.servers` 与 `affect.enabled` / `affect.evaluatorEnabled` 三项。
+ * MCP 的代价与失败回退写在 `HOT_RELOAD_FIELDS` 的注释里；情绪开关由 real-loop 每轮装配时读取，
+ * 首次开启会改变一次静态指令前缀，环境变量 `IRMIA_AFFECT_ENABLED` 始终优先。
  * 生效方式有一条与"换一份新配置"不同的地方，见 `applyHotFieldsInPlace`：**就地改活的
  * `AppConfig`**（引用它的消费者包括 `RealLoop` 与 `WebServer`，换对象等于它们继续读旧的）。
  *
@@ -92,7 +93,10 @@ export const CONFIG_POLL_INTERVAL_MS = 250;
  * 全 miss ≈9.6 万 token）。`mcp.servers` 之所以能先来，正是因为它**不在**那条路上（见 ①）。
  * 填一项就得有一项的证据：别在改这一行时顺手把别的东西一起放进来。
  */
-export const HOT_RELOAD_FIELDS: readonly string[] = ['mcp.servers'];
+export const HOT_RELOAD_FIELDS: readonly string[] = [
+  'mcp.servers', 'affect.enabled', 'affect.evaluatorEnabled', 'intimacy.', 'stickers.',
+  'channels.qqOfficial.stickers', 'channels.onebot.stickers',
+];
 
 /**
  * **配置生效口径的唯一一句话**（2026-10-18 立）。
@@ -105,7 +109,7 @@ export const HOT_RELOAD_FIELDS: readonly string[] = ['mcp.servers'];
  * （注释/文档里写 `config/watcher.ts` 的 `HOT_RELOAD_POLICY`），不许再各写一遍。
  *
  * 它把三件事说全，缺一件就会重新长出矛盾：
- *   ① 谁热更：只有 `HOT_RELOAD_FIELDS`（今天 `mcp.servers` 一项）；
+ *   ① 谁热更：只有 `HOT_RELOAD_FIELDS`（MCP 声明、情绪开关与贴纸配置）；
  *   ② 怎么生效：写盘后 600ms 去抖内**就地改活的 `AppConfig`**，并写 `config/changed`；
  *   ③ 刻意**不**做什么：不重建 MCP 常驻索引（那一段的字节要稳定，声明变化走尾部追加通报）。
  * 名单外的字段要重启进程才生效——重启本身就是一次"上下文重大变化"，索引在那时按新配置重建。
@@ -114,10 +118,11 @@ export const HOT_RELOAD_FIELDS: readonly string[] = ['mcp.servers'];
  * `HOT_RELOAD_FIELDS` 一致），别让这段注释变成第二份真相。
  */
 export const HOT_RELOAD_POLICY =
-  '只有 mcp.servers 是热更字段（配置写盘后 600ms 去抖内就地生效并写 config/changed）；'
-  + '其余全部字段要重启进程才生效。热更刻意不重建 MCP 常驻索引：那一格的字节必须稳定，'
-  + '声明变化走尾部追加的通报（wake/manual{via:mcp}），索引只在重大变化点'
-  + '（进程启动 / 模板换代 / compaction-summary 之后）按当前配置重建。';
+  'mcp.servers、affect.enabled、affect.evaluatorEnabled、intimacy.、stickers.、channels.qqOfficial.stickers 与 channels.onebot.stickers 是热更字段'
+  + '（配置写盘后 600ms 去抖内就地生效并写 config/changed）；其余全部字段要重启进程才生效。'
+  + '热更刻意不重建 MCP 常驻索引：那一格的字节必须稳定，声明变化走尾部追加的通报（wake/manual{via:mcp}），'
+  + '索引只在重大变化点（进程启动 / 模板换代 / compaction-summary 之后）按当前配置重建；'
+  + '情绪开关由 real-loop 每轮装配时读取，环境变量 IRMIA_AFFECT_ENABLED 优先；贴纸与采收在下一拍/下一轮读取。';
 
 /**
  * 必须重启才生效（§1 表格右列）。`timezone` / `paths` / `persona` 未列入可热更白名单，

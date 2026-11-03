@@ -1,0 +1,9 @@
+{
+  "apiVersion": 2,
+  "id": "demo-hook-compat",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": ["hooks.model", "hooks.turn", "hooks.tool", "chat.send", "state.plugin"],
+  "meta": { "title": "命名钩子兼容夹具", "author": "tests", "desc": "注册表路径下复验旧 14 点与 host.ready" }
+}

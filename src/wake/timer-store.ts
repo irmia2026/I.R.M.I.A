@@ -630,24 +630,22 @@ export class TimerStore {
     const entry: StoredTimerEntry = cron === undefined
       ? { timerId: id, at, payload, skipped: 0 }
       : { timerId: id, at, cron, payload, skipped: 0 };
+    // 日志是恢复真源：事实提交成功后才布防，写失败时不能留下会触发的任务。
+    this.emitSet(entry);
     this.#entries.set(id, entry);
     this.arm(id, { resetSkip: true });
-    // 先落盘再写事件：盘上那份只是 hint，但"已经报过 ok 的定时器"两处都不该缺。
-    // 顺序是刻意的——**盘 → 日志**：崩在两者之间时留下的是"表里有、日志里没有"，
-    // 恢复流程按日志重建（reconcile/importEntries）会把它抹掉，盘不覆盖日志。
-    // 反过来（日志有、盘上无）则会多出一条恢复不掉的定时器，那才是真丢事实。
     await this.save();
-    this.emitSet(entry);
     return { ok: true, id };
   }
 
   /** 取消条目：在途 handle 与错峰状态一并清理，然后落盘 */
   async cancel(id: string): Promise<boolean> {
-    const existed = this.#entries.delete(id);
-    this.armedDelete(id);
-    if (!existed) return false;
-    await this.save();
+    if (!this.#entries.has(id)) return false;
+    // 失败保留原条目及句柄供重试；不得把“取消未持久化”报告成成功。
     this.emitCancelled(id);
+    this.#entries.delete(id);
+    this.armedDelete(id);
+    await this.save();
     return true;
   }
 
@@ -1021,7 +1019,12 @@ export class TimerStore {
      *
      * 一次性条目**不走这里**：它触发即出表，投影里那一条由 `timer/fired` 收掉（fold.ts）。
      */
-    this.emitSet(this.#entries.get(id) ?? entry);
+    try {
+      this.emitSet(this.#entries.get(id) ?? entry);
+    } catch {
+      // 后台推进没有命令调用方接住错误；emitSet 已记录告警，本轮停止重新布防。
+      return;
+    }
 
     // 离线太久时下一次也已经过期：逐拍向前推进并让出 staggerMs，
     // 把恢复期的唤醒风暴摊成一条平滑队列；1000 拍上限防止病态表达式烧 CPU。
@@ -1075,8 +1078,8 @@ export class TimerStore {
         payload: entry.payload,
       });
     } catch (err) {
-      // 与 onDue 同一条纪律：留痕失败只是少了留痕，绝不能反过来让布防失败
       this.#warnings.push(`timer/set: ${toErrorMessage(err)}`);
+      throw err;
     }
   }
 
@@ -1088,6 +1091,7 @@ export class TimerStore {
       sink.cancelled(timerId);
     } catch (err) {
       this.#warnings.push(`timer/cancelled: ${toErrorMessage(err)}`);
+      throw err;
     }
   }
 }

@@ -98,6 +98,16 @@ class PendingRequest {
   String toString() => label;
 }
 
+/// 一条请求固定的目标与凭据；仅同实例的 401 自愈可以推进它的代际。
+class _ApiRequestContext {
+  _ApiRequestContext(this.generation, this.baseUrl, this.token, this.instance);
+
+  int generation;
+  final String baseUrl;
+  String? token;
+  String? instance;
+}
+
 /// 主进程 API 客户端（规格：docs/gui-design.md §5）。零第三方依赖——只用 dart:io 的 HttpClient。
 ///
 /// ## 认证形态（2026-10 起）
@@ -131,13 +141,15 @@ class PendingRequest {
 /// 出事时不用再靠猜——清单上写的就是"卡在哪一条"。
 class IrmiaApi {
   IrmiaApi({
-    required this.baseUrl,
-    this.token,
+    required String baseUrl,
+    String? token,
     Duration? connectTimeout,
     Duration? requestTimeout,
     Duration? sseIdleTimeout,
     Duration? waitDumpInterval,
-  })  : connectTimeout = connectTimeout ?? kApiConnectTimeout,
+  })  : _baseUrl = baseUrl,
+        _token = token,
+        connectTimeout = connectTimeout ?? kApiConnectTimeout,
         requestTimeout = requestTimeout ?? kApiRequestTimeout,
         sseIdleTimeout = sseIdleTimeout ?? kSseIdleTimeout,
         waitDumpInterval = waitDumpInterval ??
@@ -147,10 +159,24 @@ class IrmiaApi {
   ///
   /// **可变**（2026-10-26）：端口现在有三级来源（后端写的端口文件 > 环境变量 > 默认 7788），
   /// 而"界面先起来、后端后起来"那条路上，界面可能在等待途中读到后端刚写下的端口文件。
-  /// 换端口是**下一条请求就生效**的事，所以这一格是字段而不是 final——判据只在
-  /// `AppState._adoptPortFromFile` 一处（只采纳"文件"这一档，见那里）。
-  String baseUrl;
-  String? token;
+  /// 重设地址会使在途旧请求失效；下一条请求使用新地址。采纳端口文件的判据在
+  /// `AppState._adoptPortFromFile`（只采纳"文件"这一档，见那里）。
+  String _baseUrl;
+  String? _token;
+  // 显式重设同一个值也换代，覆盖切走再切回的情况。
+  int _generation = 0;
+
+  String get baseUrl => _baseUrl;
+  set baseUrl(String value) {
+    _baseUrl = value;
+    _generation += 1;
+  }
+
+  String? get token => _token;
+  set token(String? value) {
+    _token = value;
+    _generation += 1;
+  }
 
   /// 建连超时（默认 [kApiConnectTimeout]；用例把它调小以便快速验伪）
   final Duration connectTimeout;
@@ -173,7 +199,19 @@ class IrmiaApi {
   /// 它只出现在认证响应与 401 的响应体里（服务端把它挂在"进不去的人"能看到的地方，
   /// 见 src/web/server.ts 的 instanceIdOf）。界面拿它去对的地方读自己那份凭据——
   /// 这是"第二个实例把第一个顶掉"那个坑的根治点。
-  String? instance;
+  String? _instance;
+  String? get instance => _instance;
+  set instance(String? value) {
+    _instance = value;
+    _generation += 1;
+  }
+
+  _ApiRequestContext _captureContext() =>
+      _ApiRequestContext(_generation, _baseUrl, _token, _instance);
+
+  void _checkContext(_ApiRequestContext context) {
+    if (context.generation != _generation) throw const ApiStaleRequest();
+  }
 
   /// 401 时的凭据补给口：返回新的会话凭据（界面接线 = 重读凭据文件）。
   ///
@@ -260,6 +298,14 @@ class IrmiaApi {
           {String? confirm, Duration? timeout}) =>
       _send('POST', path, body: body, confirm: confirm, timeout: timeout);
 
+  Future<dynamic> patch(String path, Map<String, dynamic> body,
+          {String? confirm, Duration? timeout}) =>
+      _send('PATCH', path, body: body, confirm: confirm, timeout: timeout);
+
+  Future<dynamic> delete(String path,
+          {Map<String, dynamic>? body, String? confirm, Duration? timeout}) =>
+      _send('DELETE', path, body: body, confirm: confirm, timeout: timeout);
+
   /// 资源 PUT：只给「写一份配置资源」用（协议端的 `PUT /api/protocol-side/config`）。
   ///
   /// 为什么与 post 分开而不是复用：那条端点的语义是**可重复提交**（同样的 body 发两遍结果一样），
@@ -323,6 +369,7 @@ class IrmiaApi {
     bool allowRetry = true,
     Duration? timeout,
   }) async {
+    final context = _captureContext();
     final limit = timeout ?? requestTimeout;
     final entry = beginRequest(method, path);
     final client = HttpClient()..connectionTimeout = connectTimeout;
@@ -332,16 +379,19 @@ class IrmiaApi {
         client,
         method,
         path,
+        context,
         body: body,
         confirm: confirm,
         allowRetry: allowRetry,
       ).timeout(limit);
+      _checkContext(context);
       final spent = clock.now().difference(began);
       if (guiLog.attached && spent.inMilliseconds >= kGuiLogSlowMs) {
         guiLog.write('[net] slow ${entry.label} ${secsOf(spent)}');
       }
       return result;
     } on TimeoutException {
+      _checkContext(context);
       // 请求**可能已经落地**（服务端收到了、只是没在时限内答完）：POST/PUT 一律按
       // "可能已经生效"报，那条话（[ApiTimeout.mayHaveApplied]）会顺着 `'$err'`
       // 一路显示到界面上——把"不知道"说成"没做成"是最容易让人点第二次的那种谎。
@@ -356,6 +406,7 @@ class IrmiaApi {
       }
       throw error;
     } catch (err) {
+      _checkContext(context);
       if (guiLog.attached) {
         final spent = clock.now().difference(began);
         guiLog.write('[net] FAIL ${entry.label} after=${secsOf(spent)} error=$err');
@@ -373,41 +424,58 @@ class IrmiaApi {
   Future<dynamic> _roundTrip(
     HttpClient client,
     String method,
-    String path, {
+    String path,
+    _ApiRequestContext context, {
     Map<String, dynamic>? body,
     String? confirm,
     bool allowRetry = true,
     bool alreadyRetried = false,
   }) async {
-    final uri = Uri.parse('$baseUrl$path');
+    _checkContext(context);
+    final uri = Uri.parse('${context.baseUrl}$path');
     final req = await client.openUrl(method, uri);
-    if (token != null) req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+    // openUrl 会让出执行权：回来后先核对，再使用发起时的票，不能把新实例的票送到旧地址。
+    _checkContext(context);
+    if (context.token != null) {
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${context.token}');
+    }
     if (confirm != null) req.headers.set('X-Confirm', confirm);
     if (body != null) {
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode(body));
     }
     final res = await req.close();
+    _checkContext(context);
     String text;
     try {
       // 读体也在时限里（外层 `.timeout`）——"服务端答了头、body 再也不来"就死在这一行
       text = await res.transform(utf8.decoder).join();
     } catch (err) {
+      _checkContext(context);
       // 401 那一路即使读体失败也要回 ApiAuthError（上层据此回门），别把 401 说成"连接断了"
-      if (res.statusCode == 401) throw ApiAuthError('HTTP 401', instance: instance);
+      if (res.statusCode == 401) throw ApiAuthError('HTTP 401', instance: context.instance);
       rethrow;
     }
+    _checkContext(context);
     if (res.statusCode == 401) {
-      final error = _authErrorOf(text);
+      final error = _authErrorOf(text, knownInstance: context.instance ?? _instance);
+      // 当前响应学到标识不会换代，避免同实例并发请求互相作废。
+      _instance = error.instance;
+      context.instance = error.instance;
       // 自愈：重读一次凭据再试一遍。**只一次**——第二次还 401 就是"票真的不作数了"。
       if (allowRetry && !alreadyRetried) {
         final replacement = await onUnauthorized?.call();
+        _checkContext(context);
         if (replacement != null && replacement.trim().isNotEmpty) {
           token = replacement.trim();
+          // 换票使其它旧请求失效；本请求获准在固定地址上重试一次。
+          context.generation = _generation;
+          context.token = _token;
           return _roundTrip(
             client,
             method,
             path,
+            context,
             body: body,
             confirm: confirm,
             alreadyRetried: true,
@@ -423,9 +491,10 @@ class IrmiaApi {
   ///
   /// 为什么要费这个劲（而不是像别的状态码那样交给 [_decode]）：这两个字段是**下一步做什么**
   /// 的全部依据——`code` 决定弹"设置密码"还是"登录"，`instance` 决定去读哪个凭据文件。
-  ApiAuthError _authErrorOf(String text) {
+  ApiAuthError _authErrorOf(String text, {String? knownInstance}) {
     String message = 'HTTP 401';
     String? code;
+    String? reportedInstance = knownInstance;
     try {
       final decoded = text.isEmpty ? null : jsonDecode(text);
       if (decoded is Map) {
@@ -437,12 +506,12 @@ class IrmiaApi {
           if (rawCode is String && rawCode.isNotEmpty) code = rawCode;
         }
         final rawInstance = decoded['instance'];
-        if (rawInstance is String && rawInstance.isNotEmpty) instance = rawInstance;
+        if (rawInstance is String && rawInstance.isNotEmpty) reportedInstance = rawInstance;
       }
     } catch (_) {
       // 读不出来就用手上这两句默认话：界面照样能回登录态，只是提示糙一点
     }
-    return ApiAuthError(message, code: code, instance: instance);
+    return ApiAuthError(message, code: code, instance: reportedInstance);
   }
 
   dynamic _decode(int status, String text) {
@@ -484,6 +553,7 @@ class IrmiaApi {
   /// 事件、也永远不重连。判死之后两个调用方（`app.dart` 与 `chat_page.dart`）照旧 3 秒后
   /// 重连，并用 `Last-Event-ID` 把断线窗口补回来，所以这一条是**纯增益**。
   Stream<Map<String, dynamic>> events({int? lastEventId}) {
+    final context = _captureContext();
     final controller = StreamController<Map<String, dynamic>>();
     HttpClient? client;
     Timer? idle;
@@ -529,21 +599,29 @@ class IrmiaApi {
       // 建连那一段也纳进空闲判死（见 armIdle 的注释）
       armIdle();
       try {
-        final req = await client!.getUrl(Uri.parse('$baseUrl/api/events/stream'));
-        if (token != null) req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+        _checkContext(context);
+        final req = await client!.getUrl(Uri.parse('${context.baseUrl}/api/events/stream'));
+        _checkContext(context);
+        if (context.token != null) {
+          req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${context.token}');
+        }
         req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
         if (lastEventId != null) req.headers.set('Last-Event-ID', '$lastEventId');
         final res = await req.close();
+        _checkContext(context);
         if (res.statusCode == 401) {
-          finish();
           String text = '';
           try {
             text = await res.transform(utf8.decoder).join();
           } catch (_) {
             // 读不出来就按裸 401 处理（上层照样回登录态）
           }
+          _checkContext(context);
+          finish();
           if (!controller.isClosed) {
-            controller.addError(_authErrorOf(text));
+            final error = _authErrorOf(text, knownInstance: context.instance ?? _instance);
+            _instance = error.instance;
+            controller.addError(error);
             await controller.close();
           }
           return;
@@ -553,6 +631,7 @@ class IrmiaApi {
         }
         var buffer = '';
         await for (final chunk in res.transform(utf8.decoder)) {
+          _checkContext(context);
           armIdle(); // 收到字节 = 这条连接还活着（服务端每 15 秒一条 `: hb`）
           buffer += chunk;
           while (true) {
@@ -581,7 +660,7 @@ class IrmiaApi {
           finish();
           if (guiLog.attached) guiLog.write('[sse] error $err');
           if (!controller.isClosed) {
-            controller.addError(err);
+            controller.addError(context.generation == _generation ? err : const ApiStaleRequest());
             await controller.close();
           }
         }
@@ -597,6 +676,15 @@ class IrmiaApi {
     };
     return controller.stream;
   }
+}
+
+/// 实例或凭据上下文已更换，本次旧响应必须丢弃；它不代表当前实例需要重新登录。
+/// 已经发出的写操作仍可能在原实例生效，调用方不得把它迁移到新实例重放。
+class ApiStaleRequest implements Exception {
+  const ApiStaleRequest();
+
+  @override
+  String toString() => 'Request superseded by an instance or credential change';
 }
 
 /// 服务端返回的"你没凭据/凭据不作数"的**认证错误**。

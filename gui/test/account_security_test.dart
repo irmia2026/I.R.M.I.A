@@ -381,7 +381,7 @@ void main() {
     expect(enClose.toLowerCase().contains('sign out'), isFalse);
     expect(en.settingsLogoutBody, contains('End instance'));
     expect(en.settingsLogoutBody, contains('password'));
-    expect(en.pickerBody.toLowerCase(), contains('sign-in is kept'));
+      expect(en.pickerBody.toLowerCase(), contains('create a new instance'));
   });
 }
 

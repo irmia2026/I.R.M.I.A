@@ -168,6 +168,8 @@ interface RenderOverrides {
    * 这一格存在的理由只有一个：让"某个字段在一轮里只发一次"这条成本口径可以被用例钉住。
    */
   previousNowLayer?: string | null;
+  affectLine?: string | null;
+  intimacyLine?: string | null;
   /**
    * 维护窗口那一行（v70 起 2/3 档也带行首 `维护窗口：` 标签）。缺省 null = 不是窗口 ⇒ 整行不出现。
    * 生产里由宿主在轮首算好递进来（`maintenanceWindowOf`），这里显式给是为了让用例**不读时钟**。
@@ -223,6 +225,8 @@ function renderOnce(
     stateBytes: o.stateBytes ?? null,
     stateBudgetBytes: o.stateBudgetBytes ?? null,
     previousNowLayer: o.previousNowLayer ?? null,
+    affectLine: o.affectLine ?? null,
+    intimacyLine: o.intimacyLine ?? null,
     maintenanceWindow: o.maintenanceWindow ?? null,
     // v76：本轮那条通道消息的名字（只喂钉住的那条；历史一律裸 openid）
     channelRender: o.channelRender ?? null,
@@ -1473,10 +1477,12 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
     }
   });
 
-  test('② 不变量：遍历此刻层每一个字段，都以 `\\n标签：` 开头（11/11 一个不少）', () => {
-    // 把 11 个字段全部打开：本机 / 用度告警 / 预警 / 通道 / 会话 / 在等你答复 / 点名 /
-    // 任务卡 / 维护窗口 / 预算提醒（+ 永远在的时刻）
+  test('② 不变量：遍历此刻层每一个字段，都以 `\\n标签：` 开头（13/13 一个不少）', () => {
+    // 把 13 个字段全部打开：本机 / 用度告警 / 预警 / 通道 / 会话 / 在等你答复 / 点名 /
+    // 任务卡 / 维护窗口 / 预算提醒 / 亲密 / 情绪（+ 永远在的时刻）
     const r = renderOnce({
+      intimacyLine: '亲密：轻微 · 情欲：轻微→ 语气比平时软一点，靠近半步就好；不写露骨描写，越界前先看对方示意。',
+      affectLine: '情绪：平稳。',
       contact: CONTACT_A,
       asks: ASKS_A,
       machine: MACHINE_A,
@@ -1491,8 +1497,8 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
       now: NOW_A,
     });
     const layer = envLayer(r);
-    assert.equal(NOW_LAYER_FIELD_LABELS.length, 11, '登记表就是这 11 个字段（加字段要一起加这里）');
-    assert.equal(NOW_MUST_KEEP_LABELS.length, 3, 'must-keep 清单是 P1-01 那三样（显式清单，别让它悄悄长）');
+    assert.equal(NOW_LAYER_FIELD_LABELS.length, 13, '登记表就是这 13 个字段（加字段要一起加这里）');
+    assert.equal(NOW_MUST_KEEP_LABELS.length, 5, 'must-keep 清单是 P1-01 三样 + 亲密 + Affect 情绪行');
     for (const label of NOW_LAYER_FIELD_LABELS) {
       const marks = layer.split(`\n${label}：`).length - 1;
       assert.equal(marks, 1,
@@ -3395,4 +3401,18 @@ describe('可见性单向承诺与固定模板', () => {
     assert.ok(shrunk !== null, '条数减少（中段被搬走）⇒ 同样是改写');
     assert.match(String(shrunk?.detail), /9 → 4/u);
   });
+});
+
+test('情绪/亲密规范在 SELF_BRIEF，动态行只进此刻层而不改系统前缀', () => {
+  const off = renderOnce({});
+  assert.match(off.instructions, /## 6\. 情绪与欲望/u);
+  assert.equal(off.instructions.includes('【情绪使用规范】'), false);
+  assert.equal(off.instructions.includes('【亲密与情欲的使用规范】'), false);
+  const both = renderOnce({
+    affectLine: '情绪：平稳。',
+    intimacyLine: '亲密：平稳 · 情欲：平稳 · 满足：平稳 · 克制：平稳 → 靠近一点，语气放软。',
+  });
+  assert.equal(both.instructions, off.instructions, '状态行不得改变 instructions');
+  assert.ok(both.input.some((item) => item.type === 'message' && item.role === 'developer'
+    && typeof item.content === 'string' && item.content.includes('亲密：平稳')));
 });

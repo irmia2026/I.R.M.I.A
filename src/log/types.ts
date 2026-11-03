@@ -8,6 +8,13 @@
  */
 
 import type { CacheBreak, ContextBreakdown } from '../model/context-audit.js';
+// affect integration: symbols required: EventEnvelope, StepStart, Projection, emptyProjection
+import type { AffectState, AffectAppraisedData, AffectStepReceipt } from '../affect/types.js';
+import { initialAffect } from '../affect/engine.ts';
+import type {
+  IntimacyState, IntimacyStepReceipt, IntimacyUpdatedData,
+} from '../intimacy/types.js';
+import { initialIntimacy } from '../intimacy/state.ts';
 import type { ChannelNoticeData } from '../channel/self-identity.js';
 import type { ChannelSelfActionData } from '../channel/self-action.js';
 
@@ -212,6 +219,15 @@ export interface ChannelRenderContext {
 }
 
 export interface StepStart extends EventEnvelope<'step/start', {
+  affect?: AffectStepReceipt;
+  /** 独立亲密层的本步渲染收据；老日志与关闭/非私聊轮次没有。 */
+  intimacy?: IntimacyStepReceipt;
+  /** 本步 instructions 是否带了情绪静态规范（看 master.enabled，不看这一轮有没有行）。 */
+  affectRules?: boolean;
+  /** 本步 instructions 是否带了亲密静态规范（看 enabled，不看这一轮是不是私聊）。 */
+  intimacyRules?: boolean;
+  /** 本步生效的思维链回传字符上限（随上下文/压缩阈值缩放；老日志没有）。 */
+  reasoningEchoMaxChars?: number;
   turn: number; step: number; model: string;
   lane: ModelLane;
   renderVersion: string;
@@ -572,6 +588,13 @@ export interface WakeChannel extends EventEnvelope<'wake/channel', {
    * 它只是留个线索（比如全量群消息模式下，content 里的 @ 前缀已被官方去掉，这是唯一还看得出指向的字段）。
    */
   mentionsMe?: boolean;
+  /**
+   * 插件在 `message.received` 里追加的上下文（P1b）。
+   *
+   * 渲染时放在 `[/external_event]` **之后**（与注入预警同一个位置）：框里是"别人说的话"，
+   * 框外这句是框架/插件说的话——归属必须一眼分得开。空串/缺省不渲染。
+   */
+  pluginContext?: string;
   dedupeKey?: string;
 }> {}
 
@@ -1111,6 +1134,12 @@ export interface TimerCancelled extends EventEnvelope<'timer/cancelled', { timer
 // ──────────────────────────────── 预算 ────────────────────────────────
 
 export interface BudgetConsumed extends EventEnvelope<'budget/consumed', {
+  /** Auxiliary affect light evaluation: account tokens without changing global failStreak. */
+  affectEvaluation?: true;
+  /** Auxiliary intimacy light judgement (separate from affect for audit). */
+  intimacyEvaluation?: true;
+  /** Sticker vision tagging: account usage separately for audit. */
+  stickerTagging?: true;
   turn: number; step: number;
   lane: ModelLane; model: string;
   inputTokens: number; outputTokens: number;
@@ -2528,12 +2557,27 @@ export interface SkillSeeded extends EventEnvelope<'skill/seed', {
   /** 复制过去的文件总数（含 references/ assets/ scripts/ 那些随包文件） */
   files: number;
 }> {}
+
+// ──────────────────── 插件生命周期（2026-10-26，插件平台） ────────────────────
+
+/**
+ * 插件的七条生命周期事件（全部 `internal`，见 `EVENT_VISIBILITY`）。
+ *
+ * 为什么它们是事件而不是内存态：信任与隔离必须能跨重启复现——`PluginManager.setEvents()`
+ * 只从日志重放，读的就是这七条。谁"确认过"、谁"被隔离到什么时候"，答案只有一个来源。
+ * 它们**不进请求体**（渲染口径一个字节都没动）：`plugin/installed` 记的是人的授权动作，
+ * 其余六条记的是框架对一次故障的处置，两者都是"装配账"，不是她该读到的输入。
+ */
 export interface PluginInstalled extends EventEnvelope<'plugin/installed', {
   id: string; version: string; contentHash: string; path: string; by: 'human';
 }> {}
 export interface PluginEnabled extends EventEnvelope<'plugin/enabled', { id: string; contentHash: string }> {}
 export interface PluginDisabled extends EventEnvelope<'plugin/disabled', { id: string; contentHash: string }> {}
-export interface PluginFailed extends EventEnvelope<'plugin/failed', { id: string; contentHash: string; reason: string }> {}
+export interface PluginFailed extends EventEnvelope<'plugin/failed', {
+  id: string; contentHash: string; reason: string;
+  /** 来自 `PluginFailureCategory` 的分类（P1a 起写；老事件没有这一格，读方按缺省处理） */
+  category?: string;
+}> {}
 export interface PluginQuarantined extends EventEnvelope<'plugin/quarantined', {
   id: string; contentHash: string; contributionKind: string; contributionName: string;
   category: string; count: number; retryAt: string; failedAt: string; reason: string;
@@ -2545,6 +2589,45 @@ export interface PluginProbeStarted extends EventEnvelope<'plugin/probe-started'
 export interface PluginRecovered extends EventEnvelope<'plugin/recovered', {
   id: string; contentHash: string; contributionKind: string; contributionName: string;
   category: string; count: number; recoveredAt: string;
+}> {}
+
+/**
+ * **代码级插件（P1a）的运行面事件**（2026-10-29 新增，全部 `internal`）。
+ *
+ * 与上面七条的分工：那七条是"信任与隔离"的生命周期；这几条是"进程到底起没起、怎么没的"。
+ * 分开记的理由是**归因**：`plugin/crashed` 说的是进程事实，`plugin/quarantined` 说的是
+ * 贡献级熔断，两者可以同时成立，也可以各自单独成立。
+ */
+export interface PluginRuntimeStarted extends EventEnvelope<'plugin/runtime-started', {
+  id: string; contentHash: string; runtime: string; entry: string;
+  pid: number | null; startedAt: string; restarted?: boolean; attempt?: number;
+}> {}
+export interface PluginRuntimeStopped extends EventEnvelope<'plugin/runtime-stopped', {
+  id: string; contentHash: string;
+  /** shutdown / disable / uninstall / restart / timeout */
+  reason: string;
+}> {}
+export interface PluginCrashed extends EventEnvelope<'plugin/crashed', {
+  id: string; contentHash: string; pid: number | null;
+  exitCode: number | null; signal: string | null;
+  /** exit = 它自己退的；spawn-error = 根本没起来 */
+  reason: string;
+  /** 冷却后会不会自动拉起来（第一次崩溃 true；第二次崩溃之前会先记 plugin/failed） */
+  willRestart: boolean;
+  at: string; error?: string;
+}> {}
+export interface PluginRestarted extends EventEnvelope<'plugin/restarted', {
+  id: string; contentHash: string; attempt: number; pid: number | null; at: string;
+}> {}
+export interface PluginRestartScheduled extends EventEnvelope<'plugin/restart-scheduled', {
+  id: string; contentHash: string; delayMs: number; at: string;
+}> {}
+export interface PluginUninstalled extends EventEnvelope<'plugin/uninstalled', {
+  id: string; version: string; contentHash: string; path: string; by: 'human';
+}> {}
+export interface PluginContributionIsolated extends EventEnvelope<'plugin/contribution-isolated', {
+  id: string; contentHash: string; contributionKind: string; contributionName: string;
+  category: string; count: number; reason: string; at: string;
 }> {}
 
 // ──────────────────── 申请单：她发起、用户只在界面点批准或驳回（2026-10-11） ────────────────────
@@ -2708,6 +2791,7 @@ export type GrantKind = 'mcp-add' | 'mcp-remove' | 'skill-install' | 'skill-remo
 export interface HookFired extends EventEnvelope<'hook/fired', {
   hook: 'PreToolUse' | 'PostToolUse' | 'Wake';
   outcome: 'ok' | 'timeout' | 'error';
+  /** 插件 Hook 才带：故障归因要能指到"哪个包的哪一条贡献"（内置 Hook 三个字段都缺） */
   pluginId?: string; contentHash?: string; contributionName?: string;
 }> {}
 
@@ -3472,9 +3556,49 @@ export interface UpdateChecked extends EventEnvelope<'update/checked', {
   reason?: string;
 }> {}
 
+// Affect ledger records are internal, not model-visible messages.
+export interface AffectAppraised extends EventEnvelope<'affect/appraised', AffectAppraisedData> {}
+
+// Intimacy is an independent private layer; events are internal ledger records, never model messages.
+export interface IntimacyUpdated extends EventEnvelope<'intimacy/updated', IntimacyUpdatedData> {}
+
+export interface StickerSent extends EventEnvelope<'sticker/sent', {
+  source: 'active' | 'passive';
+  tag: string;
+  stickerId: string;
+  position: 'after' | 'before' | 'only';
+  dice?: number;
+  affect?: { dominant: string; value: number };
+  candidates: string[];
+}> {}
+export interface StickerSkipped extends EventEnvelope<'sticker/skipped', { reason: string }> {}
+export interface StickerHarvested extends EventEnvelope<'sticker/harvested', {
+  chatType: string;
+  sha256: string;
+  result: 'auto-approved' | 'pending' | 'rejected';
+  reason?: string;
+}> {}
+export interface StickerTagged extends EventEnvelope<'sticker/tagged', {
+  stickerId: string;
+  tags: string[];
+  intensity: 'mild' | 'obvious' | 'strong';
+  confidence: number;
+  model: string;
+  ok: boolean;
+}> {}
+export interface StickerReviewed extends EventEnvelope<'sticker/reviewed', {
+  stickerId: string;
+  action: 'approve' | 'reject' | 'restore' | 'delete' | 'block';
+  by: 'human';
+}> {}
+export interface StickerUnknownTag extends EventEnvelope<'sticker/unknown-tag', { tag: string }> {}
+
 // ──────────────────────────────── 联合类型 ────────────────────────────────
 
 export type AppEvent =
+  | AffectAppraised
+  | IntimacyUpdated
+  | StickerSent | StickerSkipped | StickerHarvested | StickerTagged | StickerReviewed | StickerUnknownTag
   | SessionStart | SessionEnd
   | RuntimeRestart
   | TurnStart | TurnEnd | StepStart | StepEnd | StepReasoningProgress
@@ -3492,10 +3616,11 @@ export type AppEvent =
   | SlashHandled
   | AlarmSent | ReviewResolved | SnapshotCheckpoint | CompactionSummary | CompactionDecision
   | PersonaUpdated | ConfigChanged | MemoryMaintained | MemorySelected | MemoryRead
-  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | SkillSeeded | HookFired | SpeakSent
-  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | HookFired | SpeakSent
+  | McpServerStarted | McpServerStopped | McpServerResource | McpIndex | SkillIndex | SkillInstalled | SkillSeeded | HookFired | SpeakSent
   | PluginInstalled | PluginEnabled | PluginDisabled | PluginFailed
   | PluginQuarantined | PluginProbeStarted | PluginRecovered
+  | PluginRuntimeStarted | PluginRuntimeStopped | PluginCrashed | PluginRestarted
+  | PluginRestartScheduled | PluginUninstalled | PluginContributionIsolated
   | ToolsInventoryChanged
   | GrantRequested | GrantResolved
   | IntentionRaised | IntentionActed | TodoUpdated
@@ -3513,6 +3638,14 @@ export type AppEventType = AppEvent['type'];
 
 /** 事件类型 → 默认可见性（写入时必须显式落定，此表用于校验与渲染分类） */
 export const EVENT_VISIBILITY: Record<string, Visibility> = {
+  'affect/appraised': 'internal',
+  'intimacy/updated': 'internal',
+  'sticker/sent': 'internal',
+  'sticker/skipped': 'internal',
+  'sticker/harvested': 'internal',
+  'sticker/tagged': 'internal',
+  'sticker/reviewed': 'internal',
+  'sticker/unknown-tag': 'internal',
   // 协议切换的留痕（2026-10-21）：**internal**——审计账（凭什么切、切到哪、首次何时），
   // 不是给她的输入；她该看见的是切换之后那次调用的结果。
   // 不进请求体 ⇒ 不动 RENDER_VERSION。写在这里而不是靠 defaultVisibility 兜底，
@@ -3638,9 +3771,19 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 写成 model（那会让她每轮读一遍"我的技能是从安装包复制的"——纯粹的常驻开销）。
   // ⚠ 它**不改 `RENDER_VERSION`**：事件不进请求体，渲染口径一个字节都没动。
   'skill/seed': 'internal',
+  // 插件生命周期（2026-10-26，插件平台）七条**同样刻意 internal**：它们是**装配账**
+  // （谁被确认过、谁被隔离到什么时候、哪一次探针把它救回来了），不是给她的输入；她该看见的
+  // 是插件贡献出来的技能行/MCP 工具（那由 skills 与 mcp 两段渲染）。⚠ 它们**不改
+  // `RENDER_VERSION`**：事件不进请求体，渲染口径一个字节都没动。
   'plugin/installed': 'internal', 'plugin/enabled': 'internal',
   'plugin/disabled': 'internal', 'plugin/failed': 'internal',
   'plugin/quarantined': 'internal', 'plugin/probe-started': 'internal', 'plugin/recovered': 'internal',
+  // 代码级插件（P1a）的运行面事件：同样是装配账，同样不进上下文。写在这里是让
+  // "这条线有意画的"看得见——进程 pid、崩溃码、重启次数都不该成为她的输入。
+  'plugin/runtime-started': 'internal', 'plugin/runtime-stopped': 'internal',
+  'plugin/crashed': 'internal', 'plugin/restarted': 'internal',
+  'plugin/restart-scheduled': 'internal', 'plugin/uninstalled': 'internal',
+  'plugin/contribution-isolated': 'internal',
   // 工具清单指纹的变化（2026-10-11，BUG-3）**同样刻意 internal**，理由与上面那条逐字同形：
   // 它是**装配账**（"这一刻进请求的清单是哪几件、比上次少了哪几件"），而清单本身已经作为
   // tools 段进了请求体——再把它作为一条事件渲染一遍，就是同一件事在她眼前出现两遍。
@@ -3871,6 +4014,9 @@ export interface TimerEntry {
 export const BUDGET_ACCOUNTING_VERSION = 2;
 
 export interface Projection {
+  affect: AffectState;
+  /** 独立于情绪的亲密/情欲层；只在用户 1:1 私聊产生事件。 */
+  intimacy: IntimacyState;
   lastSeq: number;
   /** 投递水位：连续已处理到的位置。推进时跳过空洞 */
   watermark: number;
@@ -4001,6 +4147,8 @@ export interface Projection {
 
 export function emptyProjection(): Projection {
   return {
+    affect: initialAffect(),
+    intimacy: initialIntimacy(),
     lastSeq: 0,
     watermark: 0,
     pending: [],

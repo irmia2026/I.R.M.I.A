@@ -1,0 +1,10 @@
+{
+  "apiVersion": 2,
+  "id": "demo-net",
+  "version": "1.0.0",
+  "engine": { "irmia": ">=0.1.0-beta.13" },
+  "runtime": { "type": "node", "entry": "main.mjs" },
+  "permissions": ["tools.define", "net"],
+  "net": { "allow": ["127.0.0.1"] },
+  "meta": { "title": "网络代理演示", "author": "tests", "desc": "P1b e2e 夹具：经宿主代理 fetch，只把摘要/错误带回宿主" }
+}

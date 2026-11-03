@@ -508,6 +508,18 @@ export function summarizeEvent(event: AppEvent): string {
     case 'step/start':
       return `turn ${event.data.turn} step ${event.data.step} · ${event.data.model}（${event.data.lane}）`;
     case 'step/end': return `turn ${event.data.turn} step ${event.data.step} · 工具 ${event.data.toolCalls} 次`;
+    case 'affect/appraised': {
+      const impulse = (event.data as { impulse?: Record<string, number> }).impulse ?? {};
+      const top = Object.entries(impulse).sort((a, b) => b[1] - a[1])[0];
+      const head = `${event.data.reasonCode}`;
+      return top === undefined ? head : `${head} · ${top[0]} ${top[1].toFixed(2)}`;
+    }
+    case 'sticker/sent':
+      return `${event.data.source === 'passive' ? '被动' : '主动'} · ${event.data.tag} · ${event.data.position} · 候选 ${event.data.candidates.length}`;
+    case 'sticker/skipped': return `${event.data.reason}`;
+    case 'sticker/harvested': return `${event.data.result} · ${event.data.chatType ?? ''}`;
+    case 'sticker/tagged': return `${(event.data.tags ?? []).join('/')} · 置信 ${event.data.confidence}`;
+    case 'sticker/reviewed': return `${event.data.action} · ${event.data.stickerId}`;
     case 'message/user': return `[${event.data.source}] ${clip(event.data.text)}`;
     case 'message/assistant': {
       const text = event.data.text;

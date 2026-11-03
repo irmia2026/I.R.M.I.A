@@ -204,8 +204,8 @@ test('② 两个版本常量与口径绑定：算式一变，两个都必须一�
     15,
     '预算口径的锚点：v2 = (input − cacheHit) + output。改这个算式 ⇒ 同时抬下面两个版本号',
   );
-  assert.equal(PROJECTION_CACHE_VERSION, 2, '投影缓存版本必须与口径同步（v1 = 未扣缓存口径）');
-  assert.equal(SNAPSHOT_VERSION, 2, '折叠快照版本必须与口径同步——只抬缓存那条，快照仍会把旧账喂回来');
+  assert.equal(PROJECTION_CACHE_VERSION, 5, 'v5 = Affect v3（害羞）+ intimacy 投影形状；预算口径仍由上一行钉在 v2');
+  assert.equal(SNAPSHOT_VERSION, 5, '快照与缓存必须同版：旧派生状态一律丢弃、从事件重建');
 });
 
 test('② 旧口径写的投影缓存 + 新算式启动：缓存被丢弃、重建后等于按事件重放', async (t) => {

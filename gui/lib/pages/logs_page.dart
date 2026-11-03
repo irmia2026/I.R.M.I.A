@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 
 import '../app.dart';
 import '../format.dart';
+import '../i18n/app_strings.dart';
+import '../i18n/strings_scope.dart';
 import '../theme.dart';
 import 'page_chrome.dart';
 

@@ -40,9 +40,10 @@ export function killProcessTree(child: ChildProcess, options: { forceTree?: bool
       const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
+        timeout: 2_000,
       });
       taskkillCode = result.status ?? null;
-      if (options.forceTree === true) return { usedTaskkill, taskkillCode };
+      if (options.forceTree === true && taskkillCode === 0 && result.error === undefined) return { usedTaskkill, taskkillCode };
     } catch {
       // taskkill 不可用（精简镜像）不影响下面的直接 kill
     }

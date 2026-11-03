@@ -1,3 +1,6 @@
+import { affectRulesForReplay, tryAffectLineForReplay } from '../affect/render.ts';
+import { intimacyRulesForReplay, tryIntimacyLineForReplay } from '../intimacy/render.ts';
+import type { ReasoningEchoPolicy } from '../model/render.ts';
 /**
  * Irmia Agent — 请求重放（M6-5、docs/operations.md §6 的 `replay <turn> <step>` 行）
  *
@@ -882,6 +885,11 @@ export function rebuildRenderedRequest(
     : position.eventsBefore.filter((event) => event.seq !== pinnedWakeEvent.seq);
 
   return deriveRequest({
+    affectLine: tryAffectLineForReplay(position.stepStart),
+    intimacyLine: tryIntimacyLineForReplay(position.stepStart),
+    affectRules: affectRulesForReplay(position.stepStart),
+    intimacyRules: intimacyRulesForReplay(position.stepStart),
+    reasoningEcho: reasoningEchoPolicyForReplay(position.stepStart),
     persona: {
       identity: options.persona.identity,
       constitution: options.persona.constitution,
@@ -1462,4 +1470,10 @@ export function formatReplaySummary(report: ReplayReport): string[] {
 
 function short(value: string | null): string {
   return value === null ? '（无记录）' : value.slice(0, 16);
+}
+
+/** 回放：新收据读当时的上限；老日志没有就交回出厂默认（300k）。 */
+function reasoningEchoPolicyForReplay(stepStart: {data: {reasoningEchoMaxChars?: number}}): Partial<ReasoningEchoPolicy> | null {
+  const value = stepStart.data.reasoningEchoMaxChars;
+  return typeof value === 'number' && Number.isFinite(value) ? {maxTotalChars: value} : null;
 }

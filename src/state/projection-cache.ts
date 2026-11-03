@@ -16,6 +16,8 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { Projection } from '../log/types.js';
+import { assertEvaluated } from '../affect/index.ts';
+import { assertIntimacyState } from '../intimacy/state.ts';
 // 预算口径版本：累计量跨不了口径，载入时必须校验它（值导入写 .ts，见 fold.ts 的约定）
 import { BUDGET_ACCOUNTING_VERSION } from '../log/types.ts';
 
@@ -38,9 +40,10 @@ export const PROJECTION_CACHE_FILE = 'projection.json';
  * `test/budget-snapshot-rebuild.test.ts` 钉住这条配对关系。
  *
  * 记账：v1 = 未扣缓存口径（`input + output`，含 cacheHit）；v2 = 非缓存口径
- * （`(input − cacheHit) + output`，见 `state/fold.ts` 的 `budgetTokensOf`）。
+ * （`(input − cacheHit) + output`，见 `state/fold.ts` 的 `budgetTokensOf`）；v3 = Affect v2 投影形状；
+ * v4 = 独立 intimacy 投影形状。v4 不改变预算算式；旧派生状态整份丢弃，从事件日志重建。
  */
-export const PROJECTION_CACHE_VERSION = 2;
+export const PROJECTION_CACHE_VERSION = 5;
 
 /** 磁盘上的缓存外形（lastSeq 冗余一份，便于不反序列化 state 就判定新鲜度） */
 export interface ProjectionCache {
@@ -143,6 +146,27 @@ const NULLABLE_OBJECT_KEYS = ['openTurn', 'waitingHuman', 'degraded', 'lastWake'
  */
 export function basicProjectionShape(value: unknown): value is Projection {
   if (!isRecord(value)) return false;
+  // affect: presence + version checked on both cache and snapshot restore paths.
+  const a = value['affect'];
+  if (!isRecord(a) || a['version'] !== 3 || !isRecord(a['emotions'])
+    || !isRecord(a['mood']) || !isRecord(a['evaluated'])
+    || !Array.isArray(a['causes']) || typeof a['atMs'] !== 'number') return false;
+  for (const key of ['joy','distress','concern','irritation','warmth','shyness']) {
+    const n = a['emotions'][key]; if (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 1) return false;
+  }
+  if (typeof a['mood']['valence'] !== 'number' || typeof a['mood']['arousal'] !== 'number'
+    || !Number.isFinite(a['mood']['valence']) || !Number.isFinite(a['mood']['arousal'])) return false;
+  if (a['evaluated']['version'] !== 1 || !Array.isArray(a['evaluated']['chunks'])) return false;
+  try { assertEvaluated(a['evaluated'] as any); } catch { return false; }
+  if (a['mood']['valence'] < -1 || a['mood']['valence'] > 1 || a['mood']['arousal'] < 0 || a['mood']['arousal'] > 1) return false;
+  if (!Number.isSafeInteger(a['atMs']) || a['atMs'] < 0 || a['causes'].length > 8) return false;
+  const i = value['intimacy'];
+  if (!isRecord(i)) return false;
+  try {
+    assertIntimacyState(i);
+  } catch {
+    return false;
+  }
   for (const key of NUMBER_KEYS) {
     // lastSeq/watermark/idleTicks/failStreak 必须是非负整数；pressure 允许小数
     const field = value[key];

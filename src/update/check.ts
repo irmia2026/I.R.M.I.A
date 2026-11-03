@@ -21,6 +21,8 @@
  * 与站点的契约见 `docs/update-check.md` §1（那份文档是这个文件的说明书，不是第二套实现）。
  */
 
+import { readBoundedBody } from '../util/bounded-response.ts';
+
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 /** 一次检测的默认总时限（毫秒）。8 秒：比一次慢速 DNS+TLS 宽，又不至于让启动等待拖太久。 */
@@ -501,12 +503,14 @@ export async function checkForUpdate(options: CheckForUpdateOptions): Promise<Up
     }
 
     let text: string;
+    const tooLarge = new Error('Update manifest exceeds byte limit');
     try {
-      text = await response.text();
-    } catch {
+      const bytes = await readBoundedBody(response, UPDATE_MANIFEST_MAX_BYTES, () => tooLarge, controller.signal);
+      text = new TextDecoder().decode(bytes);
+    } catch (error) {
+      if (error === tooLarge) return unknown('too-large');
       return unknown(controller.signal.aborted ? 'timeout' : 'network');
     }
-    if (text.length > UPDATE_MANIFEST_MAX_BYTES) return unknown('too-large');
 
     let raw: unknown;
     try {

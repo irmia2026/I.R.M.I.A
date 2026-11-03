@@ -196,7 +196,8 @@ class _Brand extends StatelessWidget {
   }
 }
 
-/// 底部「更多」折叠组：日志与设置收在这里；二级项选中时组标题同样高亮并自动展开。
+/// 底部「更多」折叠组：记忆、日志与设置收在这里；
+/// 二级项选中时组标题同样高亮并自动展开。
 /// 展开态写进状态文件（照 AstrBot VerticalSidebar 的 sidebar_openedItems）：重启后
 /// 保持用户上次的选择；当前页在二级里时以选中态为准，不读文件。
 class _MoreGroup extends StatefulWidget {
@@ -289,6 +290,8 @@ class _MoreGroupState extends State<_MoreGroup> {
                   children: [
                     for (final page in morePages)
                       _NavItem(
+                        // 与一级项同一套定位件：用例按 id 找「更多」里的那一项
+                        key: ValueKey('nav-${page.id}'),
                         icon: page.icon,
                         activeIcon: page.activeIcon,
                         label: page.label,

@@ -31,6 +31,7 @@ import test, { type TestContext } from 'node:test';
 import { deflateRawSync } from 'node:zlib';
 
 import { createNotifier } from '../src/alert/notifier.ts';
+import { makeAppraisedData } from '../src/affect/engine.ts';
 import { defaultConfig, type AppConfig } from '../src/config/config.ts';
 import { keysPath } from '../src/config/keys.ts';
 import { DepsManager } from '../src/deps/manager.ts';
@@ -365,6 +366,41 @@ test('GET /api/projection：返回全投影（写入的事件能立刻读到）'
   assert.equal(projection.lastSeq, 1);
   assert.equal(projection.pending.length, 1);
   assert.equal(projection.pending[0]!.source, 'manual');
+});
+
+test('GET /api/affect：关闭、开启无评价、有评价三态与 configured 分支', async (t) => {
+  const fx = await setup(t);
+  const disabled = await call(fx, '/api/affect');
+  assert.equal(disabled.status, 200);
+  const disabledBody = disabled.body as { enabled: boolean; configured: boolean; renderLine: string | null };
+  assert.equal(disabledBody.enabled, false);
+  assert.equal(disabledBody.configured, false);
+  assert.equal(disabledBody.renderLine, null);
+
+  fx.config.affect.enabled = true;
+  const empty = (await call(fx, '/api/affect')).body as {
+    enabled: boolean; configured: boolean; atMs: number | null; updatedAt: string | null; renderLine: string;
+  };
+  assert.equal(empty.enabled, true);
+  assert.equal(empty.configured, false, '盘上未写与当前生效值必须分开返回');
+  assert.equal(empty.atMs, null);
+  assert.equal(empty.updatedAt, null);
+  assert.equal(empty.renderLine, '情绪：平稳。');
+
+  fx.append('affect/appraised', makeAppraisedData({
+    sourceSeq: 100,
+    evaluatedAtMs: T0.getTime(),
+    sourceWeight: 1,
+    appraisal: { r: 1, s: 0, u: -0.8, g: 0, b: 0, n: 0.2, z: 0.5, c: 0.1, q: 1 },
+    reasonCode: 'owner_setback',
+  }));
+  const active = (await call(fx, '/api/affect')).body as {
+    atMs: number; updatedAt: string; causes: Array<{ reasonCode: string }>; renderLine: string;
+  };
+  assert.equal(active.atMs, T0.getTime());
+  assert.equal(active.updatedAt, T0.toISOString());
+  assert.equal(active.causes[0]?.reasonCode, 'owner_setback');
+  assert.match(active.renderLine, /^情绪：/u);
 });
 
 test('GET /api/events：默认 200/批、from_seq 起点、types/visibility 过滤、非法参数 400', async (t) => {
@@ -3064,7 +3100,7 @@ function consumedWithContext(overrides: { turn?: number; step?: number } = {}): 
     turn: overrides.turn ?? 12,
     step: overrides.step ?? 3,
     context: {
-      renderVersion: '80',
+      renderVersion: '85',
       instructions: { tokens: 7000, hash: 'h-inst' },
       tools: { tokens: 4000, hash: 'h-tools', count: 22 },
       memory: { tokens: 2000, hash: 'h-mem' },
@@ -3127,7 +3163,7 @@ assert.equal(body.empty, undefined, '有数就不是空态');
   assert.ok(Math.abs(sum - 1) < 1e-9, `三组占比合计应为 1，实际 ${sum}`);
   assert.ok(Math.abs((body.groups[2]?.ratio ?? 0) - 155200 / 168200) < 1e-9);
 
-  assert.equal(body.notes.renderVersion, '80', '渲染版本原样给（换版时这一格会变）');
+  assert.equal(body.notes.renderVersion, '85', '渲染版本原样给（换版时这一格会变）');
   assert.equal(typeof body.notes.keepReasoning, 'boolean');
   assert.equal(body.notes.keepReasoning, true, '出厂口径是"区外也全传"（线上没有调用点传 omit）');
 });
@@ -3142,7 +3178,7 @@ test('GET /api/context/breakdown：**最近一条**算数（后写的那拍覆�
     turn: 2,
     step: 1,
     context: {
-      renderVersion: '80',
+      renderVersion: '85',
       instructions: { tokens: 10, hash: 'i' },
       tools: { tokens: 5, hash: 't', count: 1 },
       memory: { tokens: 0, hash: 'm' },

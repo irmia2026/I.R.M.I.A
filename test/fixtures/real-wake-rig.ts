@@ -110,8 +110,14 @@ export interface RigOptions {
    * 要测"读不到配置面"（`undefined`）得用 `patchConfig` 把那一格改成读不出结论的形状。
    */
   mcpServers?: readonly string[];
-  /** MCP 池与索引共享的完整声明面（含插件） */
+  /**
+   * MCP 池与索引共享的**完整声明面**（含插件贡献；2026-10-26 插件平台加）。
+   *
+   * 与上面 `mcpServers`（只有名字）分开传：那一格是事实层的读数，这一格决定"索引里写哪些
+   * server"。不传 ⇒ 真循环退回 `config.mcp.servers`（与没有插件平台时逐字相同）。
+   */
   mcpDeclarations?: () => readonly import('../../src/mcp/client.js').McpServerEntry[];
+  /** turn 边界钩子（插件隔离/恢复的落点）：不传就是"没有这一格" */
   onTurnBoundary?: () => Promise<void>;
   /**
    * 技能管理器工厂（v34）：数字资产事实层的 skill 那一半要它（"她清单里那条技能还在不在"）。
@@ -154,6 +160,8 @@ export interface RigOptions {
      */
     handler?: (args: Record<string, unknown>) => Promise<{ content: string }>;
   }[];
+  /** 贴纸被动路径的真实运行期；不传时 RealLoop 保持原有空装配。 */
+  stickerRuntime?: import('../../src/stickers/runtime.ts').StickerRuntime;
 }
 
 /** 心跳事件的数据形状（与 `HeartbeatSource` 落库时逐字段一致） */
@@ -290,6 +298,7 @@ export async function makeRealWakeRig(options: RigOptions = {}): Promise<RealWak
     ...(options.onTurnBoundary === undefined ? {} : { onTurnBoundary: options.onTurnBoundary }),
     // 执行点钩子：只有要验"钩子入参与请求体是不是同一串字节"的用例才传
     ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
+    ...(options.stickerRuntime === undefined ? {} : { stickerRuntime: options.stickerRuntime }),
   });
 
   const append = (type: string, data: unknown, ts?: string): AppEvent => {

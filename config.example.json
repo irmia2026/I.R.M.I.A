@@ -198,6 +198,28 @@
     "imagesToContext": true,
     "maxContextImages": 2
   },
+  "affect": {
+    "$comment": [
+      "情绪系统：开 = 她会有一层当前情绪（影响语气与被动表情包），对话前后由 light 模型评价；关 = 请求里不出现情绪行。",
+      "enabled：总开关。关掉时请求字节与没有情绪系统时逐字节一致。",
+      "evaluatorEnabled：是否每步前真的调用 light 评价（每步最多 2 次、4 秒超时、失败不挡主流程）。",
+      "  GUI 的「情绪系统」开关会同时写这两格；只有想\"看历史、不产生新评价\"时才单独关它。"
+    ],
+    "enabled": false,
+    "evaluatorEnabled": false
+  },
+  "intimacy": {
+    "$comment": [
+      "亲密/情欲层：独立于情绪，默认关闭；状态只从用户来源更新，动态行按开关全局注入。",
+      "maxLevel：subtle / obvious / strong（默认 obvious）是表现上限，不是自动档位。",
+      "spontaneousChance：neutral 轮次的自主触发概率（默认 0.04）。",
+      "privateOnly 固定 true；配置成 false 会被拒绝。"
+    ],
+    "enabled": false,
+    "maxLevel": "obvious",
+    "spontaneousChance": 0.04,
+    "privateOnly": true
+  },
   "speak": {
     "$comment": [
       "发言节奏（speak 的拆条投递）：段与段之间按「这一段要打多久」隔开，界面与 IM 同一个节奏。",
