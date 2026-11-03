@@ -43,6 +43,8 @@ export interface StickerTaggingResult {
   intensity: StickerIntensity;
   confidence: number;
   note: string;
+  /** Whether the image itself is a sticker/meme, not a photo/screenshot/long image. */
+  isSticker: boolean;
 }
 
 export function isStickerTag(value: unknown): value is StickerTag {

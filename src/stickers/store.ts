@@ -62,6 +62,26 @@ export class StickerStore {
       if (!existsSync(path)) this.writePack(blankPack(packId));
     }
     if (!existsSync(join(this.root, 'state.json'))) writeJsonAtomic(join(this.root, 'state.json'), emptyStickerState());
+    this.migrateLegacyCollectedApprovals();
+  }
+
+  /**
+   * 旧版自动打标会把 collected 条目直接标成 approved。人工审核是唯一出口：
+   * 一次性、幂等地把它们降回 pending；owner 包（owner-stickers）不动。
+   */
+  migrateLegacyCollectedApprovals(): number {
+    const path = this.packPath('collected');
+    if (!existsSync(path)) return 0;
+    const pack = this.readPack('collected');
+    let changed = 0;
+    for (const entry of pack.stickers) {
+      if (entry.status === 'approved' && entry.tagSource !== 'human') {
+        entry.status = 'pending';
+        changed += 1;
+      }
+    }
+    if (changed > 0) this.writePack(pack);
+    return changed;
   }
 
   private packPath(packId: string): string {
@@ -153,6 +173,8 @@ export class StickerStore {
       intensity: result.intensity,
       tagConfidence: result.confidence,
       note: result.note,
+      // applyTagging(true) 是人工/夹具路径；自动路径永远传 false。
+      tagSource: approved ? 'human' : entry.tagSource,
       status: approved ? 'approved' : 'pending',
     };
     if (approved) {

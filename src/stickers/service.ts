@@ -167,7 +167,12 @@ export class StickerService {
     return await this.mutate(async () => {
       const imported = this.deps.store.importSticker({ bytes, mime, source: 'owner' });
       if (imported.duplicate) return { entry: this.entry(imported.entry.id), duplicate: true, tagging: null };
-      const outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
+      let outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
+      if (outcome.reason === 'not-sticker') {
+        // 上传与采集同一条判据：不是表情包就进 rejected，不留在可发送列表。
+        const rejected = this.deps.store.review(imported.entry.id, 'reject');
+        outcome = {...outcome, entry: rejected};
+      }
       return { entry: this.entry(outcome.entry.id), duplicate: false, tagging: outcome };
     });
   }

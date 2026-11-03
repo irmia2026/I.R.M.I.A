@@ -151,13 +151,21 @@ void main() {
     await server.close(force: true);
   });
 
-  Future<void> pumpPanel(WidgetTester tester, {Map<String, dynamic>? initial, StickerFilePicker? picker}) async {
-    tester.view.physicalSize = const Size(1280, 1100);
+  Future<void> pumpPanel(
+    WidgetTester tester, {
+    Map<String, dynamic>? initial,
+    StickerFilePicker? picker,
+    double height = 1100,
+    Size size = const Size(1280, 1100),
+  }) async {
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(MaterialApp(
       theme: IrmiaTheme.light(),
-      home: Scaffold(body: SingleChildScrollView(
+      home: Scaffold(body: SizedBox(
+        height: height,
+        width: double.infinity,
         child: StickersPanel(
           state: state,
           view: initial ?? view(),
@@ -197,6 +205,87 @@ void main() {
     expect(find.textContaining('采收'), findsOneWidget);
     expect(find.textContaining('使用 2 次'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('骨架：左侧栏 + 右侧单卡片，上传与刷新只在卡片头', (tester) async {
+    items = [entry('one', 'approved', ['开心'])];
+    await pumpPanel(tester);
+    expect(find.byType(ChoiceChip), findsNothing, reason: '横向 ChoiceChip 不再作为主导航');
+    expect(find.byKey(const ValueKey('sticker-side-scroll')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-content-scroll')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-view-title')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-view-count')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-upload')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-refresh')), findsOneWidget);
+    expect(find.text('表情包'), findsOneWidget, reason: '标题在左侧栏');
+    expect(find.text('全部'), findsOneWidget, reason: '库模式默认显示全部');
+  });
+
+  testWidgets('左侧标签只过滤右栏，不改库存，也不发请求', (tester) async {
+    items = [entry('one', 'approved', ['开心']), entry('two', 'approved', ['亲近'])];
+    await pumpPanel(tester);
+    expect(find.byKey(const ValueKey('sticker-card-one')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
+
+    await tap(tester, find.byKey(const ValueKey('sticker-filter-tag-亲近')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byKey(const ValueKey('sticker-card-one')), findsNothing);
+    expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '1');
+    expect(patches, isEmpty, reason: '标签筛选只改本地显示');
+    expect(writes, isEmpty, reason: '标签筛选不写后端配置');
+    expect(items, hasLength(2), reason: '库存一张都不许动');
+
+    await tap(tester, find.byKey(const ValueKey('sticker-filter-all')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byKey(const ValueKey('sticker-card-one')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
+  });
+
+  testWidgets('右栏滚动能到最底部，最后一张卡片可见', (tester) async {
+    items = [for (var i = 0; i < 24; i++) entry('s$i', 'approved', ['开心'])];
+    await pumpPanel(tester, height: 600);
+    final scrollView = tester.widget<SingleChildScrollView>(
+      find.byKey(const ValueKey('sticker-content-scroll')),
+    );
+    final controller = scrollView.controller!;
+    expect(controller.position.maxScrollExtent, greaterThan(0), reason: '内容必须真的可滚');
+
+    await tester.drag(find.byKey(const ValueKey('sticker-content-scroll')), const Offset(0, -400));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(controller.offset, greaterThan(0));
+
+    controller.jumpTo(controller.position.maxScrollExtent);
+    await tester.pump();
+    expect(controller.offset, closeTo(controller.position.maxScrollExtent, 1));
+    final last = tester.getRect(find.byKey(const ValueKey('sticker-card-s23')));
+    expect(last.top, greaterThanOrEqualTo(0));
+    expect(last.bottom, lessThanOrEqualTo(600), reason: '滚到底时最后一张应在视口内');
+  });
+
+  testWidgets('设置与事件切过去是可滚 ListView，左栏也能独立滚', (tester) async {
+    await pumpPanel(tester, height: 260);
+    final side = tester.widget<ListView>(find.byKey(const ValueKey('sticker-side-scroll')));
+    expect(side.controller!.position.maxScrollExtent, greaterThan(0));
+
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-3')));
+    final settings = tester.widget<ListView>(find.byKey(const ValueKey('sticker-content-scroll')));
+    expect(settings.controller!.position.maxScrollExtent, greaterThan(0));
+    settings.controller!.jumpTo(settings.controller!.position.maxScrollExtent);
+    await tester.pump();
+
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-4')));
+    await settle(tester);
+    final events = tester.widget<ListView>(find.byKey(const ValueKey('sticker-content-scroll')));
+    expect(events.controller!.position.maxScrollExtent, greaterThan(0));
+  });
+
+  testWidgets('窄窗：卡片 Wrap 不溢出', (tester) async {
+    items = [for (var i = 0; i < 6; i++) entry('n$i', 'approved', ['开心'])];
+    await pumpPanel(tester, height: 800, size: const Size(760, 800));
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('sticker-card-n0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-upload')), findsOneWidget);
   });
 
   testWidgets('审核：批准后调用 PATCH，待审区如实清空', (tester) async {
@@ -312,7 +401,7 @@ void main() {
     await pumpPanel(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-tags-one')));
     await tester.pump();
-    await tap(tester, find.text('亲近'));
+    await tap(tester, find.widgetWithText(FilterChip, '亲近'));
     await tap(tester, find.byKey(const ValueKey('sticker-tags-confirm')));
     await settle(tester);
     expect(patches.first['body'], {'tags': ['开心', '亲近']});
@@ -341,7 +430,7 @@ void main() {
     final baseTheme = IrmiaTheme.light();
     await tester.pumpWidget(MaterialApp(
       theme: baseTheme.copyWith(textTheme: baseTheme.textTheme.apply(fontFamily: 'SmokeCJK')),
-      home: Scaffold(body: SingleChildScrollView(child: StickersPanel(state: liveState, view: liveView))),
+      home: Scaffold(body: StickersPanel(state: liveState, view: liveView)),
     ));
     await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
     await tester.pump();

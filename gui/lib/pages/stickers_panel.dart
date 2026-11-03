@@ -72,6 +72,14 @@ class _StickersPanelState extends State<StickersPanel> {
   List<dynamic>? _events;
   bool _eventsLoading = false;
 
+  /// 左栏与右栏各自一个滚动位置：两边互不牵连，右栏里始终只有一个滚动区。
+  final ScrollController _sideScroll = ScrollController();
+  final ScrollController _rightScroll = ScrollController();
+
+  /// 库模式的本地筛选（只影响右侧显示，不发任何请求）。
+  String? _selectedTag;
+  String? _selectedStatus;
+
   @override
   void initState() {
     super.initState();
@@ -82,6 +90,13 @@ class _StickersPanelState extends State<StickersPanel> {
   void didUpdateWidget(covariant StickersPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.view != widget.view && !_busy) _accept(widget.view);
+  }
+
+  @override
+  void dispose() {
+    _sideScroll.dispose();
+    _rightScroll.dispose();
+    super.dispose();
   }
 
   void _accept(Map<String, dynamic> value) {
@@ -95,6 +110,86 @@ class _StickersPanelState extends State<StickersPanel> {
       ];
 
   int _count(String key) => ((_view['counts'] as Map?)?[key] as num?)?.toInt() ?? 0;
+
+  List<Map<String, dynamic>> get _approvedEntries =>
+      _entries.where((entry) => entry['status'] == 'approved').toList();
+
+  /// 左栏标签上的数量来自服务端这份 tags 计数；没有就按已入库的图现算。
+  Map<String, int> get _tagCounts {
+    final raw = _view['tags'];
+    if (raw is Map) {
+      return {
+        for (final tag in kStickerTags) tag: (raw[tag] as num?)?.toInt() ?? 0,
+      };
+    }
+    return {
+      for (final tag in kStickerTags)
+        tag: _approvedEntries
+            .where((entry) => (entry['tags'] as List? ?? const []).contains(tag))
+            .length,
+    };
+  }
+
+  /// 库模式当前筛选出的条目。标签筛选只碰已入库；已拒绝 / 停用是独立状态筛选。
+  List<Map<String, dynamic>> get _libraryEntries {
+    final status = _selectedStatus;
+    if (status != null) {
+      return _entries.where((entry) => entry['status'] == status).toList();
+    }
+    final tag = _selectedTag;
+    if (tag != null) {
+      return _approvedEntries
+          .where((entry) => (entry['tags'] as List? ?? const []).contains(tag))
+          .toList();
+    }
+    return _approvedEntries;
+  }
+
+  int? get _headerCount => switch (_tab) {
+        0 => _libraryEntries.length,
+        1 => _entries.length,
+        2 => _entries
+            .where((entry) => entry['status'] == 'pending' || entry['status'] == 'rejected')
+            .length,
+        4 => _events?.length,
+        _ => null,
+      };
+
+  String _viewTitle(AppStrings s) {
+    if (_tab == 0) {
+      final status = _selectedStatus;
+      if (status != null) return s.stickerStatus(status);
+      return _selectedTag ?? s.stickerTabLibrary;
+    }
+    return switch (_tab) {
+      1 => s.stickerTabTagging,
+      2 => s.stickerTabReview,
+      3 => s.stickerTabSettings,
+      _ => s.stickerTabEvents,
+    };
+  }
+
+  /// 切视图 / 换筛选都回到右栏顶部：新内容不该继承上一屏的滚动位置。
+  void _jumpRightToTop() {
+    if (!_rightScroll.hasClients) return;
+    _rightScroll.animateTo(0, duration: const Duration(milliseconds: 160), curve: Curves.easeOut);
+  }
+
+  void _selectTagFilter(String? tag) {
+    setState(() {
+      _selectedTag = tag;
+      _selectedStatus = null;
+    });
+    _jumpRightToTop();
+  }
+
+  void _selectStatusFilter(String status) {
+    setState(() {
+      _selectedTag = null;
+      _selectedStatus = status;
+    });
+    _jumpRightToTop();
+  }
 
   Future<void> _load() async {
     try {
@@ -331,73 +426,390 @@ class _StickersPanelState extends State<StickersPanel> {
 
   void _selectTab(int value) {
     setState(() => _tab = value);
+    _jumpRightToTop();
     if (value == 4 && _events == null) unawaited(_loadEvents());
   }
 
   @override
   Widget build(BuildContext context) {
     final s = IrmiaStrings.of(context);
-    if (!validStickerView(_view)) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(s.stickerInvalidData, style: const TextStyle(color: IrmiaTheme.danger)),
-        TextButton(onPressed: _busy ? null : _load, child: Text(s.retry)),
-      ]);
-    }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(s.stickerTitle, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-          Text(s.stickerBlurb, style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).colorScheme.onSurfaceVariant)),
-        ])),
-        IconButton(onPressed: _busy ? null : _load, icon: const Icon(Icons.refresh_rounded), tooltip: s.retry),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(26, 12, 26, 16),
+      child: !validStickerView(_view)
+          ? Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text(s.stickerInvalidData, textAlign: TextAlign.center, style: const TextStyle(color: IrmiaTheme.danger)),
+                const SizedBox(height: 8),
+                TextButton(onPressed: _busy ? null : _load, child: Text(s.retry)),
+              ]),
+            )
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(width: 230, child: _sidebar(s)),
+                const SizedBox(width: 16),
+                Expanded(child: _contentCard(s)),
+              ],
+            ),
+    );
+  }
+
+  Widget _sidebar(AppStrings s) {
+    final scheme = Theme.of(context).colorScheme;
+    final counts = _tagCounts;
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: IrmiaTheme.hairline,
+      ),
+      child: Scrollbar(
+        controller: _sideScroll,
+        thumbVisibility: true,
+        child: ListView(
+          key: const ValueKey('sticker-side-scroll'),
+          controller: _sideScroll,
+          padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Text(s.stickerTitle, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+            ),
+            const SizedBox(height: 6),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Text(
+                s.stickerStats(_count('approved'), _count('pending'), _count('sentToday')),
+                style: TextStyle(fontSize: 11.5, height: 1.55, color: scheme.onSurfaceVariant),
+              ),
+            ),
+            const SizedBox(height: 14),
+            _navRow(
+              key: const ValueKey('sticker-tab-0'),
+              icon: Icons.grid_view_rounded,
+              label: s.stickerTabLibrary,
+              count: _count('approved'),
+              selected: _tab == 0,
+              onTap: () => _selectTab(0),
+            ),
+            _navRow(
+              key: const ValueKey('sticker-tab-1'),
+              icon: Icons.sell_outlined,
+              label: s.stickerTabTagging,
+              count: _entries.length,
+              selected: _tab == 1,
+              onTap: () => _selectTab(1),
+            ),
+            _navRow(
+              key: const ValueKey('sticker-tab-2'),
+              icon: Icons.fact_check_outlined,
+              label: s.stickerTabReview,
+              count: _count('pending'),
+              selected: _tab == 2,
+              onTap: () => _selectTab(2),
+            ),
+            _navRow(
+              key: const ValueKey('sticker-tab-3'),
+              icon: Icons.tune_rounded,
+              label: s.stickerTabSettings,
+              selected: _tab == 3,
+              onTap: () => _selectTab(3),
+            ),
+            _navRow(
+              key: const ValueKey('sticker-tab-4'),
+              icon: Icons.history_rounded,
+              label: s.stickerTabEvents,
+              count: _events?.length,
+              selected: _tab == 4,
+              onTap: () => _selectTab(4),
+            ),
+            if (_tab == 0) ...[
+              const Divider(height: 26),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
+                child: Text(
+                  s.stickerEditTags,
+                  style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: scheme.onSurfaceVariant),
+                ),
+              ),
+              _filterRow(
+                key: const ValueKey('sticker-filter-all'),
+                label: s.stickerFilterAll,
+                count: _count('approved'),
+                selected: _selectedTag == null && _selectedStatus == null,
+                onTap: () => _selectTagFilter(null),
+              ),
+              for (final tag in kStickerTags)
+                _filterRow(
+                  key: ValueKey('sticker-filter-tag-$tag'),
+                  label: tag,
+                  count: counts[tag] ?? 0,
+                  selected: _selectedTag == tag,
+                  onTap: () => _selectTagFilter(tag),
+                ),
+              const Divider(height: 18),
+              _filterRow(
+                key: const ValueKey('sticker-filter-rejected'),
+                label: s.stickerStatus('rejected'),
+                count: _count('rejected'),
+                selected: _selectedStatus == 'rejected',
+                onTap: () => _selectStatusFilter('rejected'),
+              ),
+              _filterRow(
+                key: const ValueKey('sticker-filter-blocked'),
+                label: s.stickerStatus('blocked'),
+                count: _count('blocked'),
+                selected: _selectedStatus == 'blocked',
+                onTap: () => _selectStatusFilter('blocked'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _navRow({
+    required Key key,
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    int? count,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final tone = selected ? scheme.primary : scheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        color: selected ? scheme.surfaceContainerHighest : Colors.transparent,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        child: InkWell(
+          key: key,
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(children: [
+              Icon(icon, size: 16, color: tone),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    color: selected ? scheme.primary : scheme.onSurface,
+                  ),
+                ),
+              ),
+              if (count != null) ...[
+                const SizedBox(width: 6),
+                Text('$count', style: TextStyle(fontSize: 11, color: tone)),
+              ],
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _filterRow({
+    required Key key,
+    required String label,
+    required int count,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 1),
+      child: Material(
+        color: selected ? scheme.surfaceContainerHighest : Colors.transparent,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+        child: InkWell(
+          key: key,
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(children: [
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    color: selected ? scheme.primary : scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text('$count', style: TextStyle(fontSize: 11, color: selected ? scheme.primary : scheme.onSurfaceVariant)),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _contentCard(AppStrings s) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: IrmiaTheme.hairline,
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        _cardHeader(s, _headerCount),
+        if (_busy) const LinearProgressIndicator(minHeight: 2),
+        Expanded(child: _rightScrollArea(s)),
+      ]),
+    );
+  }
+
+  Widget _cardHeader(AppStrings s, int? count) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 9, 10, 9),
+      decoration: BoxDecoration(border: Border(bottom: BorderSide(color: scheme.outlineVariant))),
+      child: Row(children: [
+        Expanded(
+          child: Row(children: [
+            Flexible(
+              child: Text(
+                _viewTitle(s),
+                key: const ValueKey('sticker-view-title'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: scheme.onSurface),
+              ),
+            ),
+            if (count != null) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Text(
+                  '$count',
+                  key: const ValueKey('sticker-view-count'),
+                  style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ]),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          key: const ValueKey('sticker-refresh'),
+          onPressed: _busy ? null : _load,
+          icon: const Icon(Icons.refresh_rounded, size: 19),
+          tooltip: s.retry,
+          padding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+        ),
+        const SizedBox(width: 4),
         FilledButton.icon(
           key: const ValueKey('sticker-upload'),
           onPressed: _busy ? null : _upload,
-          icon: const Icon(Icons.upload_file_outlined, size: 17),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            minimumSize: const Size(0, 34),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: const Icon(Icons.upload_file_outlined, size: 16),
           label: Text(s.stickerUpload),
         ),
       ]),
-      const SizedBox(height: 10),
-      Text(s.stickerStats(_count('approved'), _count('pending'), _count('sentToday'))),
-      if (_busy) const LinearProgressIndicator(minHeight: 2),
-      if (_notice != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text(_notice!, style: const TextStyle(color: IrmiaTheme.ok))),
-      if (_error != null) Padding(
-        padding: const EdgeInsets.only(top: 6),
-        child: Text(s.stickerActionFailed(_error!), style: const TextStyle(color: IrmiaTheme.danger)),
-      ),
-      const SizedBox(height: 10),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(children: [
-          for (final (index, label) in [s.stickerTabLibrary, s.stickerTabTagging, s.stickerTabReview, s.stickerTabSettings, s.stickerTabEvents].indexed)
-            Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: ChoiceChip(key: ValueKey('sticker-tab-$index'), label: Text(label), selected: _tab == index, onSelected: (_) => _selectTab(index)),
-            ),
+    );
+  }
+
+  Widget _rightScrollArea(AppStrings s) {
+    final Widget body;
+    if (_tab == 3) {
+      body = ListView(
+        key: const ValueKey('sticker-content-scroll'),
+        controller: _rightScroll,
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        children: [_messages(s), _settingsTab()],
+      );
+    } else if (_tab == 4) {
+      body = ListView(
+        key: const ValueKey('sticker-content-scroll'),
+        controller: _rightScroll,
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        children: [_messages(s), _eventsTab()],
+      );
+    } else {
+      body = SingleChildScrollView(
+        key: const ValueKey('sticker-content-scroll'),
+        controller: _rightScroll,
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _messages(s),
+          switch (_tab) {
+            0 => _library(),
+            1 => _tagging(),
+            _ => _reviewTab(),
+          },
         ]),
-      ),
-      const SizedBox(height: 12),
-      switch (_tab) {
-        0 => _library(),
-        1 => _tagging(),
-        2 => _reviewTab(),
-        3 => _settingsTab(),
-        _ => _eventsTab(),
-      },
-    ]);
+      );
+    }
+    return Scrollbar(controller: _rightScroll, thumbVisibility: true, child: body);
+  }
+
+  Widget _messages(AppStrings s) {
+    if (_notice == null && _error == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (_notice != null) Text(_notice!, style: const TextStyle(color: IrmiaTheme.ok)),
+        if (_error != null) Text(s.stickerActionFailed(_error!), style: const TextStyle(color: IrmiaTheme.danger)),
+      ]),
+    );
   }
 
   Widget _library() {
     final s = IrmiaStrings.of(context);
-    final approved = _entries.where((entry) => entry['status'] == 'approved').toList();
-    final blocked = _entries.where((entry) => entry['status'] == 'blocked').toList();
     if (_entries.isEmpty) return _empty();
+    final selected = _libraryEntries;
+    if (selected.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Text(s.stickerNoMatches, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+      );
+    }
+    if (_selectedStatus != null) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _hint(s.stickerLibraryHint),
+        _group(s.stickerStatus(_selectedStatus!), selected),
+      ]);
+    }
+    final approved = _approvedEntries;
+    if (_selectedTag != null) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _hint(s.stickerLibraryHint),
+        _group(_selectedTag!, selected),
+      ]);
+    }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _hint(s.stickerLibraryHint),
       for (final tag in kStickerTags)
         if (approved.any((entry) => (entry['tags'] as List? ?? const []).contains(tag)))
           _group(tag, approved.where((entry) => (entry['tags'] as List? ?? const []).contains(tag)).toList()),
-      if (blocked.isNotEmpty) _group(s.stickerStatus('blocked'), blocked),
     ]);
   }
 

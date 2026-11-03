@@ -3998,6 +3998,8 @@ abstract class AppStrings {
   String get stickerTitle;
   String get stickerBlurb;
   String get stickerTabLibrary;
+  /// 库筛选：全部标签
+  String get stickerFilterAll;
   String get stickerTabTagging;
   String get stickerTabReview;
   String get stickerTabSettings;
@@ -4033,6 +4035,8 @@ abstract class AppStrings {
   String get stickerNoEvents;
   String get stickerNoPending;
   String get stickerNoRejected;
+  /// 当前标签/状态筛选下没有图
+  String get stickerNoMatches;
   String get stickerIntensityLabel;
   String get stickerConfidence;
   String stickerStats(int approved, int pending, int sent);
@@ -7373,6 +7377,8 @@ class ZhStrings extends AppStrings {
   @override
   String get stickerTabLibrary => '库';
   @override
+  String get stickerFilterAll => '全部';
+  @override
   String get stickerTabTagging => '打标';
   @override
   String get stickerTabReview => '审核';
@@ -7442,6 +7448,8 @@ class ZhStrings extends AppStrings {
   String get stickerNoPending => '没有待审贴纸';
   @override
   String get stickerNoRejected => '没有已拒绝贴纸';
+  @override
+  String get stickerNoMatches => '没有符合当前筛选的贴纸';
   @override
   String get stickerIntensityLabel => '强度';
   @override
@@ -10943,6 +10951,8 @@ class EnStrings extends AppStrings {
   @override
   String get stickerTabLibrary => 'Library';
   @override
+  String get stickerFilterAll => 'All';
+  @override
   String get stickerTabTagging => 'Tags';
   @override
   String get stickerTabReview => 'Review';
@@ -11012,6 +11022,8 @@ class EnStrings extends AppStrings {
   String get stickerNoPending => 'No pending stickers';
   @override
   String get stickerNoRejected => 'No rejected stickers';
+  @override
+  String get stickerNoMatches => 'No stickers match the current filter.';
   @override
   String get stickerIntensityLabel => 'Intensity';
   @override

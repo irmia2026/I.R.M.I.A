@@ -23,7 +23,7 @@ const PASSWORD = 'sticker-api-test-password';
 const SALT = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
 const HASH = scryptSync(PASSWORD, SALT, 32, { N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p }).toString('hex');
 
-async function rig(t: TestContext, withService = true) {
+async function rig(t: TestContext, withService = true, tagText = '') {
   const dir = tempDirSync('irmia-sticker-api-');
   const dataDir = join(dir, 'data');
   mkdirSync(dataDir, { recursive: true });
@@ -45,7 +45,7 @@ async function rig(t: TestContext, withService = true) {
     client: {
       generate: async (request) => {
         modelCalls.push(request);
-        return stickerModelResponse(JSON.stringify({ tags: ['开心'], intensity: 'obvious', confidence: 0.96, note: '测试贴图' }));
+        return stickerModelResponse(tagText || JSON.stringify({ tags: ['开心'], intensity: 'obvious', confidence: 0.96, note: '测试贴图', isSticker: true }));
       },
     },
     store,
@@ -125,6 +125,15 @@ test('API：上传→视觉打标→待审预览；高置信也不绕过人工�
   assert.equal(second.duplicate, true);
   assert.equal(second.tagging, null);
   assert.equal(fx.modelCalls.length, 1);
+});
+
+test('API：上传非表情包 isSticker=false 进 rejected，不自动可用', async (t) => {
+  const fx = await rig(t, true,
+    JSON.stringify({tags: ['开心'], intensity: 'obvious', confidence: 0.96, note: '截图', isSticker: false}));
+  const uploaded = await fx.upload();
+  assert.equal(uploaded.entry.status, 'rejected');
+  assert.equal(uploaded.tagging.reason, 'not-sticker');
+  assert.equal(fx.store.candidates('开心').length, 0);
 });
 
 test('API：批准、改标签、拒绝与恢复都落人审事件', async (t) => {

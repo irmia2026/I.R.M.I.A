@@ -1407,6 +1407,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'stickerTitle': s.stickerTitle,
     'stickerBlurb': s.stickerBlurb,
     'stickerTabLibrary': s.stickerTabLibrary,
+    'stickerFilterAll': s.stickerFilterAll,
     'stickerTabTagging': s.stickerTabTagging,
     'stickerTabReview': s.stickerTabReview,
     'stickerTabSettings': s.stickerTabSettings,
@@ -1442,6 +1443,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'stickerNoEvents': s.stickerNoEvents,
     'stickerNoPending': s.stickerNoPending,
     'stickerNoRejected': s.stickerNoRejected,
+    'stickerNoMatches': s.stickerNoMatches,
     'stickerIntensityLabel': s.stickerIntensityLabel,
     'stickerConfidence': s.stickerConfidence,
 };
@@ -5033,6 +5035,8 @@ class OverriddenStrings extends AppStrings {
   @override
   String get stickerTabLibrary => overrides['stickerTabLibrary'] ?? base.stickerTabLibrary;
   @override
+  String get stickerFilterAll => overrides['stickerFilterAll'] ?? base.stickerFilterAll;
+  @override
   String get stickerTabTagging => overrides['stickerTabTagging'] ?? base.stickerTabTagging;
   @override
   String get stickerTabReview => overrides['stickerTabReview'] ?? base.stickerTabReview;
@@ -5102,6 +5106,8 @@ class OverriddenStrings extends AppStrings {
   String get stickerNoPending => overrides['stickerNoPending'] ?? base.stickerNoPending;
   @override
   String get stickerNoRejected => overrides['stickerNoRejected'] ?? base.stickerNoRejected;
+  @override
+  String get stickerNoMatches => overrides['stickerNoMatches'] ?? base.stickerNoMatches;
   @override
   String get stickerIntensityLabel => overrides['stickerIntensityLabel'] ?? base.stickerIntensityLabel;
   @override

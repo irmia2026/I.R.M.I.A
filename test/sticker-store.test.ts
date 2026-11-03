@@ -32,6 +32,27 @@ test('store：初始化两个包，导入待审、内容哈希去重、批准后
   assert.equal(store.candidates('开心').length, 1);
 });
 
+test('store：init 幂等降级旧的 collected 自动批准条目，owner/人工批准不动', (t) => {
+  const store = rig(t);
+  const legacy = store.importSticker({ bytes: pngBytes(11, 11), mime: 'image/png', source: 'collected' });
+  const human = store.importSticker({ bytes: pngBytes(12, 12), mime: 'image/png', source: 'collected' });
+  const owner = store.importSticker({ bytes: pngBytes(13, 13), mime: 'image/png', source: 'owner' });
+  const pack = store.readPack('collected');
+  Object.assign(pack.stickers.find((item) => item.id === legacy.entry.id)!, {status: 'approved', tags: ['开心'], tagSource: 'auto'});
+  Object.assign(pack.stickers.find((item) => item.id === human.entry.id)!, {status: 'approved', tags: ['开心'], tagSource: 'human'});
+  store.writePack(pack);
+  const ownerPack = store.readPack('owner-stickers');
+  Object.assign(ownerPack.stickers.find((item) => item.id === owner.entry.id)!, {status: 'approved', tags: ['难过'], tagSource: 'auto'});
+  store.writePack(ownerPack);
+
+  assert.equal(store.migrateLegacyCollectedApprovals(), 1);
+  assert.equal(store.findById(legacy.entry.id)?.entry.status, 'pending');
+  assert.equal(store.findById(human.entry.id)?.entry.status, 'approved');
+  assert.equal(store.findById(owner.entry.id)?.entry.status, 'approved', 'owner 包不动');
+  assert.deepEqual(store.candidates('开心').map((entry) => entry.id), [human.entry.id]);
+  assert.equal(store.migrateLegacyCollectedApprovals(), 0, '幂等');
+});
+
 test('store：最近十张去重、同图三十天三次上限与今日计数', (t) => {
   const store = rig(t);
   const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'owner' });

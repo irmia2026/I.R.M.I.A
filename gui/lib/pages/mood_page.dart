@@ -25,7 +25,7 @@ import 'stickers_panel.dart';
 /// 数据只有一条来源：`GET /api/affect`（`history` 是后端按 `affect/appraised` 折出来的轨迹）。
 /// 页面**不自己算**情绪：阈值、主导情绪、颜色都只做"读数的解释"，公式在 `src/affect/`。
 ///
-/// 表情包仍在本页第二个 tab（`StickersPanel` 未改），两件事回答同一个问题：
+/// 表情包仍在本页第二个 tab（`StickersPanel` 自带左栏与单一滚动区），两件事回答同一个问题：
 /// 「她现在用什么表达情绪」。
 ///
 /// 2026-11-03 后端把第六维从「好奇」换成「害羞」（键 `shyness`），并在 `/api/intimacy`
@@ -51,7 +51,7 @@ class MoodPage extends StatefulWidget {
 class _MoodPageState extends State<MoodPage> with WidgetsBindingObserver {
   int _tab = 0; // 0=情绪 1=表情包 2=亲密
 
-  // ── 表情包（沿用上一版，不动面板本身）──
+  // ── 表情包（数据在这里取，版式归 StickersPanel）──
   Map<String, dynamic>? _stickers;
   String? _stickersError;
   bool _stickersLoading = true;
@@ -511,13 +511,10 @@ class _MoodPageState extends State<MoodPage> with WidgetsBindingObserver {
         ]),
       );
     }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(26, 12, 26, 16),
-      child: StickersPanel(
-        state: widget.state,
-        view: _stickers!,
-        onRefresh: () => _loadStickers(silent: true),
-      ),
+    return StickersPanel(
+      state: widget.state,
+      view: _stickers!,
+      onRefresh: () => _loadStickers(silent: true),
     );
   }
 

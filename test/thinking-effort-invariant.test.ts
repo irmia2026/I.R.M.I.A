@@ -519,7 +519,7 @@ async function driveStickerTagger(_t: TestContext): Promise<DsRequest[]> {
   const client = {
     generate: async (request: DsRequest) => {
       requests.push(request);
-      return stickerModelResponse('{"tags":["开心"],"intensity":"obvious","confidence":0.9,"note":"微笑"}');
+      return stickerModelResponse('{"tags":["开心"],"intensity":"obvious","confidence":0.9,"note":"微笑","isSticker":true}');
     },
   };
   await new StickerTagger({ client, store, model: 'vision-test' }).tag({

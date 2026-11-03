@@ -3575,8 +3575,9 @@ export interface StickerSkipped extends EventEnvelope<'sticker/skipped', { reaso
 export interface StickerHarvested extends EventEnvelope<'sticker/harvested', {
   chatType: string;
   sha256: string;
-  result: 'auto-approved' | 'pending' | 'rejected';
+  result: 'pending' | 'rejected';
   reason?: string;
+  resizeFailed?: true;
 }> {}
 export interface StickerTagged extends EventEnvelope<'sticker/tagged', {
   stickerId: string;
@@ -3585,6 +3586,7 @@ export interface StickerTagged extends EventEnvelope<'sticker/tagged', {
   confidence: number;
   model: string;
   ok: boolean;
+  isSticker?: boolean;
 }> {}
 export interface StickerReviewed extends EventEnvelope<'sticker/reviewed', {
   stickerId: string;

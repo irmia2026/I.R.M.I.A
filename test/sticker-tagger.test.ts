@@ -9,7 +9,7 @@ import type { VisionGenerateRequest, VisionModelClient } from '../src/tools/visi
 import { pngBytes, stickerModelResponse } from './helpers/sticker-fixtures.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
-const VALID = '{"tags":["开心","亲近"],"intensity":"obvious","confidence":0.9,"note":"微笑"}';
+const VALID = '{"tags":["开心","亲近"],"intensity":"obvious","confidence":0.9,"note":"微笑","isSticker":true}';
 
 function rig(t: TestContext, options: { enabled?: boolean; maxPerHour?: number; text?: string; fail?: boolean } = {}) {
   const dir = tempDirSync('irmia-sticker-tagger-');
@@ -39,8 +39,8 @@ function rig(t: TestContext, options: { enabled?: boolean; maxPerHour?: number; 
   return { store, imported, tagger, requests, usage, events };
 }
 
-test('tagger：严格 JSON 只收九标签 1–2 个与四字段，其他一律失败', () => {
-  assert.deepEqual(parseStickerTagging(VALID), { tags: ['开心', '亲近'], intensity: 'obvious', confidence: 0.9, note: '微笑' });
+test('tagger：严格 JSON 只收九标签 1–2 个与五字段（含 isSticker），其他一律失败', () => {
+  assert.deepEqual(parseStickerTagging(VALID), { tags: ['开心', '亲近'], intensity: 'obvious', confidence: 0.9, note: '微笑', isSticker: true });
   for (const raw of [
     '```json\n' + VALID + '\n```',
     VALID.replace('"开心"', '"期待"'),
@@ -48,16 +48,18 @@ test('tagger：严格 JSON 只收九标签 1–2 个与四字段，其他一律�
     VALID.replace('0.9', '1.1'),
     VALID.replace('0.9', '0.9,"extra":true'),
     VALID.replace('"obvious"', '"very"'),
+    VALID.replace(',"isSticker":true', ''),
+    VALID.replace('"isSticker":true', '"isSticker":"yes"'),
     '{}',
   ]) assert.equal(parseStickerTagging(raw), null, raw);
 });
 
-test('tagger：达标自动入库，视觉请求 light/low，usage 与 tagged 留痕', async (t) => {
+test('tagger：高置信也只留 pending，视觉请求 light/low，usage 与 tagged 留痕', async (t) => {
   const { store, imported, tagger, requests, usage, events } = rig(t);
   const outcome = await tagger.tag({ stickerId: imported.entry.id, bytes: pngBytes(), mime: 'image/png' });
-  assert.equal(outcome.approved, true);
-  assert.equal(outcome.reason, 'auto-approved');
-  assert.equal(store.findById(imported.entry.id)?.entry.status, 'approved');
+  assert.equal(outcome.approved, false);
+  assert.equal(outcome.reason, 'pending');
+  assert.equal(store.findById(imported.entry.id)?.entry.status, 'pending');
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.lane, 'light');
   assert.deepEqual(requests[0]?.reasoning, { effort: 'low' });
@@ -65,7 +67,18 @@ test('tagger：达标自动入库，视觉请求 light/low，usage 与 tagged �
   assert.equal(requests[0]?.input[0]?.content[1]?.type, 'input_image');
   assert.equal(usage.length, 1);
   assert.equal(usage[0]?.model, 'vision-test');
-  assert.ok(events.some((event) => event.type === 'sticker/tagged' && (event.data as { ok: boolean }).ok));
+  assert.ok(events.some((event) => event.type === 'sticker/tagged'
+    && (event.data as { ok: boolean; confidence: number }).ok === false
+    && (event.data as { confidence: number }).confidence === 0.9));
+});
+
+test('tagger：isSticker=false 返回 not-sticker，不自动入库', async (t) => {
+  const { store, imported, tagger } = rig(t, {text: VALID.replace('"isSticker":true', '"isSticker":false')});
+  const outcome = await tagger.tag({stickerId: imported.entry.id, bytes: pngBytes(), mime: 'image/png'});
+  assert.equal(outcome.isSticker, false);
+  assert.equal(outcome.reason, 'not-sticker');
+  assert.equal(outcome.approved, false);
+  assert.equal(store.findById(imported.entry.id)?.entry.status, 'pending');
 });
 
 test('tagger：解析失败与低置信都留待审，不重试轰炸', async (t) => {
