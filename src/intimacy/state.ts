@@ -89,6 +89,7 @@ export function initialIntimacy(atMs = 0): IntimacyState {
     intimacyDay: null,
     intimacyGainedToday: 0,
     desireFullSinceMs: null,
+    afterglow: false,
     causes: [],
   };
 }
@@ -115,6 +116,7 @@ export function assertIntimacyState(value: unknown): asserts value is IntimacySt
     if (item !== null) integer(item, key);
   }
   for (const key of ['intimacy', 'desire', 'satisfaction', 'restraint']) range(s[key], key);
+  if (s['afterglow'] !== undefined && typeof s['afterglow'] !== 'boolean') throw new RangeError('invalid afterglow');
   if (s['lastAudience'] !== null) assertAudience(s['lastAudience']);
   if (s['intimacyDay'] !== null && typeof s['intimacyDay'] !== 'string') throw new RangeError('invalid intimacyDay');
   if (typeof s['intimacyGainedToday'] !== 'number' || !Number.isFinite(s['intimacyGainedToday'] as number)
@@ -141,6 +143,7 @@ export function assertIntimacyUpdated(data: IntimacyUpdatedData): void {
   if (data.desireFullSinceMs !== undefined && data.desireFullSinceMs !== null) {
     integer(data.desireFullSinceMs, 'desireFullSinceMs');
   }
+  if (data.afterglow !== undefined && typeof data.afterglow !== 'boolean') throw new RangeError('invalid afterglow');
   assertCause(data.cause);
 }
 
@@ -170,6 +173,7 @@ export function applyIntimacyUpdated(
   const desireFullSinceMs = data.desireFullSinceMs === undefined || data.desireFullSinceMs === null
     ? null
     : data.desireFullSinceMs;
+  const afterglow = data.afterglow ?? state.afterglow ?? false;
   return {
     ...state,
     atMs: data.atMs,
@@ -183,6 +187,7 @@ export function applyIntimacyUpdated(
     intimacyDay: day,
     intimacyGainedToday: nextGained,
     desireFullSinceMs,
+    afterglow,
     causes,
   };
 }
@@ -200,10 +205,12 @@ export function evolveIntimacy(state: IntimacyState, nowMs: number): IntimacySta
   let restraint = state.restraint;
 
   let remaining = minutes;
+  // 只有满足真正到过 100 才允许进入余韵；部分满足（例如 19）只累积/衰减，
+  // 不得按“高潮后”压情欲。afterglow 由 applyIntent 在首次到顶时置位。
+  let afterglow = state.afterglow === true;
+  if (afterglow && satisfaction <= SATISFACTION_HOLD_THRESHOLD) afterglow = false;
   if (satisfaction > 0) {
-    // 高潮后的余韵：满足高于阈值时，情欲被压住并快速收向 0；
-    // 满足降到阈值以下，才恢复普通增长。
-    if (satisfaction > SATISFACTION_HOLD_THRESHOLD) {
+    if (afterglow && satisfaction > SATISFACTION_HOLD_THRESHOLD) {
       const holdMinutes = Math.min(
         remaining,
         (satisfaction - SATISFACTION_HOLD_THRESHOLD) / SATISFACTION_DECAY_PER_MINUTE,
@@ -211,6 +218,7 @@ export function evolveIntimacy(state: IntimacyState, nowMs: number): IntimacySta
       satisfaction = Math.max(0, satisfaction - SATISFACTION_DECAY_PER_MINUTE * holdMinutes);
       desire = Math.max(0, desire - AFTERGLOW_DESIRE_DROP_PER_MINUTE * holdMinutes);
       remaining -= holdMinutes;
+      if (satisfaction <= SATISFACTION_HOLD_THRESHOLD) afterglow = false;
     }
     if (remaining > 0) {
       satisfaction = Math.max(0, satisfaction - SATISFACTION_DECAY_PER_MINUTE * remaining);
@@ -218,6 +226,7 @@ export function evolveIntimacy(state: IntimacyState, nowMs: number): IntimacySta
       restraint += RESTRAINT_RISE_PER_MINUTE * remaining;
       remaining = 0;
     }
+    if (satisfaction <= 0) afterglow = false;
   }
   if (remaining > 0) {
     desire += DESIRE_RISE_PER_MINUTE * remaining;
@@ -248,6 +257,7 @@ export function evolveIntimacy(state: IntimacyState, nowMs: number): IntimacySta
     satisfaction: clamp(satisfaction, 0, INTIMACY_MAX),
     restraint,
     desireFullSinceMs,
+    afterglow,
   };
 }
 

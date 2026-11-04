@@ -37,16 +37,17 @@ test('state: update carries values and satisfaction opens a 60-minute refractory
   assert.equal(satisfied.refractoryUntilMs, NOW + 1000 + SATISFACTION_REFRACTORY_MS);
 });
 
-test('evolve: 满足余韵压住情欲；低于阈值后才恢复普通增长', () => {
+test('evolve: 未到 100 的满足只衰减，不压情欲', () => {
   const base = applyIntimacyUpdated(initialIntimacy(NOW), updated({satisfaction: 20, desire: 10, restraint: 0}));
   const after = evolveIntimacy(base, NOW + 4 * 60_000);
   assert.ok(Math.abs(after.satisfaction - 16) < 1e-9, '1/min decay');
-  assert.equal(after.desire, 0, '满足高于阈值时情欲被压到 0');
-  assert.equal(after.restraint, 0);
+  assert.ok(Math.abs(after.desire - 10.32) < 1e-9, '满足未到 100，情欲按普通速度增长');
+  assert.ok(Math.abs(after.restraint - 0.24) < 1e-9);
+  assert.equal(after.afterglow, false);
   const later = evolveIntimacy(base, NOW + 30 * 60_000);
   assert.ok(Math.abs(later.satisfaction) < 1e-9);
-  assert.ok(Math.abs(later.desire - 2) < 1e-9, '满足降到阈值以下后 0.08/min 慢涨');
-  assert.ok(Math.abs(later.restraint - 1.5) < 1e-9, '0.06/min');
+  assert.ok(Math.abs(later.desire - 12.4) < 1e-9, '0.08/min 普通增长');
+  assert.ok(Math.abs(later.restraint - 1.8) < 1e-9, '0.06/min');
   const fast = evolveIntimacy({...base, satisfaction: 0, desire: 0, restraint: 0}, NOW + 10 * 60_000);
   assert.ok(Math.abs(fast.desire - 0.8) < 1e-9, '普通日常 0.08/min');
   assert.ok(Math.abs(fast.restraint - 0.6) < 1e-9, '普通日常 0.06/min');
@@ -58,6 +59,22 @@ test('evolve: 低满足区间直接走普通增长', () => {
   assert.ok(Math.abs(after.satisfaction) < 1e-9);
   assert.ok(Math.abs(after.desire - 12.4) < 1e-9, `desire=${after.desire}`);
   assert.ok(Math.abs(after.restraint - 1.8) < 1e-9, `restraint=${after.restraint}`);
+});
+
+test('evolve: 发情中的部分满足不结束发情，只有到 100 才进入余韵', () => {
+  const partial = {
+    ...initialIntimacy(NOW),
+    desire: 100,
+    restraint: 0,
+    satisfaction: 19,
+    desireFullSinceMs: NOW,
+  };
+  const after7 = evolveIntimacy(partial, NOW + 7 * 60_000);
+  assert.ok(Math.abs(after7.satisfaction - 12) < 1e-9);
+  assert.equal(after7.desire, 100);
+  assert.equal(after7.restraint, 0);
+  assert.equal(after7.afterglow, false);
+  assert.equal(estrusOf(after7), true, '19 满足不能把发情压掉');
 });
 
 test('evolve: full desire accelerates restraint drop; restraint 0 + desire 100 is estrus', () => {
@@ -117,14 +134,17 @@ test('climax: 满足第一次到顶会把情欲压到 0，进入满足状态', (
   assert.equal(data.satisfaction, 100);
   assert.equal(data.desire, 0, '顶点直接削减情欲');
   assert.equal(data.restraint, 0);
+  assert.equal(data.afterglow, true, '只有到 100 才进入余韵');
   const state = applyIntimacyUpdated(base, data);
+  assert.equal(state.afterglow, true);
   assert.equal(estrusOf(state), false);
   assert.equal(phaseOf(state), 'warm');
   assert.match(renderIntimacyNow(state, {maxLevel: 'strong', nowMs: NOW}), /余韵还在身体里/u);
 
   const after30 = evolveIntimacy(state, NOW + 30 * 60_000);
   assert.equal(after30.satisfaction, 70);
-  assert.equal(after30.desire, 0, '满足高于阈值时情欲保持 0');
+  assert.equal(after30.desire, 0, '到过 100 后余韵期情欲保持 0');
+  assert.equal(after30.afterglow, true);
   assert.match(renderIntimacyNow(after30, {maxLevel: 'strong', nowMs: NOW + 30 * 60_000}), /慵懒/u);
   const after50 = evolveIntimacy(state, NOW + 50 * 60_000);
   assert.equal(after50.satisfaction, 50);
@@ -134,6 +154,7 @@ test('climax: 满足第一次到顶会把情欲压到 0，进入满足状态', (
   assert.match(renderIntimacyNow(after80, {maxLevel: 'strong', nowMs: NOW + 80 * 60_000}), /元气满满/u);
   const after95 = evolveIntimacy(state, NOW + 95 * 60_000);
   assert.equal(after95.satisfaction, 5);
+  assert.equal(after95.afterglow, false, '满足降到阈值以下，余韵结束');
   assert.ok(after95.desire > 0, '满足低于阈值后情欲重新开始涨');
   assert.match(renderIntimacyNow(after95, {maxLevel: 'strong', nowMs: NOW + 95 * 60_000}), /心里开始有些痒痒/u);
 });

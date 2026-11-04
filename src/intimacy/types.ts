@@ -40,6 +40,8 @@ export interface IntimacyState {
   intimacyGainedToday: number;
   /** First moment desire reached 100; drives the sustained estrus ramp. */
   desireFullSinceMs: number | null;
+  /** True only after satisfaction has actually reached 100; gates the afterglow suppression. */
+  afterglow: boolean;
   causes: IntimacyCause[];
 }
 
@@ -53,6 +55,8 @@ export interface IntimacyUpdatedData {
   restraint: number;
   /** New events carry the full-desire anchor; old logs omit it (fold treats missing as null). */
   desireFullSinceMs?: number | null;
+  /** New events carry the afterglow gate; old logs omit it (fold preserves prior state). */
+  afterglow?: boolean;
   cause: { reasonCode: IntimacyReasonCode; strength: number };
 }
 

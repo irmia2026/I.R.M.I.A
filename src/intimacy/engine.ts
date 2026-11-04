@@ -42,6 +42,7 @@ export function applyIntent(input: IntimacyIntentInput): IntimacyUpdatedData | n
   let desire = s.desire;
   let satisfaction = s.satisfaction;
   let restraint = s.restraint;
+  let afterglow = s.afterglow === true;
   let reasonCode: IntimacyReasonCode;
   let causeStrength = Math.round(strength * 100);
   const estrus = s.desire >= INTIMACY_MAX && s.restraint <= 0;
@@ -82,7 +83,8 @@ export function applyIntent(input: IntimacyIntentInput): IntimacyUpdatedData | n
   }
 
   // 满足条第一次到顶：快速削减情欲，进入满足状态。
-  // 之后由 evolveIntimacy 在满足高于阈值时继续压住情欲。
+  // 只有真正到 100 才置 afterglow；部分满足不允许触发余韵。
+  if (satisfaction >= INTIMACY_MAX) afterglow = true;
   if (s.satisfaction < INTIMACY_MAX && satisfaction >= INTIMACY_MAX) {
     desire = 0;
     restraint = 0;
@@ -97,6 +99,7 @@ export function applyIntent(input: IntimacyIntentInput): IntimacyUpdatedData | n
     satisfaction,
     restraint,
     desireFullSinceMs: desire >= INTIMACY_MAX ? (s.desireFullSinceMs ?? now) : null,
+    afterglow,
     cause: {reasonCode, strength: causeStrength},
   };
 }
