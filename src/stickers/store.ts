@@ -326,8 +326,7 @@ export class StickerStore {
     const recent = new Set(state.recent.slice(0, 10));
     return this.listEntries()
       .map(({ entry }) => entry)
-      .filter((entry) => entry.status === 'approved' && entry.tags.includes(tag) && !recent.has(entry.id))
-      .filter((entry) => state.sent.filter((item) => item.stickerId === entry.id && now.getTime() - item.atMs <= 30 * DAY_MS).length < 3);
+      .filter((entry) => entry.status === 'approved' && entry.tags.includes(tag) && !recent.has(entry.id));
   }
 
   sentToday(now = this.clock()): number {

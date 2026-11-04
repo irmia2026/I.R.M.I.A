@@ -73,12 +73,15 @@ test('store：phash 写入、最近邻查找、补写与缺 hash 列表', (t) =>
   assert.deepEqual(store.entriesMissingPHash(), []);
 });
 
-test('store：最近十张去重、同图三十天三次上限与今日计数', (t) => {
+test('store：最近十张去重、三十天三次不再限制与今日计数', (t) => {
   const store = rig(t);
   const imported = store.importSticker({ bytes: pngBytes(), mime: 'image/png', source: 'owner' });
   store.applyTagging(imported.entry.id, { tags: ['开心'], intensity: 'obvious', confidence: 1, note: '' }, true);
   for (let i = 0; i < 3; i++) store.recordSent(imported.entry.id, new Date(`2026-10-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`));
-  assert.equal(store.candidates('开心', new Date('2026-10-15T00:00:00.000Z')).length, 0, '三十天三次后不再候选');
+  const state = store.readState();
+  state.recent = [];
+  store.writeState(state);
+  assert.equal(store.candidates('开心', new Date('2026-10-15T00:00:00.000Z')).length, 1, '三十天三次后仍可候选');
   assert.equal(store.sentToday(new Date('2026-10-03T00:00:00.000Z')), 1);
 });
 
