@@ -59,6 +59,8 @@ export interface IntimacyView {
   restraint: number;
   level: 'subtle' | 'obvious' | 'strong';
   estrus: boolean;
+  /** True only after satisfaction actually reached 100; partial satisfaction is false. */
+  afterglow: boolean;
   phase: IntimacyPhase;
   labels: IntimacyLabels;
   line: string | null;
@@ -121,6 +123,7 @@ export function buildIntimacyView(input: {
     restraint: viewState.restraint,
     level: effectiveLevel(viewState, input.config.intimacy.maxLevel),
     estrus: estrusOf(viewState),
+    afterglow: viewState.afterglow === true,
     phase: phaseOf(viewState),
     labels: intimacyLabels(viewState),
     line,

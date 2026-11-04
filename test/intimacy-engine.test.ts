@@ -254,7 +254,7 @@ test('API view: enabled exposes four readings, estrus/phase and line; bad event 
     config, configured: true, projection, events: [], now: new Date(NOW).toISOString(),
   });
   for (const key of ['enabled', 'configured', 'privateOnly', 'maxLevel', 'atMs', 'updatedAt', 'intimacy',
-    'desire', 'satisfaction', 'restraint', 'level', 'estrus', 'phase', 'labels', 'line', 'renderLine', 'causes', 'history']) {
+    'desire', 'satisfaction', 'restraint', 'level', 'estrus', 'afterglow', 'phase', 'labels', 'line', 'renderLine', 'causes', 'history']) {
     assert.ok(key in view, `missing ${key}`);
   }
   assert.equal(view.privateOnly, true);
