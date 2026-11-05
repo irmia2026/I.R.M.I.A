@@ -2109,7 +2109,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '85';
+export const RENDER_VERSION = '86';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -4822,7 +4822,7 @@ function echoTurnAnchorOf(events: readonly AppEvent[]): number {
 const USER_ITEM_EVENT_TYPES: ReadonlySet<string> = new Set([
   'message/user', 'image/attached', 'human/answered',
   'wake/timer', 'wake/file', 'wake/webhook', 'wake/manual',
-  'wake/heartbeat', 'wake/intention', 'wake/job', 'wake/channel',
+  'wake/heartbeat', 'wake/intention', 'wake/job', 'wake/channel', 'wake/subagent',
 ]);
 
 /**
@@ -6036,7 +6036,8 @@ function renderEvents(
         }, null);
         break;
       case 'wake/timer': case 'wake/file': case 'wake/webhook': case 'wake/manual':
-      case 'wake/heartbeat': case 'wake/intention': case 'wake/job': case 'wake/channel': {
+      case 'wake/heartbeat': case 'wake/intention': case 'wake/job': case 'wake/channel':
+      case 'wake/subagent': {
         close();
         // 历史里的唤醒：重投标记一律不带（v49 的判据：历史 item 的字节永不被后来的 requeue 改写）。
         push(wakeItemOf(e, NO_REQUEUED), null);
@@ -6426,6 +6427,11 @@ export function wakeTitle(e: AppEvent, timerPayloads?: Map<string, unknown>): st
     const count = e.data.attachments?.length ?? 0;
     return count > 0 ? `（发了 ${count} 个附件，没写字）` : '（空消息）';
   }
+  if (e.type === 'wake/subagent') {
+    const summary = e.data.summary.replace(/\s+/gu, ' ').trim();
+    return `[子代理${e.data.kind === 'progress' ? '进度' : '完成'}] ${e.data.agentId}`
+      + (summary === '' ? '' : `：${summary}`);
+  }
   if (e.type === 'wake/job') {
     // 任务完成那条的**标题**：一行摘要（命令 + 退出码）。**正文不在这里**——它在 `renderWake`
     // 里（结果正文是多行的，她要在请求里原样看到）。两件事从 v41 起分开，与 v35 对
@@ -6505,6 +6511,12 @@ export function renderWake(
       return `[文件变化] ${e.data.kind}：${e.data.path}`;
     case 'wake/intention':
       return `[意图到期] ${e.data.content}`;
+    case 'wake/subagent': {
+      const summary = e.data.summary.trim();
+      return `[子代理${e.data.kind === 'progress' ? '进度' : '完成'}] ${e.data.agentId}`
+        + `（${e.data.status}，用度 ${e.data.tokens.used}/${e.data.tokens.limit}）`
+        + (summary === '' ? '\n（它没有留下文字结论；可用 subagent({action:"status"}) 查看状态）' : `\n${summary}`);
+    }
     case 'wake/job': {
       // **这一行必须带正文**（2026-10-08 用户的口径：「后台任务回执、timer 提醒，这类得是真唤醒」
       // ——判据是"真的起 turn，且那一条内容出现在当轮请求体里"）。

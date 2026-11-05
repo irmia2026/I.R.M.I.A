@@ -171,8 +171,8 @@ export interface DsTool {
   parameters: Record<string, unknown>;
 }
 
-/** 思考强度：`none` 关闭思考模式；其余开启（官方 effort 枚举） */
-export type DsReasoningEffort = 'none' | 'low' | 'high' | 'max';
+/** 思考强度：传输层原样透传；具体 provider 的支持面由调用方检查，失败不得静默改档。 */
+export type DsReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'max';
 
 export type DsTextFormat =
   | { type: 'text' }

@@ -53,7 +53,7 @@ import type { PreparedAffect } from '../affect/types.js';
  * 纯类型导入写 `.js`。
  */
 
-import type { DsClient, DsRequest, DsStreamCallbacks, DsStreamResult } from '../model/ds-client.js';
+import type { DsClient, DsReasoningEffort, DsRequest, DsStreamCallbacks, DsStreamResult } from '../model/ds-client.js';
 import { isDsClientError, isReasoningEchoRejection } from '../model/ds-client.ts';
 // **400 飞行记录器**（2026-10-22）：把"被拒的那一发"的现场提炼成一条 internal 事件。
 // 判据（`serverRejectionOf`）与脱敏/区段口径都在那个模块里，本文件只负责"什么时候写、写哪份"。
@@ -537,6 +537,10 @@ export interface AgentLoopDeps {
   budget?: AgentLoopBudget;
   /** 主循环 lane（§4.12 任务-模型两级路由），默认 heavy */
   lane?: ModelLane;
+  /** 子代理会话冻结的思考档；缺省保持 heavy=high / light=low。 */
+  reasoningEffort?: DsReasoningEffort;
+  /** 在发送前检查上下文预算；返回非 null 时结束当前 turn，不发送这份请求。 */
+  contextGuard?: (request: RenderedRequest, lastProviderInputTokens: number | null) => TurnEndReason | null;
   /** 文件类工具的路径白名单根；默认 process.cwd() */
   workspaceRoot?: string;
   /**
@@ -867,6 +871,8 @@ export interface AgentLoopDeps {
    * 顶层不传 → 事件里不出现该字段（零成本保持既有事件形状与字节序）。
    */
   parentCallId?: string;
+  /** Persistent AgentSession id (P1 background subagents); omitted for legacy task chains. */
+  agentId?: string;
   /**
    * turn 号下限（schema §2 编号规则）。子代理在隔离的事件视图里跑，`maxTurn()` 看不见主日志里
    * 已有的 turn；不给下限，子代理就会从 1 重新开始编号，与主日志重号——而 `replay <turn>`、
@@ -1798,6 +1804,8 @@ export class TurnRunner {
 
     // `let` 而不是 `const`：400 自救会重建一份（全量）请求，后面记账要用**真发出去的那一份**
     let request = this.deriveAt({ wakeEvent, pinnedWake, step, now, model, softHint });
+    const contextVerdict = this.deps.contextGuard?.(request, this.lastSuccessfulCall?.inputTokens ?? null) ?? null;
+    if (contextVerdict !== null) return contextVerdict;
     // 记下**上一步完整的那一层**（v69；v66 起是"真正发出去的那一层"）：下一步据此逐字段
     // 比对、不变的不发。取的是渲染结果里的 `nowLayerFull`（**未经增量裁剪**的原文）——
     // 取裁剪后的那一份，被省掉的字段下一步就会当成"上一步没有它"重发一遍（隔步重发）。
@@ -1840,7 +1848,7 @@ export class TurnRunner {
       // 「已想 X 字」在整段落库之前只能是「…」（实测 turn 2115 空了 153 秒）。
       // 接上它只读计数、不碰正文：载荷里没有也不许有正文的任何片段（见 StepReasoningProgress）。
       result = await this.deps.ds.stream(
-        toDsRequest(request, this.lane, this.deps.signal),
+        toDsRequest(request, this.lane, this.deps.signal, this.deps.reasoningEffort),
         this.reasoningProgressReporter(step),
       );
     } catch (error) {
@@ -2097,7 +2105,7 @@ export class TurnRunner {
     let second: { code: string; detail: string } | null = null;
     try {
       result = await this.deps.ds.stream(
-        toDsRequest(full, this.lane, this.deps.signal),
+        toDsRequest(full, this.lane, this.deps.signal, this.deps.reasoningEffort),
         this.reasoningProgressReporter(args.step),
       );
     } catch (error) {
@@ -3625,6 +3633,7 @@ export class TurnRunner {
       origin: ORIGIN,
       // 子代理链归属（§4.21 隔离三件套之三）：顶层不传 → 字段不出现，事件形状与之前完全一致
       ...(this.deps.parentCallId !== undefined ? { parentCallId: this.deps.parentCallId } : {}),
+      ...(this.deps.agentId !== undefined ? { agentId: this.deps.agentId } : {}),
     } as unknown as AppEvent;
     this.log.append(event, { sync: options.sync });
     applyOne(this.projection, event);
@@ -4154,10 +4163,13 @@ function clipEchoDetail(detail: string | null): string {
   return detail.length <= ECHO_DETAIL_LOG_MAX ? detail : `${detail.slice(0, ECHO_DETAIL_LOG_MAX)}…`;
 }
 
-function toDsRequest(rendered: RenderedRequest, lane: ModelLane, signal: AbortSignal | undefined): DsRequest {
-  // **发送前的自洽断言**（v73，防复发的第二道门）：render 之后、`ds.stream` 之前的最后一步。
-  // 判据与理由见 `render.ts` 的 `assertReasoningEchoIntegrity`：任何一个 `reasoning` item
-  // 缺正文 / 正文为空 ⇒ **抛**，这一份请求发不出去（宁可这一拍失败，也不发半截状态）。
+function toDsRequest(
+  rendered: RenderedRequest,
+  lane: ModelLane,
+  signal: AbortSignal | undefined,
+  reasoningEffort: DsReasoningEffort | undefined,
+): DsRequest {
+  // 发送前的自洽断言：任何 reasoning item 缺正文都不许发半截状态。
   assertReasoningEchoIntegrity(rendered.input);
   const request: DsRequest = {
     lane,
@@ -4165,20 +4177,8 @@ function toDsRequest(rendered: RenderedRequest, lane: ModelLane, signal: AbortSi
     input: rendered.input,
     instructions: rendered.instructions,
     tools: rendered.tools,
-    /**
-     * 思考强度：**用户的口径（2026-10-06）——heavy 一律 `high`，且不提供更改**
-     * （五处 light 各自写死 `low`：`channel/injection-judge.ts`、`channel/topic.ts`、
-     * `persona/assets.ts`、`persona/memory-maintain.ts` ×2、`tools/vision.ts`；
-     * 两档都不受任何配置影响）。
-     *
-     * 为什么把它**写出来**（原先这个字段是缺席的）：官方文档写着"思考模式默认打开、
-     * effort 默认为 `high`"——也就是说字段缺席时**恰好**也是 high（`deepseek-flash` 是思考模式
-     * 模型，日志里那几千条 `message/reasoning` 就是证据）。但那是**别人的默认值**，不是我们的
-     * 承诺：服务端改一次默认、或这个字段哪天被漏掉，她的思考强度就会无声地变，而账本上看不出来。
-     * 写死之后它只由这一行决定——`test/thinking-effort-invariant.test.ts` 钉着这一行发出去的
-     * 实际值，同时钉着"配置面里没有能改它的旋钮"。
-     */
-    reasoning: { effort: lane === 'light' ? 'low' : 'high' },
+    // 主循环保持既有 heavy=high / light=low；子代理只覆盖自己会话冻结的那一份。
+    reasoning: { effort: reasoningEffort ?? (lane === 'light' ? 'low' : 'high') },
   };
   if (signal !== undefined) request.signal = signal;
   return request;

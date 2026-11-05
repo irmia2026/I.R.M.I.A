@@ -565,7 +565,7 @@ describe('维护窗口 · 常驻规则与信号同源（用户点名要的那条
     // **v81 是 Affect v4 接线**（2026-10-31）：情绪行位于此刻层末尾，只有开启时才加静态规则。
     // 关闭态请求字节不变；开启时接受一次设计内的前缀 miss。
     // **v82 是 speak 贴纸接线**：两个可选参数与三条静态规则同批进入工具 schema / instructions。
-    assert.equal(RENDER_VERSION, '85', '模板换代就必须递增：一次设计内的全 miss');
+    assert.equal(RENDER_VERSION, '86', '模板换代就必须递增：一次设计内的全 miss');
     const rendered = render(renderInput());
     // v61：装置自述**逐字置换**后，这一句的落点从旧的 ⑦ 段容器搬进新稿的 §6（口径不变、措辞是
     // 用户的原文）⇒ 这条按新正文重锚，**不是放宽**：它照样要求"这一口径真的进 instructions"。

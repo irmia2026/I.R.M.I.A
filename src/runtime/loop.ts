@@ -132,6 +132,7 @@ function describeWake(event: AppEvent | null): string {
     case 'wake/webhook': return `回调：${event.data.path}`;
     case 'wake/intention': return `意图到期：${event.data.content}`;
     case 'wake/job': return `后台任务完成：${event.data.jobId}`;
+    case 'wake/subagent': return `子代理完成：${event.data.agentId}`;
     case 'wake/channel': {
       const where = event.data.chatType === 'c2c' ? '私聊' : event.data.chatType === 'group-at' ? '群@' : '群';
       return `IM 消息（${event.data.channel}/${where}）：${event.data.text.slice(0, 60)}`;
@@ -160,6 +161,7 @@ function userMessageSourceOf(source: WakeSource): UserMessage['data']['source'] 
     case 'webhook': return 'webhook';
     case 'intention': return 'intention';
     case 'job': return 'job';
+    case 'subagent': return 'job';
     case 'channel': return 'human'; // IM 通道消息语义上是人说话
     case 'heartbeat': return 'timer';
   }

@@ -3980,6 +3980,104 @@ abstract class AppStrings {
   String intimacyLevelSaved(String level, bool applied);
   String intimacySaveFailed(String reason);
 
+  // ── 亲密面板（2026-11-04 设计稿重做）────────────────────────────────
+  //
+  // 页头的品牌句、四格读数、phase 卡、最近变化、情绪潮汐、关闭 / 错误 / 加载态
+  // 与设置面板的文案。设计稿里那些英文小字（CURRENT PHASE / INNER TIDES …）
+  // 也是界面文案，统一放这里；widget 里不再出现中文字面量。
+  String get intimacyPageEyebrow;
+
+  /// 大标题的三段：中文把「靠近」用衬线斜体挑出来，英文把 closeness 挑出来
+  String get intimacyHeadingLead;
+  String get intimacyHeadingAccent;
+  String get intimacyHeadingTail;
+  String get intimacyTagline;
+
+  /// 页头 / 面板上的连接状态 pill
+  String get intimacyConnectionLive;
+  String get intimacyConnectionLoading;
+  String get intimacyConnectionError;
+  String get intimacyConnectionOff;
+
+  /// 说明：状态由后端计算
+  String get intimacySyncNote;
+
+  /// 左侧四格那一段的标题（设计稿 "四种读数 · INNER TIDES"）
+  String get intimacyReadingsSection;
+
+  /// 四格的小号英文名：CLOSENESS / DESIRE / AFTER TASTE / RESTRAINT
+  String intimacyMetricEn(String key);
+
+  /// 四格卡脚注（"当前读数"）与量纲（"0 — 100"）
+  String get intimacyMetricFoot;
+  String get intimacyScale;
+
+  /// phase 卡的卡名（情绪页风格的 panel 标题）
+  String get intimacyPhaseCardTitle;
+
+  /// phase 卡的眉题与四个阶段的短句
+  String get intimacyCurrentPhase;
+  String get intimacyPhaseEstrusSuffix;
+  String get intimacyPhaseCalmKicker;
+  String get intimacyPhaseWarmKicker;
+  String get intimacyPhaseTenseKicker;
+  String get intimacyPhaseEstrusKicker;
+  String get intimacyPhaseCalmSub;
+  String get intimacyPhaseWarmSub;
+  String get intimacyPhaseTenseSub;
+  String get intimacyPhaseEstrusSub;
+  String get intimacyAfterglow;
+  String get intimacyLevelMeta;
+  String get intimacyUpdatedMeta;
+  String get intimacyNoUpdated;
+
+  /// 最近变化：上限说明、空态第二句、强度小标签
+  String get intimacyCausesHeading;
+  String get intimacyCausesLimit;
+  String get intimacyCausesEmptyHint;
+  String intimacyStrength(int value);
+
+  /// 情绪潮汐：标题、右上角计数与脚注
+  String get intimacyHistoryHeading;
+  String intimacyHistoryCount(int count);
+  String get intimacyHistoryNote;
+
+  /// 设置面板 / 齿轮
+  String get intimacySettingsTooltip;
+  String get intimacySettingsTitle;
+  String get intimacyEnabledLabel;
+  String get intimacyEnabledNote;
+  String get intimacyMaxLevelNote;
+  String get intimacyPrivateScope;
+  String get intimacyPrivateScopeNote;
+  String get intimacyPrivateOnlyPill;
+  String get intimacySaveSettings;
+  String get intimacySettingsSaved;
+  String get intimacySettingsPending;
+
+  /// 关闭态
+  String get intimacyClosedEyebrow;
+  String get intimacyClosedTitle;
+  String get intimacyClosedBody;
+  String get intimacyClosedStatus;
+
+  /// 错误态
+  String get intimacyErrorUnsupportedTitle;
+  String get intimacyErrorUnsupportedBody;
+  String get intimacyErrorAuthTitle;
+  String get intimacyErrorAuthBody;
+  String get intimacyErrorInvalidTitle;
+  String get intimacyErrorInvalidBody;
+  String get intimacyErrorLoadTitle;
+  String get intimacyErrorEyebrow;
+
+  /// 原始数据入口（phase 卡右上角那颗 info）
+  String get intimacyDetailsTooltip;
+
+  /// 页脚
+  String get intimacyFooterPrivate;
+  String get intimacyFooterSync;
+
   // ── 日志页：事件类型标签与摘要（2026-10-31 补情绪/表情包一族）────────────
   String get logsTypeAffectAppraised;
   String get logsTypeStickerSent;
@@ -4052,6 +4150,107 @@ abstract class AppStrings {
   String stickerUseCount(int count);
   String stickerActionFailed(String reason);
   String stickerBatchDone(int count);
+
+  // ── 子代理（P3.3，2026-11-05）────────────────────────────────────────
+  //
+  // 入口在「更多 → 子代理」；页面沿用情绪面板的版式与明暗体系。
+  // 静态标签走无参 getter（可在 strings-override 里改），带读数/状态的句子走方法
+  // （参数由实现放，页面不拼语序）。Profile 的 label / description 是**后端数据**，
+  // 不在这一层重译；这里只管界面骨架。
+  String get navSubagents;
+  String get subagentsEyebrow;
+  String get subagentsHeading;
+  String get subagentsTagline;
+  String get subagentsSystem;
+  String get subagentsDisabledTitle;
+  String get subagentsDisabledBody;
+  String get subagentsRestartNote;
+  String get subagentsProfilesTitle;
+  String get subagentsProfilesCaption;
+  String get subagentsProfilesDisabled;
+  String get subagentsSessionsTitle;
+  String get subagentsActiveTab;
+  String get subagentsArchivedTab;
+  String get subagentsEmptyTitle;
+  String get subagentsEmptyBody;
+  String get subagentsArchivedEmptyTitle;
+  String get subagentsArchivedEmptyBody;
+  String get subagentsDetailTitle;
+  String get subagentsDetailEmpty;
+  String get subagentsReportTitle;
+  String get subagentsNoReport;
+  String get subagentsTimelineTitle;
+  String get subagentsTimelineEmpty;
+  String get subagentsMessageHint;
+  String get subagentsMessageBlocked;
+  String get subagentsSend;
+  String get subagentsResume;
+  String get subagentsCancelTitle;
+  String get subagentsResumeTitle;
+  String get subagentsSafetyNote;
+
+  /// Profile 状态徽标。刻意与后端 `available` / `locked` 同形：用户看界面时
+  /// 能一字对上 API 与日志，不用在脑子里做第二次翻译。
+  String get subagentsProfileAvailable;
+  String get subagentsProfileLocked;
+
+  /// 角色包列表行里更短的状态词（徽标之外的可扫读副本）。
+  String get subagentsProfileReady;
+  String get subagentsProfileNeedsInstall;
+
+  /// 选中详情底部的结论句：可用 / 缺依赖。
+  String get subagentsProfileAvailableHint;
+  String get subagentsProfileLockedHint;
+
+  /// 详情里的三段摘要标题。
+  String get subagentsProfileSkills;
+  String get subagentsProfileMcp;
+  String get subagentsProfileMissing;
+
+  /// 一行放不下的 chip 尾巴：`+N`。
+  String subagentsProfileMore(int count);
+
+  /// 展开后的收起按钮。
+  String get subagentsProfileCollapse;
+
+  /// Profile 卡上的「校验」入口（安装用现有的 [settingsInstall]）。
+  String get subagentsProfileVerify;
+
+  /// `7 个工具 · 自建 workspace · 重模型`（Profile 摘要的脚注）
+  String subagentsProfileMeta(int tools, String workspace, String lane);
+
+  /// Profile 的 workspace 策略（`own` / `none`）
+  String subagentsWorkspace(String key);
+
+  /// Profile 的模型车道（`heavy` / `light`）
+  String subagentsLane(String key);
+
+  /// 子代理状态（六态；另认后端可能出现的 waiting / reporting）
+  String subagentsStatus(String status);
+
+  /// 详情里的小标签：profile / status / agentId / parentTurn / parentCall /
+  /// createdAt / updatedAt / tokens / lastReport
+  String subagentsField(String key);
+
+  /// 时间线事件标题（事件类型去掉 `subagent/` 后的值，另含 `wake`）
+  String subagentsEventTitle(String type);
+
+  /// 中断/取消原因码 → 人话；未知码原样返回
+  String subagentsReason(String key);
+
+  String subagentsLoadFailed(String reason);
+  String subagentsProfilesLoadFailed(String reason);
+  String subagentsDetailLoadFailed(String reason);
+  String subagentsTimelineLoadFailed(String reason);
+  String subagentsMessageSent();
+  String subagentsMessageFailed(String reason);
+  String subagentsCancelBody(String agentId);
+  String subagentsResumeBody(String agentId);
+  String subagentsCancelDone();
+  String subagentsResumeDone();
+  String subagentsActionFailed(String reason);
+  String subagentsToggleSaved(bool enabled, bool restartRequired);
+  String subagentsToggleFailed(String reason);
 }
 
 /// 中文（**作者语言**，也是所有既有测试断言的基准）。
@@ -7325,6 +7524,139 @@ class ZhStrings extends AppStrings {
   @override
   String intimacySaveFailed(String reason) => '亲密设置保存失败：$reason';
 
+  // ── 亲密面板（2026-11-04 设计稿重做）────────────────────────────────
+  @override
+  String get intimacyPageEyebrow => 'INTIMACY / PRIVATE STATE';
+  @override
+  String get intimacyHeadingLead => '在克制与';
+  @override
+  String get intimacyHeadingAccent => '靠近';
+  @override
+  String get intimacyHeadingTail => '之间';
+  @override
+  String get intimacyTagline => '只在用户 1:1 私聊中生效';
+  @override
+  String get intimacyConnectionLive => '已连接';
+  @override
+  String get intimacyConnectionLoading => '读取中';
+  @override
+  String get intimacyConnectionError => '连接异常';
+  @override
+  String get intimacyConnectionOff => '已关闭';
+  @override
+  String get intimacySyncNote => '状态由后端计算 · 前端仅负责呈现';
+  @override
+  String get intimacyReadingsSection => '四种读数 · INNER TIDES';
+  @override
+  String intimacyMetricEn(String key) => switch (key) {
+    'intimacy' => 'CLOSENESS',
+    'desire' => 'DESIRE',
+    'satisfaction' => 'AFTER TASTE',
+    'restraint' => 'RESTRAINT',
+    _ => key,
+  };
+  @override
+  String get intimacyMetricFoot => '当前读数';
+  @override
+  String get intimacyScale => '0 — 100';
+  @override
+  String get intimacyPhaseCardTitle => '当前阶段';
+  @override
+  String get intimacyCurrentPhase => 'CURRENT PHASE';
+  @override
+  String get intimacyPhaseEstrusSuffix => ' · 临界状态';
+  @override
+  String get intimacyPhaseCalmKicker => 'A SOFT DISTANCE';
+  @override
+  String get intimacyPhaseWarmKicker => 'A QUIET AFTERTONE';
+  @override
+  String get intimacyPhaseTenseKicker => 'HELD IN RESTRAINT';
+  @override
+  String get intimacyPhaseEstrusKicker => 'AT THE THRESHOLD';
+  @override
+  String get intimacyPhaseCalmSub => '安静而清醒 · 留有靠近的余地';
+  @override
+  String get intimacyPhaseWarmSub => '靠近之后，余温仍在';
+  @override
+  String get intimacyPhaseTenseSub => '张力正在累积 · 仍保持分寸';
+  @override
+  String get intimacyPhaseEstrusSub => '情绪抵达临界 · 仍遵循既定边界';
+  @override
+  String get intimacyAfterglow => '余韵';
+  @override
+  String get intimacyLevelMeta => '表达档位';
+  @override
+  String get intimacyUpdatedMeta => '最近更新';
+  @override
+  String get intimacyNoUpdated => '暂无记录';
+  @override
+  String get intimacyCausesHeading => '最近变化 · RECENT CAUSES';
+  @override
+  String get intimacyCausesLimit => '最多 5 条';
+  @override
+  String get intimacyCausesEmptyHint => '关系并不总需要被解释，有时安静也是一种状态。';
+  @override
+  String intimacyStrength(int value) => '$value 强度';
+  @override
+  String get intimacyHistoryHeading => '情绪潮汐 · RECENT HISTORY';
+  @override
+  String intimacyHistoryCount(int count) => '$count / 400 RECORDS';
+  @override
+  String get intimacyHistoryNote => '事件归档值 · 纵轴固定 0–100 · 当前读数不作为历史点';
+  @override
+  String get intimacySettingsTooltip => '亲密设置';
+  @override
+  String get intimacySettingsTitle => '亲密状态设置';
+  @override
+  String get intimacyEnabledLabel => '启用亲密系统';
+  @override
+  String get intimacyEnabledNote => '只在用户 1:1 私聊中生效；不会改变其他会话。';
+  @override
+  String get intimacyMaxLevelNote => '只影响对外表达档位，不会封顶四项内部读数。';
+  @override
+  String get intimacyPrivateScope => '私密范围';
+  @override
+  String get intimacyPrivateScopeNote => '固定限制，不提供关闭选项。';
+  @override
+  String get intimacyPrivateOnlyPill => '仅用户私聊';
+  @override
+  String get intimacySaveSettings => '保存设置';
+  @override
+  String get intimacySettingsSaved => '设置已保存并生效';
+  @override
+  String get intimacySettingsPending => '配置已保存，等待生效';
+  @override
+  String get intimacyClosedEyebrow => 'PRIVATE STATE';
+  @override
+  String get intimacyClosedTitle => '把这份亲密，留在私密对话里。';
+  @override
+  String get intimacyClosedBody =>
+      '启用后，系统会在用户 1:1 私聊中维护亲密、情欲、满足与克制四项状态。此页面只展示后端返回的结果，不会自行推断阶段或修改读数。';
+  @override
+  String get intimacyClosedStatus => '亲密系统当前处于关闭状态';
+  @override
+  String get intimacyErrorUnsupportedTitle => '此版本暂不支持亲密面板';
+  @override
+  String get intimacyErrorUnsupportedBody => '当前后端没有提供 /api/intimacy。升级后端后再试。';
+  @override
+  String get intimacyErrorAuthTitle => '需要本地会话认证';
+  @override
+  String get intimacyErrorAuthBody => '请在已登录的 IRMIA 界面中打开面板，然后重试。';
+  @override
+  String get intimacyErrorInvalidTitle => '数据格式不对';
+  @override
+  String get intimacyErrorInvalidBody => '响应缺少必需字段或字段类型不对；面板不会用 0 值替代。';
+  @override
+  String get intimacyErrorLoadTitle => '暂时无法连接';
+  @override
+  String get intimacyErrorEyebrow => 'CONNECTION';
+  @override
+  String get intimacyDetailsTooltip => '查看原始数据';
+  @override
+  String get intimacyFooterPrivate => '仅用户 1:1 私聊生效';
+  @override
+  String get intimacyFooterSync => '本地会话 · 每 60 秒同步';
+
   // ── 日志页：事件类型标签与摘要 ──
   @override
   String get logsTypeAffectAppraised => '情绪评价';
@@ -7497,6 +7829,187 @@ class ZhStrings extends AppStrings {
   String stickerActionFailed(String reason) => '贴纸操作失败：$reason';
   @override
   String stickerBatchDone(int count) => '已处理 $count 张';
+
+  // ── 子代理（P3.3）────────────────────────────────────────────────
+  @override
+  String get navSubagents => '子代理';
+  @override
+  String get subagentsEyebrow => 'SUBAGENTS / DELEGATED WORK';
+  @override
+  String get subagentsHeading => '子代理';
+  @override
+  String get subagentsTagline => '后台会话、报告与父子消息，一处查看';
+  @override
+  String get subagentsSystem => '子代理';
+  @override
+  String get subagentsDisabledTitle => '子代理未启用';
+  @override
+  String get subagentsDisabledBody =>
+      '启用后，她可以在后台派出专职子代理，把较长的工作放到单独的会话里做；'
+      '这里会显示会话、最后报告与父子消息。开关写入配置，需重启主进程后生效。';
+  @override
+  String get subagentsRestartNote => '开关已保存；重启主进程后生效。';
+  @override
+  String get subagentsProfilesTitle => 'Profile';
+  @override
+  String get subagentsProfilesCaption => '能力模板只读摘要';
+  @override
+  String get subagentsProfilesDisabled => 'Profile 摘要在启用并重启后显示。';
+  @override
+  String get subagentsSessionsTitle => '会话';
+  @override
+  String get subagentsActiveTab => '未归档';
+  @override
+  String get subagentsArchivedTab => '归档';
+  @override
+  String get subagentsEmptyTitle => '还没有子代理会话';
+  @override
+  String get subagentsEmptyBody => '当她在后台派出子代理时，会话会出现在这里。';
+  @override
+  String get subagentsArchivedEmptyTitle => '没有归档记录';
+  @override
+  String get subagentsArchivedEmptyBody => '已归档的子代理会话会保留在这里。';
+  @override
+  String get subagentsDetailTitle => '详情';
+  @override
+  String get subagentsDetailEmpty => '从左侧选择一个子代理，查看报告、事件与消息。';
+  @override
+  String get subagentsReportTitle => '最后报告';
+  @override
+  String get subagentsNoReport => '还没有报告。';
+  @override
+  String get subagentsTimelineTitle => '事件时间线';
+  @override
+  String get subagentsTimelineEmpty => '这个子代理还没有事件记录。';
+  @override
+  String get subagentsMessageHint => '给子代理发一条消息（会进入它的队列）';
+  @override
+  String get subagentsMessageBlocked => '已取消或已归档的会话不能再发消息。';
+  @override
+  String get subagentsSend => '发送';
+  @override
+  String get subagentsResume => '恢复';
+  @override
+  String get subagentsCancelTitle => '取消这个子代理？';
+  @override
+  String get subagentsResumeTitle => '恢复这个子代理？';
+  @override
+  String get subagentsSafetyNote => '这里只显示摘要：不展示完整对话、工具输出或 workspace 路径。';
+  @override
+  String get subagentsProfileAvailable => 'available';
+  @override
+  String get subagentsProfileLocked => 'locked';
+  @override
+  String get subagentsProfileReady => '就绪';
+  @override
+  String get subagentsProfileNeedsInstall => '缺依赖';
+  @override
+  String get subagentsProfileAvailableHint => '依赖齐全，可以被派工。';
+  @override
+  String get subagentsProfileLockedHint => '缺少依赖：装好角色包后才可以被派工。';
+  @override
+  String get subagentsProfileSkills => '技能';
+  @override
+  String get subagentsProfileMcp => 'MCP';
+  @override
+  String get subagentsProfileMissing => '缺少依赖';
+  @override
+  String subagentsProfileMore(int count) => '+$count';
+  @override
+  String get subagentsProfileCollapse => '收起';
+  @override
+  String get subagentsProfileVerify => '校验';
+  @override
+  String subagentsProfileMeta(int tools, String workspace, String lane) =>
+      '$tools 个工具 · ${subagentsWorkspace(workspace)} · ${subagentsLane(lane)}';
+  @override
+  String subagentsWorkspace(String key) => switch (key) {
+    'own' => '自建 workspace',
+    'none' => '无 workspace',
+    _ => key,
+  };
+  @override
+  String subagentsLane(String key) => switch (key) {
+    'heavy' => '重模型',
+    'light' => '轻模型',
+    _ => key,
+  };
+  @override
+  String subagentsStatus(String status) => switch (status) {
+    'queued' => '排队中',
+    'running' => '运行中',
+    'interrupted' => '已中断',
+    'completed' => '已完成',
+    'cancelled' => '已取消',
+    'archived' => '已归档',
+    'waiting' => '等待中',
+    'reporting' => '汇报中',
+    _ => status,
+  };
+  @override
+  String subagentsField(String key) => switch (key) {
+    'profile' => 'Profile',
+    'status' => '状态',
+    'agentId' => 'Agent ID',
+    'parentTurn' => '父轮次',
+    'parentCall' => '父调用',
+    'createdAt' => '创建时间',
+    'updatedAt' => '更新时间',
+    'tokens' => 'Tokens',
+    'lastReport' => '最后报告',
+    'message' => '发消息',
+    _ => key,
+  };
+  @override
+  String subagentsEventTitle(String type) => switch (type) {
+    'started' => '已启动',
+    'report' => '报告',
+    'finished' => '已结束',
+    'interrupted' => '已中断',
+    'resumed' => '已恢复',
+    'cancelled' => '已取消',
+    'wake' => '父级唤醒',
+    _ => type,
+  };
+  @override
+  String subagentsReason(String key) => switch (key) {
+    'restart' => '进程重启',
+    'shutdown' => '进程退出',
+    'max-turns' => '达到轮数上限',
+    'cancel' || 'cancelled' => '已取消',
+    'parent-cancel' => '父代理取消',
+    'progress' => '进度',
+    'final' => '最终',
+    _ => key,
+  };
+  @override
+  String subagentsLoadFailed(String reason) => '会话读取失败：$reason';
+  @override
+  String subagentsProfilesLoadFailed(String reason) => 'Profile 读取失败：$reason';
+  @override
+  String subagentsDetailLoadFailed(String reason) => '详情读取失败：$reason';
+  @override
+  String subagentsTimelineLoadFailed(String reason) => '事件读取失败：$reason';
+  @override
+  String subagentsMessageSent() => '消息已加入队列。';
+  @override
+  String subagentsMessageFailed(String reason) => '消息没有发出：$reason';
+  @override
+  String subagentsCancelBody(String agentId) =>
+      '将中止「$agentId」当前的工作。已完成的部分会保留，之后仍可恢复。';
+  @override
+  String subagentsResumeBody(String agentId) => '将重新排队「$agentId」，并继续消耗预算。';
+  @override
+  String subagentsCancelDone() => '已请求取消。';
+  @override
+  String subagentsResumeDone() => '已恢复并重新排队。';
+  @override
+  String subagentsActionFailed(String reason) => '操作没有完成：$reason';
+  @override
+  String subagentsToggleSaved(bool enabled, bool restartRequired) =>
+      restartRequired ? '已保存；重启主进程后生效。' : (enabled ? '子代理已启用。' : '子代理已关闭。');
+  @override
+  String subagentsToggleFailed(String reason) => '开关没有保存：$reason';
 }
 
 /// English。
@@ -10907,6 +11420,151 @@ class EnStrings extends AppStrings {
   @override
   String intimacySaveFailed(String reason) => 'Could not save intimacy settings: $reason';
 
+  // ── 亲密面板（2026-11-04 设计稿重做）────────────────────────────────
+  @override
+  String get intimacyPageEyebrow => 'INTIMACY / PRIVATE STATE';
+  @override
+  String get intimacyHeadingLead => 'Between restraint and ';
+  @override
+  String get intimacyHeadingAccent => 'closeness';
+  @override
+  String get intimacyHeadingTail => '';
+  @override
+  String get intimacyTagline => 'Private 1:1 with her owner only';
+  @override
+  String get intimacyConnectionLive => 'Connected';
+  @override
+  String get intimacyConnectionLoading => 'Loading';
+  @override
+  String get intimacyConnectionError => 'Connection issue';
+  @override
+  String get intimacyConnectionOff => 'Off';
+  @override
+  String get intimacySyncNote => 'Computed by the backend · presented here';
+  @override
+  String get intimacyReadingsSection => 'INNER TIDES · READINGS';
+  @override
+  String intimacyMetricEn(String key) => switch (key) {
+    'intimacy' => 'CLOSENESS',
+    'desire' => 'DESIRE',
+    'satisfaction' => 'AFTER TASTE',
+    'restraint' => 'RESTRAINT',
+    _ => key,
+  };
+  @override
+  String get intimacyMetricFoot => 'CURRENT';
+  @override
+  String get intimacyScale => '0 — 100';
+  @override
+  String get intimacyPhaseCardTitle => 'Current phase';
+  @override
+  String get intimacyCurrentPhase => 'CURRENT PHASE';
+  @override
+  String get intimacyPhaseEstrusSuffix => ' · THRESHOLD';
+  @override
+  String get intimacyPhaseCalmKicker => 'A SOFT DISTANCE';
+  @override
+  String get intimacyPhaseWarmKicker => 'A QUIET AFTERTONE';
+  @override
+  String get intimacyPhaseTenseKicker => 'HELD IN RESTRAINT';
+  @override
+  String get intimacyPhaseEstrusKicker => 'AT THE THRESHOLD';
+  @override
+  String get intimacyPhaseCalmSub =>
+      'Quiet and clear · room left to come closer';
+  @override
+  String get intimacyPhaseWarmSub => 'After closeness, the warmth lingers';
+  @override
+  String get intimacyPhaseTenseSub =>
+      'Tension building · still holding the line';
+  @override
+  String get intimacyPhaseEstrusSub =>
+      'At the threshold · still within her bounds';
+  @override
+  String get intimacyAfterglow => 'Afterglow';
+  @override
+  String get intimacyLevelMeta => 'Expression level';
+  @override
+  String get intimacyUpdatedMeta => 'Updated';
+  @override
+  String get intimacyNoUpdated => 'No record';
+  @override
+  String get intimacyCausesHeading => 'RECENT CAUSES';
+  @override
+  String get intimacyCausesLimit => 'Up to 5';
+  @override
+  String get intimacyCausesEmptyHint =>
+      'A relationship does not always need explaining; quiet is a state too.';
+  @override
+  String intimacyStrength(int value) => 'strength $value';
+  @override
+  String get intimacyHistoryHeading => 'RECENT HISTORY';
+  @override
+  String intimacyHistoryCount(int count) => '$count / 400 RECORDS';
+  @override
+  String get intimacyHistoryNote =>
+      'Archived event values · fixed 0–100 axis · current readings are not history points';
+  @override
+  String get intimacySettingsTooltip => 'Intimacy settings';
+  @override
+  String get intimacySettingsTitle => 'Intimacy settings';
+  @override
+  String get intimacyEnabledLabel => 'Enable intimacy system';
+  @override
+  String get intimacyEnabledNote =>
+      'Only in private 1:1 chats with her owner; other conversations are untouched.';
+  @override
+  String get intimacyMaxLevelNote =>
+      'Only caps how openly she expresses it; the four readings are never capped.';
+  @override
+  String get intimacyPrivateScope => 'Private scope';
+  @override
+  String get intimacyPrivateScopeNote => 'Fixed; no option to turn it off.';
+  @override
+  String get intimacyPrivateOnlyPill => 'Owner DMs only';
+  @override
+  String get intimacySaveSettings => 'Save settings';
+  @override
+  String get intimacySettingsSaved => 'Saved and applied';
+  @override
+  String get intimacySettingsPending => 'Saved; waiting to take effect';
+  @override
+  String get intimacyClosedEyebrow => 'PRIVATE STATE';
+  @override
+  String get intimacyClosedTitle =>
+      'Keep this closeness inside the private conversation.';
+  @override
+  String get intimacyClosedBody =>
+      'When enabled, the system keeps intimacy, desire, satisfaction and restraint in private 1:1 chats with her owner. This page only shows what the backend returns; it never infers phases or changes readings.';
+  @override
+  String get intimacyClosedStatus => 'The intimacy system is currently off';
+  @override
+  String get intimacyErrorUnsupportedTitle =>
+      'This build does not support the intimacy panel';
+  @override
+  String get intimacyErrorUnsupportedBody =>
+      'The backend does not expose /api/intimacy. Update it and try again.';
+  @override
+  String get intimacyErrorAuthTitle => 'Local session required';
+  @override
+  String get intimacyErrorAuthBody =>
+      'Open the panel in a signed-in IRMIA window, then retry.';
+  @override
+  String get intimacyErrorInvalidTitle => 'Unexpected data shape';
+  @override
+  String get intimacyErrorInvalidBody =>
+      'The response is missing required fields or has wrong types; this panel will not substitute zeros.';
+  @override
+  String get intimacyErrorLoadTitle => 'Cannot reach the service';
+  @override
+  String get intimacyErrorEyebrow => 'CONNECTION';
+  @override
+  String get intimacyDetailsTooltip => 'View raw data';
+  @override
+  String get intimacyFooterPrivate => 'Owner 1:1 chats only';
+  @override
+  String get intimacyFooterSync => 'Local session · 60s sync';
+
   // ── 日志页：事件类型标签与摘要 ──
   @override
   String get logsTypeAffectAppraised => 'Affect appraisal';
@@ -11079,6 +11737,208 @@ class EnStrings extends AppStrings {
   String stickerActionFailed(String reason) => 'Sticker action failed: $reason';
   @override
   String stickerBatchDone(int count) => '$count processed';
+
+  // ── Subagents (P3.3) ───────────────────────────────────────────────
+  @override
+  String get navSubagents => 'Subagents';
+  @override
+  String get subagentsEyebrow => 'SUBAGENTS / DELEGATED WORK';
+  @override
+  String get subagentsHeading => 'Subagents';
+  @override
+  String get subagentsTagline =>
+      'Background sessions, reports, and parent-child messages in one place';
+  @override
+  String get subagentsSystem => 'Subagents';
+  @override
+  String get subagentsDisabledTitle => 'Subagents are off';
+  @override
+  String get subagentsDisabledBody =>
+      'When enabled, she can delegate longer work to dedicated background subagents. '
+      'Sessions, final reports, and parent-child messages will appear here. '
+      'The switch is saved to config and takes effect after the main process restarts.';
+  @override
+  String get subagentsRestartNote =>
+      'Switch saved; takes effect after the main process restarts.';
+  @override
+  String get subagentsProfilesTitle => 'Profiles';
+  @override
+  String get subagentsProfilesCaption => 'Read-only capability templates';
+  @override
+  String get subagentsProfilesDisabled =>
+      'Profile summaries appear after subagents are enabled and restarted.';
+  @override
+  String get subagentsSessionsTitle => 'Sessions';
+  @override
+  String get subagentsActiveTab => 'Active';
+  @override
+  String get subagentsArchivedTab => 'Archived';
+  @override
+  String get subagentsEmptyTitle => 'No subagent sessions yet';
+  @override
+  String get subagentsEmptyBody =>
+      'Sessions appear here when she delegates work in the background.';
+  @override
+  String get subagentsArchivedEmptyTitle => 'No archived sessions';
+  @override
+  String get subagentsArchivedEmptyBody =>
+      'Archived subagent sessions stay available here.';
+  @override
+  String get subagentsDetailTitle => 'Details';
+  @override
+  String get subagentsDetailEmpty =>
+      'Select a subagent on the left to see its report, events, and messages.';
+  @override
+  String get subagentsReportTitle => 'Last report';
+  @override
+  String get subagentsNoReport => 'No report yet.';
+  @override
+  String get subagentsTimelineTitle => 'Event timeline';
+  @override
+  String get subagentsTimelineEmpty => 'No events for this subagent yet.';
+  @override
+  String get subagentsMessageHint =>
+      'Send this subagent a message (it joins its queue)';
+  @override
+  String get subagentsMessageBlocked =>
+      'Cancelled or archived sessions cannot receive messages.';
+  @override
+  String get subagentsSend => 'Send';
+  @override
+  String get subagentsResume => 'Resume';
+  @override
+  String get subagentsCancelTitle => 'Cancel this subagent?';
+  @override
+  String get subagentsResumeTitle => 'Resume this subagent?';
+  @override
+  String get subagentsSafetyNote =>
+      'Summaries only: transcripts, tool output, and workspace paths are not shown.';
+  @override
+  String get subagentsProfileAvailable => 'available';
+  @override
+  String get subagentsProfileLocked => 'locked';
+  @override
+  String get subagentsProfileReady => 'Ready';
+  @override
+  String get subagentsProfileNeedsInstall => 'Needs install';
+  @override
+  String get subagentsProfileAvailableHint =>
+      'Dependencies satisfied; ready for delegation.';
+  @override
+  String get subagentsProfileLockedHint =>
+      'Missing dependencies: install the role package before delegation.';
+  @override
+  String get subagentsProfileSkills => 'Skills';
+  @override
+  String get subagentsProfileMcp => 'MCP';
+  @override
+  String get subagentsProfileMissing => 'Missing dependencies';
+  @override
+  String subagentsProfileMore(int count) => '+$count';
+  @override
+  String get subagentsProfileCollapse => 'Show less';
+  @override
+  String get subagentsProfileVerify => 'Verify';
+  @override
+  String subagentsProfileMeta(int tools, String workspace, String lane) =>
+      '$tools tools · ${subagentsWorkspace(workspace)} · ${subagentsLane(lane)}';
+  @override
+  String subagentsWorkspace(String key) => switch (key) {
+    'own' => 'Own workspace',
+    'none' => 'No workspace',
+    _ => key,
+  };
+  @override
+  String subagentsLane(String key) => switch (key) {
+    'heavy' => 'Heavy lane',
+    'light' => 'Light lane',
+    _ => key,
+  };
+  @override
+  String subagentsStatus(String status) => switch (status) {
+    'queued' => 'Queued',
+    'running' => 'Running',
+    'interrupted' => 'Interrupted',
+    'completed' => 'Completed',
+    'cancelled' => 'Cancelled',
+    'archived' => 'Archived',
+    'waiting' => 'Waiting',
+    'reporting' => 'Reporting',
+    _ => status,
+  };
+  @override
+  String subagentsField(String key) => switch (key) {
+    'profile' => 'Profile',
+    'status' => 'Status',
+    'agentId' => 'Agent ID',
+    'parentTurn' => 'Parent turn',
+    'parentCall' => 'Parent call',
+    'createdAt' => 'Created',
+    'updatedAt' => 'Updated',
+    'tokens' => 'Tokens',
+    'lastReport' => 'Last report',
+    'message' => 'Message',
+    _ => key,
+  };
+  @override
+  String subagentsEventTitle(String type) => switch (type) {
+    'started' => 'Started',
+    'report' => 'Report',
+    'finished' => 'Finished',
+    'interrupted' => 'Interrupted',
+    'resumed' => 'Resumed',
+    'cancelled' => 'Cancelled',
+    'wake' => 'Parent wake',
+    _ => type,
+  };
+  @override
+  String subagentsReason(String key) => switch (key) {
+    'restart' => 'process restart',
+    'shutdown' => 'process shutdown',
+    'max-turns' => 'turn limit reached',
+    'cancel' || 'cancelled' => 'cancelled',
+    'parent-cancel' => 'cancelled by parent',
+    'progress' => 'progress',
+    'final' => 'final',
+    _ => key,
+  };
+  @override
+  String subagentsLoadFailed(String reason) =>
+      'Could not read sessions: $reason';
+  @override
+  String subagentsProfilesLoadFailed(String reason) =>
+      'Could not read profiles: $reason';
+  @override
+  String subagentsDetailLoadFailed(String reason) =>
+      'Could not read details: $reason';
+  @override
+  String subagentsTimelineLoadFailed(String reason) =>
+      'Could not read events: $reason';
+  @override
+  String subagentsMessageSent() => 'Message queued.';
+  @override
+  String subagentsMessageFailed(String reason) => 'Message not sent: $reason';
+  @override
+  String subagentsCancelBody(String agentId) =>
+      'This stops the current work of "$agentId". Finished progress is kept and the session can be resumed later.';
+  @override
+  String subagentsResumeBody(String agentId) =>
+      '"$agentId" will be queued again and will keep using budget.';
+  @override
+  String subagentsCancelDone() => 'Cancellation requested.';
+  @override
+  String subagentsResumeDone() => 'Resumed and queued again.';
+  @override
+  String subagentsActionFailed(String reason) =>
+      'Operation did not complete: $reason';
+  @override
+  String subagentsToggleSaved(bool enabled, bool restartRequired) =>
+      restartRequired
+      ? 'Saved; takes effect after the main process restarts.'
+      : (enabled ? 'Subagents enabled.' : 'Subagents disabled.');
+  @override
+  String subagentsToggleFailed(String reason) =>
+      'Could not save the switch: $reason';
 }
 
 /// 按具体语言取文案表。[AppLanguage.system] 必须先经 [AppLanguage.resolve]。

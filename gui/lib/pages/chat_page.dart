@@ -920,6 +920,9 @@ class ChatPageState extends State<ChatPage> {
       if (_earliestSeq == null || value < _earliestSeq!) _earliestSeq = value;
     }
     final data = (event['data'] as Map?)?.cast<String, dynamic>() ?? const {};
+    // 子代理自己的活动不进主对话流：事件带 `agentId`（parentCallId 是它的归属键，
+    // 但主代理自己的调用没有 agentId）。子代理页有独立时间线；主聊天只看主代理。
+    if ((event['agentId']?.toString() ?? '').trim().isNotEmpty) return false;
     final ts = event['ts']?.toString();
     switch (event['type']) {
       case 'message/assistant':

@@ -6812,6 +6812,40 @@ export class RealLoop {
   }
 
   /**
+   * 有界窗口扫描：从 `ceiling` 前方最近的一段日志里收集 `map` 命中的事件。
+   *
+   * 为什么必须补这一层：`read_channel` 一次会顺序调用消息、她自己的发言、群 notice、
+   * 自己的动作四个读取口。消息那一口已改成窗口读，另外三口却仍是 `readAll()` 全量扫——
+   * 28 万条 / 200+MB 的日志下，一次 `read_channel` 会超过 10s 工具超时（现场：
+   * `status=timeout`，随后 handler 才完成，落成 zombie）。这里给它们统一的有界窗口：
+   * 先在最近 `max(2000, target*500)` 条事件里找，够数就停；不够再 ×2，封顶 20k。
+   *
+   * 这不是只追求快：对“最近这一屏”语义，窗口外的旧事件本来就不该参与；翻页时
+   * `ceiling=before` 会把窗口放到游标前方，带游标的页仍能取到对应历史。极端冷清会话
+   * 若 20k 内没有命中，返回空而不是继续扫全库——交互式读不该为一条旧记录付 10 秒。
+   */
+  private async recentChannelEvents<T>(
+    ceiling: number,
+    map: (event: AppEvent) => T | null,
+    target: number,
+  ): Promise<T[]> {
+    const latest = this.deps.log.latestSeq();
+    let window = Math.max(2_000, target * 500);
+    const maxWindow = 20_000;
+    for (;;) {
+      const hits: T[] = [];
+      const from = Math.max(1, Math.min(ceiling, latest + 1) - window);
+      for await (const event of this.deps.log.readRange(from)) {
+        if (event.seq >= ceiling) break;
+        const value = map(event);
+        if (value !== null) hits.push(value);
+      }
+      if (hits.length >= target || from === 1 || window >= maxWindow) return hits;
+      window = Math.min(maxWindow, window * 2);
+    }
+  }
+
+  /**
    * `read_channel` 的**第三个**读取口：这个会话里**发生过的事**（`channel/notice`）。
    *
    * 与 `readChannelMessages` 同一个理由由宿主来读（工具层不读日志），也与它同一套游标语义：
@@ -6827,18 +6861,16 @@ export class RealLoop {
    */
   // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelNotices(sid: string, limit: number, before?: number): Promise<ChannelNoticeView[]> {
-    const hits: ChannelNoticeView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/notice') continue;
+    const ceiling = before ?? this.deps.log.latestSeq() + 1;
+    const hits = await this.recentChannelEvents<ChannelNoticeView>(ceiling, (event) => {
+      if (event.type !== 'channel/notice') return null;
       const d = event.data;
       // 形状再判一次：畸形事件（手工改过日志、旧版本写下的）**不进这一屏**——
       // 一条渲染不出来的东西摆进去只会让她读到一行空的
-      if (!isChannelNoticeData(d)) continue;
-      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
-      // 游标那一刀在读完字段之前（与 readChannelMessages 同一条：翻页时绝大多数事件落在游标之后）
-      if (before !== undefined && event.seq >= before) continue;
-      hits.push(noticeViewOf(d, event.seq, event.ts));
-    }
+      if (!isChannelNoticeData(d)) return null;
+      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) return null;
+      return noticeViewOf(d, event.seq, event.ts);
+    }, limit);
     return hits.slice(-limit);
   }
 
@@ -6855,16 +6887,15 @@ export class RealLoop {
    */
   // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelActions(sid: string, limit: number, before?: number): Promise<ChannelSelfActionView[]> {
-    const hits: ChannelSelfActionView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/self-action') continue;
+    const ceiling = before ?? this.deps.log.latestSeq() + 1;
+    const hits = await this.recentChannelEvents<ChannelSelfActionView>(ceiling, (event) => {
+      if (event.type !== 'channel/self-action') return null;
       const d = event.data;
       // 畸形事件（手工改过日志、旧版本写下的）不进这一屏：渲染不出来的一行只是噪音
-      if (!isChannelSelfActionData(d)) continue;
-      if (normalizeSid(d.sid) !== sid) continue;
-      if (before !== undefined && event.seq >= before) continue;
-      hits.push({ ...d, seq: event.seq, ts: event.ts });
-    }
+      if (!isChannelSelfActionData(d)) return null;
+      if (normalizeSid(d.sid) !== sid) return null;
+      return { ...d, seq: event.seq, ts: event.ts };
+    }, limit);
     return hits.slice(-limit);
   }
 
@@ -6888,7 +6919,15 @@ export class RealLoop {
     /** 归并键 → 那一段话（旧事件没有 callId 时退回按 turn、再退回"各自一行"） */
     const bySpoken = new Map<string, ChannelSpoken>();
     let counter = 0;
-    for await (const event of this.deps.log.readAll()) {
+    // 只读最近窗口：`readAll()` 全量扫在 28 万条日志上会把 read_channel 拖过 10s。
+    // 一次交互式读只需最近这一屏相关的发言；窗口外没有命中就返回空，不拿交互式超时
+    // 去换一条很旧的 `speak/sent`。
+    const events = await this.recentChannelEvents<AppEvent>(
+      this.deps.log.latestSeq() + 1,
+      (event) => event.type === 'speak/sent' ? event : null,
+      200,
+    );
+    for (const event of events) {
       if (event.type !== 'speak/sent') continue;
       const d = event.data;
       // 三件闸：**判据只此一处**（`deliveredToSid`，与产生侧 `deliverToSession` 同源）。

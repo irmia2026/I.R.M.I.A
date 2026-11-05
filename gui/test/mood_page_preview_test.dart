@@ -15,14 +15,14 @@ import 'package:irmia_gui/theme.dart';
 
 /// 情绪页的**肉眼验收图**（设计稿 2026-10-31）。
 ///
-/// 不出断言，出 PNG：把新页按 1280×900 渲染一次，存到
+/// 不出断言，出 PNG：把新页按 1350×900 渲染一次，存到
 /// `tmp/emotion-panel-preview.png`（仓库根下）；再切到第三个 tab「亲密」出
 /// `tmp/intimacy-panel-preview.png`。默认 skip——截图依赖本机的中文字体，
 /// 在别人的机器上渲染出来是方框，不该当成回归。要出图时显式跑：
 ///
 ///     PowerShell:  $env:IRMIA_PREVIEW=1; flutter test test/mood_page_preview_test.dart
 ///
-/// 数据是**固定假数据**（设计稿 quiet 那一幕；亲密那一屏是"开着 + 有冷却前的一拍读数"），
+/// 数据是**固定假数据**（设计稿 quiet 那一幕；亲密那一屏是"开着 + 六拍历史读数"），
 /// 只走 `/api/affect` `/api/intimacy` 的响应形状，不碰真后端、不写 `data/`。
 final bool _enabled = Platform.environment['IRMIA_PREVIEW'] == '1';
 
@@ -42,6 +42,16 @@ Future<bool> _loadFont(String family) async {
     return true;
   }
   return false;
+}
+
+/// 设计稿里的衬线小字是 Georgia；测试环境不加载它的话，预览图里会是一排方框。
+Future<void> _loadSerifFont() async {
+  final file = File(r'C:\Windows\Fonts\georgia.ttf');
+  if (!file.existsSync()) return;
+  final bytes = await file.readAsBytes();
+  final loader = FontLoader('Georgia')
+    ..addFont(Future<ByteData>.value(ByteData.sublistView(bytes)));
+  await loader.load();
 }
 
 /// 图标也要有真字形，否则预览图里每个图标都是一枚方框。
@@ -123,7 +133,7 @@ Map<String, dynamic> _previewView() {
 }
 
 /// 亲密那一屏的假数据（`GET /api/intimacy` 的响应形状）：开着、有 6 拍读数、
-/// 三档上限里选了「明显」、两条原因、一次"收住"。图里四格读数与走势都要看得出差别。
+/// 三档上限里选了「明显」、两条原因。图里四格读数与走势都要看得出差别。
 Map<String, dynamic> _previewIntimacy() {
   final now = DateTime.now();
   return <String, dynamic>{
@@ -138,9 +148,10 @@ Map<String, dynamic> _previewIntimacy() {
     'satisfaction': 73,
     'restraint': 55,
     'level': 'obvious',
-    // 状态机：截图里只留「已进入发情」一枚状态 chip（phase 的「发情」不再并排）
+    // 状态机：发情时大 phase 标题是「发情」，右上角 chip 追一句「临界状态」
     'phase': 'estrus',
     'estrus': true,
+    'afterglow': false,
     // 四格档位：后端 labels 原样显示（满足/克制不被 maxLevel 封顶）
     'labels': <String, String>{
       'intimacy': '明显',
@@ -154,13 +165,13 @@ Map<String, dynamic> _previewIntimacy() {
       {
         'atMs': now.subtract(const Duration(minutes: 3, seconds: 30)).millisecondsSinceEpoch,
         'reasonCode': 'owner_close',
-        'strength': 0.4,
+        'strength': 40,
         'label': '用户主动靠近',
       },
       {
         'atMs': now.subtract(const Duration(minutes: 42, seconds: 30)).millisecondsSinceEpoch,
         'reasonCode': 'long_gap',
-        'strength': 0.2,
+        'strength': 20,
         'label': '隔了很久没说话',
       },
     ],
@@ -174,8 +185,6 @@ Map<String, dynamic> _previewIntimacy() {
           'restraint': 68.0 - i * 2.2,
         },
     ],
-    'cooldownUntilMs': null,
-    'stoppedAtMs': now.subtract(const Duration(minutes: 10, seconds: 30)).millisecondsSinceEpoch,
   };
 }
 
@@ -188,6 +197,7 @@ void main() {
   setUpAll(() async {
     // 字体要在 testWidgets 的假时钟之外加载（FontLoader 走引擎消息，测试体里会等不到）
     await _loadFont(IrmiaTheme.windowsUiFont);
+    await _loadSerifFont();
     await _loadIconFont();
   });
 
@@ -221,11 +231,11 @@ void main() {
   });
 
   testWidgets(
-    '情绪页预览图：1280×900 渲染到 tmp/emotion-panel-preview.png',
+    '情绪页预览图：1350×900 渲染到 tmp/emotion-panel-preview.png',
     (tester) async {
       state = AppState(api: IrmiaApi(baseUrl: 'http://127.0.0.1:${server!.port}'));
 
-      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.physicalSize = const Size(1350, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
 
@@ -238,7 +248,7 @@ void main() {
               key: const ValueKey('mood-preview'),
               child: MediaQuery(
                 // 静态截图：关掉浮动动画，避免一帧一帧永远排下去
-                data: const MediaQueryData(size: Size(1280, 900), disableAnimations: true),
+                data: const MediaQueryData(size: Size(1350, 900), disableAnimations: true),
                 // 测试环境的环境默认风格是测试字库（全是方框）；把真字体栈补到继承链上，
                 // 图里的字才认得出（与 grant_card_golden_test 同一招）
                 child: DefaultTextStyle.merge(
@@ -271,7 +281,7 @@ void main() {
       // 截图要放在 runAsync 里：`toImage` 等的是引擎栅格线程，假时钟区里会一直等下去
       final bytes = await tester.runAsync(() async {
         final image = await boundary.toImage(pixelRatio: 1);
-        expect(image.width, 1280);
+        expect(image.width, 1350);
         expect(image.height, 900);
         final data = await image.toByteData(format: ui.ImageByteFormat.png);
         image.dispose();
@@ -307,7 +317,7 @@ void main() {
           tester.renderObject<RenderRepaintBoundary>(find.byKey(const ValueKey('mood-preview')));
       final intimacyBytes = await tester.runAsync(() async {
         final image = await intimacyBoundary.toImage(pixelRatio: 1);
-        expect(image.width, 1280);
+        expect(image.width, 1350);
         expect(image.height, 900);
         final data = await image.toByteData(format: ui.ImageByteFormat.png);
         image.dispose();

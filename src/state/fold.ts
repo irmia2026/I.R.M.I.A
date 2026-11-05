@@ -289,7 +289,7 @@ export function applyOne(p: Projection, e: AppEvent, onSkip?: FoldSkipHandler): 
     }
 
     case 'wake/timer': case 'wake/file': case 'wake/webhook':
-    case 'wake/manual': case 'wake/intention': case 'wake/job':
+    case 'wake/manual': case 'wake/intention': case 'wake/job': case 'wake/subagent':
     case 'wake/heartbeat': case 'wake/channel': {
       const key = 'dedupeKey' in e.data ? e.data.dedupeKey : undefined;
       if (key && p.dedupeKeys.includes(key)) break; // 重复幂等键：丢弃
@@ -519,6 +519,7 @@ export function wakeSourceOf(type: string): WakeSource {
     case 'wake/heartbeat': return 'heartbeat';
     case 'wake/intention': return 'intention';
     case 'wake/job': return 'job';
+    case 'wake/subagent': return 'job';
     default: return 'manual';
   }
 }
