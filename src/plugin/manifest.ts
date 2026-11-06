@@ -26,6 +26,13 @@ export interface PluginAdapterContribution {
   readonly capabilities: readonly string[];
 }
 
+export interface PluginViewDeclaration {
+  readonly id: string;
+  readonly title: string;
+  readonly icon?: string;
+  readonly subtitle?: string;
+}
+
 export interface PluginManifestV2 {
   readonly apiVersion: 2;
   readonly id: string;
@@ -38,6 +45,7 @@ export interface PluginManifestV2 {
     readonly tools?: string;
     readonly events?: { readonly namespace: string };
     readonly adapters: readonly PluginAdapterContribution[];
+    readonly views?: readonly PluginViewDeclaration[];
   };
   /** Kept for compatibility; it is declaration input, not an authorization grant. */
   readonly permissions: readonly string[];
@@ -118,7 +126,7 @@ export function parsePluginManifest(raw: unknown, where = 'plugin.json'): Plugin
   if (typeof engine.irmia !== 'string') throw new Error(`${where}.engine.irmia: expected a version requirement`);
   isPluginEngineCompatible(engine.irmia, '0.0.0');
   const contributions = record(value.contributions, `${where}.contributions`);
-  const contributionKeys = apiVersion === 2 ? ['skills', 'hooks', 'mcp', 'adapters', 'tools', 'events'] : ['skills', 'hooks', 'mcp'];
+  const contributionKeys = apiVersion === 2 ? ['skills', 'hooks', 'mcp', 'adapters', 'tools', 'events', 'views'] : ['skills', 'hooks', 'mcp'];
   exactKeys(contributions, contributionKeys, `${where}.contributions`);
   if (!Array.isArray(contributions.skills)) throw new Error(`${where}.contributions.skills: expected an array`);
   const skills = Object.freeze(contributions.skills.map((path, i) => pluginContributionPath(path, `${where}.contributions.skills[${i}]`)));
@@ -143,12 +151,20 @@ export function parsePluginManifest(raw: unknown, where = 'plugin.json'): Plugin
   const eventsContribution = contributions.events === undefined
     ? undefined
     : parseEventsContribution(contributions.events, `${where}.contributions.events`);
+  const viewsContribution = contributions.views === undefined
+    ? undefined
+    : parseViewsContribution(contributions.views, `${where}.contributions.views`);
   return Object.freeze({
     apiVersion: 2,
     id: value.id,
     version: value.version,
     engine: engineResult,
-    contributions: Object.freeze({ ...legacy, adapters, ...(eventsContribution === undefined ? {} : { events: eventsContribution }) }),
+    contributions: Object.freeze({
+      ...legacy,
+      adapters,
+      ...(eventsContribution === undefined ? {} : { events: eventsContribution }),
+      ...(viewsContribution === undefined ? {} : { views: viewsContribution }),
+    }),
     permissions,
     declaredCapabilities: permissionsToCapabilityDeclarations(permissions),
   });
@@ -186,6 +202,37 @@ function parseAdapterContribution(value: unknown, where: string): PluginAdapterC
 }
 
 const NAMESPACE = /^[a-z][a-z0-9-]{1,40}$/;
+
+const VIEW_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const ICON_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+
+function optionalText(value: unknown, where: string, limit: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`${where}: expected a string`);
+  const text = value.trim();
+  if (text === '') throw new Error(`${where}: expected a non-empty string`);
+  if ([...text].length > limit) throw new Error(`${where}: longer than ${limit} characters`);
+  return text;
+}
+
+function parseViewsContribution(value: unknown, where: string): readonly PluginViewDeclaration[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${where}: expected a non-empty array`);
+  const seen = new Set<string>();
+  return Object.freeze(value.map((entry, index) => {
+    const at = `${where}[${index}]`;
+    const view = record(entry, at);
+    exactKeys(view, ['id', 'title', 'icon', 'subtitle'], at);
+    if (typeof view.id !== 'string' || !VIEW_ID.test(view.id)) throw new Error(`${at}.id: invalid view id`);
+    if (seen.has(view.id)) throw new Error(`${at}.id: duplicate view id ${view.id}`);
+    seen.add(view.id);
+    const title = optionalText(view.title, `${at}.title`, 24);
+    if (title === undefined) throw new Error(`${at}.title: required`);
+    const icon = optionalText(view.icon, `${at}.icon`, 32);
+    if (icon !== undefined && !ICON_NAME.test(icon)) throw new Error(`${at}.icon: invalid icon name`);
+    const subtitle = optionalText(view.subtitle, `${at}.subtitle`, 80);
+    return Object.freeze({ id: view.id, title, ...(icon === undefined ? {} : { icon }), ...(subtitle === undefined ? {} : { subtitle }) });
+  }));
+}
 
 function parseEventsContribution(value: unknown, where: string): { readonly namespace: string } {
   const event = record(value, where);

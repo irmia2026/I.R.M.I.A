@@ -130,6 +130,48 @@ function buildView() {
   };
 }
 
+const STATUS_LABEL = { approved: '可用', pending: '待审' };
+const STATUS_TONE = { approved: 'ok', pending: 'warn' };
+
+function buildSchema() {
+  const view = buildView();
+  const blocks = [
+    {
+      type: 'hero',
+      badge: '图',
+      tone: 'primary',
+      title: view.renderLine,
+      chips: [
+        { label: '总数', value: `${view.total}` },
+        { label: '可用', value: `${view.approved}`, tone: 'ok' },
+        { label: '待审', value: `${view.pending}`, tone: 'warn' },
+      ],
+    },
+    {
+      type: 'grid',
+      title: '图库',
+      items: view.items.map((item) => ({
+        title: item.id,
+        subtitle: item.path === '' ? '未落地' : '已落地',
+        badge: STATUS_LABEL[item.status] ?? '未启用',
+        tone: STATUS_TONE[item.status] ?? 'muted',
+        dots: { filled: Math.max(0, Math.min(5, Number(item.intensity) || 0)), total: 5 },
+        chips: item.tags,
+      })),
+    },
+    {
+      type: 'kv',
+      title: '说明',
+      items: [
+        { key: '注入位置', value: '此刻层' },
+        { key: '待审图', value: '不参与注入，等人在扩展页确认' },
+        { key: '发图方式', value: '模型自己调用 send_media' },
+      ],
+    },
+  ];
+  return { title: '表情包', blocks };
+}
+
 loadCatalog();
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -163,6 +205,10 @@ input.on('line', (line) => {
     if (message.method === 'ui/handle') {
       const params = message.params ?? {};
       const path = typeof params.path === 'string' ? params.path : '';
+      if (path === '/ui/stickers' || path === '/ui/stickers/') {
+        reply(id, { result: buildSchema() });
+        return;
+      }
       if (path !== '/state' && path !== '/state/' && path !== '' && path !== '/') {
         reply(id, { error: { code: -32601, message: `未知视图路径: ${path}` } });
         return;

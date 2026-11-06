@@ -2,15 +2,35 @@
   "apiVersion": 2,
   "id": "linre-affect",
   "version": "0.1.0",
-  "engine": { "irmia": ">=0.1.0-beta.14" },
+  "engine": {
+    "irmia": ">=0.1.0-beta.14"
+  },
   "contributions": {
-    "skills": ["skills"],
-    "events": { "namespace": "linre-affect" },
+    "skills": [
+      "skills"
+    ],
+    "events": {
+      "namespace": "linre-affect"
+    },
     "adapters": [
       {
         "worker": "adapter-worker.mjs",
         "apiVersion": 2,
-        "capabilities": ["event.observe", "event.publish", "model.invoke", "prompt.inject", "ui.api"]
+        "capabilities": [
+          "event.observe",
+          "event.publish",
+          "model.invoke",
+          "prompt.inject",
+          "ui.api"
+        ]
+      }
+    ],
+    "views": [
+      {
+        "id": "mood",
+        "title": "情绪",
+        "icon": "mood",
+        "subtitle": "此刻的状态；数据来自 linre-affect 插件"
       }
     ]
   },

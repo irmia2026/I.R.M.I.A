@@ -159,6 +159,80 @@ function buildView(nowMs) {
   };
 }
 
+const EMOTION_LABEL_CN = {
+  joy: '愉快',
+  distress: '低落',
+  concern: '关切',
+  irritation: '不悦',
+  warmth: '亲近',
+  shyness: '害羞',
+};
+
+const REASON_LABEL_CN = {
+  general: '综合',
+  praise: '被认可',
+  criticism: '被批评',
+  ignored: '被忽略',
+  unwelcome_advance: '越界',
+  repair: '和解',
+};
+
+function toneOf(key) {
+  return Object.prototype.hasOwnProperty.call(EMOTION_LABEL_CN, key) ? key : 'primary';
+}
+
+function moodWord(valence) {
+  if (valence > 0.12) return '偏暖';
+  if (valence < -0.12) return '偏冷';
+  return '居中';
+}
+
+function buildSchema(nowMs) {
+  const view = buildView(nowMs);
+  const label = EMOTION_LABEL_CN[view.dominant];
+  const badge = view.neutral ? '稳' : (label ?? '稳').slice(0, 1);
+  const blocks = [
+    {
+      type: 'hero',
+      badge,
+      tone: view.neutral ? 'primary' : toneOf(view.dominant),
+      title: view.renderLine,
+      chips: [
+        { label: '主导', value: view.neutral ? '平稳' : `${label ?? view.dominant} ${Math.round(view.strength * 100)}%` },
+        { label: '心境', value: moodWord(view.mood.valence) },
+        { label: '唤醒', value: `${Math.round(view.mood.arousal * 100)}%` },
+      ],
+    },
+    {
+      type: 'bars',
+      title: '情绪构成',
+      items: Object.keys(EMOTION_LABEL_CN).map((key) => ({
+        label: EMOTION_LABEL_CN[key],
+        value: Number(view.emotions[key] ?? 0),
+        tone: key,
+      })),
+    },
+    {
+      type: 'chart',
+      title: '心境轨迹',
+      points: view.history.map((point) => Number(point.valence ?? 0)),
+      min: -1,
+      max: 1,
+      empty: '还没有评价记录',
+    },
+    {
+      type: 'list',
+      title: '最近的影响',
+      items: view.causes.map((cause) => ({
+        tone: toneOf(cause.dominantEmotion),
+        label: REASON_LABEL_CN[cause.reasonCode] ?? '综合',
+        trailing: `${Math.round(Number(cause.strength ?? 0) * 100)}%`,
+      })),
+    },
+  ];
+  return { title: '情绪', blocks };
+}
+
 async function evaluateOne(nowMs) {
   if (evaluating) return null;
   const candidate = candidates.shift();
@@ -249,6 +323,10 @@ input.on('line', (line) => {
     if (message.method === 'ui/handle') {
       const params = message.params ?? {};
       const path = typeof params.path === 'string' ? params.path : '';
+      if (path === '/ui/mood' || path === '/ui/mood/') {
+        reply(id, { result: buildSchema(Date.now()) });
+        return;
+      }
       if (path !== '/state' && path !== '/state/' && path !== '' && path !== '/') {
         reply(id, { error: { code: -32601, message: `未知视图路径: ${path}` } });
         return;

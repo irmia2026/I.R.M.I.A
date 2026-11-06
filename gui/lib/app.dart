@@ -43,8 +43,7 @@ import 'pages/channels_page.dart';import 'pages/chat_page.dart';
 import 'pages/extensions_page.dart';
 import 'pages/logs_page.dart';
 import 'pages/memory_page.dart';
-import 'pages/mood_page.dart';
-import 'pages/stickers_page.dart';
+import 'pages/plugin_view.dart';
 import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
 import 'pages/schedule_page.dart';
@@ -298,14 +297,33 @@ final morePages = <PageEntry>[
     label: '情绪',
     icon: Icons.mood_outlined,
     solidIcon: Icons.mood_rounded,
-    builder: (state) => MoodPage(state: state),
+    builder: (state) => PluginViewPage(
+      state: state,
+      pluginId: 'linre-affect',
+      viewId: 'mood',
+      title: '情绪',
+      subtitle: '此刻的状态；由 linre-affect 插件提供',
+    ),
   ),
   PageEntry(
     id: 'stickers',
     label: '表情包',
     icon: Icons.emoji_emotions_outlined,
     solidIcon: Icons.emoji_emotions_rounded,
-    builder: (state) => StickersPage(state: state),
+    builder: (state) => PluginViewPage(
+      state: state,
+      pluginId: 'linre-stickers',
+      viewId: 'stickers',
+      title: '表情包',
+      subtitle: '可配图目录；由 linre-stickers 插件提供',
+    ),
+  ),
+  PageEntry(
+    id: 'plugin-views',
+    label: '插件页',
+    icon: Icons.extension_outlined,
+    solidIcon: Icons.extension_rounded,
+    builder: (state) => PluginViewsPage(state: state),
   ),
   PageEntry(
     id: 'memory',
