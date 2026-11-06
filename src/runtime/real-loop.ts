@@ -245,6 +245,12 @@ const DEFAULT_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
  * （历史上 turn 1277 的双实例就是这么来的）。真正的恢复靠传输层超时 + 重试上限。
  */
 const DEFAULT_TICK_STUCK_MS = 3 * 60 * 1000;
+/**
+ * 哪些事件算“这一拍还在推进”。watchdog 只在**连续没有进展**时才报警/中断；
+ * 长 turn 里的每个 step、tool 结果、模型输出都会刷新计时，不会被整拍总时长误杀。
+ * 外部事件（channel/*）、告警、runtime/slow-tick 刻意不算——它们不能证明 turn 在动。
+ */
+const TICK_PROGRESS_TYPE_RE = /^(?:turn\/start$|step\/|tool\/|message\/|budget\/|model\/|speak\/|compaction\/|affect\/|intimacy\/|image\/)/u;
 /** 单拍最多认领的输入条数（与 M2 一致：一批多条时的边界固定，便于复盘） */
 const BATCH_LIMIT = 8;
 
@@ -1749,12 +1755,16 @@ export class RealLoop {
    * 而 `busy` 的置位也已提到 prepare 段之前（同一处修的另一半），两者一起才堵住这个缺口。
    */
   private tickInFlight = false;
-  /** 看门狗定时器：一拍超过 `tickStuckMs` 还没收尾就告警一次 */
+  /** 看门狗定时器：连续 `tickStuckMs` 没有任何 step/tool/模型进展就告警一次 */
   private tickStuckTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 看门狗的第二只闸：超过两倍阈值还没收尾，就 abort 当前 turn（只报警不掐，现场会挂十几分钟） */
+  /** 看门狗的第二只闸：连续两倍阈值没有进展，就 abort 当前 turn */
   private tickAbortTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 这一拍已经报过"卡住"了吗（同一拍只报一次） */
+  /** 这一拍已经报过"卡住"了吗（同一段无进展只报一次；有进展会复位） */
   private tickStuckReported = false;
+  /** 本拍开始的时刻：用于告警里写“整拍已跑多久” */
+  private tickStartedAt = 0;
+  /** 最近一次有进展的时刻：step/tool/message 等事件会刷新它 */
+  private tickLastProgressAt = 0;
   private readonly tickStuckMs: number;
   /** 本拍那个 promise（`stop()` 要等它收场，免得"退出时还有一个 turn 在写日志"） */
   private tickCompletion: Promise<void> | null = null;
@@ -2994,6 +3004,80 @@ export class RealLoop {
    * 必然恒为 1，所以有信息量的是"这一慢拍压掉了几拍"——它正是重叠发生过的证据。
    * 写成 internal 而不是 model 是刻意的：它是**框架的账**，不是对她说的话。
    */
+  /**
+   * 记录“这一拍还在推进”：只有 step/tool/模型输出一类事件算进展。
+   * 连续没有进展才由 watchdog 报警/中断，长 turn 不会因为总时长被误杀。
+   */
+  private noteTickProgress(type: string): void {
+    if (!this.tickInFlight) return;
+    if (!TICK_PROGRESS_TYPE_RE.test(type)) return;
+    this.tickLastProgressAt = Date.now();
+    this.tickStuckReported = false;
+    this.armTickWatchdog();
+  }
+
+  /** 按“最近一次进展”重新布防两个 watchdog 定时器；有进展就整体后移。 */
+  private armTickWatchdog(): void {
+    if (this.tickStuckTimer !== null) {
+      clearTimeout(this.tickStuckTimer);
+      this.tickStuckTimer = null;
+    }
+    if (this.tickAbortTimer !== null) {
+      clearTimeout(this.tickAbortTimer);
+      this.tickAbortTimer = null;
+    }
+    if (!this.tickInFlight) return;
+    const idle = Math.max(0, Date.now() - this.tickLastProgressAt);
+    const alertIn = Math.max(0, this.tickStuckMs - idle);
+    const abortIn = Math.max(0, this.tickStuckMs * 2 - idle);
+    this.tickStuckTimer = setTimeout(() => {
+      if (!this.tickInFlight) return;
+      const idleNow = Date.now() - this.tickLastProgressAt;
+      if (idleNow < this.tickStuckMs) {
+        this.armTickWatchdog();
+        return;
+      }
+      if (this.tickStuckReported) return;
+      this.tickStuckReported = true;
+      const total = Math.round((Date.now() - this.tickStartedAt) / 1000);
+      const waited = Math.round(idleNow / 1000);
+      this.write(`[循环] 连续 ${waited} 秒没有进展（整拍已 ${total} 秒）：后续拍会被静默丢弃`);
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍连续 ${Math.round(this.tickStuckMs / 60_000)} 分钟没有进展`,
+        body: `这一拍已经连续 ${waited} 秒没有新的 step/tool/模型输出（整拍 ${total} 秒）。`
+          + '她的消息会一直排在队列里（界面看起来像"不说话"）。恢复靠传输层超时；若长时间不恢复，重启后端即可。',
+        params: { thresholdMs: this.tickStuckMs },
+      }).catch(() => undefined);
+    }, alertIn);
+    this.tickStuckTimer.unref?.();
+    this.tickAbortTimer = setTimeout(() => {
+      if (!this.tickInFlight) return;
+      const idleNow = Date.now() - this.tickLastProgressAt;
+      if (idleNow < this.tickStuckMs * 2) {
+        this.armTickWatchdog();
+        return;
+      }
+      if (!this.busy || this.stopController.signal.aborted) return;
+      const total = Math.round((Date.now() - this.tickStartedAt) / 1000);
+      const waited = Math.round(idleNow / 1000);
+      this.write(`[循环] 连续 ${waited} 秒没有进展（整拍已 ${total} 秒）：自动中断当前 turn`);
+      this.stoppedByOwner = false;
+      this.stopController.abort(new Error('看门狗：turn 连续无进展超时'));
+      this.stopController = new AbortController();
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍连续 ${Math.round((this.tickStuckMs * 2) / 60_000)} 分钟没有进展，已自动中断`,
+        body: `这一拍已经连续 ${waited} 秒没有新的 step/tool/模型输出，watchdog 已 abort 当前 turn。`
+          + '输入会按 aborted 语义处理；若仍不恢复，再重启后端。',
+        params: { thresholdMs: this.tickStuckMs * 2 },
+      }).catch(() => undefined);
+    }, abortIn);
+    this.tickAbortTimer.unref?.();
+  }
+
   private async tick(): Promise<void> {
     if (!this.running) return;
     // 上一拍还在飞：这一拍整拍丢掉，只记一笔。丢拍是安全的——下一拍会把所有推导重做一遍
@@ -3004,41 +3088,10 @@ export class RealLoop {
     }
     this.tickInFlight = true;
     const startedAt = Date.now();
+    this.tickStartedAt = startedAt;
+    this.tickLastProgressAt = startedAt;
     this.tickStuckReported = false;
-    this.tickStuckTimer = setTimeout(() => {
-      this.tickStuckReported = true;
-      const elapsed = Date.now() - startedAt;
-      this.write(`[循环] 一拍卡住超过 ${Math.round(this.tickStuckMs / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：后续拍会被静默丢弃`);
-      void this.notifier.alert({
-        category: 'tick-stuck',
-        level: 'warn',
-        title: `循环一拍卡住超过 ${Math.round(this.tickStuckMs / 60_000)} 分钟`,
-        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒还没收尾。她的消息会一直排在队列里（界面看起来像"不说话"）。`
-          + '恢复靠传输层超时；若长时间不恢复，重启后端即可。',
-        params: { thresholdMs: this.tickStuckMs },
-      }).catch(() => undefined);
-    }, this.tickStuckMs);
-    this.tickStuckTimer.unref?.();
-    // 第二只闸：告警之后再等一个阈值，仍没收尾就真掐掉这一轮。
-    // 现场（2026-11-03）：turn 4330 卡在 step/start 之前，模型连接一直 Established，
-    // watchdog 只发了告警、/stop 也没把 turn 结束，整轮挂了 12 分钟。只报警不够。
-    this.tickAbortTimer = setTimeout(() => {
-      if (!this.busy || this.stopController.signal.aborted) return;
-      const elapsed = Date.now() - startedAt;
-      this.write(`[循环] 一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：自动中断当前 turn`);
-      this.stoppedByOwner = false;
-      this.stopController.abort(new Error('看门狗：turn 卡住超时'));
-      this.stopController = new AbortController();
-      void this.notifier.alert({
-        category: 'tick-stuck',
-        level: 'warn',
-        title: `循环一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 60_000)} 分钟，已自动中断`,
-        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒，watchdog 已 abort 当前 turn。`
-          + '输入会按 aborted 语义处理；若仍不恢复，再重启后端。',
-        params: { thresholdMs: this.tickStuckMs * 2 },
-      }).catch(() => undefined);
-    }, this.tickStuckMs * 2);
-    this.tickAbortTimer.unref?.();
+    this.armTickWatchdog();
     const completion = this.tickOnce();
     this.tickCompletion = completion;
     try {
@@ -7414,6 +7467,8 @@ export class RealLoop {
     finalizePressure(this.deps.projection, event.ts);
     // 信任事件就地折入（不等下一拍）：确认后本拍就能生效，不必重启
     this.skills?.applyTrustEvent(event);
+    // 有 step/tool/模型输出 = 这一拍还在推进：watchdog 按“无进展”计时，不按整拍总时长。
+    this.noteTickProgress(type);
     return event;
   }
 }
