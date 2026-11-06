@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 
 const worker = process.argv[2];
 const viewPath = process.argv[3] ?? '/ui/stickers';
+const invokeJson = process.argv[4];
 const child = spawn(process.execPath, [worker], { stdio: ['pipe', 'pipe', 'inherit'] });
 let buffer = '';
 
@@ -28,7 +29,13 @@ child.stdout.on('data', (chunk) => {
 
 const send = (payload) => child.stdin.write(`${JSON.stringify(payload)}\n`);
 send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { apiVersion: 2, pluginId: 'probe', capabilities: ['ui.api'] } });
-setTimeout(() => send({ jsonrpc: '2.0', id: 2, method: 'ui/handle', params: { path: viewPath } }), 1200);
+setTimeout(() => {
+  if (invokeJson !== undefined) {
+    send({ jsonrpc: '2.0', id: 2, method: 'ui/invoke', params: JSON.parse(invokeJson) });
+    return;
+  }
+  send({ jsonrpc: '2.0', id: 2, method: 'ui/handle', params: { path: viewPath } });
+}, 1200);
 setTimeout(() => {
   console.error('超时：没有拿到 id=2 的回执');
   child.kill();

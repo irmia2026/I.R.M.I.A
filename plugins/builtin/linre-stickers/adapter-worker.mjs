@@ -9,7 +9,8 @@
  *  · 不读宿主文件系统（要落盘就走 `media/store`，由宿主内容寻址地写）。
  */
 
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { keywordsOf, pickSticker, renderStickerLine } from './lib/picker.mjs';
@@ -19,21 +20,73 @@ const PLUGIN_ID = 'linre-stickers';
 /** 1×1 透明 PNG：示例素材，避免插件依赖包外文件。 */
 const SAMPLE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
+const DATA_DIR = process.env.IRMIA_DATA_DIR ?? '';
+const DATA_SUBDIR = 'plugin-data/linre-stickers';
+
 let catalog = [];
 /** 最近一条可见事件的文本（关键词来源） */
 let recentText = '';
 let nextId = 1;
 const pending = new Map();
 
-function loadCatalog() {
+function catalogPaths() {
+  if (DATA_DIR === '') return null;
+  const dir = join(DATA_DIR, DATA_SUBDIR);
+  return { dir, file: join(dir, 'catalog.json') };
+}
+
+function seedCatalogText() {
   try {
-    const raw = readFileSync(new URL('./catalog.json', import.meta.url), 'utf8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      catalog = parsed.filter((entry) => entry !== null && typeof entry === 'object');
-    }
+    return readFileSync(new URL('./catalog.json', import.meta.url), 'utf8');
   } catch (error) {
-    process.stderr.write(`[${PLUGIN_ID}] catalog.json 读取失败：${String(error)}\n`);
+    process.stderr.write(`[${PLUGIN_ID}] 种子 catalog.json 读取失败：${String(error)}\n`);
+    return null;
+  }
+}
+
+function saveCatalog() {
+  const paths = catalogPaths();
+  if (paths === null) return false;
+  try {
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.file, `${JSON.stringify(catalog, null, 2)}\n`, 'utf8');
+    return true;
+  } catch (error) {
+    process.stderr.write(`[${PLUGIN_ID}] catalog 写入失败：${String(error)}\n`);
+    return false;
+  }
+}
+
+function loadCatalog() {
+  const paths = catalogPaths();
+  let raw = null;
+  if (paths !== null) {
+    try {
+      raw = readFileSync(paths.file, 'utf8');
+    } catch {
+      raw = null;
+    }
+  }
+  if (raw === null) {
+    raw = seedCatalogText();
+    if (raw !== null && paths !== null) {
+      try {
+        mkdirSync(paths.dir, { recursive: true });
+        writeFileSync(paths.file, raw, 'utf8');
+      } catch (error) {
+        process.stderr.write(`[${PLUGIN_ID}] catalog 初始化落盘失败：${String(error)}\n`);
+      }
+    }
+  }
+  if (raw === null) {
+    catalog = [];
+    return;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    catalog = Array.isArray(parsed) ? parsed.filter((entry) => entry !== null && typeof entry === 'object') : [];
+  } catch (error) {
+    process.stderr.write(`[${PLUGIN_ID}] catalog 解析失败：${String(error)}\n`);
     catalog = [];
   }
 }
@@ -172,6 +225,42 @@ function buildSchema() {
   return { title: '表情包', blocks };
 }
 
+function invokeUi(params) {
+  const action = typeof params.action === 'string' ? params.action : '';
+  const target = typeof params.target === 'string' ? params.target : '';
+  if (action === 'reset') {
+    const seed = seedCatalogText();
+    if (seed === null) return { ok: false, message: '种子目录读不到' };
+    try {
+      const parsed = JSON.parse(seed);
+      catalog = Array.isArray(parsed) ? parsed.filter((entry) => entry !== null && typeof entry === 'object') : [];
+    } catch {
+      return { ok: false, message: '种子目录解析失败' };
+    }
+    if (!saveCatalog()) return { ok: false, message: '写入失败，目录不可写' };
+    return { ok: true, refresh: true, message: '已恢复初始目录' };
+  }
+  const entry = catalog.find((item) => item.id === target);
+  if (entry === undefined) return { ok: false, message: `没有这张图：${target}` };
+  if (action === 'approve') entry.status = 'approved';
+  else if (action === 'reject') entry.status = 'rejected';
+  else if (action === 'remove') catalog = catalog.filter((item) => item.id !== target);
+  else if (action === 'set-tags') {
+    const tags = Array.isArray(params.tags)
+      ? params.tags.filter((tag) => typeof tag === 'string' && tag.trim() !== '').map((tag) => tag.trim()).slice(0, 16)
+      : [];
+    entry.tags = tags;
+  } else if (action === 'set-intensity') {
+    const value = Number(params.intensity);
+    if (!Number.isFinite(value)) return { ok: false, message: '强度必须是数字' };
+    entry.intensity = Math.max(0, Math.min(5, Math.round(value)));
+  } else {
+    return { ok: false, message: `不认识的操作：${action}` };
+  }
+  if (!saveCatalog()) return { ok: false, message: '写入失败，目录不可写' };
+  return { ok: true, refresh: true, message: `已更新 ${target}` };
+}
+
 loadCatalog();
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -200,6 +289,10 @@ input.on('line', (line) => {
       const maxChars = Number.isSafeInteger(params.maxChars) ? params.maxChars : 90;
       const text = params.slot === 'now-layer' || params.slot === undefined ? renderFor(maxChars) : '';
       reply(id, { result: { text } });
+      return;
+    }
+    if (message.method === 'ui/invoke') {
+      reply(id, { result: invokeUi(message.params ?? {}) });
       return;
     }
     if (message.method === 'ui/handle') {

@@ -53,7 +53,7 @@ import {
   renameSync, statSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { ALERT_DIR_NAME, type AlertNotifier } from '../alert/notifier.ts';
 import { buildBudgetReport, buildReviewEntries, summarizeEvent } from '../cli.ts';
@@ -218,6 +218,24 @@ export const SKILLS_IGNORED_FILE = 'skills-ignored.json';
  * 与 `skills-ignored.json` 同一性质：**进 dataDir，不进事件日志**（schema 里没有这种事件类型）。
  */
 export const SKILL_TRASH_DIR = 'trash';
+
+/** 媒体文件的单次服务上限：表情包、截图这类都远小于它，超了直接 413，不把内存当磁盘用 */
+const MEDIA_MAX_BYTES = 32 * 1024 * 1024;
+
+const MEDIA_TYPES: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
+};
 
 
 /** `mcp-test` 的握手超时上限：测试要拉真进程，但不能让它挂住这条 HTTP 请求 */
@@ -748,7 +766,12 @@ export interface WebServerDeps {
    * 不给（CLI、测试）维持旧语义——回执如实说「重启后生效」。confirm/install 不触发。
    */
   pluginApply?: (() => Promise<void>) | undefined;
-  pluginApi?: ((request: { pluginId: string; suffix: string; query: URLSearchParams }) => Promise<unknown>) | undefined;
+  pluginApi?: ((request: {
+    pluginId: string;
+    suffix: string;
+    query: URLSearchParams;
+    body?: JsonValue | undefined;
+  }) => Promise<unknown>) | undefined;
   /**
    * 内置协议端（`channels.onebot.managed`，v34）。给了它才有 `GET/POST/PUT /api/protocol-side`：
    * 界面据此启停它、看它的状态、改它的目录。
@@ -4010,6 +4033,11 @@ class WebServerImpl implements WebServer {
       return;
     }
 
+    if (path.startsWith('/api/media/')) {
+      await this.handleMedia(req, res, url);
+      return;
+    }
+
     // 内置协议端（v34）：一条读、两条启停、一条写配置。三条**共用同一份视图**
     if (path.startsWith('/api/plugin/')) {
       await this.handlePluginApi(req, res, url);
@@ -4553,9 +4581,55 @@ class WebServerImpl implements WebServer {
    * 写配置那一半则走 `withConfigDoc`（它自己会落 `config/changed`）。形状不对就是 405：
    * "这个地址存在，但不是这个用法"与"没这个地址"是两件事。
    */
+  private async handleMedia(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      throw new HttpError(405, 'method-not-allowed', '媒体只接受 GET');
+    }
+    let rel: string;
+    try {
+      rel = decodeURIComponent(url.pathname.slice('/api/media/'.length));
+    } catch {
+      throw new HttpError(400, 'bad-media-path', '媒体路径编码不合法');
+    }
+    if (rel === '' || rel.includes('\0') || rel.includes('\\')) {
+      throw new HttpError(400, 'bad-media-path', '媒体路径不合法');
+    }
+    const root = resolve(this.deps.dataDir, 'media');
+    const file = resolve(root, rel);
+    if (file !== root && !file.startsWith(root + sep)) {
+      throw new HttpError(403, 'media-outside-root', '媒体路径越界');
+    }
+    let size = 0;
+    let mtime = new Date(0);
+    try {
+      const info = statSync(file);
+      if (!info.isFile()) throw new Error('not a file');
+      size = info.size;
+      mtime = info.mtime;
+    } catch {
+      throw new HttpError(404, 'media-not-found', '没有这个媒体文件');
+    }
+    if (size > MEDIA_MAX_BYTES) {
+      throw new HttpError(413, 'media-too-large', `媒体文件超过 ${Math.floor(MEDIA_MAX_BYTES / 1024 / 1024)}MB`);
+    }
+    const type = MEDIA_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
+    res.writeHead(200, {
+      'content-type': type,
+      'content-length': String(size),
+      'cache-control': 'private, max-age=300',
+      'last-modified': mtime.toUTCString(),
+      'x-content-type-options': 'nosniff',
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(readFileSync(file));
+  }
+
   private async handlePluginApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    if (req.method !== 'GET') {
-      throw new HttpError(405, 'method-not-allowed', '插件视图只接受 GET');
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      throw new HttpError(405, 'method-not-allowed', '插件视图只接受 GET，操作只接受 POST');
     }
     const handler = this.deps.pluginApi;
     if (handler === undefined) {
@@ -4568,13 +4642,27 @@ class WebServerImpl implements WebServer {
       throw new HttpError(400, 'bad-plugin-id', '插件 id 不合法');
     }
     const suffix = slash < 0 ? '' : rest.slice(slash + 1);
+    let body: JsonValue | undefined;
+    if (req.method === 'POST') {
+      const read = await readBody(req, DEFAULT_BODY_LIMIT_BYTES);
+      if (!read.ok) {
+        throw new HttpError(read.code === 'payload-too-large' ? 413 : 400, read.code, read.message);
+      }
+      if (read.text.trim() !== '') {
+        try {
+          body = JSON.parse(read.text) as JsonValue;
+        } catch {
+          throw new HttpError(400, 'bad-json', '请求体不是合法 JSON');
+        }
+      }
+    }
     try {
-      const payload = await handler({ pluginId, suffix, query: url.searchParams });
-      console.log(`[视图] ${pluginId}/${suffix || 'root'} → 200`);
+      const payload = await handler({ pluginId, suffix, query: url.searchParams, body });
+      console.log(`[视图] ${pluginId}/${suffix || 'root'} ${req.method} → 200`);
       sendJson(res, 200, payload);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.log(`[视图] ${pluginId}/${suffix || 'root'} → 失败：${reason}`);
+      console.log(`[视图] ${pluginId}/${suffix || 'root'} ${req.method} → 失败：${reason}`);
       throw error;
     }
   }

@@ -2827,7 +2827,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       pluginApply: applyPluginRuntime,
       // 管理视图（/api/skills、/api/mcp）要看到插件贡献：给的是函数，读的永远是当下这一份组合
       pluginRuntime: () => pluginRuntime,
-      pluginApi: async ({ pluginId, suffix, query }) => {
+      pluginApi: async ({ pluginId, suffix, query, body }) => {
         if (pluginId === 'views') {
           const running = new Set(
             pluginRuntime.adapters
@@ -2855,6 +2855,9 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         const adapter = pluginRuntime.adapters.find((entry) => entry.pluginId === pluginId);
         if (adapter === undefined) throw new Error(`插件 ${pluginId} 没有运行中的适配器`);
         if (!adapter.capabilities.includes('ui.api')) throw new Error(`插件 ${pluginId} 未声明能力 ui.api`);
+        if (body !== undefined) {
+          return await adapterSupervisor.request(pluginId, 'ui/invoke', body);
+        }
         return await adapterSupervisor.request(pluginId, 'ui/handle', {
           path: `/${suffix}`,
           query: Object.fromEntries(query.entries()),
