@@ -44,6 +44,7 @@ import 'pages/extensions_page.dart';
 import 'pages/logs_page.dart';
 import 'pages/memory_page.dart';
 import 'pages/mood_page.dart';
+import 'pages/stickers_page.dart';
 import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
 import 'pages/schedule_page.dart';
@@ -298,6 +299,13 @@ final morePages = <PageEntry>[
     icon: Icons.mood_outlined,
     solidIcon: Icons.mood_rounded,
     builder: (state) => MoodPage(state: state),
+  ),
+  PageEntry(
+    id: 'stickers',
+    label: '表情包',
+    icon: Icons.emoji_emotions_outlined,
+    solidIcon: Icons.emoji_emotions_rounded,
+    builder: (state) => StickersPage(state: state),
   ),
   PageEntry(
     id: 'memory',

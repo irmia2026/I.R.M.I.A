@@ -1,5 +1,7 @@
+import { statSync } from 'node:fs';
 import { isAbsolute, win32 } from 'node:path';
 
+import { compareVersions, parseVersion } from '../update/check.ts';
 import type { PluginManager, PluginView } from './manager.js';
 
 export type PluginCommand = 'plugin-install' | 'plugin-confirm' | 'plugin-enable' | 'plugin-disable';
@@ -40,30 +42,30 @@ function current(manager: PluginManager, view: PluginView): PluginView {
     && item.package.contentHash === view.package.contentHash) ?? view;
 }
 
-function versionParts(version: string): number[] {
-  return version.split('.').map((part) => {
-    const digits = part.match(/^\d+/)?.[0] ?? '0';
-    return Number.parseInt(digits, 10);
-  });
-}
-
-function compareVersion(a: string, b: string): number {
-  const left = versionParts(a);
-  const right = versionParts(b);
-  const size = Math.max(left.length, right.length);
-  for (let index = 0; index < size; index += 1) {
-    const diff = (left[index] ?? 0) - (right[index] ?? 0);
-    if (diff !== 0) return diff;
-  }
+function stateRank(state: PluginView['state']): number {
+  if (state === 'untrusted') return 4;
+  if (state === 'enabled') return 3;
+  if (state === 'probing') return 2;
+  if (state === 'disabled') return 1;
   return 0;
 }
 
+function mtimeOf(rootDir: string): number {
+  try { return statSync(rootDir).mtimeMs; } catch { return 0; }
+}
+
 function preferView(a: PluginView, b: PluginView): PluginView {
-  const aOn = a.state === 'enabled' ? 1 : 0;
-  const bOn = b.state === 'enabled' ? 1 : 0;
-  if (aOn !== bOn) return aOn > bOn ? a : b;
-  const byVersion = compareVersion(a.package.manifest.version, b.package.manifest.version);
-  if (byVersion !== 0) return byVersion > 0 ? a : b;
+  const byState = stateRank(a.state) - stateRank(b.state);
+  if (byState !== 0) return byState > 0 ? a : b;
+  const left = parseVersion(a.package.manifest.version);
+  const right = parseVersion(b.package.manifest.version);
+  if (left !== null && right !== null) {
+    const byVersion = compareVersions(left, right);
+    if (byVersion !== 0) return byVersion > 0 ? a : b;
+  }
+  const leftMs = mtimeOf(a.package.rootDir);
+  const rightMs = mtimeOf(b.package.rootDir);
+  if (leftMs !== rightMs) return leftMs > rightMs ? a : b;
   return a.package.contentHash <= b.package.contentHash ? a : b;
 }
 

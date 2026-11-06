@@ -556,7 +556,7 @@ test('② 清单是全的：源码里每一处模型调用都有人在表里认�
   const expected: Array<[string, number]> = [
     ['src/channel/injection-judge.ts', 1],
     ['src/channel/topic.ts', 1],
-    ['src/main.ts', 1],
+    ['src/main.ts', 2],
     ['src/persona/memory-maintain.ts', 1],
     // 2 = 主循环那一处 + v73 的 400 自救那一处（同一个文件、两处 `.stream(`）；
     // 两处都在下面 `MODEL_CALL_SITES` 里各有一行（各自断言 heavy/high）。

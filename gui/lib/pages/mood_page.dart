@@ -35,6 +35,8 @@ class _MoodPageState extends State<MoodPage> {
   String? error;
   Map<String, dynamic>? view;
 
+  MoodPalette get _m => MoodPalette.of(context);
+
   @override
   void initState() {
     super.initState();
@@ -128,12 +130,13 @@ class _MoodPageState extends State<MoodPage> {
   }
 
   Widget _card({required Widget child, EdgeInsets padding = const EdgeInsets.all(18)}) {
+    final m = _m;
     return Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: MoodPalette.card,
+        color: m.card,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: MoodPalette.edge),
+        border: Border.all(color: m.edge),
       ),
       child: child,
     );
@@ -144,17 +147,18 @@ class _MoodPageState extends State<MoodPage> {
       padding: const EdgeInsets.only(bottom: 12),
       child: Text(
         text,
-        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: MoodPalette.title),
+        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _m.title),
       ),
     );
   }
 
   Widget _hero() {
+    final m = _m;
     final mood = ((view?['mood'] as Map?) ?? const {}).cast<String, dynamic>();
     final valence = ((mood['valence'] as num?) ?? 0).toDouble();
     final arousal = ((mood['arousal'] as num?) ?? 0).toDouble();
     final neutral = view?['neutral'] == true;
-    final color = MoodPalette.emotionColor(_dominantKey);
+    final color = m.emotionColor(_dominantKey);
     return _card(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -180,7 +184,7 @@ class _MoodPageState extends State<MoodPage> {
               children: [
                 Text(
                   _renderLine,
-                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: MoodPalette.heading, height: 1.35),
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: m.heading, height: 1.35),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -212,18 +216,19 @@ class _MoodPageState extends State<MoodPage> {
   }
 
   Widget _pill(String label, String value) {
+    final m = _m;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: MoodPalette.chipBg,
+        color: m.chipBg,
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: MoodPalette.chipBorder),
+        border: Border.all(color: m.chipBorder),
       ),
       child: Text.rich(
         TextSpan(
           children: [
-            TextSpan(text: '$label ', style: const TextStyle(fontSize: 11, color: MoodPalette.muted)),
-            TextSpan(text: value, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: MoodPalette.ink)),
+            TextSpan(text: '$label ', style: TextStyle(fontSize: 11, color: m.muted)),
+            TextSpan(text: value, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: m.ink)),
           ],
         ),
       ),
@@ -251,6 +256,7 @@ class _MoodPageState extends State<MoodPage> {
   }
 
   Widget _timelineCard() {
+    final m = _m;
     final points = _history;
     return _card(
       child: Column(
@@ -258,16 +264,16 @@ class _MoodPageState extends State<MoodPage> {
         children: [
           _sectionTitle('心境轨迹'),
           if (points.isEmpty)
-            const SizedBox(
+            SizedBox(
               height: 72,
               child: Center(
-                child: Text('还没有评价记录', style: TextStyle(fontSize: 12, color: MoodPalette.mutedSoft)),
+                child: Text('还没有评价记录', style: TextStyle(fontSize: 12, color: m.mutedSoft)),
               ),
             )
           else
             SizedBox(
               height: 104,
-              child: CustomPaint(painter: _TimelinePainter(points: points), size: Size.infinite),
+              child: CustomPaint(painter: _TimelinePainter(points: points, palette: m), size: Size.infinite),
             ),
         ],
       ),
@@ -275,6 +281,7 @@ class _MoodPageState extends State<MoodPage> {
   }
 
   Widget _factorsCard() {
+    final m = _m;
     final causes = _causes;
     return _card(
       child: Column(
@@ -282,7 +289,7 @@ class _MoodPageState extends State<MoodPage> {
         children: [
           _sectionTitle('最近的影响'),
           if (causes.isEmpty)
-            const Text('还没有影响记录', style: TextStyle(fontSize: 12, color: MoodPalette.mutedSoft))
+            Text('还没有影响记录', style: TextStyle(fontSize: 12, color: m.mutedSoft))
           else
             for (final cause in causes)
               Padding(
@@ -294,19 +301,19 @@ class _MoodPageState extends State<MoodPage> {
                       height: 7,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: MoodPalette.emotionColor('${cause['dominantEmotion'] ?? ''}'),
+                        color: m.emotionColor('${cause['dominantEmotion'] ?? ''}'),
                       ),
                     ),
                     const SizedBox(width: 9),
                     Expanded(
                       child: Text(
                         _reasonLabels['${cause['reasonCode'] ?? 'general'}'] ?? '综合',
-                        style: const TextStyle(fontSize: 12.5, color: MoodPalette.ink),
+                        style: TextStyle(fontSize: 12.5, color: m.ink),
                       ),
                     ),
                     Text(
                       '${(((cause['strength'] as num?) ?? 0) * 100).round()}%',
-                      style: const TextStyle(fontSize: 12, color: MoodPalette.muted),
+                      style: TextStyle(fontSize: 12, color: m.muted),
                     ),
                   ],
                 ),
@@ -325,7 +332,8 @@ class _EmotionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = MoodPalette.emotionColor(emotionKey);
+    final m = MoodPalette.of(context);
+    final color = m.emotionColor(emotionKey);
     final v = value.clamp(0.0, 1.0).toDouble();
     return Row(
       children: [
@@ -348,7 +356,7 @@ class _EmotionBar extends StatelessWidget {
                   _emotionLabels[emotionKey] ?? emotionKey,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: MoodPalette.ink),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: m.ink),
                 ),
               ),
             ],
@@ -363,7 +371,7 @@ class _EmotionBar extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  const ColoredBox(color: MoodPalette.track),
+                  ColoredBox(color: m.track),
                   FractionallySizedBox(
                     alignment: Alignment.centerLeft,
                     widthFactor: v,
@@ -380,7 +388,7 @@ class _EmotionBar extends StatelessWidget {
           child: Text(
             '${(v * 100).round()}%',
             textAlign: TextAlign.right,
-            style: const TextStyle(fontSize: 11.5, color: MoodPalette.muted),
+            style: TextStyle(fontSize: 11.5, color: m.muted),
           ),
         ),
       ],
@@ -389,14 +397,15 @@ class _EmotionBar extends StatelessWidget {
 }
 
 class _TimelinePainter extends CustomPainter {
-  _TimelinePainter({required this.points});
+  _TimelinePainter({required this.points, required this.palette});
 
   final List<Map<String, dynamic>> points;
+  final MoodPalette palette;
 
   @override
   void paint(Canvas canvas, Size size) {
     final grid = Paint()
-      ..color = MoodPalette.chartGrid
+      ..color = palette.chartGrid
       ..strokeWidth = 1;
     for (var i = 0; i <= 4; i += 1) {
       final y = size.height * i / 4;
@@ -420,7 +429,7 @@ class _TimelinePainter extends CustomPainter {
     canvas.drawPath(
       path,
       Paint()
-        ..color = MoodPalette.chartLine
+        ..color = palette.chartLine
         ..strokeWidth = 2
         ..style = PaintingStyle.stroke
         ..strokeJoin = StrokeJoin.round
@@ -430,10 +439,11 @@ class _TimelinePainter extends CustomPainter {
       final x = points.length == 1 ? size.width / 2 : size.width * i / (points.length - 1);
       final valence = ((points[i]['valence'] as num?) ?? 0).toDouble().clamp(-1.0, 1.0);
       final y = zeroY - valence * (size.height / 2 - 6);
-      canvas.drawCircle(Offset(x, y), 2.5, Paint()..color = MoodPalette.chartLine);
+      canvas.drawCircle(Offset(x, y), 2.5, Paint()..color = palette.chartLine);
     }
   }
 
   @override
-  bool shouldRepaint(_TimelinePainter oldDelegate) => oldDelegate.points != points;
+  bool shouldRepaint(_TimelinePainter oldDelegate) =>
+      oldDelegate.points != points || oldDelegate.palette != palette;
 }

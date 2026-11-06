@@ -1,0 +1,37 @@
+[
+  {
+    "name": "enter_channel",
+    "description": "一般不用调：read_channel 看过哪个群，就自动进那个群待着。要手动换群才用它。一次只能待一个群，进别的会自动离开当前那个。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sid": { "type": "string" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 50 }
+      },
+      "required": ["sid"],
+      "additionalProperties": false
+    },
+    "server": "linre-presence__presence",
+    "tool": "enter_channel"
+  },
+  {
+    "name": "wait_messages",
+    "description": "在待着的那个群等新消息，最多 120 秒：有消息立刻返回，没有就等到点。read_channel 之后就自动进去了，直接等即可。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "seconds": { "type": "integer", "minimum": 1, "maximum": 120 }
+      },
+      "additionalProperties": false
+    },
+    "server": "linre-presence__presence",
+    "tool": "wait_messages"
+  },
+  {
+    "name": "leave_channel",
+    "description": "退出当前待着的群。之后不再收这个群的消息，已经看到的不会被收回。",
+    "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+    "server": "linre-presence__presence",
+    "tool": "leave_channel"
+  }
+]

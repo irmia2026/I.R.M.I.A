@@ -106,6 +106,30 @@ function renderFor(maxChars) {
   return renderStickerLine(picked, maxChars);
 }
 
+function buildView() {
+  const items = catalog.map((entry) => ({
+    id: typeof entry.id === 'string' ? entry.id : '',
+    tags: Array.isArray(entry.tags) ? entry.tags.filter((tag) => typeof tag === 'string') : [],
+    intensity: Number.isFinite(entry.intensity) ? entry.intensity : 0,
+    status: typeof entry.status === 'string' ? entry.status : 'pending',
+    path: typeof entry.path === 'string' ? entry.path : '',
+    lastUsedMs: Number.isFinite(entry.lastUsedMs) ? entry.lastUsedMs : null,
+  }));
+  const approved = items.filter((item) => item.status === 'approved');
+  const pendingCount = items.filter((item) => item.status === 'pending').length;
+  const picked = pickSticker(catalog, { keywords: keywordsOf(recentText), nowMs: Date.now() });
+  return {
+    atMs: Date.now(),
+    total: items.length,
+    approved: approved.length,
+    pending: pendingCount,
+    other: items.length - approved.length - pendingCount,
+    items,
+    preview: picked === null ? null : { id: picked.id, tags: Array.isArray(picked.tags) ? picked.tags : [] },
+    renderLine: picked === null ? '暂无可配图。' : renderStickerLine(picked, 90),
+  };
+}
+
 loadCatalog();
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -134,6 +158,16 @@ input.on('line', (line) => {
       const maxChars = Number.isSafeInteger(params.maxChars) ? params.maxChars : 90;
       const text = params.slot === 'now-layer' || params.slot === undefined ? renderFor(maxChars) : '';
       reply(id, { result: { text } });
+      return;
+    }
+    if (message.method === 'ui/handle') {
+      const params = message.params ?? {};
+      const path = typeof params.path === 'string' ? params.path : '';
+      if (path !== '/state' && path !== '/state/' && path !== '' && path !== '/') {
+        reply(id, { error: { code: -32601, message: `未知视图路径: ${path}` } });
+        return;
+      }
+      reply(id, { result: buildView() });
       return;
     }
     reply(id, { error: { code: -32601, message: `Method not found: ${String(message.method)}` } });

@@ -1,0 +1,11 @@
+[
+  {
+    "name": "presence",
+    "command": "node",
+    "args": ["server.mjs"],
+    "desc": "进频道待着：进屋看最近 20 条、等一阵子新消息（≤120 秒）、退屋。想跟着听某个群聊天而不只是被 @ 时用它。",
+    "requestTimeoutMs": 150000,
+    "maxInFlight": 2,
+    "toolsCache": false
+  }
+]

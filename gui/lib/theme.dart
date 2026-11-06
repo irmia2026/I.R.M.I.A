@@ -572,32 +572,54 @@ class _BreathDotState extends State<BreathDot> with SingleTickerProviderStateMix
   }
 }
 
-abstract final class MoodPalette {
-  static const Color shell = Color(0xFFF8FBFD);
-  static const Color card = Color(0xFFFFFFFF);
-  static const Color ink = Color(0xFF25394E);
-  static const Color heading = Color(0xFF29465F);
-  static const Color title = Color(0xFF38546D);
-  static const Color muted = Color(0xFF8191A3);
-  static const Color mutedSoft = Color(0xFFA0AEBB);
-  static const Color edge = Color(0xFFE5EDF3);
-  static const Color primary = Color(0xFF658CBA);
-  static const Color primarySoft = Color(0xFFEAF3FB);
-  static const Color track = Color(0xFFF0F4F7);
-  static const Color chipBorder = Color(0xFFEDF2F6);
-  static const Color chipBg = Color(0xFFF8FBFD);
+class MoodPalette {
+  const MoodPalette({
+    required this.shell,
+    required this.card,
+    required this.ink,
+    required this.heading,
+    required this.title,
+    required this.muted,
+    required this.mutedSoft,
+    required this.edge,
+    required this.primary,
+    required this.primarySoft,
+    required this.track,
+    required this.chipBorder,
+    required this.chipBg,
+    required this.concern,
+    required this.warmth,
+    required this.shyness,
+    required this.joy,
+    required this.distress,
+    required this.irritation,
+    required this.chartLine,
+    required this.chartGrid,
+  });
 
-  static const Color concern = Color(0xFF83A9CE);
-  static const Color warmth = Color(0xFFB4A5C3);
-  static const Color shyness = Color(0xFF8FBCB3);
-  static const Color joy = Color(0xFFD7B487);
-  static const Color distress = Color(0xFFAAB1C0);
-  static const Color irritation = Color(0xFFC5A6AA);
+  final Color shell;
+  final Color card;
+  final Color ink;
+  final Color heading;
+  final Color title;
+  final Color muted;
+  final Color mutedSoft;
+  final Color edge;
+  final Color primary;
+  final Color primarySoft;
+  final Color track;
+  final Color chipBorder;
+  final Color chipBg;
+  final Color concern;
+  final Color warmth;
+  final Color shyness;
+  final Color joy;
+  final Color distress;
+  final Color irritation;
+  final Color chartLine;
+  final Color chartGrid;
 
-  static const Color chartLine = Color(0xFF83ACCC);
-  static const Color chartGrid = Color(0xFFEAF0F5);
-
-  static Color emotionColor(String key) => switch (key) {
+  Color emotionColor(String key) => switch (key) {
         'concern' => concern,
         'warmth' => warmth,
         'shyness' => shyness,
@@ -606,4 +628,55 @@ abstract final class MoodPalette {
         'irritation' => irritation,
         _ => primary,
       };
+
+  static const MoodPalette light = MoodPalette(
+    shell: Color(0xFFF8FBFD),
+    card: Color(0xFFFFFFFF),
+    ink: Color(0xFF25394E),
+    heading: Color(0xFF29465F),
+    title: Color(0xFF38546D),
+    muted: Color(0xFF8191A3),
+    mutedSoft: Color(0xFFA0AEBB),
+    edge: Color(0xFFE5EDF3),
+    primary: Color(0xFF658CBA),
+    primarySoft: Color(0xFFEAF3FB),
+    track: Color(0xFFF0F4F7),
+    chipBorder: Color(0xFFEDF2F6),
+    chipBg: Color(0xFFF8FBFD),
+    concern: Color(0xFF83A9CE),
+    warmth: Color(0xFFB4A5C3),
+    shyness: Color(0xFF8FBCB3),
+    joy: Color(0xFFD7B487),
+    distress: Color(0xFFAAB1C0),
+    irritation: Color(0xFFC5A6AA),
+    chartLine: Color(0xFF83ACCC),
+    chartGrid: Color(0xFFEAF0F5),
+  );
+
+  static const MoodPalette dark = MoodPalette(
+    shell: Color(0xFF14161A),
+    card: Color(0xFF1A1D22),
+    ink: Color(0xFFE9ECEF),
+    heading: Color(0xFFF1F3F5),
+    title: Color(0xFFD7DCE2),
+    muted: Color(0xFF98A0AA),
+    mutedSoft: Color(0xFF7A828C),
+    edge: Color(0xFF2C3138),
+    primary: Color(0xFF7FA7D6),
+    primarySoft: Color(0xFF1E2A3A),
+    track: Color(0xFF232A3A),
+    chipBorder: Color(0xFF2C3138),
+    chipBg: Color(0xFF1F242C),
+    concern: Color(0xFF9CC2E8),
+    warmth: Color(0xFFC9B8DA),
+    shyness: Color(0xFFA5D2C7),
+    joy: Color(0xFFE8C899),
+    distress: Color(0xFFC0C7D6),
+    irritation: Color(0xFFDDB8BD),
+    chartLine: Color(0xFF9CC2E8),
+    chartGrid: Color(0xFF262B33),
+  );
+
+  static MoodPalette of(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark ? dark : light;
 }

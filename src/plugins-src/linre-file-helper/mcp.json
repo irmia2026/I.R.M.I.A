@@ -1,0 +1,10 @@
+[
+  {
+    "name": "send_file",
+    "command": "node",
+    "args": ["server.mjs"],
+    "requestTimeoutMs": 30000,
+    "maxInFlight": 2,
+    "toolsCache": true
+  }
+]

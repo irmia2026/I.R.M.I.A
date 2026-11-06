@@ -1731,6 +1731,7 @@ export class RealLoop {
    * 每拍清零上报，不做累计（累计数会把"上一次卡顿"混进"这一次"）。
    */
   private tickSkipped = 0;
+  private tickTotal = 0;
   /**
    * **上一轮 turn 的收尾计时**（`agent-loop` 的 `onTurnTiming` 回填，见 BUG-4）。
    *
@@ -2922,6 +2923,10 @@ export class RealLoop {
    * 写成 internal 而不是 model 是刻意的：它是**框架的账**，不是对她说的话。
    */
   private async tick(): Promise<void> {
+    this.tickTotal += 1;
+    if (this.tickTotal % 20 === 0) {
+      this.write(`[循环] 第 ${this.tickTotal} 拍：running=${this.running} inFlight=${this.tickInFlight} busy=${this.busy} pending=${this.deps.projection.pending.length} skipped=${this.tickSkipped}`);
+    }
     if (!this.running) return;
     // 上一拍还在飞：这一拍整拍丢掉，只记一笔。丢拍是安全的——下一拍会把所有推导重做一遍
     // （判据与理由见 `tickOnce` 里那段"四件事跳过的代价"）。

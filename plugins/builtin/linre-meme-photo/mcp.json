@@ -1,0 +1,10 @@
+[
+  {
+    "name": "meme-photo",
+    "command": "node",
+    "args": ["server.mjs"],
+    "requestTimeoutMs": 20000,
+    "maxInFlight": 2,
+    "toolsCache": true
+  }
+]

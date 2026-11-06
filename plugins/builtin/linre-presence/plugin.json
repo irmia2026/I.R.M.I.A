@@ -1,0 +1,12 @@
+{
+  "apiVersion": 2,
+  "id": "linre-presence",
+  "version": "0.2.1",
+  "engine": { "irmia": ">=0.1.0-beta.14" },
+  "contributions": {
+    "skills": ["skills"],
+    "mcp": "mcp.json",
+    "tools": "tools.json"
+  },
+  "permissions": []
+}

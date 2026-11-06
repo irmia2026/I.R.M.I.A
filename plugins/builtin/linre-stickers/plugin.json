@@ -10,7 +10,7 @@
       {
         "worker": "adapter-worker.mjs",
         "apiVersion": 2,
-        "capabilities": ["event.observe", "prompt.inject", "asset.store"]
+        "capabilities": ["event.observe", "prompt.inject", "asset.store", "ui.api"]
       }
     ]
   },

@@ -1,0 +1,18 @@
+{
+  "apiVersion": 2,
+  "id": "linre-meme-photo",
+  "version": "0.1.0",
+  "engine": { "irmia": ">=0.1.0-beta.14" },
+  "contributions": {
+    "skills": ["skills"],
+    "mcp": "mcp.json",
+    "adapters": [
+      {
+        "worker": "adapter-worker.mjs",
+        "apiVersion": 2,
+        "capabilities": ["event.observe", "asset.resolve", "storage.kv", "message.propose"]
+      }
+    ]
+  },
+  "permissions": []
+}

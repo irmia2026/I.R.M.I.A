@@ -1,7 +1,8 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { AppEvent, AppEventType } from '../log/types.js';
+import { compareVersions, parseVersion } from '../update/check.ts';
 import type { PluginFailure } from './failures.js';
 import { installPluginPackage, pluginPackageFingerprint, pluginPackagesRoot, scanPluginPackage, type PluginPackage } from './package-store.ts';
 
@@ -33,6 +34,9 @@ const asString = (value: unknown): string => typeof value === 'string' ? value :
 const idPrefixOf = (id: string): string => keyOf(id, '');
 /** 与 package-store 同一条规矩：排序按码点，别让 locale/ICU 版本影响先后。 */
 const compareCodePoint = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
+function mtimeOf(rootDir: string): number {
+  try { return statSync(rootDir).mtimeMs; } catch { return 0; }
+}
 
 export class PluginManager {
   private lifecycle = new Map<string, Lifecycle>();
@@ -287,8 +291,9 @@ export class PluginManager {
    *
    * `setEnabled` 已经拒绝新的并发启用，但**历史日志**里可能早就有两条 `plugin/enabled`
    * （那道门是后加的）。同 id 两版同时装进组合会产出两套同命名空间的 MCP/Hook/Skill，
-   * 调用与故障归因都会说不清，所以这里只留一个：按 contentHash 码点序取首个（与整包
-   * 哈希的排序口径一致，跨机器稳定），其余登记裁剪原因交给 `list()` 报出去。
+   * 调用与故障归因都会说不清，所以这里只留一个：先比版本号（高者胜），同版本比目录
+   * 落地时间（新者胜，代表最近装进来的那份），再同则按 contentHash 码点序。其余登记
+   * 裁剪原因交给 `list()` 报出去。
    */
   private dedupeByVersion(packages: readonly PluginPackage[]): PluginPackage[] {
     this.versionTrims.clear();
@@ -299,12 +304,26 @@ export class PluginManager {
         kept.set(pkg.manifest.id, pkg);
         continue;
       }
-      const [winner, loser] = compareCodePoint(pkg.contentHash, existing.contentHash) < 0 ? [pkg, existing] : [existing, pkg];
+      const winner = this.preferPackage(pkg, existing);
+      const loser = winner === pkg ? existing : pkg;
       kept.set(pkg.manifest.id, winner);
       this.versionTrims.set(loser.rootDir,
-        `同 id 多版本同时启用：已按 contentHash 码点序裁剪 ${loser.manifest.id}@${loser.contentHash}，保留 ${winner.contentHash}；请停用或卸载多余版本`);
+        `同 id 多版本同时启用：已选中 ${winner.manifest.version}（${winner.contentHash.slice(0, 8)}），裁剪 ${loser.manifest.version}（${loser.contentHash.slice(0, 8)}）；请停用或卸载多余版本`);
     }
     return [...kept.values()].sort((a, b) => compareCodePoint(a.manifest.id, b.manifest.id) || compareCodePoint(a.contentHash, b.contentHash));
+  }
+
+  private preferPackage(a: PluginPackage, b: PluginPackage): PluginPackage {
+    const left = parseVersion(a.manifest.version);
+    const right = parseVersion(b.manifest.version);
+    if (left !== null && right !== null) {
+      const byVersion = compareVersions(left, right);
+      if (byVersion !== 0) return byVersion > 0 ? a : b;
+    }
+    const leftMs = mtimeOf(a.rootDir);
+    const rightMs = mtimeOf(b.rootDir);
+    if (leftMs !== rightMs) return leftMs > rightMs ? a : b;
+    return compareCodePoint(a.contentHash, b.contentHash) <= 0 ? a : b;
   }
 
   private state(id: string, hash: string): Lifecycle { return this.lifecycle.get(keyOf(id, hash)) ?? { trusted: false, enabled: false }; }

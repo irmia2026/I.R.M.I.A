@@ -162,8 +162,8 @@ test('历史日志里同 id 多版本同时启用时 active 只收一个，并�
 
   const active = manager.active();
   assert.equal(active.length, 1);
-  const expected = [newer.contentHash, older.contentHash].sort()[0]!;
-  assert.equal(active[0]?.contentHash, expected, '裁剪规则是 contentHash 码点序取首个');
+  const expected = newer.contentHash;
+  assert.equal(active[0]?.contentHash, expected, '裁剪规则是版本高者胜');
   const trimmed = manager.list().find((view) => view.package.contentHash !== expected);
   assert.match((trimmed?.problems ?? []).join('\n'), /多版本|裁剪/);
   assert.equal(trimmed?.state, 'enabled', '被裁掉的包内容本身没问题，不该被标成 invalid');

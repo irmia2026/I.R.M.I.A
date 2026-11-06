@@ -1420,7 +1420,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const capable = pluginRuntime.adapters
       .filter((adapter) => adapter.capabilities.includes('prompt.inject'))
       .sort((left, right) => (left.pluginId < right.pluginId ? -1 : left.pluginId > right.pluginId ? 1 : 0));
-    if (capable.length === 0) return [];
+    if (capable.length === 0) {
+      write(`[插件] 没有声明 prompt.inject 的适配器（当前装配 ${pluginRuntime.adapters.length} 个）`);
+      return [];
+    }
     const lines: string[] = [];
     for (const adapter of capable) {
       try {
@@ -1432,9 +1435,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         const text = result !== null && typeof result === 'object' && typeof (result as { text?: unknown }).text === 'string'
           ? (result as { text: string }).text.trim()
           : '';
-        if (text !== '') lines.push(text);
-      } catch {
-        // fail-open：这一步不注入它，主流程继续。
+        if (text !== '') {
+          write(`[插件] ${adapter.pluginId} 注入此刻层：${text}`);
+          lines.push(text);
+        } else {
+          write(`[插件] ${adapter.pluginId} 这一拍没有要注入的行`);
+        }
+      } catch (error) {
+        write(`[插件] ${adapter.pluginId} prompt/render 失败：${error instanceof Error ? error.message : String(error)}`);
       }
     }
     return lines;

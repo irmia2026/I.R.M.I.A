@@ -4568,7 +4568,15 @@ class WebServerImpl implements WebServer {
       throw new HttpError(400, 'bad-plugin-id', '插件 id 不合法');
     }
     const suffix = slash < 0 ? '' : rest.slice(slash + 1);
-    sendJson(res, 200, await handler({ pluginId, suffix, query: url.searchParams }));
+    try {
+      const payload = await handler({ pluginId, suffix, query: url.searchParams });
+      console.log(`[视图] ${pluginId}/${suffix || 'root'} → 200`);
+      sendJson(res, 200, payload);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.log(`[视图] ${pluginId}/${suffix || 'root'} → 失败：${reason}`);
+      throw error;
+    }
   }
 
   private async handleProtocolSide(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
