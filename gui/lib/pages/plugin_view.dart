@@ -976,12 +976,36 @@ class _PluginViewsPageState extends State<PluginViewsPage> {
         builder: (context) => Scaffold(
           backgroundColor: _m.shell,
           body: SafeArea(
-            child: PluginViewPage(
-              state: widget.state,
-              pluginId: entry.pluginId,
-              viewId: entry.viewId,
-              title: entry.title,
-              subtitle: entry.subtitle,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                  child: Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                        label: const Text('返回'),
+                      ),
+                      const Spacer(),
+                      TextButton.icon(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                        label: const Text('关闭'),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: PluginViewPage(
+                    state: widget.state,
+                    pluginId: entry.pluginId,
+                    viewId: entry.viewId,
+                    title: entry.title,
+                    subtitle: entry.subtitle,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
