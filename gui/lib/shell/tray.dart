@@ -3,7 +3,6 @@
 // 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
 // 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -115,18 +114,6 @@ class IrmiaTray with TrayListener {
     _actions = actions;
     _strings = strings;
     if (displayName != null && displayName.trim().isNotEmpty) _displayName = displayName.trim();
-    if (_installed) return;
-
-    trayManager.addListener(this);
-    await trayManager.setIcon(_iconPath);
-    await trayManager.setToolTip(_tooltip);
-    await trayManager.setContextMenu(Menu(items: trayMenuItems(
-      strings,
-      pending: _pendingCount,
-      updateVersion: _updateVersion,
-      updateRequired: _updateRequired,
-    )));
-    _installed = true;
   }
 
   /// 语言换了之后把菜单文字重画一遍（`effectiveLanguage` 一变就调）。
@@ -233,16 +220,6 @@ class IrmiaTray with TrayListener {
     } catch (_) {
       // 拆不掉也不该拦住退出
     }
-  }
-
-  /// 托盘图标：直接用 runner 里那份应用图标（省得再放一份、两份还会不一致）
-  String get _iconPath {
-    if (Platform.isWindows) {
-      final exeDir = File(Platform.resolvedExecutable).parent.path;
-      return '$exeDir${Platform.pathSeparator}data${Platform.pathSeparator}flutter_assets'
-          '${Platform.pathSeparator}assets${Platform.pathSeparator}tray.ico';
-    }
-    return 'assets/tray.ico';
   }
 
   @override

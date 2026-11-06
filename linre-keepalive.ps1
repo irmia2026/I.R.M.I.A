@@ -131,7 +131,10 @@ function Open-Gui {
     Start-Sleep -Milliseconds 800
   }
   try {
-    & cmd.exe /c start "" $GuiExe
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $GuiExe
+    $startInfo.UseShellExecute = $true
+    [System.Diagnostics.Process]::Start($startInfo) | Out-Null
     Write-Log 'Linre GUI 已拉起'
   } catch { Write-Log ("启动 Linre GUI 失败：{0}" -f $_.Exception.Message) }
 }
@@ -231,7 +234,7 @@ try {
     foreach ($process in @(Get-BackendProcesses)) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
   })
   $logItem = $menu.Items.Add('打开日志')
-  $logItem.add_Click({ try { & cmd.exe /c start "" $LogDir } catch { } })
+  $logItem.add_Click({ try { Start-Process -FilePath explorer.exe -ArgumentList $LogDir } catch { } })
   [void]$menu.Items.Add('-')
   $quitItem = $menu.Items.Add('退出保活')
   $quitItem.add_Click({
