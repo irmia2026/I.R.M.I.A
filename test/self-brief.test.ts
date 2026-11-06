@@ -460,10 +460,25 @@ describe('通知行 · 发言人那一格走名字真源', () => {
     lastTs: '2026-10-09T11:27:45.834Z',
   };
 
-  test('① 有名字就写名字：点名那句与预警行都不再出现那串裸 id', () => {
+  test('① 有名字就写名字：点名那句与预警行都不再出现那串裸 id；但必须指名 read_channel', () => {
     const mention = renderMentionNote(groupFacts({ personNameOf: nameOf }));
     assert.ok(mention !== null && mention.includes(OWNER), `点名那句要写名字：${mention}`);
-    assert.equal(mention?.includes(QQ), false, '名字认得出时不该再摆那串 QQ 号');
+    /**
+     * **v84（用户 2026-11-02）**：通知行要**引导她去 `read_channel` 认人**——原话
+     * 「提及的时候提示词要加入 openid 相关的提示词引导模型 read」。
+     *
+     * 但"引导"不等于"把 id 摆出来"：2026-10-11 那次治的病是 **id 顶替名字**
+     * （通知写 `1234567890`、`read_channel` 那行写「用户（阿岚）」，她照前者把用户当外人）。
+     * 认得出名字时，**名字本身就是那一屏里的锚**（`read_channel` 那一行也写这个名字），
+     * 所以这里不印 id，只补一句"那一屏里同一个人的行写的就是这个名字"。
+     *
+     * ⚠ 实际约束（2026-11-02 实测踩到）：这段会进任务卡，而任务卡有长度上限、超了会
+     * 用 `…` 截断——认得出名字时还硬塞 32 位 openid，只会把后半句截掉、反而更难读。
+     */
+    assert.equal(mention?.includes(QQ), false, '名字认得出时不许再摆那串 QQ 号（任务卡会截断）');
+    assert.ok(mention?.includes('read_channel'), `要指名去 read_channel 认人：${mention}`);
+    assert.ok(mention?.includes('那一屏里同一个人的行会对上这个人'),
+      `要说清两处怎么对上：${mention}`);
 
     const warn = renderInjectionNote([warnRow], Date.parse('2026-10-09T15:28:44.030Z'), nameOf);
     assert.ok(warn.includes(`测试群（群聊@）· ${OWNER}`), `预警行要写"哪个群 · 谁"：\n${warn}`);
@@ -494,6 +509,7 @@ describe('通知行 · 发言人那一格走名字真源', () => {
     assert.equal(messageRow, OWNER);
     assert.ok(mention.includes(messageRow!), '消息行与点名那句必须是同一个名字');
     assert.ok(warn.includes(messageRow!), '消息行与预警行必须是同一个名字');
+    // 认得出名字 ⇒ 两处通知里都不许再出现那串 id（v84 仍守这条：名字就是锚）
     assert.equal(`${mention}${warn}`.includes(QQ), false, '两行通知里都不许再出现那串 id');
   });
 

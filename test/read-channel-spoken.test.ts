@@ -46,6 +46,14 @@ const CTX: ToolContext = {
   workspaceRoot: process.cwd(),
 };
 
+/**
+ * v84（2026-11-02）：`speak` 成功回执的**第二行**——把话指回聊天记录，并点名行首 `（我）`。
+ *
+ * 与 `delivery-receipt.test.ts` 里那份同形：这一行是她"要不要再发一遍"的判据，逐字钉死。
+ */
+const SPEAK_ECHO_LINE =
+  '- 已进 qq:group:G1 的聊天记录——read_channel 里行首「（我）」那一行就是你刚说的这句（要核对或撤回都看它）';
+
 /** 一条外部消息（只填断言用到的字段；sid 跟着 chatId 走，免得手写错一个就验错东西） */
 function message(patch: Partial<ChannelMessageView> & { chatId: string }): ChannelMessageView {
   const chatType = patch.chatType ?? 'group';
@@ -466,14 +474,23 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
     const speakOut = (await reportToolkit(rec, async () => ({ ok: true, status: 200 }))
       .byName('speak').handler({ text: '在的' }, CTX)).content;
     /**
-     * v74（用户 2026-10-20 的**最终口径**）：回执压成三态（`发送成功` / `成功，但超25字限制（N 字）`
-     * / `失败，<原因>`），**一个字都不多印**——"不必重复发送"这条**规矩搬进 `SELF_BRIEF` §2.1**
+     * v74（用户 2026-10-20 的**最终口径**）：回执压到极限（`发送成功` / `失败，<原因>`），
+     * **一个字都不多印**——"不必重复发送"这条**规矩搬进 `SELF_BRIEF` §2.1**
      * （她发之前就读得到；回执是最高频、后续 160 多个请求反复读回的一行，规矩不该每条回执付一遍）。
-     * 2026-10-21 补：三态里那条"超 25 字"只属于 `speak`——`report` 是发长文的那一件，
+     * 2026-10-21 补：那条"超 25 字"的成功态只属于 `speak`——`report` 是发长文的那一件，
      * 它**没有** 25 字建议线，成功回执固定 `发送成功`（长短一个样）。
+     * 2026-11-02 再补：`speak` 硬门 40 → 25 之后，那第二种成功态**不可达**（26 字先被门拒），
+     * 已删——于是两个工具的成功回执现在**完全同形**，都只有 `发送成功`。
+     *
+     * **v84（2026-11-02 增补）**：`speak` 那行之后再补**一行**，指回聊天记录并点名「（我）」。
+     * 这不是把"不必重复发送"那句规矩搬回来——规矩仍然只在 `SELF_BRIEF`（下面两条断言钉着），
+     * 补的是"**去哪儿核对**"这个动作性出口（v76 搬走它之后，她收到回执时读不到落点）。
+     * `report` **不动**：它的"发出去过"凭据本来就该由 `read_channel` 那行回答，且这一行
+     * 只对 `speak` 的口径（用户点名的是 speak 的调用结果）。
      */
     assert.deepEqual(reportOut.split('\n').filter(line => line !== ''), ['- 发送成功'], reportOut);
-    assert.deepEqual(speakOut.split('\n').filter(line => line !== ''), ['- 发送成功'], speakOut);
+    assert.deepEqual(speakOut.split('\n').filter(line => line !== ''),
+      ['- 发送成功', SPEAK_ECHO_LINE], speakOut);
     assert.ok(SELF_BRIEF.includes('不必重复发送'), '规矩必须在自述里（她发之前就能看到）');
     assert.equal(reportOut.includes('不必重复发送'), false, '回执不再逐条付这句规矩');
     assert.equal(speakOut.includes('不必重复发送'), false, '回执不再逐条付这句规矩');

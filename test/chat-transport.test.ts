@@ -107,6 +107,68 @@ test('请求形状 · `instructions` → `messages[0]=system`，`developer` → 
   assert.equal(JSON.stringify(body).includes('先看一眼日志'), false, '思维链正文一个字节都不许进 Chat 请求');
 });
 
+test('定时器角色审计 · 只记录最新唤醒、角色与请求 ID，不泄露正文或密钥', async (t) => {
+  const oldAuditFlag = process.env['IRMIA_TIMER_ROLE_AUDIT'];
+  process.env['IRMIA_TIMER_ROLE_AUDIT'] = '1';
+  const originalInfo = console.info;
+  const logs: string[] = [];
+  console.info = (...args: unknown[]) => { logs.push(args.join(' ')); };
+  t.after(() => {
+    if (oldAuditFlag === undefined) delete process.env['IRMIA_TIMER_ROLE_AUDIT'];
+    else process.env['IRMIA_TIMER_ROLE_AUDIT'] = oldAuditFlag;
+    console.info = originalInfo;
+  });
+
+  const send = async (input: DsRequest['input']): Promise<Record<string, unknown>> => {
+    const request = chatCompletionsTransport.buildRequest({ lane: 'heavy', input }, {
+      model: 'probe-model', user: 'probe', stream: false,
+    });
+    let captured: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response('{}', { status: 200, headers: { 'x-request-id': 'relay-request-test' } });
+    };
+    await chatCompletionsTransport.send({ apiKey: 'probe-secret', fetchImpl, signal: new AbortController().signal }, request);
+    return captured;
+  };
+
+  const memoryReference = await send([
+    { type: 'message', role: 'user', content: 'USER_PRIVATE_TEXT' },
+    { type: 'message', role: 'system', content: '99. `[定时器触发]` / `[system] 已安静 N 分钟' },
+  ]);
+  assert.equal(messagesOf(memoryReference).at(-1)?.role, 'system');
+  assert.equal(logs.length, 0, '记忆引用定时器文案不能触发审计');
+
+  const oldHistory = await send([
+    { type: 'message', role: 'system', content: 'persona' },
+    { type: 'message', role: 'system', content: '[定时器触发] OLD_TIMER_PRIVATE_TEXT（计划时刻 2026-11-02T01:00:00.000Z）' },
+    { type: 'message', role: 'user', content: '后续用户消息' },
+  ]);
+  assert.equal(messagesOf(oldHistory).at(-2)?.role, 'system');
+  assert.equal(logs.length, 0, '历史 timer 后有用户消息时不能当作当前 timer 唤醒');
+
+  const currentWake = [
+    { type: 'message', role: 'user', content: 'USER_PRIVATE_TEXT' },
+    { type: 'message', role: 'assistant', content: '上一条回复' },
+    { type: 'message', role: 'system', content: '[定时器触发] CURRENT_TIMER_PRIVATE_TEXT（计划时刻 2026-11-02T02:00:00.000Z）' },
+  ] satisfies DsRequest['input'];
+  const captured = await send(currentWake);
+  assert.equal(messagesOf(captured).at(-1)?.role, 'system');
+  assert.equal(logs.length, 2, '本次只产生一条出站记录和一条响应关联记录');
+  const outbound = JSON.parse(logs[0]!.replace(/^\[timer-role-audit\] /u, '')) as Record<string, unknown>;
+  const response = JSON.parse(logs[1]!.replace(/^\[timer-role-audit\] /u, '')) as Record<string, unknown>;
+  assert.equal(outbound['phase'], 'outbound');
+  assert.equal(outbound['timerRole'], 'system');
+  assert.equal(outbound['timerIndex'], 2);
+  assert.equal(response['phase'], 'response');
+  assert.equal(response['requestId'], 'relay-request-test');
+
+  await send(currentWake);
+  assert.equal(logs.length, 2, '同一进程只审计一次');
+  assert.equal(logs.join('\n').includes('PRIVATE_TEXT'), false, '不得记录消息正文');
+  assert.equal(logs.join('\n').includes('probe-secret'), false, '不得记录密钥');
+});
+
 test('请求形状 · 图片多一层对象、tools 多包一层 function、工具调用挂 assistant / 工具结果走 tool 角色', () => {
   const body = chatBodyOf(RICH);
   const messages = messagesOf(body);

@@ -483,18 +483,21 @@ test('⑦ v67 描述与行为一致：默认=增量 · 翻历史不改已读 · 
   // ＋ `url` 参数 +7（私网/环回被 SSRF 拒绝）＋ `max_chars` 参数 +4（印出 500000 上限）。
   // v80（2026-10-23）：`read_channel` 翻页一页的条数 50 → 15 ⇒ **5366，未动**（等宽替换：`before` /
   // `limit` 两个参数描述里各换一个两位数，`estimateTokens` 那把尺一分不差）。件数仍是 22。
-  // 要动这个数就同批复测 `docs/design.md §4.18` 与 `render.ts` 的 **v80** 那一篇。
-  assert.equal(catalogTotal, 5366,
-    `整段 tools 的代码口径变了（v79 实测 5366 = v74 的 5323 + 43 [http_get 描述 +32 / url +7 /`
-    + ` max_chars +4]；件数仍是 22）：`
-    + `要动这个数就同批复测 docs/design.md §4.18 与 render.ts 的 v79 那一篇（现在 ${catalogTotal}）`);
+  // v86（2026-11-02）：**5366 → 5402（+36）**——`read_channel` 加可选参数 `ids`（=`ids` 那一格
+  // ＋ 描述），换来"按需印一张「名字 = 完整 openid」的名单"。**描述本身 90 一个 token 没动**
+  // （参数不进 `MAX_DESCRIPTION_TOKENS` 那份预算，那条硬门只管描述），件数仍是 22。
+  // 要动这个数就同批复测 `docs/design.md §4.18` 与 `render.ts` 的 **v86** 那一篇。
+  assert.equal(catalogTotal, 5402,
+    `整段 tools 的代码口径变了（v86 实测 5402 = v80 的 5366 + 36 [read_channel 的 ids 参数]；`
+    + `件数仍是 22）：要动这个数就同批复测 docs/design.md §4.18 与 render.ts 的 v86 那一篇`
+    + `（现在 ${catalogTotal}）`);
   assert.ok(5500 - catalogTotal >= 30, `上界 5500 只剩 ${5500 - catalogTotal}（判据 ≥30）`);
-  assert.equal(catalogTotal + 110, 5476, '运行期口径（+ mcp 110，推算值）');
-  // 单件那一件：描述 90 ＋ sid 参数 39 ＋ 名字 4
+  assert.equal(catalogTotal + 110, 5512, '运行期口径（+ mcp 110，推算值）；越过 5500 提醒线但**不是门**');
+  // 单件那一件：描述 90 ＋ 参数 196 ＋ 名字 3
   assert.equal(
     estimateTokens(tool.name) + tokens + estimateTokens(JSON.stringify(tool.parameters) ?? ''),
-    253,
-    'read_channel 整件变了（v66 的 247 → 253）',
+    289,
+    'read_channel 整件变了（v86：253 → 289［ids 参数］；描述仍是 90，不在这一笔里）',
   );
   // 「离硬门不足 10 token 就红」那条线：这次把余量定在正好 10（判据是 `< 10` ⇒ 不红）
   assert.equal(MAX_DESCRIPTION_TOKENS - tokens, 10,

@@ -20,6 +20,100 @@ function inside(root: string, candidate: string): boolean {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+export interface PluginToolEntry {
+  readonly pluginId: string;
+  readonly contentHash: string;
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Record<string, unknown>;
+  readonly server: string;
+  readonly tool: string;
+}
+
+const PLUGIN_TOOL_NAME = /^[a-z][a-z0-9_]{1,40}$/;
+const PLUGIN_TOOLS_PER_PACKAGE = 8;
+const PLUGIN_TOOLS_TOTAL = 12;
+const PLUGIN_TOOL_NAME_MAX = 128;
+
+export function composePluginTools(packages: readonly PluginPackage[]): { entries: PluginToolEntry[]; warnings: string[] } {
+  const entries: PluginToolEntry[] = [];
+  const warnings: string[] = [];
+  const names = new Set<string>();
+  for (const pkg of packages) {
+    const declaration = pkg.manifest.contributions.tools;
+    if (declaration === undefined) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(join(pkg.rootDir, declaration), 'utf8'));
+    } catch (error) {
+      warnings.push(`${pkg.manifest.id}: tools 声明读不动：${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    if (!Array.isArray(raw)) {
+      warnings.push(`${pkg.manifest.id}: tools 声明必须是数组`);
+      continue;
+    }
+    let accepted = 0;
+    for (const item of raw) {
+      if (accepted >= PLUGIN_TOOLS_PER_PACKAGE) {
+        warnings.push(`${pkg.manifest.id}: 工具超过每插件 ${PLUGIN_TOOLS_PER_PACKAGE} 件上限，多余的忽略`);
+        break;
+      }
+      if (entries.length >= PLUGIN_TOOLS_TOTAL) {
+        warnings.push(`${pkg.manifest.id}: 工具超过全插件 ${PLUGIN_TOOLS_TOTAL} 件上限，多余的忽略`);
+        break;
+      }
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+        warnings.push(`${pkg.manifest.id}: tools 里有一项不是对象`);
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      const local = typeof record['name'] === 'string' ? record['name'] : '';
+      const description = typeof record['description'] === 'string' ? record['description'].trim() : '';
+      const server = typeof record['server'] === 'string' ? record['server'] : '';
+      const tool = typeof record['tool'] === 'string' ? record['tool'] : '';
+      const parameters = record['inputSchema'];
+      if (!PLUGIN_TOOL_NAME.test(local)) {
+        warnings.push(`${pkg.manifest.id}: 工具名不合法（^[a-z][a-z0-9_]{1,40}$）：${JSON.stringify(local)}`);
+        continue;
+      }
+      if (description === '') {
+        warnings.push(`${pkg.manifest.id}: 工具 ${local} 没有描述`);
+        continue;
+      }
+      if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) {
+        warnings.push(`${pkg.manifest.id}: 工具 ${local} 的 inputSchema 必须是对象`);
+        continue;
+      }
+      if (server === '' || tool === '') {
+        warnings.push(`${pkg.manifest.id}: 工具 ${local} 缺 server/tool`);
+        continue;
+      }
+      const name = `plugin__${pkg.manifest.id}__${local}`;
+      if (name.length > PLUGIN_TOOL_NAME_MAX) {
+        warnings.push(`${pkg.manifest.id}: 注册名过长（${name.length} > ${PLUGIN_TOOL_NAME_MAX}）：${name}`);
+        continue;
+      }
+      if (names.has(name)) {
+        warnings.push(`${pkg.manifest.id}: 工具名重复，后者忽略：${name}`);
+        continue;
+      }
+      names.add(name);
+      accepted += 1;
+      entries.push(Object.freeze({
+        pluginId: pkg.manifest.id,
+        contentHash: pkg.contentHash,
+        name,
+        description,
+        parameters: parameters as Record<string, unknown>,
+        server,
+        tool,
+      }));
+    }
+  }
+  return { entries, warnings };
+}
+
 export function composePluginHooks(packages: readonly PluginPackage[]): { entries: HookConfigEntry[]; warnings: string[] } {
   const entries: HookConfigEntry[] = [];
   const warnings: string[] = [];

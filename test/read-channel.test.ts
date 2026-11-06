@@ -426,6 +426,60 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.match(repeat.content, /你自己发出去的那些/u, `去重那句话要说清她的凭据在里面：${repeat.content}`);
   });
 
+  test('`ids` 默认不印名单；给 true 才在框外印「名字 = 完整 openid」（同一人只一条）', async () => {
+    /**
+     * v86（2026-11-02，用户口径「read_channel 加一列全 id」）。
+     *
+     * 病：要 @ 人得在 `speak` 正文里写 32 位全串，可她手上只有 `…A01` 这种尾号。
+     * 现在按需要多印一张名单——**默认关着**，因为那一串 32 位会留在历史里被后续每个请求重发。
+     */
+    const A = 'OPENID_AAAAAAAAAAAAAAAAAAAAAAAAAAAA01';
+    const B = 'OPENID_BBBBBBBBBBBBBBBBBBBBBBBBBBBB02';
+    const messages = [
+      message({ chatId: 'G1', chatType: 'group', person: A, text: '在的' }),
+      message({ chatId: 'G1', chatType: 'group', person: B, text: '我也在', msgSeq: 2, seq: 2 }),
+      message({ chatId: 'G1', chatType: 'group', person: A, text: '好', msgSeq: 3, seq: 3 }),
+    ];
+
+    // ① 不给 ids：那一屏保持原样，一个 32 位 id 都不许冒出来
+    const off = await toolkitWith(async () => messages, recorder())
+      .byName('read_channel').handler({ sid: 'qq:group:G1' }, CTX);
+    assert.equal(off.content.includes(A), false, `默认不许把整串 openid 塞进那一屏：\n${off.content}`);
+    assert.equal(off.content.includes(B), false, off.content);
+    assert.equal(off.content.includes('完整 openid'), false, '默认不印名单（也不印这句说明）');
+
+    // ② 给 ids: true：框外多一张名单，措辞给出下一步动作
+    const on = await toolkitWith(async () => messages, recorder())
+      .byName('read_channel').handler({ sid: 'qq:group:G1', ids: true }, CTX);
+    assert.ok(on.content.includes(A) && on.content.includes(B), `名单里要能查到这两个人：\n${on.content}`);
+    assert.match(on.content, /· .+ = OPENID_AAAA/u, `名单的行形态是「· 名字 = openid」：\n${on.content}`);
+    // **同一人只一条**：A 说了两句，名单上不该出现两行
+    assert.equal(on.content.split(A).length - 1, 1, `同一个人的 openid 只许出现一次：\n${on.content}`);
+    // 名单必须写在框**外**（框里是"别人说的话"，这张名单是框架给的查询结果）
+    const boxEnd = on.content.indexOf('[/external_event]');
+    assert.ok(boxEnd >= 0, '框要先正常闭合');
+    assert.ok(on.content.indexOf('完整 openid') > boxEnd, `名单要在框外：\n${on.content}`);
+    // 名字用的是**这一屏印过的同一个 label**（不是另起一套写法）
+    assert.match(on.content, /· [^=\n]+ = OPENID_BBBBBBBBBBBBBBBBBBBBBBBBBBBB02/u, on.content);
+
+    // ③ 同一条会话再读一次 ⇒ 走"没有新消息"那一支：**名单照样要给**
+    //    （不给的话就成了死胡同：她想 @ 人时，恰好是"已经看过那一屏"的时候）
+    const tk = toolkitWith(async () => messages, recorder());
+    await tk.byName('read_channel').handler({ sid: 'qq:group:G1', ids: true }, CTX);
+    const again = await tk.byName('read_channel').handler({ sid: 'qq:group:G1', ids: true }, CTX);
+    assert.match(again.content, /没有新消息/u, `第二次读应当是"没有新消息"：\n${again.content}`);
+    assert.ok(again.content.includes(A) && again.content.includes(B),
+      `"没有新消息"那一支也要给名单（否则她想 @ 人时永远拿不到）：\n${again.content}`);
+    assert.match(again.content, /· .+ = OPENID_AAAA/u, `措辞与摆出东西那一屏同一份：\n${again.content}`);
+
+    // ④ 同一支不给 ids ⇒ 一个 id 都不许冒出来（默认行为没被这个新分支带偏）
+    const tk2 = toolkitWith(async () => messages, recorder());
+    await tk2.byName('read_channel').handler({ sid: 'qq:group:G1' }, CTX);
+    const againOff = await tk2.byName('read_channel').handler({ sid: 'qq:group:G1' }, CTX);
+    assert.match(againOff.content, /没有新消息/u, againOff.content);
+    assert.equal(againOff.content.includes(A), false, `不给 ids 时"没有新消息"那一支也不许带名单：\n${againOff.content}`);
+  });
+
   test('描述在单件 100 token 的硬线以内（工具清单是每轮常驻开销）', () => {
     const tk = toolkitWith(null, recorder());
     const tokens = estimateTokens(tk.byName('read_channel').description);

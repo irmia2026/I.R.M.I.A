@@ -240,6 +240,10 @@ export interface ExecutionContext {
    * 执行器**不解读**它——判读只有一处（`tools/boundary.ts`），这里只是搬运。
    */
   boundaryRoot?: string | null;
+  /**
+   * 本轮外发策略：执行器只搬运，目标判断由具体外发工具在 resolveTarget 后完成。
+   */
+  outboundPolicy?: ToolContext['outboundPolicy'];
   /** 承诺类落库：tool/call */
   onToolCall: ToolCallRecorder;
   /** 承诺类落库：tool/result（按提交顺序串行调用） */
@@ -664,6 +668,7 @@ async function runInProcess(
     turn: ctx.turn,
     step: ctx.step,
     signal: link.signal,
+    ...(ctx.outboundPolicy === undefined ? {} : { outboundPolicy: ctx.outboundPolicy }),
     // 「有人插话」计数读取器原样透传：它是 turn 级的（整轮共用），不是每次调用新建的
     ...(ctx.interruptEpoch === undefined ? {} : { interruptEpoch: ctx.interruptEpoch }),
     // 销账口同样原样透传（speak 真被打断时用它；见 ExecutionContext.claimInterruption）

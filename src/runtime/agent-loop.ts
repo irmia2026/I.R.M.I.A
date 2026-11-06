@@ -530,6 +530,8 @@ export interface AgentLoopDeps {
    * 循环层只负责透传给执行器——循环层不读配置，与 `workspaceRoot` 同一条纪律。
    */
   boundaryRoot?: string | null;
+  /** 纯内部 timer 轮次的 owner 外发策略；缺省保持历史行为。 */
+  outboundPolicy?: ExecutionContext['outboundPolicy'];
   /** 外部取消（shutdown）：透传给模型请求与工具执行 */
   signal?: AbortSignal;
   /**
@@ -594,6 +596,8 @@ export interface AgentLoopDeps {
    * 行为与引入这一格之前逐字节相同。
    */
   isFrameworkWake?: (event: AppEvent) => boolean;
+  /** `scope:self` 且非 human 的 timer 失败后不重投；判据由宿主注入。 */
+  isInternalTimerWake?: (event: AppEvent) => boolean;
   /** 子进程隔离配置，原样透传给执行器（不响应中断的工具走隔离，超时即杀） */
   isolation?: IsolationConfig;
   /**
@@ -635,6 +639,20 @@ export interface AgentLoopDeps {
    * 状态层该段整体不出现；SKILL.md 正文永不在此——模型按需自己 safe_read（M7-4）。
    */
   skillCatalog?: string | null;
+  /**
+   * 插件提示行（协议 v2 `prompt/render`，2026-11-06）。
+   *
+   * 宿主装配点（`main.ts`）遍历**启用且声明了 `prompt.inject`** 的适配器，逐个
+   * `request(pluginId, 'prompt/render', …)` 取一行，按插件 id 稳定排序后交回来；
+   * 渲染层把它们合成此刻层末尾的**一个**「插件：」字段。
+   *
+   * **缺省 = 没有插件能力**：这一格不传，`RenderInput.pluginLines` 就不传，
+   * 渲染结果与引入它之前**逐字节相同**（`test/render.test.ts` 的基线用例钉着这条）。
+   *
+   * **fail-open 是调用方的责任**：这里抛错，`runStep` 只把这一格清空，
+   * 绝不让主循环失败——插件坏了不该让她说不出话。
+   */
+  pluginPromptLines?: (context: { turn: number; step: number; now: string }) => Promise<readonly string[]>;
   /**
    * MCP 索引文本（v46：与技能 catalog **同源同性质**的状态层素材，见 render.ts 的
    * `RenderInput.mcpIndex` 与 `mcp/index` 事件）。
@@ -1031,6 +1049,11 @@ export interface RequestDerivation {
   /** 技能 catalog（状态层素材，见 AgentLoopDeps.skillCatalog） */
   skillCatalog?: string | null;
   /**
+   * 插件提示行（协议 v2 `prompt/render`）：运行时由 `runStep` 取好后转手；
+   * 重放/预览没有插件可问 ⇒ 不传 ⇒ 与引入这一格之前逐字节相同。
+   */
+  pluginLines?: readonly string[];
+  /**
    * MCP 索引（**与技能 catalog 同段素材**，见 AgentLoopDeps.mcpIndex）：只回答"有哪些 server"，
    * 工具清单按需（`mcp` 工具）。重建时必须给**当时那一版**（`replay` 从 `mcp/index` 事件取）。
    */
@@ -1224,6 +1247,8 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     lane: input.lane,
     // 技能索引：与 events/persona 并列的渲染输入，重放走同一份 deriveRequest 才不会漂移
     skillCatalog: input.skillCatalog ?? null,
+    // 插件行（协议 v2）：重放/预览不传这一格 ⇒ 与引入它之前逐字节相同。
+    ...(input.pluginLines === undefined ? {} : { pluginLines: input.pluginLines }),
     // MCP 索引（v46）：**与技能索引同段素材、同一个位置**（长期记忆层里紧挨着它）。
     // 它的字节只有一处来源——日志里那条 `mcp/index` 快照（见 AgentLoopDeps.mcpIndex）。
     mcpIndex: input.mcpIndex ?? null,
@@ -1411,6 +1436,14 @@ export class TurnRunner {
    * 也不是"重新渲染一遍上个时刻"：这一格与真正发出去的那一份同一次调用产出，不落库、不进历史。
    */
   private previousNow = '';
+  /**
+   * 本步的插件提示行（协议 v2 `prompt/render`）：每步刷新，渲染层合成一个「插件：」字段。
+   *
+   * 为什么是字段而不是 `deriveAt` 的参数：`deriveAt` 是同步的（重放与界面预览也调它，
+   * 它们没有插件可问），取插件行必须发生在 `runStep` 的异步上下文里；用字段还能让
+   * "400 自救重建请求"（同一步的第二份）复用同一批行，不会多问一次模型。
+   */
+  private pluginLines: readonly string[] = [];
 
   /**
    * **上一 step 的历史段基线**（v76，P4 中段改写不变量；只在本 turn 内有效）。
@@ -1707,6 +1740,26 @@ export class TurnRunner {
 
   // ── 单步 ──
 
+  /**
+   * 向插件要本步的提示行（协议 v2 `prompt/render`）。
+   *
+   * **fail-open**：任何一个插件超时/报错都只是"这一步不注入它"，绝不让主循环失败。
+   * 空数组与"这一格不存在"渲染结果逐字节相同（`RenderInput.pluginLines` 的缺省语义）。
+   */
+  private async collectPluginLines(): Promise<void> {
+    const collect = this.deps.pluginPromptLines;
+    if (collect === undefined) {
+      this.pluginLines = [];
+      return;
+    }
+    try {
+      const lines = await collect({ turn: this.turn, step: this.step, now: this.deps.now() });
+      this.pluginLines = Array.isArray(lines) ? lines.filter((line) => typeof line === 'string') : [];
+    } catch {
+      this.pluginLines = [];
+    }
+  }
+
   /** 返回非 null 表示本 turn 到此结束；null 表示带上工具结果继续下一步 */
   private async runStep(firstStep: boolean): Promise<TurnEndReason | null> {
     // 重新对齐日志：本 step 的请求必须由日志派生（别人写进来的事件也要看得见）
@@ -1721,6 +1774,9 @@ export class TurnRunner {
     // 放在 `stepStartedMs` 之前是刻意的：那一段是网络/落盘，不是模型调用，不该混进
     // "这一步花了多久才失败"那个刻度（180s 那批事故全靠它认）。
     await this.prewarmStepImages();
+    // 插件行（协议 v2）：紧贴预热之后、计时起跳之前——它可能含一次 light 评价，
+    // 那算"装配"不算"模型主调用"，不该混进 `stepStartedMs` 之后那段时长。
+    await this.collectPluginLines();
     // **这一 step 的实测起跳点**（2026-10-16 加）：失败路径原来把 `durationMs` 写死 0
     // （`failStep` 里那一行），于是"这一步花了多久才失败"在日志上永远是 0——
     // 而 180s 那批事故全靠这个字段才认出"精确贴着 180s"是**我们自己的定时器**。
@@ -2282,6 +2338,7 @@ export class TurnRunner {
       // 每个 ToolContext。**条件展开**是必要的：`undefined` 与"不存在"在这里必须同义
       // （exactOptionalPropertyTypes 下显式赋 undefined 与缺省不是一回事，而语义上是一回事）。
       ...(this.boundaryRoot === undefined ? {} : { boundaryRoot: this.boundaryRoot }),
+      ...(this.deps.outboundPolicy === undefined ? {} : { outboundPolicy: this.deps.outboundPolicy }),
       // 两阶段落库：call 先拿 seq，result 引用它（§4.5）。两者都是承诺类。
       onToolCall: (call, def) => this.recordToolCall(step, call, def),
       onToolResult: (call, result, callSeq) => this.recordToolResult(step, call, result, callSeq),
@@ -2867,6 +2924,15 @@ export class TurnRunner {
         }, { sync: true });
         continue;
       }
+      if (event !== null && this.deps.isInternalTimerWake?.(event) === true) {
+        this.write('input/dead-letter', {
+          inputSeq: wakeSeq,
+          claimCount: nextCount,
+          lastError: '内部 scope:self 定时任务整轮失败，不自动重投，避免重复执行或向用户外发',
+          reason: 'internal-timer',
+        }, { sync: true });
+        continue;
+      }
       if (rejected) {
         this.write('input/dead-letter', {
           inputSeq: wakeSeq,
@@ -3403,6 +3469,8 @@ export class TurnRunner {
       // 记忆那一段**不在这里**（2026-10-04）：固定块里关于记忆的只有上面那份索引（`memoryIndex`），
       // 正文要她自己 `safe_read`（用户口径见 docs/memory-injection.md §5）。
       turnBlock: this.turnBlockNow(),
+      // 插件行（协议 v2）：本步取到的那几行；空数组与"这一格不存在"逐字节相同。
+      pluginLines: this.pluginLines,
       // STATE 预算（v32）：宿主装配 deps 时给一次（`config.persona.stateBudgetBytes`），
       // 每步原样转手。字节数不在这里传——它在 deriveRequest 里从 `persona.state` 量，
       // 于是运行期/重放/预览三条路量的是同一份文本、用同一个函数（stateBytesOf）。

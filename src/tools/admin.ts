@@ -36,15 +36,28 @@ import { mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promi
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
 
 import type { StoredTimerEntry, TimerSetInput, TimerStore } from '../wake/timer-store.js';
+import {
+  TIMER_FRAMEWORK_CHORE_KINDS,
+  TIMER_SELF_SCOPE,
+  isOwnerFacingTimer,
+} from '../wake/timer-policy.ts';
+export {
+  TIMER_FRAMEWORK_CHORE_KINDS,
+  TIMER_SELF_SCOPE,
+  isOwnerFacingTimer,
+} from '../wake/timer-policy.ts';
 import type { ChannelMessage, Visibility, WakeChannel } from '../log/types.js';
 import { contextImageSkipText, defaultVisibility, isImageAttachment, type ContextImageSkipReason } from '../log/types.ts';
 // 默认等待线只此一份（config.ts）：回执里说的时长必须与 real-loop 落 human/expired 的判定线同源
 import { DEFAULT_ASK_HUMAN_TIMEOUT_MIN } from '../config/config.ts';
 // 回投地址的 scheme 与解析口都属于通道层（`qq:<chatType>:<chatId>`、`onebot:<chatType>:<chatId>`），
 // 不在这里另造一套：多通道并存时按 wake.channel 选各自命名空间
-import { QQ_CHANNEL_NAME, parseReplyUrl as parseQqReplyUrl, replyUrlOf as qqReplyUrlOf } from '../channel/qq-official.ts';
 import {
-  ONEBOT_CHANNEL_NAME, ONEBOT_REPLY_SCHEME, isOneBotFamilyChannel,
+  QQ_AT_LEGACY_TAG_RE, QQ_AT_TAG_RE, QQ_CHANNEL_NAME, QQ_FACE_TAG_RE,
+  parseReplyUrl as parseQqReplyUrl, replyUrlOf as qqReplyUrlOf,
+} from '../channel/qq-official.ts';
+import {
+  CQ_CODE_PATTERN_SOURCE, ONEBOT_CHANNEL_NAME, ONEBOT_REPLY_SCHEME, isOneBotFamilyChannel,
   parseReplyUrl as parseOneBotReplyUrl, replyUrlOf as oneBotReplyUrlOf,
 } from '../channel/onebot.ts';
 import { CHAT_TYPE_LABELS, channelForNamespace, normalizeSid, parseSid, sessionLabelOf, type SessionEntry } from '../channel/sessions.ts';
@@ -202,30 +215,128 @@ export const SPEAK_TEXT_REMIND_MAX = 25;
  * speak 的**硬门**：超过它**直接拒绝**（`errorResult`）——不截断、不"提醒之后照发"。
  *
  * 用户 2026-10-05 的原话：「超多少字不截断取消。而是超过 40 字直接拒绝。返回要求重新组织语言，
- * 或是多次调用，或是 report」。所以这一条与上面两条**性质不同**：
+ * 或是多次调用，或是 report」。**2026-11-02 用户把这道门从 40 收到 25**（理由见下面那行 fork
+ * 注释），于是原来分层的三个数**并成了一条线**：
  *
  *   • **25**（`SPEAK_TEXT_SUGGESTED_MAX`）= **目标**——她该往哪儿说（越短越好，像打字聊天）；
- *   • **40（本常量）= 硬门**——过了就退回，一个字不发（`text` 那条路根本走不到）；
- *   • **提醒线**（`SPEAK_TEXT_REMIND_MAX`）= **纠偏的密度**——多久追她一句（不阻止发送）。
- *   • **分段**（`chat-split.ts`）= **40 以内的投递形态**——切成几条、按打字节奏一条条发。
+ *   • **25（本常量）= 硬门**——过了就退回，一个字不发（`text` 那条路根本走不到）；
+ *   • **25**（`SPEAK_TEXT_REMIND_MAX`）= **纠偏的密度**——多久追她一句（不阻止发送）；
+ *   • **分段**（`chat-split.ts`）= **门以内的投递形态**——切成几条、按打字节奏一条条发。
  *
- * 三层的分工可以一句话说完：**25 是目标，40 是门，分段是门里的走路方式**。40 以内照旧分段
- * （那是"像人打字"的语义，没有"超过多少就不分段"这回事了——那条 45 字的口径已被用户取消）。
+ * ⚠ **并线的直接后果（2026-11-02 收口，别把它改回去）**：门与建议线相等 ⇒
+ * "成功但超过建议线"这个区间**根本不存在**。v74 那条 `成功，但超25字限制（N 字）`
+ * 因此**永远不可达**（26 字先被这道门拒绝、一个字都没发出去）。所以成功回执现在
+ * **只有一个形状**：`发送成功`（+ v84 那行指回聊天记录）。留一个不可达的分支，
+ * 只会让人（和后来的我）以为那种回执还能出现。
  *
- * **为什么 40 是"拒绝"而不是"截断"**：截断过的话照样发出去，人读到的就不是她想说的那句了
+ * **为什么是"拒绝"而不是"截断"**：截断过的话照样发出去，人读到的就不是她想说的那句了
  * （回执与日志还会记着一段被砍过的文本）——那是替她说了半句。拒绝则把决定权还给她：
  * 重说、拆几次、还是改用 `report`，由她判断。拒绝文案必须给出这三条路（她照着就能改）。
  *
  * 判据用 `charCount`（中文计字口径：emoji / 增补平面字符算一个字），与分段、`maxLength`
  * 同一把尺子——用 `text.length` 会把 emoji 数成两个，同一句话带不带表情会落在门的两侧。
- * **边界是精确的**：正好 40 字通过，41 字起拒绝（测试 `test/admin-pwsh.test.ts` 钉住两侧）。
+ * **边界是精确的**：正好 25 字通过，26 字起拒绝（测试 `test/admin-pwsh.test.ts` 钉住两侧）。
  *
  * `SPEAK_TEXT_HARD_MAX` 仍在、仍是 `requiredString` 的 `maxLength`：那是"别把整篇报告塞进来"
- * 的兜底（schema 层），400 > 40，所以真正会先拦下来的是这一条。
+ * 的兜底（schema 层），400 > 25，所以真正会先拦下来的是这一条。
  */
-export const SPEAK_TEXT_MAX = 40;
+// fork(pashippercode): 硬上限 40→25。软提醒拦不住重试循环（见 2026-11-01 四连发事故），
+// 长内容一律走 report（不限长）；与上游合并时保留本行。
+export const SPEAK_TEXT_MAX = 25;
 /** 硬上限：只是防它把整篇报告塞进来；稍微超过不拒，只在结果里提醒（那条提醒见 SPEAK_TEXT_REMIND_MAX） */
 const SPEAK_TEXT_HARD_MAX = 400;
+
+/**
+ * **`speak` 的计字尺子：QQ 的机器标记串整串算一个字**（用户 2026-11-02 定：「占一个字」）。
+ *
+ * ## 为什么
+ *
+ * 她要 @ 人时，正文里得写 `<qqbot-at-user id="0000…0004"/>`——**58 个字里 53 个是 openid**。
+ * 25 字门把那句话整个拒掉，于是 `speak` 这条路**根本发不出 @**（实测：最短的合法标签就 23 字，
+ * 只剩 2 字空间，写不出一句人话）。可那串 id 不是"她说的话"，是**寻址标记**——
+ * 按字数算它，等于按"信封上写了多少个字"来限制信的内容。
+ *
+ * ## 口径（哪些串算"一个字"）
+ *
+ * **只认协议定义过的形态**，不是"任何 `<…>` 都算一个"。区别在误伤：
+ *
+ * ```
+ *   "1 < 2 > 0 所以没问题"      ← 宽松口径会把 `< 2 >` 吞成一个"标记"，少算 4 字
+ *   "用 if (a < b > c) 判断"    ← 同理
+ * ```
+ *
+ * 走严格口径，算式和 HTML 一个字都不会被误算；而这个 const 集合本身**与渲染同源**
+ * （`readableContent` 用的是同一批正则），不会出现"渲染认得出、计字不认"的分裂。
+ *
+ * 目前两族：
+ *   · **QQ 官方**的三种 `<…>`（@ 人两种、表情一种）；
+ *   · **OneBot 的 CQ 码** `[CQ:type,key=value]`（2026-11-03，用户口径「允许 speak 使用 CQ
+ *     并算作一个字符呗，本来聊天就能在 speak 里发」）。
+ *
+ * ## 怎么实现的：占位 → 量/切 → 还原
+ *
+ * 把每个标记串替换成**一个私有区字符**（U+E000 + 序号），于是它天然「长度是 1」，
+ * 也天然不会被 `chat-split` 从中间切开——这正是需要的两个性质，一次搞定：
+ *
+ * ```
+ *   "<qqbot-at-user id=\"X\"/> 在不在"   原 27 字 → 遮罩后 5 字 ⇒ 过门
+ *   分段时也不会再出现 "<qqbot-at-user" | "id=\"X\"/> 在不在" 这种把标签切断的结果
+ * ```
+ *
+ * ⚠ `[CQ:...]` 这一族有个**这条通道之外的代价**，如实记：遮罩不带通道判断（门在解析目标之前，
+ * 见 handler 里"位置刻意在**解析目标之前**"那段），所以发往**非 OneBot** 通道时，
+ * 一个字面量 `[CQ:image,...]` 也只算 1 字、却会原样（当成普通文字）发出去。
+ * 没有选"按通道决定"，因为那要么把门挪到解析之后（推翻那条刻意留的次序），
+ * 要么在计字处再猜一次目标——两者都比"官方通道里几乎不会有人写 CQ 码"更贵。
+ *
+ * ⚠ 不用宽松正则、也不改 `chat-split` 的成对符号表：往那张表里加 `<>` 会让**任何**半开尖括号
+ * 触发"配不齐就整篇不拆"的保守分支，副作用比这个大得多。
+ */
+const CQ_CODE_RE = new RegExp(CQ_CODE_PATTERN_SOURCE, 'gu');
+const SPEECH_TAG_RES = [QQ_AT_TAG_RE, QQ_AT_LEGACY_TAG_RE, QQ_FACE_TAG_RE, CQ_CODE_RE] as const;
+/** 占位符所在的私有区（U+E000–U+F8FF）：只由我们自己插入，还原时按区段扫回来 */
+const SPEECH_TAG_PLACEHOLDER_BASE = 0xE000;
+const SPEECH_TAG_PLACEHOLDER_RE = /[\uE000-\uF8FF]/gu;
+
+/** 遮罩结果：`masked` 拿去量长度与分段，`tags` 按序存着原文，切完再贴回去 */
+interface MaskedSpeech {
+  masked: string;
+  tags: string[];
+}
+
+/**
+ * 把正文里的 QQ 标记串换成一个字符，原串按出现顺序收进 `tags`。
+ *
+ * 三种正则**依次**替换（它们互不重叠：`<qqbot-at-user…>` 不可能同时是 `<@…>`），
+ * 所以序号顺序就是原文里的出现顺序，还原时按下标取即可。
+ *
+ * 兜底：正文里**本来就含私有区字符**时不做遮罩（原样返回、`tags` 为空）。
+ * 那种输入不存在于真实聊天里，但万一有，宁可退回"标签也算字"的旧行为，
+ * 也不能让还原那一步把用户自己打的字符替换成标签。
+ */
+function maskSpeechTags(text: string): MaskedSpeech {
+  if (/[\uE000-\uF8FF]/u.test(text)) return { masked: text, tags: [] };
+  const tags: string[] = [];
+  let masked = text;
+  for (const re of SPEECH_TAG_RES) {
+    masked = masked.replace(re, (whole: string) => {
+      tags.push(whole);
+      return String.fromCharCode(SPEECH_TAG_PLACEHOLDER_BASE + tags.length - 1);
+    });
+  }
+  return { masked, tags };
+}
+
+/** 把遮罩贴回去——分完段逐条还原，出站的就是她写的那几个字节 */
+function unmaskSpeechTags(masked: string, tags: readonly string[]): string {
+  if (tags.length === 0) return masked;
+  return masked.replace(SPEECH_TAG_PLACEHOLDER_RE, (ch: string) => {
+    const index = ch.charCodeAt(0) - SPEECH_TAG_PLACEHOLDER_BASE;
+    // 越界不可能发生（占位符只由 maskSpeechTags 按 tags 下标生成）；
+    // 真越界就原样留着，绝不编一个标签出来。
+    return tags[index] ?? ch;
+  });
+}
 /** report 的上限：正式内容允许长，与 speak 差三个量级 */
 const REPORT_TEXT_MAX = 64000;
 
@@ -920,48 +1031,6 @@ export const TIMER_WAIT_REASON_MAX = 200;
  *     没有 IM 会话的那一拍是 null）。
  */
 export const TIMER_WAIT_PAYLOAD_KIND = 'wait';
-
-/** 她自报"这是我的内部事"的那一格：`payload.scope === 'self'` ⇒ 不上日程页的周历（v59 约定） */
-export const TIMER_SELF_SCOPE = 'self';
-
-/**
- * **框架自己的内务** kind（与"她自己的事"一样**不上日程页的周历**）。
- *
- * 只收"框架替她排的、与人无关的"那一种：
- *   · `memory-maintain` —— 每日记忆整理（常量在 `src/persona/memory-maintain.ts`，
- *     由 `src/runtime/real-loop.ts` 排成每天一次的 cron）。
- *
- * ⚠ **`wait` 不在这里**（`TIMER_WAIT_PAYLOAD_KIND`）：那是"过一会儿叫我"的定时唤醒，内容多半是
- * 替用户记的事（提醒他、约好的事）⇒ 按缺省算**用户向**，照旧上周历。
- * ⚠ 这里的字面量与 `memory-maintain.ts` 的常量**由用例锁住**（`test/timer-payload.test.ts`
- * 断言两者相等），`admin.ts` 不 import persona 那一层——为一个字符串引一条跨层依赖不划算。
- */
-export const TIMER_FRAMEWORK_CHORE_KINDS: readonly string[] = ['memory-maintain'];
-
-/**
- * 这一条定时器**是不是给用户看的**（日程页的周历只画用户向的；清单里两类都留、用户向在前）。
- *
- * 判据**黑名单式**（缺省用户向——默认可见比默认隐藏安全），按顺序、先命中先定：
- *   ① `payload.by === 'human'` ⇒ **用户向**（人自己建的，一律算用户向，这条最优先）；
- *   ② `payload.scope === 'self'` ⇒ **她自己的事**；
- *   ③ `payload.kind` 命中 [TIMER_FRAMEWORK_CHORE_KINDS] ⇒ **她自己的事**；
- *   ④ 其余 ⇒ **用户向**（`wait`/`set` 那些多半是"到点提醒用户"的事，没有信号时不该被藏起来）。
- *
- * ⚠ **不看 `payload.action`**：那是"到点做什么动作"（自主工作/提醒/存草稿），与"给谁看"正交——
- * 拿它当判据会把用户的"每周复盘""整理周计划"一起挡在周历外。
- * ⚠ 旧形状（`payload` 是字符串或 null）⇒ 按用户向（缺省口径）。
- * ⚠ GUI 侧有一份**等价实现**（`gui/lib/pages/schedule_page.dart` 的 `_isOwnerFacing`）：界面读的是
- * 同一份投影，但跨语言不能共享代码 ⇒ **两份必须同步改**（各自的用例各钉一遍，判据逐条对齐）。
- */
-export function isOwnerFacingTimer(payload: unknown): boolean {
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return true;
-  const record = payload as Record<string, unknown>;
-  if (record['by'] === 'human') return true;
-  if (record['scope'] === TIMER_SELF_SCOPE) return false;
-  const kind = record['kind'];
-  if (typeof kind === 'string' && TIMER_FRAMEWORK_CHORE_KINDS.includes(kind)) return false;
-  return true;
-}
 
 /** `payload` 里的一格字符串（读不到给空串）——回执自检与上面那条判据共用 */
 function payloadStringField(payload: unknown, key: string): string {
@@ -2147,6 +2216,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     };
   };
 
+  const outboundDenialFor = (ctx: ToolContext, target: ReplyTarget | null): string | null =>
+    target === null ? null : (ctx.outboundPolicy?.denyOwnerTarget?.(target.url) ?? null);
+
   /**
    * 降级事实那一行（回执用）：`ok: true` 且通道带回了 `note` 时才追加。
    *
@@ -2748,7 +2820,17 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       try {
         const args = argsRecord(rawArgs, 'speak');
         const text = requiredString(args, 'text', { maxLength: SPEAK_TEXT_HARD_MAX });
-        // **硬门（`SPEAK_TEXT_MAX` 40）：超过就退回，一个字不发。** 用户 2026-10-05 的口径。
+        /**
+         * **计字用的视图**：QQ 标记串（@ / 表情）整串算**一个字**（用户 2026-11-02 定）。
+         * 判据与遮罩的理由见文件上方 `maskSpeechTags` 那段注释——一句话：
+         * 32 位的 openid 是寻址标记，不是她说的内容，不该占她的 25 字额度。
+         *
+         * `text` 本体**一个字都不改**：遮罩只活在"量长度"与"分段"这两步里，
+         * 出站用的仍是原文（下面分段完 `.map` 还原）。
+         */
+        const speechMask = maskSpeechTags(text);
+        const speechChars = charCount(speechMask.masked);
+        // **硬门（`SPEAK_TEXT_MAX`，2026-11-02 起 25）：超过就退回，一个字不发。** 用户 2026-10-05 的口径。
         //
         // 拒绝而不是截断：截断过的那半句照样发出去，人读到的就不是她想说的那句了；把它退回去，
         // "重说 / 拆几次 / 改用 report"这三个决定仍在她手里。所以文案给全三条路，并把**收到多少字**
@@ -2757,7 +2839,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         //
         // 位置刻意在**解析目标之前**：一句话超了门就没有"该不该发、发给谁"的问题了，先判它
         // 才不会白算一轮；也保证被拒时日志里一个字都没落（截断或提醒后照发都做不到这一点）。
-        if (charCount(text) > SPEAK_TEXT_MAX) {
+        if (speechChars > SPEAK_TEXT_MAX) {
           /**
            * 超限回执（2026-10-16 压缩）：**保留**三件她据此行动的事——收到多少字、上限是多少、
            * 三条出路；压掉的是展开的形容（"聊天不必是完整句子，口语、残缺、倒装、省略都行"
@@ -2768,7 +2850,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
            * 而且离 `<60 token` 的硬门只剩几 token——回执不在那份预算里，压缩只落在这里。
            */
           return errorResult(
-            `这段 ${charCount(text)} 字，超过 speak 的上限（一次至多 ${SPEAK_TEXT_MAX} 字）——`
+            `这段 ${speechChars} 字，超过 speak 的上限（一次至多 ${SPEAK_TEXT_MAX} 字）——`
             + '一个字都没发出去。三条路挑一条：\n'
             + `- 压缩成更短的一句（往 ${SPEAK_TEXT_SUGGESTED_MAX} 字左右收）；\n`
             + '- 拆成几次调用：一次说一件事；\n'
@@ -2776,10 +2858,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             TOOL_ERROR_CODES.invalidArgs,
           );
         }
-        // v74（用户 2026-10-20 的最终口径）：越线不再单独追一句"提醒"——回执的两种成功态里
-        // 已经写着 `成功，但超25字限制（N 字）`，再追一段解释就是**同一件事说两遍**（而这条
-        // 回执是最高频、会被后续 160 多个请求反复读回的一行）。"写短"的指导搬进了
-        // `SELF_BRIEF` §2.1 与工具描述（她发之前就能看到），不再靠事后叨叨。
+        // v74（用户 2026-10-20 的最终口径）：越线不再单独追一句"提醒"——超线的那半句已经被上面
+        // 那道硬门直接退回，根本没有"发出去之后再解释"这一步。而"写短"的指导搬进了
+        // `SELF_BRIEF` §2.1 与工具描述（她**发之前**就能看到），不再靠事后叨叨
+        // （回执是最高频、会被后续 160 多个请求反复读回的一行）。
         const level = readNotifyLevel(args);
         const chars = text.length;
         const lines: string[] = [];
@@ -2798,6 +2880,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         }
         const target = resolved.target;
         const targetLabel = resolved.label;
+        const outboundDenial = outboundDenialFor(ctx, target);
+        if (outboundDenial !== null) {
+          return errorResult(outboundDenial, TOOL_ERROR_CODES.outboundDenied);
+        }
 
         // 第一路 + 第三路：**同一个循环、同一个节奏**。
         //
@@ -2814,9 +2900,16 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // **分段照旧**：一次发言切成几条、按打字节奏一条条发（`chat-split.ts` 认逗号与句号，
         // 成对符号与代码块有保护、不足 12 字整段一条——细则全在那个模块里，这里不重写一套）。
         // 已经没有"超过多少字就不分段"这回事了：用户 2026-10-05 取消了那条 45 字的口径，
-        // 超长改由上面的硬门（`SPEAK_TEXT_MAX` 40）直接拒绝——**门在进 speak 之前**，
+        // 超长改由上面的硬门（`SPEAK_TEXT_MAX`，2026-11-02 起 25）直接拒绝——**门在进 speak 之前**，
         // 走到这里的文本一定在门内，于是"切不切"只剩"该怎么切"。
-        const segments = splitForChat(text);
+        //
+        // **2026-11-02：切的是遮罩版，切完再还原。** QQ 标记串在 `speechMask.masked` 里是一个
+        // 私有区字符，所以 `chat-split` 既数不到它的长度（`SPLIT_MAX_CHARS` = 20 那把刀），
+        // 也不可能从它中间断开——在此之前 `<qqbot-at-user id="X"/>` 会被切成
+        // `"<qqbot-at-user"` + `"id=\"X\"/>…"`，@ 直接失效。没有标签时走原路（逐字节与从前相同）。
+        const segments = speechMask.tags.length === 0
+          ? splitForChat(text)
+          : splitForChat(speechMask.masked).map((seg) => unmaskSpeechTags(seg, speechMask.tags));
         // **正文原样出站**：一个字都不改、一段都不拦（2026-10-05 用户决定移除"名字 → openid →
         // 官方 @ 串"那一层，原话「我觉得没必要存在」，理由见 `channel/qq-official.ts` 文末那段
         // 注释与 docs/design.md §4.20.1）。`[@1 号]` 这种写法就是普通文字：**照发**——那层便利
@@ -2945,7 +3038,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           if (target !== null && sent > 0) {
             emit('speak/sent', deliverToSession({
               sid: target.url,
-              // 字数按中文计字口径（`charCount`：一个 emoji 算一个）——与整段那条回执同一个算法
+              // 字数按中文计字口径（`charCount`：一个 emoji 算一个），数的是**真正出站的字节**——
+              // 与硬门用的那把尺子（`speechChars`，QQ 标记串整串算 1 字）**故意不同**：
+              // 这条是账面记录"她一共发出去多少字"，含 openid 那几个字节才是实话；
+              // 硬门那把尺子算的是"她说了多少话"，是额度，不是账。两者别合并。
               chars: charCount(deliveredSegments.join('')),
               // 攒下来的就是**真送成的那几段**（不补失败之后没发的那些）
               text: deliveredSegments.join(''),
@@ -3020,18 +3116,38 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             ...deliveredIdKey(),
             ...spokenKey,
           }) satisfies SpeakSentPayload);
-          // v74（用户 2026-10-20 的**最终口径**）：成功回执按**她发出去的正文长度**分两态，
-          // 除此之外**一个多余字都不印**：
-          //   · 正文 ≤25 字 ⇒ `发送成功`（就这四个字）；
-          //   · 正文 >25 字 ⇒ `成功，但超25字限制（N 字）`——**不是失败**，只是告知；
-          //   · 不印坐标、不回显正文、不印"不必重复发送"、成功时不印"主动推送：跳过"。
+          // v74（用户 2026-10-20 的**最终口径**）：成功回执不印坐标、不回显正文、
+          // 不印"不必重复发送"、成功时不印"主动推送：跳过"。
+          //
+          // **2026-11-02 收口：两态并成一态。** 原来按正文长度分两态
+          // （≤25 ⇒ `发送成功`；>25 ⇒ `成功，但超25字限制（N 字）`）。用户把硬门
+          // （`SPEAK_TEXT_MAX`）从 40 收到 25 之后，26 字**根本到不了这里**（先被上面那道门拒掉），
+          // 所以 ">25 字还能成功" 这个区间不存在了，第二个分支是**不可达的死代码**。
+          // 留着的害处不是说错一句话，而是让人（和后来的我）以为那种回执还会出现、
+          // 照着它去写测试或排查。删掉它，这里就只剩一个事实：**能走到这一行 = 已经发出去了**。
+          //
           // "25 字"这条写进了 `SELF_BRIEF` §2.1 与 `speak.description`（她**发之前**就知道该写短）
           // ——回执是最高频、且会被后续 160 多个请求反复读回的一行，规矩写在前两处只付一次。
-          // 字数按 **runes**（Unicode 字符）数：中文一个字算 1，emoji 也算 1，不是字节、不是 token。
-          const bodyChars = [...text].length;
-          lines.push(bodyChars <= SPEAK_TEXT_SUGGESTED_MAX
-            ? '发送成功'
-            : `成功，但超${SPEAK_TEXT_SUGGESTED_MAX}字限制（${bodyChars} 字）`);
+          lines.push('发送成功');
+          /**
+           * 2026-11-02（用户口径）：**回执要指回聊天记录，并点名那一行长什么样。**
+           *
+           * 病：v76 把 `SENT_CREDENTIAL_NOTE`（"证据在 `read_channel`，行首 `（我）`"那一段）
+           * 从回执里搬进了 `SELF_BRIEF` §2.1，理由是对每条回执都一样、只该付一次。代价是回执
+           * 只剩光秃秃的 `发送成功`——她**在收到回执的这一拍**读不到"去哪儿核对"，想知道
+           * "到底发出去没有"就只剩两条路：再发一遍（重复），或者不管。而 §2.1 那段在长段落
+           * 里，隔着几十个段落，命不中。
+           *
+           * 所以这里补**一行**（不是 beta11 的整段样板）：给出
+           *   ① 这话进了哪个会话的聊天记录（`sid` 原样给——她要核对就得对得上坐标）；
+           *   ② **行首那个 `（我）` 就是她刚说的这一句**（`SELF_SPEAK_LABEL`，唯一措辞出处）；
+           *   ③ 一句出口（要看/要撤都走它）。
+           * 为什么用 `（我）` 这个**字面符号**而不是再解释一遍"你自己的发言会单独占一行"：
+           * 她在 `read_channel` 里认出自己那一行靠的就是这三个字，两处必须是同一串。
+           * 长度：约 60 字，只在这一条回执上付一次（成功态才印；失败/无会话那两支不印）。
+           */
+          lines.push(`已进 ${target.url} 的聊天记录——read_channel 里行首「${SELF_SPEAK_LABEL}」那一行`
+            + '就是你刚说的这句（要核对或撤回都看它）');
         }
         // 降级提醒单独一行，且**排在投递结论之后**：先答"发没发出去"，再答"发成什么样"。
         // 它只在通道明确带回降级事实时出现（例如 markdown 被拒、按纯文本发的）——
@@ -3087,6 +3203,18 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         const level = readNotifyLevel(args);
         const chars = text.length;
         const lines: string[] = [];
+        const resolved = resolveTarget(
+          typeof args['to'] === 'string' ? args['to'].trim() : '',
+          ctx,
+        );
+        if (resolved.error !== undefined) {
+          return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
+        }
+        const target = resolved.target;
+        const outboundDenial = outboundDenialFor(ctx, target);
+        if (outboundDenial !== null) {
+          return errorResult(outboundDenial, TOOL_ERROR_CODES.outboundDenied);
+        }
         // 整段发：不切分、不加工格式。可见性显式给（与 speak 那条同一条理由，见上）
         emit('message/assistant', { text, toolCalls: [] }, defaultVisibility('message/assistant'));
         emit('speak/sent', { channel: 'log', chars } satisfies SpeakSentPayload);
@@ -3105,14 +3233,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             lines.push(`推送失败，${speakFailureReason(outcome.reason, 0, 1)}`);
           }
         }
-        const resolved = resolveTarget(
-          typeof args['to'] === 'string' ? args['to'].trim() : '',
-          ctx,
-        );
-        if (resolved.error !== undefined) {
-          return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
-        }
-        const target = resolved.target;
         // 正文原样出站（与 speak 同一条判据）：报告里写 `[@1 号]` 也好、写官方那一串
         // `<qqbot-at-user id="…" />` 也好，都只是正文的一部分——框架不改写、也不拒发。
         if (target === null) {
@@ -3152,6 +3272,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             // ⚠ 这里曾经照搬 `speak` 的两态（>25 字 ⇒ `成功，但超25字限制（N 字）`），那是**假话**：
             // 用户截图实证一篇 1293 字的报告被回执判成"超限"，而回执会被后续每个请求读回
             // ⇒ 等于每轮都告诉她"你的报告超限了"。降级 note 仍单独一行（它说的是形态，不是长短）。
+            // （2026-11-02 之后 `speak` 那两态本身也并成了一态，理由见它那一段注释。）
             lines.push('发送成功');
             const note = degradeLineOf(outcome.note);
             if (note !== null) lines.push(note);
@@ -3458,6 +3579,20 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
      * 判据与行首 `▶` **同一份**（都是 `mentioned` 这个集合）：有标记 ⇒ 有年龄格，一格不多一格不少。
      */
     mentionClock: { nowMs: number; watermark: number },
+    /**
+     * **在这一屏末尾把每个人的完整 openid 列出来**（`ids: true`；用户 2026-11-02 拍板的第 1 条）。
+     *
+     * 病：要 @ 人就得在 `speak` 正文里写 32 位全串，而她手上**只有尾号**——`read_channel` 平时
+     * 把长 id 折成 `…0004`，提及通知也只在认不出名字时才给全串。结果是**认得出来的人反而 @ 不了**。
+     *
+     * 为什么是"末尾一张名单"而不是"每行都加一格"：那一串 32 位字在每一行重复一遍，
+     * 一屏二十行就是六百多字，而她要的只是"这个名字对应哪串 id"这一个映射——
+     * **给一次就够**，且只在明确要 @ 的时候要（默认关着）。
+     *
+     * 名字用**这一屏印过的同一个 label**（同一个 alias 实例），所以她照着名单上的名字
+     * 回到上面那几行去认人，两处不会打架。
+     */
+    wantIds: boolean,
   ): string[] => {
     // 框的**开头与会话那一份同形**（`[external_event source=… chat=…`）：她认"这是别人说的话"
     // 靠的就是这个开头（装置自述里写着）。整批一个框，所以只写一次；`count=` 说明批里几条
@@ -3539,6 +3674,13 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
      * 而且它本来就在本文件的 import 里（回投地址那一处）。
      */
     const printIds = isOneBotFamilyChannel(anchor.channel);
+    /**
+     * `ids: true` 时那张**末尾名单**的原料：`openid → 这一屏印的名字`。
+     *
+     * 用 `Map` 而不是数组：同一个人在一屏里说三句，名单上只该有一条。
+     * 插入顺序 = 第一次出现的顺序（她从上往下读，正好对上）。
+     */
+    const personLabels = new Map<string, string>();
     for (const item of batch) {
       const when = shortLocalTime(item.ts, timezone);
       // "点了她的那条"的标记：加在整行最左边（见上面 `mentioned` 的说明）
@@ -3613,6 +3755,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         continue;
       }
       const label = alias(item.person, item.nickname);
+      // 名单（`wantIds`）用**这一屏印过的同一个 label**：她照着名字回到上面几行去认人，
+      // 两处不会打架。只收"别人的消息行"——她自己的发言走上面那条 `continue`，
+      // 进不到这里（那份名单是"要 @ 谁"，不是"我是谁"）。
+      if (wantIds && item.person.trim() !== '') personLabels.set(item.person, label);
       // 图片那一格：**逐个**对上宿主给的事实（它只含图、顺序与这里的图一致）。
       // 判据用 `isImageAttachment` 而不是 `a.type === 'image'`：那是全仓"这是不是一张图"的
       // 唯一实现（MIME `image/png` 与 OneBot 的段类型裸标签 `image` 都算），写窄了会让
@@ -3722,7 +3868,38 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       lines.push(`框架对其中 ${notes.length} 条的提示（不属于框里的内容）：`);
       lines.push(...notes);
     }
+    /**
+     * **末尾那张名单**（只在 `ids: true` 时印）：把这一屏出现过的人对上完整 openid。
+     *
+     * 位置刻意在框**外**（框里是"别人说的话"，这张名单是框架给的查询结果）——
+     * 和上面那几句"怎么看图""还有几张没带"同一类。
+     *
+     * 措辞给出**下一步动作**（"填进 speak 正文的哪个位置"），否则一串 id 摆在那儿，
+     * 她不知道该拿它干什么——那和"给个尾号"没区别。
+     */
+    if (wantIds) lines.push(...rosterLines(personLabels));
     return lines;
+  };
+
+  /**
+   * `ids: true` 那张名单（`· 名字 = 完整 openid`）——**两处共用同一份措辞**：
+   *   · 摆出了东西的那一屏（名字取行里印过的同一个 label，见 `renderReadBatch`）；
+   *   · **"没有新消息"那一支**（2026-11-02 一并修的死胡同）。
+   *
+   * 为什么第二条也要给：她刚读过这一屏、转头想 @ 里面的人，这时"没有新消息"确实是事实，
+   * 但**名单不该跟着一起消失**——"这几个人各是谁"与"这一屏有没有新东西"是两件事。
+   * 不修的话，`ids: true` 在她最需要的时候（已经看过那一屏）恰好什么都不给，
+   * 与之前那条"按 messageId 去查"的指路是同一类空头支票。
+   *
+   * 空表就返回空数组（调用方 `push(...)` 天然什么都不加）。
+   */
+  const rosterLines = (pairs: ReadonlyMap<string, string>): string[] => {
+    if (pairs.size === 0) return [];
+    return [
+      '（下面这张名单是「名字 = 完整 openid」，框架给的、不在框里，也不是谁说的话；'
+        + '要 @ 谁就把等号右边那串整串填进 speak 正文的 <qqbot-at-user id="…" /> 里。）',
+      ...[...pairs].map(([openid, label]) => `· ${label} = ${openid}`),
+    ];
   };
 
   /**
@@ -3820,6 +3997,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             + `给了就进翻页模式：一页 ${READ_CHANNEL_PAGE_SIZE} 条、读全部历史、**不改已读**；不给就是上面那个默认`,
         },
         limit: { type: 'number', description: `这一屏最多几行（缺省 ${READ_CHANNEL_DEFAULT_LIMIT}、翻页一页 ${READ_CHANNEL_PAGE_SIZE}、上限 ${READ_CHANNEL_MAX_LIMIT}）；你自己的发言也占行、一次回复只占一行` },
+        ids: { type: 'boolean', description: '给 true 就在这一屏末尾列出「名字 = 完整 openid」，@ 人才需要（那串 32 位很占地方）' },
       },
       required: [],
       additionalProperties: false,
@@ -3867,6 +4045,13 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           args['limit'],
           cursor === null ? READ_CHANNEL_DEFAULT_LIMIT : READ_CHANNEL_PAGE_SIZE,
         );
+        /**
+         * `ids: true` ⇒ 这一屏末尾多印一张 `名字 = 完整 openid` 的名单（要 @ 人时用）。
+         *
+         * **只认严格的 `true`**：这是个"要不要多印六百字"的开关，猜错方向代价不对称——
+         * 多印的这一屏会留在历史里被后续每个请求重发，少印只是她再要一次。
+         */
+        const wantIds = args['ids'] === true;
         /**
          * 写一笔已读位——**这个工具里唯一的写入处**（2026-10-24）。
          *
@@ -3976,7 +4161,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             ...renderReadBatch(batch, sessionEntryOf(messages[0]!), messages[0]!, undefined, {
               nowMs: readAtMs,
               watermark: 0,
-            }),
+            }, wantIds),
             // 这一屏之后还有没有更早的？宿主只回"最近 limit 条"，**它不回"是不是到日志开头了"**
             // （`readChannelMessages` 的窗口语义），所以判据取保守的那一侧：这一屏**装满了**
             // （`pool` 有 limit 条以上）就照实说"想接着往回翻"——多说一句的代价是白翻一次，
@@ -4186,6 +4371,23 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // `unread` 一条都没有（＝没有任何东西比她的水位更新），窗口里那些她要么已经看过、
           // 要么本来就压在已读位之内，推到一个她够得着的位置不会把任何一条没给她的话标成已读。
           advanceReadUpTo(readMarkOf(pool));
+          /**
+           * `ids: true` ⇒ **"没有新消息"照样把名单给她**（2026-11-02）。
+           *
+           * 取数窗口 `messages` 就是"最近的这些人"，名单从它建，与上面那句话互不冲突：
+           * 那句话答"有没有新东西"，这张名单答"这几个人各是谁"。共用 `rosterLines`，
+           * 所以措辞与摆出东西那一屏**逐字相同**。
+           */
+          if (wantIds) {
+            const alias = makePersonAliaser(resolvePersonName);
+            const roster = new Map<string, string>();
+            for (const m of messages) {
+              if (m.person.trim() === '' || roster.has(m.person)) continue;
+              roster.set(m.person, alias(m.person, m.nickname));
+            }
+            const extra = rosterLines(roster);
+            if (extra.length > 0) return okResult([head, ...extra].join('\n'));
+          }
           return okResult(head);
         }
         /**
@@ -4325,7 +4527,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           ...renderReadBatch(display, sessionEntryOf(anchor), anchor, digest.mentioned, {
             nowMs: readAtMs,
             watermark: prevSeq,
-          }),
+          }, wantIds),
           // 默认那一屏**也要给"下一页怎么翻"**（2026-10-08：返回里必须告诉她还有没有更多、
           // 下一页怎么翻；不给的话她只能反复拉同一屏）。游标是这一屏取数的下界：
           // 翻过去正好接上"这一屏之前"的那一段，不重不漏；上面真的没有更早的了就如实说。
@@ -4476,6 +4678,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
       }
       const target = resolved.target;
+      const outboundDenial = outboundDenialFor(ctx, target);
+      if (outboundDenial !== null) {
+        return errorResult(outboundDenial, TOOL_ERROR_CODES.outboundDenied);
+      }
       if (target === null) {
         return errorResult(
           '这一轮没有可发消息的会话（本轮不是 IM 唤醒，也没给 to）——媒体没发出去。',

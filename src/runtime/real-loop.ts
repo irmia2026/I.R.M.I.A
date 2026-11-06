@@ -58,6 +58,7 @@ import {
 import { TopicSummarizer, isUnattendedGroup } from '../channel/topic.ts';
 import type { WakeEmission } from '../wake/sources.js';
 import type { EventLog } from '../log/event-log.js';
+import { AfterCommitEventBus } from '../adapter/event-bus.ts';
 import type { DsClient } from '../model/ds-client.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import {
@@ -139,6 +140,7 @@ import type { SkillManager } from '../skill/skills.js';
 import { writeSkillIndexSnapshot } from '../skill/index-snapshot.ts';
 import type { HookRunner } from '../hook/hooks.js';
 import type { TimerStore } from '../wake/timer-store.js';
+import { isInternalTimerPayload, isPureInternalTimerBatch } from '../wake/timer-policy.ts';
 import { trustOfBatch, isOwnerLabel, type TurnTrust } from './trust.ts';
 import { createAuthzGate, type Scenario } from './authz.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
@@ -1482,6 +1484,8 @@ export interface RealLoopDeps {  log: EventLog;
     traceText: string;
     traceUsable: boolean;
   };
+  /** Adapter v2 的 after-commit 观察面；未注入时保持旧行为。 */
+  adapterEventBus?: AfterCommitEventBus;
   /** 轮询间隔（毫秒），默认 1000 */
   pollMs?: number;
   /** 刹车判定器覆盖点（测试注入假阈值用）；缺省按 config.budget 构造 */
@@ -1536,6 +1540,13 @@ export interface RealLoopDeps {  log: EventLog;
    * 缺省 `undefined` ⇒ 不参与判据（不注入插件平台的实例行为完全不变）。
    */
   pluginRevision?: () => string | undefined;
+  /**
+   * 插件提示行（协议 v2 `prompt/render`，2026-11-06）：原样透传给 `AgentLoopDeps`。
+   *
+   * 为什么在运行时这一层也要有：`agentDeps()` 是**同步**的，而取插件行是异步的
+   * （可能要问一次 light 模型）——所以它只能是一个回调，由 `runStep` 在异步上下文里调。
+   */
+  pluginPromptLines?: (context: { turn: number; step: number; now: string }) => Promise<readonly string[]>;
   /** 一轮结算后、下一批输入前应用插件隔离/恢复 */
   onTurnBoundary?: () => Promise<void>;
   /**
@@ -4757,6 +4768,11 @@ export class RealLoop {
     // warmUp 本来就要读全量日志，顺手算，零额外扫描。
     this.sessionBook = collectSessionsFromLog(events);
     this.channelBookSeq = this.deps.projection.lastSeq;
+    // `read_channel` 的取数索引（2026-11-04）：这一趟本来就全量读完了，顺手记「sid → 事件 seq」，
+    // 零额外扫描。不在这里装填的话，第一次 `read_channel` 要么白扫一遍日志（八秒多、撞工具超时），
+    // 要么给出空答案——两种都是错的。
+    for (const event of events) this.noteChannelSeq(event);
+    this.channelIndexSeq = this.deps.projection.lastSeq;
     // **群成员回填**（2026-10-07 补上那道空档）：`collectSessionsFromLog` 只折会话簿，而运行期
     // 那趟 `foldChannelEvents` 还负责 `registerGroupMembers`（群成员自动档案）。游标一前移，
     // **重启前**到达的那些群 @ 就再也没人折——那些人永远进不了档案，她问"甲是谁"时框架只能
@@ -5159,6 +5175,21 @@ export class RealLoop {
     // **不再有第三个消费点**：工具清单不读它（常量口径，见下面 `modelVisibility` 那段）。
     const trust: TurnTrust = this.trustOfTurn(wakeEvents);
     const scenario: Scenario = trust === 'owner' || trust === 'self' ? 'owner' : 'guest';
+    const pureInternalTimerTurn = isPureInternalTimerBatch(wakeEvents);
+    const ownerIds = pureInternalTimerTurn ? this.ownerIds() : null;
+    const outboundPolicy = pureInternalTimerTurn
+      ? {
+        denyOwnerTarget: (targetUrl: string): string | null => {
+          const parts = normalizeSid(targetUrl).split(':');
+          const personId = parts[1] === 'c2c' && parts.length >= 3
+            ? parts.slice(2).join(':')
+            : null;
+          return personId !== null && ownerIds?.has(personId) === true
+            ? '这是 scope:self 内部定时任务，本次未向用户发送消息。'
+            : null;
+        },
+      }
+      : undefined;
     // 本轮固定块的素材（B2）：**在这里读一次**，整轮共用同一份（见 turnBlockFacts）。
     // 读一次是这段代码的全部要点：`deriveRequest` 每步都会重新读 deps，而 deps 里的这份
     // 是**轮首快照**——一轮之内它逐字节不变，"不必每步重新编码"才成立。
@@ -5285,11 +5316,14 @@ export class RealLoop {
       // 为什么在这里注入而不是让循环层 import：判据的第二份实现必然与这一份漂开，
       // 而"哪些唤醒是框架自己的"这种判据漂开的后果是**静默的**（唤醒消失或重复认领）。
       isFrameworkWake: (event) => this.isMemoryMaintainWake(event),
+      isInternalTimerWake: (event) => event.type === 'wake/timer'
+        && isInternalTimerPayload(event.data.payload),
       // 活动边界（`config.trust.mode`）：**装配层唯一的消费点**——判据是 config.ts 的
       // `trustBoundaryRoot`（'full' → null 完全信任 / 'workspace' → 只限 trust.workspaceRoot）。
       // 与 workspaceRoot 一样是启动期定下的（它进的是 `AgentLoopDeps`，每 turn 重新装配一次，
       // 但值来自同一份 config，改配置要重启才接管——GUI 的开关也是这么写的）。
       boundaryRoot: trustBoundaryRoot(d.config.trust),
+      ...(outboundPolicy === undefined ? {} : { outboundPolicy }),
       /**
        * **外部取消**（2026-10-16 接线）：`AgentLoopDeps.signal` 这个字段早就在了
        * （它的注释写着"外部取消（shutdown）：透传给模型请求与工具执行"），而这一格
@@ -5344,6 +5378,11 @@ export class RealLoop {
       // 这一格是**实例上那份缓存**（`mcpIndexText`）：`mcpIndexSync` 在同一个 tick 的轮首
       // 刚把它更新过，而本轮认领输入发生在它之后 ⇒ 这里读到的永远是本拍定下的那一份。
       mcpIndex: this.mcpIndexText,
+      // 插件提示行（协议 v2 `prompt/render`，2026-11-06）：不传 = 没有插件能力，
+      // 渲染与引入它之前逐字节相同。它**不是轮首快照**——每步现取（见 `collectPluginLines`）。
+      ...(this.deps.pluginPromptLines === undefined
+        ? {}
+        : { pluginPromptLines: this.deps.pluginPromptLines }),
       // 记忆索引（B2）：`MEMORIES/INDEX.md` 的渲染形态——只有指针（路径 + 一行摘要 + !pinned），
       // 正文要她按需 safe_read。每 turn 重建一次索引文件（幂等：内容没变就不写盘），
       // 因为上一轮里她可能刚写过新记忆。见 persona/memory-injection.ts。
@@ -6368,6 +6407,60 @@ export class RealLoop {
   }
 
   /**
+   * `read_channel` 的取数索引（2026-11-04 补）：sid → 该会话消息的事件 seq（升序）。
+   *
+   * 为什么要有它：原先每次都 `log.readAll()` 全量扫一遍再 `slice(-limit)`。日志涨到 135 MB /
+   * 26 万条之后，扫一次实测 8.5 秒，直接撞上 `read_channel` 的 10 秒工具超时 —— 线上表现就是
+   * 「工具 read_channel 超过 10000ms 没有返回」。可它真正要的只有最后 N 条。
+   *
+   * 代价：只存序号（全库约 26 万个整数，几 MB），不存消息体；冷启动那一趟挂在 `warmUp` 上
+   * （那里本来就全量读一次，零额外扫描），之后用 `readRange` 增量补齐。
+   */
+  private readonly channelSeqIndex = new Map<string, number[]>();
+
+  /** 索引已经吃到哪个 seq（含）；`warmUp` 走完时等于当时的 lastSeq */
+  private channelIndexSeq = 0;
+
+  private noteChannelSeq(event: AppEvent): void {
+    if (event.type !== 'wake/channel' && event.type !== 'channel/message') return;
+    const d = event.data;
+    const sid = sidOf(d.channel, d.chatType, d.chatId);
+    const list = this.channelSeqIndex.get(sid);
+    if (list === undefined) this.channelSeqIndex.set(sid, [event.seq]);
+    else if (list[list.length - 1] !== event.seq) list.push(event.seq);
+  }
+
+  /** 把索引补齐到日志末尾（通常只差重启以来的那几条，`readRange` 不从头全读） */
+  private async topUpChannelSeqIndex(): Promise<void> {
+    if (this.ready !== null) {
+      await this.ready;
+    } else if (this.channelIndexSeq === 0) {
+      // 走不到这里（工具调用必然发生在 ready 之后）；真走到了就退化成全扫，绝不给空答案
+      for await (const event of this.deps.log.readAll()) this.noteChannelSeq(event);
+      this.channelIndexSeq = this.deps.projection.lastSeq;
+      return;
+    }
+    const from = this.channelIndexSeq + 1;
+    if (from > this.deps.projection.lastSeq) return;
+    for await (const event of this.deps.log.readRange(from)) this.noteChannelSeq(event);
+    this.channelIndexSeq = this.deps.projection.lastSeq;
+  }
+
+  /** 这次要取的那些 seq：从后往前挑，`before` 那一刀的语义与原来逐字节相同 */
+  private channelSeqsForRead(sid: string, limit: number, before?: number): number[] {
+    const seqs = this.channelSeqIndex.get(sid) ?? [];
+    const picked: number[] = [];
+    for (let i = seqs.length - 1; i >= 0 && picked.length < limit; i -= 1) {
+      const seq = seqs[i]!;
+      if (before !== undefined && seq >= before) continue;
+      picked.push(seq);
+    }
+    picked.reverse();
+    return picked;
+  }
+
+
+  /**
    * `read_channel` 的读取口：取某个会话的消息（时间正序）。
    *
    * 两种事件都算这个会话的消息——`wake/channel` 是"叫她"的那条、`channel/message` 是只记账的
@@ -6379,22 +6472,24 @@ export class RealLoop {
    *     判据用事件 seq 而不是平台序号：平台序号**答不了"这一条在这段历史里的位置"**
    *     （官方单聊恒为 1、OneBot 没 @ 的群消息也没有），拿它当游标必然错页。
    *
-   * 全量扫日志（不是只扫尾部）：`readTailEvents` 的早停对"按类型过滤"是安全的，但在她读一个
-   * 冷清会话时会白读一大片别人的消息。这里取的是**每轮至多一次**的交互式调用（她主动点开），
-   * 与"逐轮渲染"不是一个量级的开销，宁可实现简单、结论确定。
+   * 取数走 `channelSeqIndex`（sid → 事件 seq）。**不再全量扫日志**：日志涨到 135 MB /
+   * 26 万条之后，一次 `readAll()` 要八秒多，线上直接撞成「read_channel 超过 10000ms」。
+   * 索引只存序号，冷启动那一趟挂在 `warmUp` 上（那里本来就全量读一次），之后增量补齐；
+   * 这里只 `log.get` 挑中的那 N 条。
    */
   // 公开（不是 private）：这两个是**宿主接口**——main.ts 装配 catalog 时把它们递给
   // `read_channel`（工具层不读日志、不读别名表）。写成 private 就没法从 main 接线，
   // 而在 main 里另写一份"取最近 N 条"等于让同一件事有两份实现（v27/v30 记过同款坑）。
   async readChannelMessages(sid: string, limit: number, before?: number): Promise<ChannelMessageView[]> {
+    await this.topUpChannelSeqIndex();
     const hits: ChannelMessageView[] = [];
-    for await (const event of this.deps.log.readAll()) {
+    for (const seq of this.channelSeqsForRead(sid, limit, before)) {
+      const event = this.deps.log.get(seq);
+      if (event === null) continue;
       if (event.type !== 'wake/channel' && event.type !== 'channel/message') continue;
       const d = event.data;
-      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
-      // 游标那一刀在**读完这一条的全部字段之前**：往回翻时绝大多数事件都落在游标之后，
-      // 提前跳过它们省下的是每条都要算的预警查表（`flaggedNoteFor`）
-      if (before !== undefined && event.seq >= before) continue;
+      // 游标那一刀已经落在 `channelSeqsForRead` 里；这里只管把选中的那几条拼成视图，
+      // 字段口径与原来逐条一致（判据一处都不重写）。
       const flagged = this.flaggedNoteFor(d.messageId);
       hits.push({
         sid,
@@ -6408,18 +6503,11 @@ export class RealLoop {
         messageId: d.messageId,
         msgSeq: d.msgSeq,
         // 落库时分配的事件 seq：`read_channel` 判"这个会话有没有新东西"与翻页游标用的都是它
-        //（平台序号答不了这两个问题——官方单聊恒为 1，见 tools/admin.ts 的 ChannelMessageView.seq）
         seq: event.seq,
         ts: event.ts,
         ...(d.attachments === undefined ? {} : { attachments: d.attachments }),
-        // "这条是不是在点她"：判据与唤醒那条路**同一个**（`group-at` 是平台 @、
-        // `mentionsMe` 是适配器/关键词判定如实填的），收进唯一的 `mentionedInMessage`。
-        // 为什么要在读的时候就算出来：`read_channel` 默认那一屏**只给提及**，
-        // 而工具层拿不到宿主的关键词表（判定是宿主的事，见 channel/inbox.ts）。
+        // "这条是不是在点她"：判据与唤醒那条路**同一个**
         ...(mentionedInMessage(d) ? { mentionsMe: true } : {}),
-        // 判过的消息**回放时也要带预警**：那句话她可能正是在"翻旧账"这一刻才看到的，
-        // 而预警落在事件里、与她翻不翻无关——这正是把预警落成事件、而不是只在唤醒那一次
-        // 渲染里拼一句的理由（换个时刻看同一条消息，结论不该变）。
         ...(flagged === null ? {} : { flaggedNote: flagged }),
       });
     }
@@ -7096,6 +7184,15 @@ export class RealLoop {
       origin: 'runtime/real-loop',
     } as unknown as AppEvent;
     this.deps.log.append(event, { sync: true });
+    this.deps.adapterEventBus?.publishAfterCommit({
+      seq: event.seq,
+      ts: event.ts,
+      type: event.type,
+      data: event.data,
+      visibility: event.visibility,
+      ...(event.origin === undefined ? {} : { origin: event.origin }),
+      ...(event.parentCallId === undefined ? {} : { correlation: { parentCallId: event.parentCallId } }),
+    });
     applyOne(this.deps.projection, event);
     finalizePressure(this.deps.projection, event.ts);
     // 信任事件就地折入（不等下一拍）：确认后本拍就能生效，不必重启

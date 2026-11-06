@@ -453,7 +453,11 @@ test('失败连击④b：软提醒真的进上下文 —— timeout 那条 outpu
 
   // 第一行是固定句 + 实测耗时（`Date.now() - startedAt` 是墙钟值，所以只有它是变的）；
   // **v50 新增的那两段逐字钉**——它们才是"她读不读得到正文与软提醒"的判据。
-  const [firstLine, ...rest] = read.split('\n');
+  assert.ok(read.startsWith('【工具回执｜read_channel｜timeout】\n'));
+  assert.ok(read.includes('不是用户的新消息'));
+  const marker = '\n【执行结果】\n';
+  assert.ok(read.includes(marker), 'v83 来源提示后必须保留完整结果区');
+  const [firstLine, ...rest] = read.slice(read.indexOf(marker) + marker.length).split('\n');
   assert.match(firstLine ?? '', /^工具执行超时（\d+ms）。结果未知，别重试这个目标。$/);
   assert.equal(
     rest.join('\n'),

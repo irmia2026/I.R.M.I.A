@@ -42,6 +42,7 @@ import { createAdminTools, TIMER_FRAMEWORK_CHORE_KINDS, TIMER_WAIT_PAYLOAD_KIND,
 import { MEMORY_MAINTAIN_PAYLOAD_KIND } from '../src/persona/memory-maintain.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { TimerWakeSource } from '../src/wake/sources.ts';
+import { isPureInternalTimerBatch } from '../src/wake/timer-policy.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
 import type { DsClient } from '../src/model/ds-client.ts';
 import type { PersonaAssets } from '../src/persona/loader.ts';
@@ -475,6 +476,22 @@ test('⑤ 判据（正反两面）：人建的/缺省 ⇒ 用户向；scope:self
   // 白名单与 persona 那一层的常量**必须同步**（`admin.ts` 不 import persona，靠这一条锁住）
   assert.ok(TIMER_FRAMEWORK_CHORE_KINDS.includes(MEMORY_MAINTAIN_PAYLOAD_KIND),
     '框架内务白名单里少了 memory-maintain：日程页的周历会开始画"每日记忆整理"');
+});
+
+test('⑤ 运行时判据：仅纯内部 timer 批次启用外发限制', () => {
+  assert.equal(isPureInternalTimerBatch([
+    { type: 'wake/timer', data: { payload: { scope: 'self' } } },
+  ]), true);
+  assert.equal(isPureInternalTimerBatch([
+    { type: 'wake/timer', data: { payload: { by: 'human', scope: 'self' } } },
+  ]), false, 'by:human 必须保留用户向语义');
+  assert.equal(isPureInternalTimerBatch([
+    { type: 'wake/timer', data: { payload: { scope: 'self' } } },
+    { type: 'wake/channel', data: {} },
+  ]), false, '混入真人消息不得启用内部 timer 外发限制');
+  assert.equal(isPureInternalTimerBatch([
+    { type: 'wake/timer', data: { payload: { note: '提醒我' } } },
+  ]), false, '旧形状/缺 scope 按用户向兼容');
 });
 
 test('⑤ list 的回执：用户向的在前并标出来，她自己的另列（参数一个没加）', async (t) => {

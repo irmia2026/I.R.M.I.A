@@ -887,6 +887,14 @@ test('界面预览里只有「群成员别名」的人也写成名字，认不�
   const preview1 = await previewNowOf(1);
   assert.ok(preview1.includes(`· ${MEMBER_ONLY_NAME}`),
     `预览里那一行也必须是名字（修之前这里是裸 openid）\n预览=${preview1}`);
+  /**
+   * 认得出名字时预览里**不许**出现那串 openid（2026-10-11 的口径，v84 未回退）。
+   *
+   * v84 给提及通知加的是"那一屏里同一个人的行写的就是这个名字"这句**指路**，而不是把 id
+   * 摆出来——原因有两条：① id 顶替名字正是 10-11 那次要治的病；② 这段会进任务卡，
+   * 任务卡有长度上限、超了用 `…` 截断（2026-11-02 实测：塞进 32 位 openid 后
+   * 后半句直接被切掉，反而更难读）。
+   */
   assert.equal(preview1.includes(MEMBER_ONLY_OPENID), false,
     `有名字的人不许在预览里退回裸 id\n预览=${preview1}`);
   assert.equal(preview1, withoutMachine(live1),

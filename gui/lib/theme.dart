@@ -571,3 +571,39 @@ class _BreathDotState extends State<BreathDot> with SingleTickerProviderStateMix
     );
   }
 }
+
+abstract final class MoodPalette {
+  static const Color shell = Color(0xFFF8FBFD);
+  static const Color card = Color(0xFFFFFFFF);
+  static const Color ink = Color(0xFF25394E);
+  static const Color heading = Color(0xFF29465F);
+  static const Color title = Color(0xFF38546D);
+  static const Color muted = Color(0xFF8191A3);
+  static const Color mutedSoft = Color(0xFFA0AEBB);
+  static const Color edge = Color(0xFFE5EDF3);
+  static const Color primary = Color(0xFF658CBA);
+  static const Color primarySoft = Color(0xFFEAF3FB);
+  static const Color track = Color(0xFFF0F4F7);
+  static const Color chipBorder = Color(0xFFEDF2F6);
+  static const Color chipBg = Color(0xFFF8FBFD);
+
+  static const Color concern = Color(0xFF83A9CE);
+  static const Color warmth = Color(0xFFB4A5C3);
+  static const Color shyness = Color(0xFF8FBCB3);
+  static const Color joy = Color(0xFFD7B487);
+  static const Color distress = Color(0xFFAAB1C0);
+  static const Color irritation = Color(0xFFC5A6AA);
+
+  static const Color chartLine = Color(0xFF83ACCC);
+  static const Color chartGrid = Color(0xFFEAF0F5);
+
+  static Color emotionColor(String key) => switch (key) {
+        'concern' => concern,
+        'warmth' => warmth,
+        'shyness' => shyness,
+        'joy' => joy,
+        'distress' => distress,
+        'irritation' => irritation,
+        _ => primary,
+      };
+}

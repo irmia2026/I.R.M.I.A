@@ -43,6 +43,7 @@ import 'pages/channels_page.dart';import 'pages/chat_page.dart';
 import 'pages/extensions_page.dart';
 import 'pages/logs_page.dart';
 import 'pages/memory_page.dart';
+import 'pages/mood_page.dart';
 import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
 import 'pages/schedule_page.dart';
@@ -291,6 +292,13 @@ final navPages = <PageEntry>[
 
 /// 二级入口：低频功能，收进底部「更多」折叠组，不占一级位置
 final morePages = <PageEntry>[
+  PageEntry(
+    id: 'mood',
+    label: '情绪',
+    icon: Icons.mood_outlined,
+    solidIcon: Icons.mood_rounded,
+    builder: (state) => MoodPage(state: state),
+  ),
   PageEntry(
     id: 'memory',
     label: '记忆',

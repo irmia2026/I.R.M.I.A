@@ -161,9 +161,9 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 80（v78 关系档案改索引 → v79 http_get 换正文抽取器 → v80 read_channel 翻页一页的条数 50→15）', () => {
-    assert.equal(RENDER_VERSION, '80');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '80');
+  test('RENDER_VERSION 递到 86（v84 三处指路；v85 自述补 @ 语法与"标记串算 1 字"；v86 read_channel 的 ids 名单）', () => {
+    assert.equal(RENDER_VERSION, '86');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '86');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {
@@ -804,7 +804,7 @@ describe('⑧ 区外开关（outOfRegion）：默认 keep 一个字节不变；o
 
   test('区边界认的是**渲染成 user item 的事件**：每一条来路都算边界（两处清单不许漂）', () => {
     // 四条分支（`renderEvents` 的 switch）：`message/user` / `human/answered` / `image/attached` /
-    // 8 类 `wake/*`（它们共用**同一个** case 分支）。逐条来路各造一份日志：
+    // 7 类 user-role `wake/*`（定时器是 developer，不在此清单）。逐条来路各造一份日志：
     // 早期输入 → 早期问答（EA/ER）→ **这条边界事件** → 晚期问答（LA/LR）。
     // 开了 omit ⇒ 只有 LR 该在；若某条类型没被认成 user item，ER 就会被多算成区内 ⇒ 断言红。
     const makeBoundary: Array<[string, () => AppEvent]> = [
@@ -812,7 +812,6 @@ describe('⑧ 区外开关（outOfRegion）：默认 keep 一个字节不变；o
       ['human/answered', () => evt('human/answered', { question: '问过的事', answer: '人答了' })],
       ['image/attached', () => evt('image/attached', { name: 'p.png', key: 'k1', mime: 'image/png' })],
       ['wake/manual', () => evt('wake/manual', { note: '界面消息' })],
-      ['wake/timer', () => evt('wake/timer', { timerId: 't1', scheduledAt: '2026-10-20T12:00:00.000Z' })],
       ['wake/heartbeat', () => evt('wake/heartbeat', {
         quietSeconds: 600, idleTicks: 1, pressure: 0.05, probability: 0.03, roll: 0.001,
       })],
@@ -839,5 +838,34 @@ describe('⑧ 区外开关（outOfRegion）：默认 keep 一个字节不变；o
       assert.deepEqual(reasoningTexts(r.input), ['LATE-R'],
         `★ ${label} 必须被认成区边界（否则它在请求里比"最后一条 user"更早，区外那一条会被多传）`);
     }
+  });
+
+  test('wake/timer 是 system，不应推进 reasoning 的最后一条 user 边界', () => {
+    const policy = { reasoningEcho: { outOfRegion: 'omit' } } as const;
+
+    resetSeq();
+    const legacyEvents: AppEvent[] = [
+      evt('message/user', { text: '早期输入', source: 'human' }),
+      evt('message/assistant', { text: 'EARLY-ANSWER', toolCalls: [] }),
+      evt('message/reasoning', { turn: 1, step: 1, text: 'EARLY-R' }),
+      evt('wake/timer', { timerId: 'legacy-timer', scheduledAt: NOW }),
+      evt('message/assistant', { text: 'LATE-ANSWER', toolCalls: [] }),
+      evt('message/reasoning', { turn: 1, step: 2, text: 'LATE-R' }),
+    ];
+    assert.deepEqual(reasoningTexts(render(baseInput(legacyEvents, policy)).input), ['EARLY-R', 'LATE-R']);
+
+    resetSeq();
+    const earlyUser = evt('message/user', { text: '早期输入', source: 'human' });
+    const earlyAnswer = evt('message/assistant', { text: 'EARLY-ANSWER', toolCalls: [] });
+    const earlyReasoning = evt('message/reasoning', { turn: 1, step: 1, text: 'EARLY-R' });
+    const turnStart = evt('turn/start', { turn: 2, lane: 'heavy' });
+    const lateAnswer = evt('message/assistant', { text: 'LATE-ANSWER', toolCalls: [] });
+    const lateReasoning = evt('message/reasoning', { turn: 2, step: 1, text: 'LATE-R' });
+    const pinnedTimer = evt('wake/timer', { timerId: 'pinned-timer', scheduledAt: NOW });
+    const pinned = render(baseInput(
+      [earlyUser, earlyAnswer, earlyReasoning, turnStart, lateAnswer, lateReasoning],
+      { ...policy, pinnedWake: { event: pinnedTimer, beforeSeq: turnStart.seq } },
+    ));
+    assert.deepEqual(reasoningTexts(pinned.input), ['EARLY-R', 'LATE-R']);
   });
 });

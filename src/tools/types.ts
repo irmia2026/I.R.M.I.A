@@ -23,6 +23,13 @@ export interface ToolContext {
   /** 取消信号。工具必须响应：超时后仍在后台跑的 handler 会制造"日志说没成、现实成了"的假阴性 */
   signal: AbortSignal;
   /**
+   * 本轮外发策略：返回拒绝理由时，文本/媒体工具必须在任何日志或网络副作用前拒绝目标。
+   * 缺省表示不增加额外限制，保持既有行为。
+   */
+  outboundPolicy?: {
+    denyOwnerTarget?: (targetUrl: string) => string | null;
+  };
+  /**
    * 「有人插话」计数读取器：她发言途中人又开口时，这个计数会加一。
    *
    * 与 `signal` 的分工：那个是"整台机器要停"（进程级，停了就什么都没了），
@@ -100,6 +107,7 @@ export const TOOL_ERROR_CODES = {
   tooLarge: 'E_TOO_LARGE',
   writeFailed: 'E_WRITE_FAILED',
   denied: 'E_DENIED_COMMAND',
+  outboundDenied: 'E_DENIED_OUTBOUND',
   destructiveDisabled: 'E_DESTRUCTIVE_DISABLED',
   noRuntime: 'E_NO_RUNTIME',
   timeout: 'E_TIMEOUT',

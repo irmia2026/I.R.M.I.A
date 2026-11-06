@@ -885,6 +885,21 @@ export interface ChannelsConfig {
       /** 框架启动时自动拉起（默认 true） */
       autoStart?: boolean;
     };
+    /**
+     * 「状态命令」（可选）：白名单里的 QQ 号发触发词，回一条**合并转发**的本机状态报告。
+     *
+     * 与插件平台刻意分开：这是**确定性命令响应**——不进 agent、不耗模型 token、不起 turn，
+     * 也不是她"可以选择做不做"的行为。不写这一段（或 users/triggers 为空）= 功能关闭。
+     */
+    statusCommand?: {
+      /** 允许触发的 QQ 号（字符串形态，与事件里的 `person` 逐字相等才算） */
+      users: string[];
+      /**
+       * 触发词：**整句 trim 后完全相等**才算（不是子串匹配——"sts"不该命中"status"），可配多个。
+       * 大小写敏感（QQ 习惯）。
+       */
+      triggers: string[];
+    };
   };
 }
 
@@ -2131,14 +2146,59 @@ function parseOneBotManaged(raw: JsonValue | undefined): ChannelsConfig['onebot'
   return managed;
 }
 
+/**
+ * 解析 `channels.onebot.statusCommand`（可选节）：users = QQ 号字符串数组（5~13 位数字），
+ * triggers = 触发词数组（非空、≤32 字）。**两个数组都不允许为空**——空 users 等于"谁都
+ * 不能触发"、空 triggers 等于"什么都触发不了"，配成那样不如不写这段，静默收下只会留下
+ * "我配了却不生效"的现场（与 mentionKeywords 同一条纪律）。
+ */
+function parseOneBotStatusCommand(raw: JsonValue | undefined): NonNullable<ChannelsConfig['onebot']['statusCommand']> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const obj = objectOr(raw, 'channels.onebot.statusCommand');
+  const where = 'channels.onebot.statusCommand';
+
+  const readStringArray = (key: 'users' | 'triggers', check: (value: string) => string | null): string[] => {
+    const item = obj[key];
+    if (!Array.isArray(item)) {
+      throw new ConfigError(`${where}.${key} 应是字符串数组（实际是 ${describeValue(item)}）`, `${where}.${key}`);
+    }
+    const out: string[] = [];
+    for (const entry of item) {
+      if (typeof entry !== 'string') {
+        throw new ConfigError(`${where}.${key} 里只允许字符串（这一项是 ${describeValue(entry)}）`, `${where}.${key}`);
+      }
+      const value = entry.trim();
+      const problem = check(value);
+      if (problem !== null) throw new ConfigError(`${where}.${key}：${problem}（收到 ${JSON.stringify(entry)}）`, `${where}.${key}`);
+      if (!out.includes(value)) out.push(value);
+    }
+    if (out.length === 0) throw new ConfigError(`${where}.${key} 不允许为空数组：不写这一段才是「功能关闭」`, `${where}.${key}`);
+    return out;
+  };
+
+  return {
+    users: readStringArray('users', (value) => {
+      if (!/^\d{5,13}$/u.test(value)) return 'QQ 号应是 5~13 位数字';
+      return null;
+    }),
+    triggers: readStringArray('triggers', (value) => {
+      if (value === '') return '触发词不能是空串/纯空格';
+      if ([...value].length > 32) return '触发词太长（上限 32 字）——它是一句整话完全相等才算的词，不是子串';
+      return null;
+    }),
+  };
+}
+
 function parseOneBotChannel(raw: JsonValue | undefined, base: ChannelsConfig['onebot']): ChannelsConfig['onebot'] {
   const obj = objectOr(raw, 'channels.onebot');
   const managed = parseOneBotManaged(obj['managed']);
+  const statusCommand = parseOneBotStatusCommand(obj['statusCommand']);
   return {
     enabled: pickBoolean(obj['enabled'], 'channels.onebot.enabled', base.enabled),
     wsUrl: pickOneBotWsUrl(obj['wsUrl'], 'channels.onebot.wsUrl') ?? base.wsUrl,
     tokenEnv: pickEnvName(obj['tokenEnv'], 'channels.onebot.tokenEnv', base.tokenEnv),
     ...(managed === undefined ? {} : { managed }),
+    ...(statusCommand === undefined ? {} : { statusCommand }),
   };
 }
 

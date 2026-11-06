@@ -1,10 +1,22 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { relative, resolve, sep } from 'node:path';
 
 import type { HookConfigEntry } from '../hook/hooks.js';
 import type { McpServerEntry } from '../mcp/client.js';
 import { composePluginHooks, composePluginMcp, composePluginSkillRoots, type PluginSkillRoot } from './contributions.ts';
 import type { PluginManager } from './manager.ts';
 import { compareCodePoint, pluginPackagesRoot, type PluginPackage } from './package-store.ts';
+
+export interface PluginAdapterRuntime {
+  readonly pluginId: string;
+  readonly version: string;
+  readonly contentHash: string;
+  readonly rootDir: string;
+  readonly worker: string;
+  readonly apiVersion: 2;
+  readonly capabilities: readonly string[];
+}
 
 export interface PluginRuntimeComposition {
   packages: PluginPackage[];
@@ -23,6 +35,7 @@ export interface PluginRuntimeComposition {
   skillRoots: PluginSkillRoot[];
   hookEntries: HookConfigEntry[];
   mcpServers: McpServerEntry[];
+  adapters: PluginAdapterRuntime[];
   warnings: string[];
 }
 
@@ -40,6 +53,40 @@ export function pluginCompositionRevision(packages: readonly PluginPackage[]): s
   return hash.digest('hex');
 }
 
+export function composePluginAdapters(packages: readonly PluginPackage[]): { adapters: PluginAdapterRuntime[]; warnings: string[] } {
+  const adapters: PluginAdapterRuntime[] = [];
+  const warnings: string[] = [];
+  for (const pkg of packages) {
+    if (pkg.manifest.apiVersion !== 2) continue;
+    for (const declaration of pkg.manifest.contributions.adapters) {
+      const worker = resolve(pkg.rootDir, declaration.worker);
+      const relation = relative(pkg.rootDir, worker);
+      if (relation === '..' || relation.startsWith(`..${sep}`) || isAbsolutePath(relation)) {
+        warnings.push(`${pkg.manifest.id}: adapter worker escapes package: ${declaration.worker}`);
+        continue;
+      }
+      if (!existsSync(worker)) {
+        warnings.push(`${pkg.manifest.id}: adapter worker does not exist: ${declaration.worker}`);
+        continue;
+      }
+      adapters.push({
+        pluginId: pkg.manifest.id,
+        version: pkg.manifest.version,
+        contentHash: pkg.contentHash,
+        rootDir: pkg.rootDir,
+        worker,
+        apiVersion: 2,
+        capabilities: declaration.capabilities,
+      });
+    }
+  }
+  return { adapters, warnings };
+}
+
+function isAbsolutePath(value: string): boolean {
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value);
+}
+
 export function composePluginRuntime(manager: PluginManager, extraLaunchers?: readonly string[]): PluginRuntimeComposition {
   const packages = manager.active();
   const hooks = composePluginHooks(packages);
@@ -51,13 +98,15 @@ export function composePluginRuntime(manager: PluginManager, extraLaunchers?: re
     return composed.entries.filter((entry) => entry.plugin?.contributionName === circuit.contributionName);
   });
   const mcp = composePluginMcp(packages, extraLaunchers);
+  const adapters = composePluginAdapters(packages);
   return {
     packages,
     revision: pluginCompositionRevision(packages),
     skillRoots: composePluginSkillRoots(packages),
     hookEntries: [...hooks.entries, ...hookProbes],
     mcpServers: mcp.servers,
-    warnings: [...manager.list().flatMap((view) => view.problems), ...hooks.warnings, ...mcp.warnings],
+    adapters: adapters.adapters,
+    warnings: [...manager.list().flatMap((view) => view.problems), ...hooks.warnings, ...mcp.warnings, ...adapters.warnings],
   };
 }
 

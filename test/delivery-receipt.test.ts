@@ -42,6 +42,15 @@ import { tempDirSync } from './helpers/temp-dirs.ts';
 const TZ = 'Asia/Shanghai';
 const SID = 'qq:group:G1';
 
+/**
+ * `speak` 成功回执里**第二条**（v84 增补）：把话指回聊天记录，并点名行首 `（我）`。
+ *
+ * 逐字钉死而不是 `includes` 松着查：这一行是**她据以决定"要不要再发一遍"**的判据，
+ * 措辞漂了就等于判据漂了（与 `SENT_CREDENTIAL_NOTE` 同一条纪律）。
+ */
+const SPEAK_ECHO_LINE =
+  `- 已进 ${SID} 的聊天记录——read_channel 里行首「（我）」那一行就是你刚说的这句（要核对或撤回都看它）`;
+
 const PERSONA: PersonaAssets = {
   identity: 'IDENTITY',
   constitution: 'CONSTITUTION',
@@ -173,7 +182,7 @@ function useNoSleep(t: TestContext): void {
 
 // ──────────────────────────────── ① speak：成功 ────────────────────────────────
 
-test('speak 成功（正文 ≤25 字）：回执就四个字 `发送成功`，别的一概不印', async (t) => {
+test('speak 成功（正文 ≤25 字）：`发送成功` + 指回聊天记录那一行（含「（我）」）', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: true, status: 200 } });
   // 会话里先得有过话，`read_channel` 才不会先撞"这个会话里没有取到消息"那条早退
@@ -187,13 +196,20 @@ test('speak 成功（正文 ≤25 字）：回执就四个字 `发送成功`，�
   assert.equal(out.isError, undefined, out.content);
 
   /**
-   * v74（用户 2026-10-20 的**最终口径**）：成功回执按**她发出去的正文长度**分两态，
-   * 除此之外**一个多余字都不印**——不印坐标、不回显正文、不印"不必重复发送"、
-   * 成功时不印"主动推送：跳过"。这里钉的是"≤25 字"那一态：逐字 `发送成功`。
+   * v74（用户 2026-10-20 的**最终口径**）：成功回执按**她发出去的正文长度**分两态——
+   * 不印坐标、不回显正文、不印"不必重复发送"、成功时不印"主动推送：跳过"。
+   *
+   * **2026-11-02 增补（v84，用户口径）**：在那两态之后**再补一行**，把话指回聊天记录，
+   * 并**点名行首那个 `（我）`**。理由见 `admin.ts` 那一段注释：v76 把这层说明搬进
+   * `SELF_BRIEF` §2.1 之后，她在**收到回执的这一拍**读不到"去哪儿核对"，
+   * 只剩"再发一遍"和"不管"两条路。这一行钉的就是"核对的落点"。
    */
   const lines = out.content.split('\n').filter(line => line !== '');
-  assert.deepEqual(lines, ['- 发送成功'], `成功回执逐字就是这一行：\n${out.content}`);
-  assert.ok([...out.content.trim()].length <= 25, `整条回执 ≤25 字符（runes）：${[...out.content].length}`);
+  assert.deepEqual(lines, ['- 发送成功', SPEAK_ECHO_LINE],
+    `成功回执 = 结论一行 + 指回聊天记录一行：\n${out.content}`);
+  // 回显那一行必须点名 `（我）`——她在 read_channel 里认出自己那一行靠的就是这三个字
+  assert.ok(lines[1]?.includes('（我）'), `要逐字点出「（我）」：\n${lines[1]}`);
+  assert.ok(lines[1]?.includes(SID), `要给会话坐标才对得上：\n${lines[1]}`);
   // ③ 送出的是哪一句：锚点引的是**实际出站的字节**（切分之后的那些段拼起来）
   assert.equal(rig.posted.length, 2, '这一段被切成两条气泡发出去（逗号处断开）');
   const outbound = rig.posted.join('');
@@ -210,23 +226,33 @@ test('speak 成功（正文 ≤25 字）：回执就四个字 `发送成功`，�
     `原话在 read_channel 里读得回来（回执不再回显，但事实有去处）：\n${view.content}`);
 });
 
-test('speak 成功但正文 >25 字：`成功，但超25字限制（N 字）`（不是失败）；边界 25/26 分得开', async (t) => {
+test('speak 的 25/26 边界：25 字成功；26 字被硬门拒绝（"超25字还能成功"这一态已不存在）', async (t) => {
   useNoSleep(t);
-  // 正好 25 字 ⇒ 仍是 `发送成功`
+  /**
+   * **2026-11-02 用户把 `speak` 硬门从 40 收到 25**，于是"成功但超过建议线"这个区间消失了：
+   * v74 那条 `成功，但超25字限制（N 字）` 是**不可达的死代码**，已从 `admin.ts` 删掉。
+   *
+   * 这条用例现在钉的就是这条边界的两侧——不是"两态"，是"过 / 不过"：
+   *   · 25 字 ⇒ 成功（回执 = `发送成功` + v84 那行指回聊天记录）；
+   *   · 26 字 ⇒ **一个字都不发**，走硬门的三条出路文案。
+   */
   const rig25 = await makeRig(t, { outcome: { ok: true, status: 200 } });
   const exact = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX);
   assert.equal([...exact].length, 25);
   const out25 = await rig25.speak({ text: exact });
-  assert.deepEqual(out25.content.split('\n').filter(line => line !== ''), ['- 发送成功'], out25.content);
+  assert.deepEqual(out25.content.split('\n').filter(line => line !== ''),
+    ['- 发送成功', SPEAK_ECHO_LINE], out25.content);
+  assert.equal(rig25.posted.length > 0, true, '25 字必须真的发出去');
 
-  // 26 字 ⇒ 超限提示（正文两个字：中文一个字算 1，不是字节）
+  // 26 字 ⇒ 硬门拒绝（正文两个字：中文一个字算 1，不是字节）
   const rig26 = await makeRig(t, { outcome: { ok: true, status: 200 } });
   const over = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX + 1);
   const out26 = await rig26.speak({ text: over });
-  assert.deepEqual(out26.content.split('\n').filter(line => line !== ''),
-    ['- 成功，但超25字限制（26 字）'], out26.content);
-  assert.equal(out26.content.includes('失败'), false, '超限不是失败');
-  assert.equal(out26.content.includes('不必重复发送'), false, '成功那格不印判据（搬进描述）');
+  assert.equal(out26.isError, true, `26 字必须被硬门拒绝：${out26.content}`);
+  assert.match(out26.content, /超过 speak 的上限（一次至多 25 字）/u, out26.content);
+  assert.equal(out26.content.includes('成功，但超'), false,
+    '这条分支已删（不可达）——回执里不许再出现"成功但超限"');
+  assert.equal(rig26.posted.length, 0, '硬门在进 speak 之前，一段都不发');
 });
 
 // ──────────────────────────────── ② speak：失败 ────────────────────────────────
@@ -330,29 +356,30 @@ test('report 成功：回执**固定** `发送成功`——report 没有 25 字�
     `她 report 的那一篇要读得回来：\n${view.content}`);
 });
 
-test('speak 的超 25 字线**没有被顺手改坏**：40 字（能成功的最长一句）仍是 `成功，但超25字限制（40 字）`', async (t) => {
+test('speak 的 25 字线**没有被顺手改坏**：40 字（旧门内、现门外）必须被硬门拒绝，一个字不发', async (t) => {
   useNoSleep(t);
-  // 25/26 的边界由上面那条 `speak >25 字` 用例钉着；这里补 40（`SPEAK_TEXT_MAX` 硬门）这一侧。
+  // 25/26 的边界由上面那条用例钉着；这里补"旧 40 字时代能成功、现在必须被拒"这一侧——
+  // 防止哪天有人把 SPEAK_TEXT_MAX 悄悄改回 40 而没人发现。
   /**
-   * 40 字 ⇒ 仍旧是这条超限提示（不是失败、不是 `发送成功`）。
+   * 2026-11-02 用户把硬门 40 → 25 之后：
+   *   · 40 字 ⇒ **被拒**（旧口径下它是"能成功的最长一句"，那已经过期）；
+   *   · 250 字 ⇒ 同样被拒。
+   * 两条都不许出现"成功"字样、都不许发出任何一段。
    *
-   * ⚠ 验收里"speak 250 字 ⇒ 仍是 `成功，但超25字限制（250 字）`"在现口径下**不可能**：
-   * speak 头上有 40 字**硬门**（2026-10-05 用户定的"超过直接拒绝、一个字不发"），
-   * 250 字根本到不了成功那一支（下面第二段钉着它被拒的原话）。所以这条超 25 字线的
-   * **成功区间只有 26–40 字**——要让它出现在 250 字上，得先动那道硬门，那是另一条口径。
+   * ⚠ 验收里那种"speak 250 字 ⇒ 仍是 `成功，但超25字限制（250 字）`"现在**双重不可能**：
+   * 250 字先被 25 字硬门拒掉，而"成功但超限"这条分支本身也已经删了（不可达死代码）。
    */
   const rig40 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const forty = '啊'.repeat(40);
-  const out40 = await rig40.speak({ text: forty });
-  assert.deepEqual(out40.content.split('\n').filter(line => line !== ''),
-    ['- 成功，但超25字限制（40 字）'], out40.content);
-  assert.equal(out40.content.includes('失败'), false, '超限不是失败');
+  const out40 = await rig40.speak({ text: '啊'.repeat(40) });
+  assert.equal(out40.isError, true, `40 字必须被 25 字硬门拒绝：${out40.content}`);
+  assert.match(out40.content, /超过 speak 的上限（一次至多 25 字）/u, out40.content);
+  assert.equal(out40.content.includes('成功'), false, '没发出去就不许有"成功"字样');
+  assert.equal(rig40.posted.length, 0, '硬门在进 speak 之前，一段都不发');
 
-  // 250 字：先被 40 字硬门退回（一个字不发），回执里**不出现**那条超限提示
   const rig250 = await makeRig(t, { outcome: { ok: true, status: 200 } });
   const out250 = await rig250.speak({ text: '啊'.repeat(250) });
   assert.equal(out250.isError, true, `250 字必须走硬门（不是成功回执）：${out250.content}`);
-  assert.match(out250.content, /超过 speak 的上限（一次至多 40 字）/u, out250.content);
+  assert.match(out250.content, /超过 speak 的上限（一次至多 25 字）/u, out250.content);
   assert.equal(out250.content.includes('成功，但超'), false, '没发出去就不许有"成功"字样');
   assert.equal(rig250.posted.length, 0, '硬门在进 speak 之前，一段都不发');
 });

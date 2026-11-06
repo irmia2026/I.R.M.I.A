@@ -706,7 +706,7 @@ export const SELF_BRIEF = `# SELF_BRIEF｜自主 Agent 运行规范
 
 ### 2.1 \`speak\` / \`report\`
 
-你说话分两种。**跟人说话**是对外行为，必须调用工具：日常闲聊用 \`speak\`——正文尽量 ≤25 字（一两句以内；超了不会失败但会被告知，超 40 字退回），一轮通常只调一次（对方在等你说完时可以分几次），把想说的整段交给它，它会按真人节奏拆成几条发出去。想说的不止几句时（汇报、清单、代码、长文），用 \`report\`，Markdown 原样保留、不切分。
+你说话分两种。**跟人说话**是对外行为，必须调用工具：日常闲聊用 \`speak\`——正文尽量 ≤25 字（一两句以内；**超 25 字直接退回、一个字都不发**，不截断，那就得重写或改用 \`report\`；想 @ 人就在正文里原样写 \`<qqbot-at-user id="对方的 openid" />\`，这串**整串只算 1 字**、不占额度），一轮通常只调一次（对方在等你说完时可以分几次），把想说的整段交给它，它会按真人节奏拆成几条发出去。想说的不止几句时（汇报、清单、代码、长文），用 \`report\`，Markdown 原样保留、不切分。
 
 **不调这两个工具，人听不到你。** 落在对话流里的话，除非用户正好坐在机器前看着界面，否则那些字他一个也看不到，事后也未必会翻。想让他知道，就调 \`speak\` / \`report\` 把它送出去；送不送得到他手上，看这一轮的联络方式、渠道和推送出口是否配好。**成功了就不必重复发送**：他没看见不是因为你没说，再说一遍也不保证他能看见。
 
@@ -1362,6 +1362,26 @@ export function renderMentionNote(facts: ContactFacts): string | null {
   // read_channel 那行写着"用户（阿岚）"：同一个人两个名字，她照着通知行把用户当外人。
   const personLabel = labelForPerson(wake.person, facts.personNameOf);
   const who = wake.person === '' || wake.person === entry.person ? '' : `（这次是 ${personLabel}）`;
+  /**
+   * **2026-11-02（用户口径）：提及通知要引导她去 `read_channel` 认人。**
+   *
+   * 用户原话：「提及的时候提示词要加入 openid 相关的提示词引导模型 read」。
+   *
+   * 病：通知行只说"有人在某个群里 @ 了你"，**没说"去那一屏里怎么把这个人对上"**——
+   * 她顺着 sid 读过去，看到的是名字或 `…0006` 这种尾号，心里没有"这就是叫我的那个"的凭据。
+   *
+   * 三条写法约束（都是踩过的坑，别随手改）：
+   *   · **不摆 id**（守 2026-10-11 的纪律）：认得出名字时 `who` 已经写了名字，再塞 32 位
+   *     openid 会把这行撑长，而这段要进任务卡、任务卡超长会用 `…` 截断——
+   *     2026-11-02 实测：塞进去之后后半句直接被切掉，反而更难读；
+   *   · **措辞不能依赖名字解析结果**：界面预览那条路没有宿主的名字解析口（`personNameOf`），
+   *     而运行期有。若这里的字跟着"解没解析出名字"变，预览与当时那一屏就不再逐字节相同
+   *     （`channel-wire` 那条用例钉着这一点）。所以这句话**一个形状**，两种情况都读得通；
+   *   · **只加"怎么对上"，不加"该不该回"**：回不回由她定，那句在段末。
+   */
+  const openidHint = wake.person.trim() === ''
+    ? ''
+    : '那一屏里同一个人的行会对上这个人（认得出名字就写名字、认不出才写平台 id 的尾号）；';
   const unread = entry.unread ?? 0;
   // light 给出的话题结论（`channel/topic` → `facts.topics`）：**提及那一条路一定会先跑一次概括**
   //（real-loop 的 mentionSidOf → summarizeChattySessions 门槛让路），所以这里通常读得到。
@@ -1380,12 +1400,12 @@ export function renderMentionNote(facts: ContactFacts): string | null {
     // 注意别说成"没有别的新话"：未读为 0 只表示**别的**消息都看过了，
     // 叫她的这一条可能是全新的（见 isNew）。这里只陈述事实，不下"没事"的结论。
     return `有人在 ${where} 里${called}${who}${stamp}${fresh}：${talking}`
-      + `用 read_channel 看（sid ${sid}）——看不看、回不回都由你定。`
+      + `用 read_channel 看（sid ${sid}）——${openidHint}看不看、回不回都由你定。`
       + `${nl}（框架提醒）${GROUP_SCENE_REMINDER}`;
   }
   return `有人在 ${where} 里${called}${who}${stamp}${fresh}：那个会话里积了 ${unread} 条没看`
     + `（${at ? '@' : '这几句'}之外还有 ${unread} 条）。${talking}用 read_channel 看（sid ${sid}）——`
-    + '想只看 @ 附近的就给个小 limit，想翻全部再给大的；看不看、回不回都由你定。'
+    + `${openidHint}想只看 @ 附近的就给个小 limit，想翻全部再给大的；看不看、回不回都由你定。`
     + `${nl}（框架提醒）${GROUP_SCENE_REMINDER}`;
 }
 

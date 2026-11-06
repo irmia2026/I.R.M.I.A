@@ -1,0 +1,41 @@
+name: build-gui
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/builtin-plugins
+    paths:
+      - 'gui/**'
+      - '.github/workflows/build-gui.yml'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: stable
+          cache: true
+
+      - name: pub get
+        working-directory: gui
+        run: flutter pub get
+
+      - name: analyze
+        working-directory: gui
+        run: flutter analyze --no-fatal-infos
+
+      - name: build
+        working-directory: gui
+        run: flutter build windows --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: irmia-gui-windows
+          path: gui/build/windows/x64/runner/Release/
+          if-no-files-found: error

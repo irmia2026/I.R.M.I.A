@@ -1,0 +1,18 @@
+{
+  "apiVersion": 2,
+  "id": "linre-affect",
+  "version": "0.1.0",
+  "engine": { "irmia": ">=0.1.0-beta.14" },
+  "contributions": {
+    "skills": ["skills"],
+    "events": { "namespace": "linre-affect" },
+    "adapters": [
+      {
+        "worker": "adapter-worker.mjs",
+        "apiVersion": 2,
+        "capabilities": ["event.observe", "event.publish", "model.invoke", "prompt.inject", "ui.api"]
+      }
+    ]
+  },
+  "permissions": []
+}

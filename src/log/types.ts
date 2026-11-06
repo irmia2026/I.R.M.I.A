@@ -1553,7 +1553,7 @@ export interface InputDeadLetter extends EventEnvelope<'input/dead-letter', {
    * 不合法"，要改的是渲染/协议而不是那条输入；`stopped-by-owner` 只是用户按了停止，随时可以重投），
    * 而界面只能读字段、读不了自由文本。`lastError` 照旧是给人读的原话。
    */
-  reason?: 'claim-limit' | 'stopped-by-owner' | 'server-rejected';
+  reason?: 'claim-limit' | 'stopped-by-owner' | 'server-rejected' | 'internal-timer';
 }> {}
 
 /**

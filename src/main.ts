@@ -15,7 +15,7 @@
 
 import { AGENT_VERSION } from './version.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -50,6 +50,8 @@ import {
   HookRunner, digestProjection, hookConfigPath, loadHookConfig, protectedHookPaths,
 } from './hook/hooks.ts';
 import { RealLoop, memoryHostingEnabled } from './runtime/real-loop.ts';
+import { AfterCommitEventBus } from './adapter/event-bus.ts';
+import { AdapterSupervisor, type AdapterWorkerSpec } from './adapter/supervisor.ts';
 import { instanceIdOf, startWebServer, type WebServer } from './web/server.ts';
 // 启动期的**早绑端口**（2026-10-26）：先 listen、再干重活；就绪前 HTTP 答 starting/503
 import { StartupState, startPreflightServer, type PreflightServer } from './web/preflight.ts';
@@ -101,7 +103,7 @@ import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
 import { PluginManager, type PluginView } from './plugin/manager.ts';
 import { BUILTIN_PLUGINS_DIR_NAME, ensureBuiltinPlugins } from './plugin/seed.ts';
 import { PluginCircuitBreaker } from './plugin/circuit-breaker.ts';
-import { composePluginMcp } from './plugin/contributions.ts';
+import { composePluginMcp, composePluginTools } from './plugin/contributions.ts';
 import { PluginProbeCancelledError, type PluginFailure } from './plugin/failures.ts';
 import { composePluginRuntime, mapPluginMcpOwners, mergeMcpDeclarations, pluginProtectedPaths, type PluginRuntimeComposition } from './plugin/runtime.ts';
 import { allEventsOf } from './state/event-snapshot.ts';
@@ -119,6 +121,7 @@ import {
 import { channelGate } from './channel/self-message-gate.ts';
 import { createWorkspaceMediaPoster } from './channel/media-poster.ts';
 import { createInputNotifyPoster } from './channel/input-notify.ts';
+import { createStatusCommand, formatDuration, type StatusForwardSender } from './channel/status-command.ts';
 import {
   ONEBOT_REPLY_SCHEME, OneBotChannel, createOneBotReplyPoster,
 } from './channel/onebot.ts';
@@ -1248,6 +1251,18 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
 
   const { log, lock } = recovery;
+  const adapterEventBus = new AfterCommitEventBus();
+  const publishAdapterEvent = (event: AppEvent): void => {
+    adapterEventBus.publishAfterCommit({
+      seq: event.seq,
+      ts: event.ts,
+      type: event.type,
+      data: event.data,
+      visibility: event.visibility,
+      ...(event.origin === undefined ? {} : { origin: event.origin }),
+      ...(event.parentCallId === undefined ? {} : { correlation: { parentCallId: event.parentCallId } }),
+    });
+  };
 
   const append = (type: string, data: unknown, visibility: Visibility): AppEvent => {
     const event = {
@@ -1259,6 +1274,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       origin: 'main',
     } as unknown as AppEvent;
     log.append(event, { sync: true });
+    publishAdapterEvent(event);
     return event;
   };
 
@@ -1309,6 +1325,120 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
   // no-seed / exists 都不必说什么：前者是老安装包的常态，后者是幂等的常态
   let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
+  const pluginEventBudget = new Map<string, { windowStart: number; count: number }>();
+  const takePluginEventSlot = (pluginId: string): boolean => {
+    const nowMs = Date.now();
+    const current = pluginEventBudget.get(pluginId);
+    if (current === undefined || nowMs - current.windowStart >= 3_600_000) {
+      pluginEventBudget.set(pluginId, { windowStart: nowMs, count: 1 });
+      return true;
+    }
+    if (current.count >= 120) return false;
+    current.count += 1;
+    return true;
+  };
+  const encoder = new TextEncoder();
+  const onPluginEventAppend = (pluginId: string, contentHash: string, payload: unknown): string | null => {
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return '事件体必须是对象';
+    const body = payload as { type?: unknown; visibility?: unknown; data?: unknown };
+    const type = typeof body.type === 'string' ? body.type : '';
+    const prefix = `plugin/${pluginId}/`;
+    if (!type.startsWith(prefix)) return `事件类型必须在自己的命名空间 ${prefix}* 下`;
+    if (!/^[a-z0-9-]{1,40}$/.test(type.slice(prefix.length))) return '事件类型后缀不合法（小写字母、数字、连字符，≤40）';
+    if (body.visibility !== 'model' && body.visibility !== 'internal') return 'visibility 只接受 model 或 internal';
+    const data = body.data;
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return 'data 必须是对象';
+    const text = (data as { text?: unknown }).text;
+    if (typeof text !== 'string' || text === '') return 'data.text 必填';
+    if (text.length > 2000) return 'data.text 超过 2000 字符';
+    if (encoder.encode(JSON.stringify(payload)).length > 4096) return '单条事件超过 4 KB';
+    if (!takePluginEventSlot(pluginId)) return '本插件写入过于频繁（每小时 120 条上限）';
+    appendWithSeq(type, () => ({ ...(data as Record<string, unknown>), text, pluginId, contentHash }), body.visibility);
+    return null;
+  };
+  /**
+   * 插件 → 宿主的模型通道（`model/generate`）。
+   *
+   * **先空后填**：`DsClient` 在下面才建（它要 apiKey），而 supervisor 必须在这之前装配。
+   * 取值发生在 worker 真的发起调用的那一刻——那时这个格子必然已填好；
+   * 没配密钥则永久为空 ⇒ 明确报错，不静默回落、不借别的 lane 的 key。
+   */
+  let pluginModelInvoker: ((spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>) | null = null;
+  const adapterSupervisor = new AdapterSupervisor({
+    eventBus: adapterEventBus,
+    onEventAppend: onPluginEventAppend,
+    onModelRequest: async (spec, params) => {
+      if (pluginModelInvoker === null) throw new Error('模型通道未就绪（进程没有可用的 API key）');
+      return await pluginModelInvoker(spec, params);
+    },
+    /**
+     * `media/store`：插件交字节，宿主落盘并回**宿主相对路径**（`send_media` 认得的那种）。
+     *
+     * 三条纪律：
+     * ① 内容寻址（sha256 作文件名）⇒ 同一张图重复提交天然幂等，不重复占盘；
+     * ② 只落在 `data/media/plugin/<pluginId>/` 之下 ⇒ 插件之间的资产不互相覆盖；
+     * ③ 大小上限 8 MB，超了直接拒绝（不让一个坏插件把盘写满）。
+     */
+    onAssetStore: async (spec, params) => {
+      const request = params !== null && typeof params === 'object' && !Array.isArray(params)
+        ? params as Record<string, unknown>
+        : null;
+      if (request === null) throw new Error('media/store 参数必须是对象');
+      const base64 = typeof request['data'] === 'string' ? request['data'] : '';
+      if (base64 === '') throw new Error('media/store 缺少 data（base64）');
+      const bytes = Buffer.from(base64, 'base64');
+      if (bytes.length === 0) throw new Error('media/store 数据为空');
+      if (bytes.length > 8 * 1024 * 1024) throw new Error('media/store 超过 8 MB');
+      const kind = typeof request['kind'] === 'string' ? request['kind'] : 'image';
+      const ext = kind === 'video' ? 'mp4' : kind === 'voice' ? 'silk' : kind === 'file' ? 'bin' : 'png';
+      const hash = createHash('sha256').update(bytes).digest('hex');
+      const dir = join(dataDir, 'media', 'plugin', spec.id);
+      const absolute = join(dir, `${hash}.${ext}`);
+      if (!existsSync(absolute)) {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(absolute, bytes);
+      }
+      return { path: `media/plugin/${spec.id}/${hash}.${ext}`, sha256: hash, bytes: bytes.length };
+    },
+    onEffectProposal: async (pluginId, proposal) => {
+      write(`[适配器] ${pluginId} 提交了 effect proposal（不执行，仅记录）：${JSON.stringify(proposal).slice(0, 1000)}`);
+    },
+    onFailure: (pluginId, error) => {
+      write(`[适配器] ${pluginId} 已隔离：${describeError(error)}`);
+    },
+  });
+  /**
+   * 插件提示行收集器（协议 v2 `prompt/render`，2026-11-06）。
+   *
+   * 只问**启用且声明了 `prompt.inject`** 的适配器；按插件 id 稳定排序 ⇒ 同一组合、
+   * 同一输入永远得到同一段字节（前缀缓存不因"插件启停顺序不同"而漂）。
+   * 任何一个插件超时/报错都只跳过它自己——插件坏了不该让她说不出话。
+   */
+  const collectPluginPromptLines = async (
+    context: { turn: number; step: number; now: string },
+  ): Promise<readonly string[]> => {
+    const capable = pluginRuntime.adapters
+      .filter((adapter) => adapter.capabilities.includes('prompt.inject'))
+      .sort((left, right) => (left.pluginId < right.pluginId ? -1 : left.pluginId > right.pluginId ? 1 : 0));
+    if (capable.length === 0) return [];
+    const lines: string[] = [];
+    for (const adapter of capable) {
+      try {
+        const result = await adapterSupervisor.request(adapter.pluginId, 'prompt/render', {
+          slot: 'now-layer',
+          maxChars: 90,
+          context,
+        });
+        const text = result !== null && typeof result === 'object' && typeof (result as { text?: unknown }).text === 'string'
+          ? (result as { text: string }).text.trim()
+          : '';
+        if (text !== '') lines.push(text);
+      } catch {
+        // fail-open：这一步不注入它，主流程继续。
+      }
+    }
+    return lines;
+  };
   let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
   let circuitBreaker: PluginCircuitBreaker | null = null;
   let replacePluginHooks: (entries: Parameters<HookRunner['setEntries']>[0]) => void = () => {};
@@ -1335,7 +1465,16 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     pluginMcpOwners = owners;
     replacePluginSkills(pluginRuntime.skillRoots);
     replacePluginHooks(pluginRuntime.hookEntries);
+    pluginToolSyncRef.sync?.();
     await mcpPoolRef.pool?.applyDeclarations(currentDeclarations());
+    await adapterSupervisor.apply(pluginRuntime.adapters.map((adapter) => ({
+      id: adapter.pluginId,
+      version: adapter.version,
+      contentHash: adapter.contentHash,
+      worker: adapter.worker,
+      capabilities: adapter.capabilities,
+      cwd: adapter.rootDir,
+    })));
     for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
   });
   const mcpPluginFailure = (serverName: string, category: PluginFailure['category'], message: string): PluginFailure | null => {
@@ -1380,6 +1519,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       origin: 'main',
     } as unknown as AppEvent;
     log.append(event, { sync: true });
+    publishAdapterEvent(event);
     return event;
   };
 
@@ -1607,6 +1747,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 进程会在框架退出后变成孤儿——它们是别人的进程，不该被留在这台机器上。
    */
   const mcpPoolRef: { pool: McpClientPool | null } = { pool: null };
+  const pluginToolSyncRef: { sync: (() => void) | null } = { sync: null };
 
   /**
    * QQ 官方通道（M9）。装配条件：配置打开 + 两个环境变量非空。
@@ -2099,6 +2240,57 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       },
     });
     /**
+     * 插件模型通道的实现（`model/generate`）。
+     *
+     * 三条纪律：
+     * ① **只转发、不解释** —— 插件给的 `text` / `reasoning` 原样交给传输层，宿主不改写；
+     * ② **不允许插件指定 model / tools / temperature** —— 那些是宿主旋钮，放开就等于让插件
+     *    借 light 的配额打 heavy 的模型名；
+     * ③ **密钥与端点不出宿主进程** —— 回执只给文本与用量，连 `responseId` 都不给。
+     */
+    pluginModelInvoker = async (spec, params) => {
+      const request = params !== null && typeof params === 'object' && !Array.isArray(params)
+        ? params as Record<string, unknown>
+        : null;
+      if (request === null) throw new Error('model/generate 参数必须是对象');
+      const lane = request['lane'] === 'heavy' ? 'heavy' : 'light';
+      const input = typeof request['input'] === 'string' ? request['input'] : '';
+      if (input === '') throw new Error('model/generate 缺少 input');
+      if (input.length > 65_536) throw new Error('model/generate input 超过 64 KiB');
+      const instructions = typeof request['instructions'] === 'string' ? request['instructions'] : undefined;
+      if (instructions !== undefined && instructions.length > 8_192) throw new Error('model/generate instructions 超过 8192 字');
+      const text = request['text'];
+      const reasoning = request['reasoning'];
+      const timeoutRaw = request['timeoutMs'];
+      const timeoutMs = typeof timeoutRaw === 'number' && Number.isFinite(timeoutRaw) && timeoutRaw > 0
+        ? Math.min(30_000, Math.trunc(timeoutRaw))
+        : 10_000;
+      const response = await ds.generate({
+        lane,
+        input,
+        ...(instructions === undefined ? {} : { instructions }),
+        ...(text !== undefined && typeof text === 'object' && text !== null ? { text } : {}),
+        ...(reasoning !== undefined && typeof reasoning === 'object' && reasoning !== null ? { reasoning } : {}),
+        timeoutMs,
+      } as Parameters<DsClient['generate']>[0]);
+      const responseText = response.outputItems
+        .map((item) => (item.type === 'message' && typeof (item as { text?: unknown }).text === 'string'
+          ? (item as { text: string }).text
+          : ''))
+        .join('');
+      write(`[插件] ${spec.id} 调用模型（${lane}，${responseText.length} 字输出）`);
+      return {
+        text: responseText,
+        model: response.model,
+        ...(response.protocol === undefined ? {} : { protocol: response.protocol }),
+        usage: {
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cachedTokens: response.usage.cachedTokens,
+        },
+      };
+    };
+    /**
      * 工具侧的事件写入点。
      *
      * **可见性走 `resolveEventVisibility` 那一处判据**（省略 ⇒ 由 schema 表判；表说 `model`
@@ -2392,6 +2584,28 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       },
     });
     const registry = catalog.registry;
+    pluginToolSyncRef.sync = () => {
+      for (const tool of composePluginTools(pluginRuntime.packages).entries) {
+        try {
+          registry.register({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+            executionMode: 'parallel',
+            sideEffect: 'none',
+            timeoutMs: 150000,
+            handler: async (args) => {
+              const pool = mcpPoolRef.pool;
+              if (pool === null) throw new Error('MCP 池尚未就绪');
+              return await pool.callTool(tool.server, tool.tool, args);
+            },
+          });
+        } catch (error) {
+          write(`[插件] 工具 ${tool.name} 未注册：${describeError(error)}`);
+        }
+      }
+    };
+    pluginToolSyncRef.sync();
     toolRegistry = registry;
     // 填上那个惰性格子（见上面 registryRef 的注释）：`task` 的取值器从这一刻起拿得到父注册表
     registryRef.registry = registry;
@@ -2436,11 +2650,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
     loop = new RealLoop({
       log, dataDir, projection: recovery.projection, now,
+      adapterEventBus,
       timezone: config.timezone ?? 'Asia/Shanghai',
       ds, registry, persona, config, out: write,
       mcpDeclarations,
       // 插件组合变了 ⇒ 常驻索引必须在下一拍失效（否则撤走的 server 会留在模型索引里）
       pluginRevision: () => pluginRuntime.revision,
+      // 插件提示行（协议 v2 `prompt/render`）：每步现取，按插件 id 稳定排序（见 collector 的注释）。
+      pluginPromptLines: collectPluginPromptLines,
       onTurnBoundary: async () => { await circuitBreaker?.drain(); },
       // 版本号（`runtime/restart` 的通报里要说"你现在跑的是哪一版"）：给的是**同一个常量**
       // ——`session/start.version` 写的也是它。循环自己不去盘上读 `package.json`：
@@ -2597,8 +2814,20 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
        */
       configPath: loadedConfig.path,
       plugins: pluginManager,
+      // 启停插件当场热重组装（技能根/hooks/MCP 声明），不再以「重启后生效」收尾；
+      // 与熔断器共用 `applyPluginRuntime` 这一条管道，重组装彼此串行。
+      pluginApply: applyPluginRuntime,
       // 管理视图（/api/skills、/api/mcp）要看到插件贡献：给的是函数，读的永远是当下这一份组合
       pluginRuntime: () => pluginRuntime,
+      pluginApi: async ({ pluginId, suffix, query }) => {
+        const adapter = pluginRuntime.adapters.find((entry) => entry.pluginId === pluginId);
+        if (adapter === undefined) throw new Error(`插件 ${pluginId} 没有运行中的适配器`);
+        if (!adapter.capabilities.includes('ui.api')) throw new Error(`插件 ${pluginId} 未声明能力 ui.api`);
+        return await adapterSupervisor.request(pluginId, 'ui/handle', {
+          path: `/${suffix}`,
+          query: Object.fromEntries(query.entries()),
+        });
+      },
       ...(toolRegistry !== undefined ? { registry: toolRegistry } : {}),
       // 更新检查的数据口（GET /api/update 与 POST /api/update/check 的宿主）
       update: updateService,
@@ -2778,6 +3007,37 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 那一段——全仓只此一处）。命中就整条丢掉：她自己的话有 `speak/sent` 那条凭据，
    * `read_channel` 里照旧以 `（我）` 出现，与这里丢掉的这个**副本**是两回事。
    */
+  /**
+   * 「状态命令」（`channels.onebot.statusCommand`，可选）：白名单 QQ 号发触发词 →
+   * 合并转发回一份本机状态报告。**确定性命令响应**——不进 agent、不落信箱、不起 turn、
+   * 不耗模型 token；与插件平台刻意分开（理由三条写在 channel/status-command.ts 的文件头）。
+   * 协议端不认合并转发时降级纯文本，两边都记账。
+   */
+  const statusCommandConfig = config.channels.onebot.statusCommand;
+  const statusCommand = onebotChannel === null || statusCommandConfig === undefined
+    ? null
+    : createStatusCommand({
+      config: statusCommandConfig,
+      write,
+      extraLines: () => [
+        `Irmia：${AGENT_VERSION}`,
+        `进程：运行 ${formatDuration(process.uptime())} · RSS ${Math.round(process.memoryUsage().rss / (1024 * 1024))} MB`,
+      ],
+    });
+  const statusSender: StatusForwardSender | null = onebotChannel === null
+    ? null
+    : {
+      sendForward: (chatType, chatId, lines) => onebotChannel.sendForward(
+        chatType as Parameters<OneBotChannel['sendForward']>[0], chatId, lines,
+        // 节点上的展示身份用她自己（学到的 selfId；还没学到就留空串，协议端一般照样发）
+        { name: 'Irmia', uin: onebotChannel.snapshot().selfId }),
+      sendText: async (chatType, chatId, text) => {
+        const out = await onebotChannel.sendText(
+          chatType as Parameters<OneBotChannel['sendText']>[0], chatId, text);
+        return out.ok ? { ok: true } : { ok: false, ...(out.reason === undefined ? {} : { reason: out.reason }) };
+      },
+    };
+
   const onChannelMessage = (data: WakeChannel['data']): void => {
     // 我自己发出去的那条（平台推回来的副本）：不落库、不注册群成员、不计未读。
     // 放在所有分支**之前**：连下面那条关键词判定都不必做——它本来就不是"别人说的话"。
@@ -2790,6 +3050,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
        * 只记通道 + 那条的 id 前 12 位：够把一条对上，不抄正文、不抄标识。
        */
       write(`[通道] 收到一条我自己发的消息（${data.channel}），已按"自己的回声"丢弃：不落库、不注册成员、不计未读`);
+      return;
+    }
+    // 「状态命令」拦在自己回声之后、唤醒判定之前：命中即接管（回复 + 吞掉），
+    // 后面的关键词/信箱/唤醒分支一律不跑。
+    if (statusCommand !== null && statusSender !== null && statusCommand.match(data)) {
+      statusCommand.handle(data, statusSender).catch((error: unknown) => {
+        write(`[状态命令] 处理失败（这条命令已吞掉，不影响后续消息）：${describeError(error)}`);
+      });
       return;
     }
     // 文本提及（关键词）也算"在叫她"：判据在分流器里，这里只把**结论**记进事件
@@ -3003,6 +3271,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     await pluginProbe.cancelAll();
     await circuitBreaker?.stop();
     await runtimeApplyChain;
+    await adapterSupervisor.stop();
     await loop.stop();
 
     // MCP server 是**别人的进程**：框架拉起来的就得由框架收尸（与上面协议端同一条纪律）。
@@ -3051,6 +3320,14 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
 
   // ── 起拍 ──
+  await adapterSupervisor.start(pluginRuntime.adapters.map((adapter) => ({
+    id: adapter.pluginId,
+    version: adapter.version,
+    contentHash: adapter.contentHash,
+    worker: adapter.worker,
+    capabilities: adapter.capabilities,
+    cwd: adapter.rootDir,
+  })));
   circuitBreaker?.start();
   loop.start();
   // 保活跟着主循环起拍（`start()` 会**先跑一拍**：布防当场就有一次"界面在不在"的读数）

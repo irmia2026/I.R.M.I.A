@@ -7,6 +7,16 @@ export interface PluginHttpResult {
   status: number;
   body: unknown;
 }
+/**
+ * 启停命令后的**热重组装**口：宿主把 `applyPluginRuntime` 递进来，enable/disable 就不再
+ * 以「重启后生效」收尾。confirm/install 不改变运行组合，不触发。
+ *
+ * 为什么 optional：缺省时维持旧行为（requiresRestart=true）——CLI 与测试里没装配运行面
+ * 的宿主不该被强迫提供一个空重组装，更不该因此静默改变回执语义。
+ */
+export interface PluginCommandHooks {
+  apply?: (() => Promise<void>) | undefined;
+}
 
 function unavailable(): PluginHttpResult {
   return { status: 501, body: { error: { code: 'not-implemented', message: '没有注入 PluginManager：这条实例不提供插件管理' } } };
@@ -30,20 +40,54 @@ function current(manager: PluginManager, view: PluginView): PluginView {
     && item.package.contentHash === view.package.contentHash) ?? view;
 }
 
+function versionParts(version: string): number[] {
+  return version.split('.').map((part) => {
+    const digits = part.match(/^\d+/)?.[0] ?? '0';
+    return Number.parseInt(digits, 10);
+  });
+}
+
+function compareVersion(a: string, b: string): number {
+  const left = versionParts(a);
+  const right = versionParts(b);
+  const size = Math.max(left.length, right.length);
+  for (let index = 0; index < size; index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function preferView(a: PluginView, b: PluginView): PluginView {
+  const aOn = a.state === 'enabled' ? 1 : 0;
+  const bOn = b.state === 'enabled' ? 1 : 0;
+  if (aOn !== bOn) return aOn > bOn ? a : b;
+  const byVersion = compareVersion(a.package.manifest.version, b.package.manifest.version);
+  if (byVersion !== 0) return byVersion > 0 ? a : b;
+  return a.package.contentHash <= b.package.contentHash ? a : b;
+}
+
 export function listPlugins(manager: PluginManager | undefined): PluginHttpResult {
   if (manager === undefined) return unavailable();
   try {
-    return { status: 200, body: { items: manager.list() } };
+    const byId = new Map<string, PluginView>();
+    for (const view of manager.list()) {
+      const id = view.package.manifest.id;
+      const existing = byId.get(id);
+      byId.set(id, existing === undefined ? view : preferView(existing, view));
+    }
+    return { status: 200, body: { items: [...byId.values()] } };
   } catch (error) {
     return failure('plugin-error', error);
   }
 }
 
-export function runPluginCommand(
+export async function runPluginCommand(
   command: PluginCommand,
   payload: Record<string, unknown>,
   manager: PluginManager | undefined,
-): PluginHttpResult {
+  hooks: PluginCommandHooks = {},
+): Promise<PluginHttpResult> {
   if (manager === undefined) return unavailable();
   try {
     if (command === 'plugin-install') {
@@ -62,6 +106,22 @@ export function runPluginCommand(
     if (id === '' || contentHash === '') return failure('bad-request', '缺少 id 或 contentHash');
     if (command === 'plugin-confirm') manager.confirm(id, contentHash);
     else manager.setEnabled(id, contentHash, command === 'plugin-enable');
+
+    // 启停热重组装：先放行 `active()` 的门（markApplied），再走宿主递进来的 apply 管道
+    // （与熔断器同一条）。装失败把快照还回去——requiresRestart 保持 true，重启兜底，
+    // 回执里如实带 applyError，不假装生效。
+    let applyError: string | undefined;
+    if ((command === 'plugin-enable' || command === 'plugin-disable') && hooks.apply !== undefined) {
+      const snapshot = manager.appliedSnapshot();
+      manager.markApplied();
+      try {
+        await hooks.apply();
+      } catch (error) {
+        manager.restoreApplied(snapshot);
+        applyError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
     const plugin = manager.list().find((item) => item.package.manifest.id === id && item.package.contentHash === contentHash);
     if (plugin === undefined) return failure('plugin-error', `Plugin ${id}@${contentHash} not found after command`);
     return {
@@ -69,7 +129,8 @@ export function runPluginCommand(
       // 回执回答的是「这次命令之后，宿主还需要为它重启吗」——判据只能是插件自己的
       // requiresRestart（本次启停是否还没被装配过），不能对启停一律回答「要重启」：
       // 重复启用一条已生效的插件时运行面一点没变，说「要重启」就是自相矛盾。
-      body: { ok: true, plugin, ...(command === 'plugin-confirm' ? {} : { restartRequired: plugin.requiresRestart }) },
+      body: { ok: true, plugin, ...(command === 'plugin-confirm' ? {} : { restartRequired: plugin.requiresRestart }),
+        ...(applyError !== undefined ? { applyError } : {}) },
     };
   } catch (error) {
     return failure('plugin-error', error);

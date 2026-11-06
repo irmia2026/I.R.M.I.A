@@ -23,7 +23,8 @@ interface Fixture {
   events(): Promise<AppEvent[]>;
 }
 
-async function setup(t: TestContext, withManager = true): Promise<Fixture> {
+async function setup(t: TestContext, options: { withManager?: boolean; apply?: () => Promise<void> } = {}): Promise<Fixture> {
+  const withManager = options.withManager ?? true;
   const dir = tempDirSync('irmia-plugin-http-');
   const dataDir = join(dir, 'data');
   const source = join(dir, 'source');
@@ -47,6 +48,7 @@ async function setup(t: TestContext, withManager = true): Promise<Fixture> {
     log, projection: emptyProjection(), config: defaultConfig(dir), personaRoot: join(dataDir, 'persona'),
     dataDir, timers: new TimerStore(join(dataDir, 'timers.json'), { now: () => NOW }), now: () => NOW,
     uiToken: TOKEN, port: 0, ...(manager === undefined ? {} : { plugins: manager }),
+    ...(options.apply === undefined ? {} : { pluginApply: options.apply }),
   });
   t.after(async () => {
     await server.close();
@@ -78,7 +80,7 @@ async function command(fx: Fixture, name: string, body: unknown, confirm: string
 }
 
 test('缺少 PluginManager 时读写接口都清晰返回 501', async (t) => {
-  const fx = await setup(t, false);
+  const fx = await setup(t, { withManager: false });
   const listed = await call(fx, '/api/plugins');
   assert.equal(listed.status, 501);
   assert.equal(listed.body.error.code, 'not-implemented');
@@ -142,6 +144,73 @@ test('安装不授予信任，确认和启停返回最新状态且启停要求�
   assert.equal(listed.body.items[0].package.manifest.id, 'demo');
   assert.equal(listed.body.items[0].state, 'disabled');
   assert.deepEqual(listed.body.items[0].problems, []);
+});
+
+test('接入热重组装口后，启用/禁用当场生效、不再要求重启', async (t) => {
+  let applies = 0;
+  // apply 里读 requiresRestart：验证「先 markApplied 放行门、再重组装」的顺序——
+  // 若顺序反了，这里读到的会是 true（门没放，组合把这颗包剔在外头）。
+  let requiresRestartAtApply: boolean | undefined;
+  const fx = await setup(t, {
+    apply: () => {
+      applies += 1;
+      requiresRestartAtApply = fx.manager!.list()[0].requiresRestart;
+      return Promise.resolve();
+    },
+  });
+  const installed = await command(fx, 'plugin-install', { sourceDir: fx.source });
+  const { id } = installed.body.plugin.package.manifest;
+  const hash = installed.body.plugin.package.contentHash;
+  await command(fx, 'plugin-confirm', { id, contentHash: hash });
+  assert.equal(applies, 0, '确认不改变运行组合，不该触发重组装');
+
+  const enabled = await command(fx, 'plugin-enable', { id, contentHash: hash });
+  assert.equal(enabled.status, 200, enabled.text);
+  assert.equal(enabled.body.restartRequired, false);
+  assert.equal(enabled.body.plugin.requiresRestart, false);
+  assert.equal(applies, 1);
+  assert.equal(requiresRestartAtApply, false);
+
+  const disabled = await command(fx, 'plugin-disable', { id, contentHash: hash });
+  assert.equal(disabled.status, 200, disabled.text);
+  assert.equal(disabled.body.restartRequired, false);
+  assert.equal(disabled.body.plugin.requiresRestart, false);
+  assert.equal(applies, 2);
+  assert.deepEqual((await fx.events()).map((event) => event.type),
+    ['plugin/installed', 'plugin/enabled', 'plugin/disabled']);
+});
+
+test('热重组装失败：回执保持「重启后生效」、如实带 applyError，重试可成功', async (t) => {
+  let fail = true;
+  const fx = await setup(t, { apply: async () => { if (fail) throw new Error('compose boom'); } });
+  const installed = await command(fx, 'plugin-install', { sourceDir: fx.source });
+  const { id } = installed.body.plugin.package.manifest;
+  const hash = installed.body.plugin.package.contentHash;
+  await command(fx, 'plugin-confirm', { id, contentHash: hash });
+
+  const enabled = await command(fx, 'plugin-enable', { id, contentHash: hash });
+  assert.equal(enabled.status, 200, enabled.text);
+  assert.equal(enabled.body.restartRequired, true, '重组装失败就必须回到「重启兜底」');
+  assert.equal(enabled.body.plugin.requiresRestart, true);
+  assert.match(enabled.body.applyError, /compose boom/);
+
+  fail = false;
+  const retried = await command(fx, 'plugin-enable', { id, contentHash: hash });
+  assert.equal(retried.status, 200, retried.text);
+  assert.equal(retried.body.restartRequired, false, '重试重组装成功即当场生效');
+  assert.equal(retried.body.plugin.requiresRestart, false);
+  assert.equal(retried.body.applyError, undefined);
+});
+
+test('没接热重组装口的宿主保持旧语义：启停如实回答「要重启」', async (t) => {
+  const fx = await setup(t);
+  const installed = await command(fx, 'plugin-install', { sourceDir: fx.source });
+  const { id } = installed.body.plugin.package.manifest;
+  const hash = installed.body.plugin.package.contentHash;
+  await command(fx, 'plugin-confirm', { id, contentHash: hash });
+  const enabled = await command(fx, 'plugin-enable', { id, contentHash: hash });
+  assert.equal(enabled.body.restartRequired, true);
+  assert.equal(enabled.body.plugin.requiresRestart, true);
 });
 
 test('相对路径和非法包被安全拒绝，不写事件', async (t) => {

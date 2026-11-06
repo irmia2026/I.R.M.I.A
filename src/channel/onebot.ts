@@ -39,6 +39,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 
 // 值导入写 `.ts`（`--experimental-strip-types` 不重写 `.js`，而这里真的要用那个函数：
 // 附件的两个判据是**两条通道共用**的唯一实现，见 log/types.ts 那段注释）
@@ -193,13 +194,26 @@ export function unescapeCqText(text: string): string {
 }
 
 /**
+ * CQ 码的形状：`[CQ:type]` / `[CQ:type,key=value,...]` —— **全仓只此一份**。
+ *
+ * 为什么导出的是**源码字符串**而不是现成的 `/g` 正则（2026-11-03）：带 `g` 的正则对象
+ * 自身带 `lastIndex` 状态，`parseCqMessage` 靠它在一段文本里推进；一旦别处也拿同一个对象
+ * 去做 `.replace()`，`lastIndex` 会被互相踩，第二次解析就从错的位置开始。
+ * 所以这里只共享**形状**，每个用点自己 `new RegExp(CQ_CODE_PATTERN_SOURCE, 'gu')`。
+ *
+ * 用点：`parseCqMessage`（入站解析）与 `tools/admin.ts` 的 `maskSpeechTags`
+ * （`speak` 计字：一个 CQ 码整串算一个字，见那里）。
+ */
+export const CQ_CODE_PATTERN_SOURCE = String.raw`\[CQ:([A-Za-z0-9_.-]+)((?:,[^\]]*)?)\]`;
+
+/**
  * 解析 CQ 码字符串 → 消息段数组。
  *
  * 值里的逗号按规范必须写成 `&#44;`，所以按 `,` 切分参数是安全的；
  * 不为非标准写法做"尽力解析"的妥协（那会让"文本里到底有没有 CQ 码"变成不可判定的问题）。
  */
 export function parseCqMessage(raw: string): OneBotSegment[] {
-  const pattern = /\[CQ:([A-Za-z0-9_.-]+)((?:,[^\]]*)?)\]/gu;
+  const pattern = new RegExp(CQ_CODE_PATTERN_SOURCE, 'gu');
   const segments: OneBotSegment[] = [];
   let cursor = 0;
   for (;;) {
@@ -227,6 +241,134 @@ export function parseCqMessage(raw: string): OneBotSegment[] {
     if (text !== '') segments.push({ type: 'text', data: { text } });
   }
   return segments;
+}
+
+/**
+ * 哪些 CQ 类型带"媒体来源"。只在这三种上做本机路径内联：
+ * `at` / `reply` / `face` 的 `qq`、`id` 也是参数，但那些是**数字**，不是文件。
+ */
+const CQ_MEDIA_TYPES = new Set(['image', 'record', 'video']);
+
+/**
+ * 一个取值像不像**本机路径**：`C:\…`、`C:/…`、`/…`、`\\server\share\…`。
+ *
+ * 先筛一遍再碰文件系统：CQ 的 `file=` 绝大多数时候是协议端的缓存键（`abc123.image`）
+ * 或者 http 地址，每发一条普通消息都去 stat 一次没必要。
+ */
+const LOCAL_PATH_HINT = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/u;
+
+/**
+ * 内联的上限。为什么是 16MB 而不是 `send_media` 的 200MB：
+ * 这个走的是**一条 JSON 文本消息**里的 base64，体积立刻 ×1.33，还要整段进协议端的消息体；
+ * 贴纸/表情包正常只有几十到几百 KB，16MB 已经宽到不像话。
+ */
+export const ONEBOT_LOCAL_INLINE_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 把 CQ 码里指向**本机文件**的媒体就地换成 `base64://`。
+ *
+ * ## 为什么非做不可（2026-11-03 现场）
+ *
+ * 协议端（NapCat）跑在**另一台机器**上（`ws://100.68.92.32:3001`），它 stat 的是它自己的盘。
+ * 于是本地表情包写成 `[CQ:image,file=C:\…\x.png]` 必然失败，日志原话：
+ *
+ * ```
+ *   OneBot send_private_msg 失败：retcode=100 ENOENT: no such file or directory, stat '1.jpg'
+ * ```
+ *
+ * 而 `send_media` 早就能发本地图——它走 `media.data` → `base64://`（见 `oneBotMediaCall`）。
+ * 这里把同一条出口补给文本里的 CQ：**读完转 base64 再交给协议端**，她就不必为了
+ * 发一张贴纸去记"发言和发图是两套工具"。
+ *
+ * ## 边界（都按"改不了就一个字不动"处理）
+ *
+ * • 不是 image/record/video 的 CQ、没有 `file=` 的、取值不像路径的 → 原样返回；
+ * • 文件不存在 / 不是普通文件 / 空文件 / 超过 {@link ONEBOT_LOCAL_INLINE_MAX_BYTES} → 原样返回
+ *   （让协议端按它自己的规矩报错，不在这一层编造结果）；
+ * • 已经是 `base64://` 或 http 地址的 → 不认路径前缀，自动跳过；
+ * • 一条消息里多个 CQ 码各自判断，互不影响。
+ */
+export async function inlineLocalCqMedia(
+  text: string,
+  maxBytes: number = ONEBOT_LOCAL_INLINE_MAX_BYTES,
+): Promise<string> {
+  if (!text.includes('[CQ:')) return text;
+  const pattern = new RegExp(CQ_CODE_PATTERN_SOURCE, 'gu');
+  let out = '';
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    out += text.slice(cursor, index);
+    cursor = index + match[0].length;
+    const inlined = await inlineOneCqCode(match[1] ?? '', match[2] ?? '', maxBytes);
+    out += inlined === null ? match[0] : inlined;
+  }
+  out += text.slice(cursor);
+  return out;
+}
+
+/**
+ * 单个 CQ 码的内联。返回 `null` 表示"这个码不用改"——调用方据此保留原文，
+ * 这样多一个字节的差异都不会被引进来。
+ */
+async function inlineOneCqCode(
+  type: string,
+  rawParams: string,
+  maxBytes: number,
+): Promise<string | null> {
+  if (!CQ_MEDIA_TYPES.has(type.toLowerCase())) return null;
+  const params = rawParams.replace(/^,/u, '');
+  if (params === '') return null;
+  const rebuilt: string[] = [];
+  let touched = false;
+  for (const pair of params.split(',')) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) {
+      rebuilt.push(pair);
+      continue;
+    }
+    const key = pair.slice(0, eq).trim();
+    const value = unescapeCqText(pair.slice(eq + 1));
+    if (key !== 'file' || !LOCAL_PATH_HINT.test(value)) {
+      rebuilt.push(pair);
+      continue;
+    }
+    const bytes = await readLocalMedia(value, maxBytes);
+    if (bytes === null) {
+      rebuilt.push(pair);
+      continue;
+    }
+    rebuilt.push(`file=base64://${bytes.toString('base64')}`);
+    touched = true;
+  }
+  if (!touched) return null;
+  /**
+   * 从本机文件内联出来的**图片**，默认按**表情包**发（`sub_type=1`，用户 2026-11-03 口径
+   * 「speak 的表情包要按表情包标签发出」）。
+   *
+   * 为什么判据是"本地文件"而不是"她自己说是表情包"：这条通道上**能走到内联这一步的图片，
+   * 本来就是她手里的文件**（表情包图库、截图）；协议端缓存键与 http 地址一律不进这里
+   * （上面 `LOCAL_PATH_HINT` 已经筛过）。QQ 收到 `sub_type=1` 才按表情包渲染，
+   * 否则同一张图会摆成一张带边框的普通图片。
+   *
+   * **显式写的 `sub_type` 一律优先**：她要发截图/照片时写 `sub_type=0` 就照办，
+   * 框架不替她推翻已经写下来的东西。
+   */
+  if (type.toLowerCase() === 'image' && !rebuilt.some((pair) => /^sub_type\s*=/u.test(pair))) {
+    rebuilt.push('sub_type=1');
+  }
+  return `[CQ:${type},${rebuilt.join(',')}]`;
+}
+
+/** 读本机媒体；任何一步不合条件就 `null`（判据全在上面那个函数的注释里）。 */
+async function readLocalMedia(path: string, maxBytes: number): Promise<Buffer | null> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size === 0 || info.size > maxBytes) return null;
+    return await readFile(path);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -606,6 +748,24 @@ export function oneBotIdOf(chatId: string): number | string {
   if (!/^-?\d+$/u.test(chatId)) return chatId;
   const value = Number(chatId);
   return Number.isSafeInteger(value) ? value : chatId;
+}
+
+/**
+ * 合并转发节点（OneBot 11 `send_*_forward_msg` 的 `messages` 数组）：
+ * 每条状态行一个节点，`content` 是**消息段数组**（与 `send_*_msg` 同一套段语义）。
+ * `uin`/`name` 是合并转发里"这条像是谁发的"的展示位——填她自己。
+ *
+ * 独立成纯函数：动作构造可以脱离 ws 客户端单测（协议形状对不对，一眼看清）。
+ */
+export function oneBotForwardNodes(lines: readonly string[], self: { name: string; uin: string }): Array<Record<string, unknown>> {
+  return lines.map((text) => ({
+    type: 'node',
+    data: {
+      name: self.name,
+      uin: self.uin,
+      content: [{ type: 'text', data: { text } }],
+    },
+  }));
 }
 
 // ──────────────────────────────── 出站媒体 ────────────────────────────────
@@ -1395,8 +1555,33 @@ export class OneBotChannel implements ChannelAdapter {
    * （少登记一个人，比错登记好）。
    */
   private readonly sentMessageIds = new Set<string>();
+
+  /**
+   * 唤醒投递的**串行队列**（2026-11-03，为"引用补图"而加）。
+   *
+   * 补图要在投递**之前**把被引用那条的图挂到这条唤醒上（下游的落库/预取/渲染全按
+   * `attachments` 走，一处不动）。但那一步是网络往返，而 `onWake` 原本是同步调的——
+   * 直接 `await` 会打乱到达顺序（同一时刻连来两条时，后一条可能先被投递，
+   * 宿主据此分配的 seq 就反了）。所以把投递串成一条链：**顺序不变，代价只有那一次往返**。
+   * 没有引用的消息在链上是一次空转（一个微任务），开销可忽略。
+   */
+  private wakeChain: Promise<void> = Promise.resolve();
+
+  /**
+   * 被引用消息的图片 url 缓存（`message_id` → 图片地址）。
+   *
+   * 为什么必须缓存：同一条被连续引用时（"你描述这张"→"再说说"），没缓存就每条都去
+   * `get_msg` 一次。**空结果也缓存**（那条本来就没有图），否则每次都要白跑一趟。
+   */
+  private readonly quotedMediaCache = new Map<string, string[]>();
   /** 发出去的消息 id 记多少条（窗口） */
   private static readonly SENT_ID_WINDOW = 512;
+
+  /**
+   * 被引用图片的缓存窗口：够覆盖"连续追问同一张"的节奏（"你描述这张"→"再说说"），
+   * 又不是一张无界表。
+   */
+  private static readonly QUOTED_MEDIA_WINDOW = 32;
 
   constructor(options: OneBotChannelOptions) {
     this.log = options.log ?? SILENT_LOG;
@@ -1431,10 +1616,88 @@ export class OneBotChannel implements ChannelAdapter {
         // **静默假活**（进程活着、端口在听、心跳照发，但下游一条事件都收不到），
         // 链路层看不见它，而"多久没消息"这个事实看得见。
         this.lastEventAtMs = Date.now();
-        options.onWake?.(data);
-        this.onMessage?.(data);
+        // 补图之后才交给宿主（顺序与理由见 `wakeChain` 的注释）。补图失败不拦投递：
+        // 少一张图，不能让这条消息消失。
+        this.wakeChain = this.wakeChain
+          .then(async () => {
+            try {
+              await this.attachQuotedImages(data);
+            } catch (error: unknown) {
+              this.log.warn(`[OneBot] 引用补图失败（这条照常投递）：${error instanceof Error ? error.message : String(error)}`);
+            }
+            options.onWake?.(data);
+            this.onMessage?.(data);
+          })
+          .catch((error: unknown) => {
+            // 链不能断在这里：一条唤醒的宿主回调炸了，不该让后面的消息永远投不出去。
+            this.log.warn(`[OneBot] 唤醒投递失败（已跳过这一条）：${error instanceof Error ? error.message : String(error)}`);
+          });
       },
     });
+  }
+
+  /**
+   * 把**被引用那条**里的图片挂到这条唤醒上（2026-11-03，用户裁决的方案 B）。
+   *
+   * ## 为什么非做不可
+   *
+   * 私聊实测（`sid=onebot:c2c:3652971137`，20:24）：她发了一张贴纸 + "这个Niko团子总行了吧"，
+   * 用户引用它说"你描述这张"。她看到的前缀逐字是 `[引用 #1447665289]` —— **只有 id**。
+   * 她确实去查了（`get_msg`），拿回来的却是：
+   *
+   * ```
+   *   [{ type:'image', data:{ url:'https://multimedia.nt.qq.com.cn/…' } }, { type:'text', … }]
+   * ```
+   *
+   * 一个**地址**，不是画面。于是她只能猜，猜成了"戴帽围蓝围巾"——那句话跟图毫无关系。
+   *
+   * 群里新发的消息，图会被下载、转述、摆到她眼前；**引用这条路上的图不经过流水线**，
+   * 这是两个入口的差别，不是她能力的问题。这里把差别抹掉：引用里的图当成这条消息的附件，
+   * 于是预取、转述、渲染三处**一处都不用改**（它们本来就按 `attachments` 走）。
+   *
+   * ## 边界
+   *
+   * • 文本里没有 `[引用 #…]`、或 id 取不回来、或那条本来没图 → 一条附件都不加；
+   * • 已经在 attachments 里同一地址的图不重复挂（她引用自己刚发的那张时）；
+   * • `get_msg` 失败**不影响投递**——少一张图，不能让这条消息消失。
+   */
+  private async attachQuotedImages(data: WakeChannel['data']): Promise<void> {
+    const matched = /\[引用 #([^\]\s]+)\]/u.exec(data.text ?? '');
+    const id = matched?.[1] ?? '';
+    if (id === '') return;
+    let urls = this.quotedMediaCache.get(id);
+    if (urls === undefined) {
+      urls = await this.fetchImageUrlsOf(id);
+      this.quotedMediaCache.set(id, urls);
+      if (this.quotedMediaCache.size > OneBotChannel.QUOTED_MEDIA_WINDOW) {
+        const oldest = this.quotedMediaCache.keys().next().value;
+        if (oldest !== undefined) this.quotedMediaCache.delete(oldest);
+      }
+    }
+    if (urls.length === 0) return;
+    const existing = data.attachments ?? [];
+    const known = new Set(existing.map((attachment) => attachment.url ?? ''));
+    const extra = urls
+      .filter((url) => !known.has(url))
+      .map((url) => ({ type: 'image', url }));
+    if (extra.length === 0) return;
+    data.attachments = [...existing, ...extra];
+  }
+
+  /** `get_msg` → 那张（或那几张）图的地址；任何一步不成就空数组。 */
+  private async fetchImageUrlsOf(id: string): Promise<string[]> {
+    const numeric = Number(id);
+    const result = await this.client.call('get_msg', {
+      message_id: Number.isFinite(numeric) ? numeric : id,
+    });
+    if (!result.ok) {
+      this.log.info(`[OneBot] 引用的那条取不回来（message_id=${id}）：${result.reason}`);
+      return [];
+    }
+    return toSegments(result.data?.['message'])
+      .filter((segment) => segment.type === 'image')
+      .map((segment) => segment.data['url'] ?? '')
+      .filter((url) => url !== '');
   }
 
   /**
@@ -1518,14 +1781,48 @@ export class OneBotChannel implements ChannelAdapter {
       return { ok: false, reason: `OneBot 不支持的 chatType：${raw}`, passive: false };
     }
     const action = isGroup ? 'send_group_msg' : 'send_private_msg';
+    // 正文里若带 CQ 码且 `file=` 指向**本机文件**，先转成 `base64://` 再上线：
+    // 协议端在别的机器上，看不到我们的盘（`inlineLocalCqMedia` 的注释里有现场日志）。
+    // 放在这层而不是工具层：这是**这条通道**的约束，换一个协议端（本机跑的）就不成立。
+    const message = await inlineLocalCqMedia(text);
     const params: Record<string, unknown> = isGroup
-      ? { group_id: oneBotIdOf(chatId), message: text }
-      : { user_id: oneBotIdOf(chatId), message: text };
+      ? { group_id: oneBotIdOf(chatId), message }
+      : { user_id: oneBotIdOf(chatId), message };
     const result = await this.client.call(action, params);
     if (!result.ok) return { ok: false, reason: result.reason, passive: false };
     const messageId = readScalar(result.data, 'message_id');
     this.rememberSentMessage(messageId);
     // `passive` 恒 false：这条通道没有被动/主动之分（如实报，不借官方的语义）
+    return { ok: true, messageId, passive: false, msgSeq: 0 };
+  }
+
+  /**
+   * 发一条**合并转发**（`send_group_forward_msg` / `send_private_forward_msg`）：
+   * 状态命令的回复载体——多条状态各占一个转发节点，收消息的人看到一份"聊天记录"样式的报告。
+   *
+   * 与 `sendText` 的取舍：协议端**不认这个动作时这里如实失败**（由调用方决定降级纯文本），
+   * 不在这层偷偷降级——"转发没发出去"与"发了纯文本"是两种结果，混在一起就没法回答
+   * "合并转发到底支持不支持"。`self` 是节点上的展示身份（uin/name）。
+   */
+  async sendForward(
+    chatType: OneBotChatType,
+    chatId: string,
+    lines: readonly string[],
+    self: { name: string; uin: string },
+  ): Promise<SendOutcome> {
+    const raw: string = chatType;
+    const isGroup = raw === 'group-at' || raw === 'group';
+    if (!isGroup && raw !== 'c2c') {
+      return { ok: false, reason: `OneBot 不支持的 chatType：${raw}`, passive: false };
+    }
+    const action = isGroup ? 'send_group_forward_msg' : 'send_private_forward_msg';
+    const id = oneBotIdOf(chatId);
+    const result = await this.client.call(action, isGroup
+      ? { group_id: id, messages: oneBotForwardNodes(lines, self) }
+      : { user_id: id, messages: oneBotForwardNodes(lines, self) });
+    if (!result.ok) return { ok: false, reason: result.reason, passive: false };
+    const messageId = readScalar(result.data, 'message_id');
+    this.rememberSentMessage(messageId);
     return { ok: true, messageId, passive: false, msgSeq: 0 };
   }
 

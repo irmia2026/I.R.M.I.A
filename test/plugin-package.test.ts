@@ -56,9 +56,10 @@ describe('插件清单', () => {
     for (const version of ['', '1.0', 'v1.0.0', '1.0.0+build']) {
       assert.throws(() => parsePluginManifest(manifest({ version })));
     }
-    for (const apiVersion of [0, 2, '1']) {
+    for (const apiVersion of [0, '1']) {
       assert.throws(() => parsePluginManifest(manifest({ apiVersion })));
     }
+    assert.equal(parsePluginManifest(manifest({ apiVersion: 2 })).apiVersion, 2);
   });
 
   test('严格校验贡献路径和权限', () => {

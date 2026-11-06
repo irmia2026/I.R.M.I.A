@@ -592,13 +592,31 @@ function quotedPrefix(payload: Record<string, unknown>): string {
   return '';
 }
 
+/**
+ * QQ 的三种**机器标记串**（都是 `<…>` 形态）：@ 人两种、表情一种。
+ *
+ * 为什么提成导出常量（2026-11-02）：此前这三条正则**只**内联在 {@link readableContent} 里，
+ * 于是"什么算一个 @ 标记"这件事只有渲染那一处知道。现在 `speak` 的计字尺子也要问同一个问题
+ * （她要 @ 人时，那一串 32 位的 openid **不该占她的说话额度**，见 `tools/admin.ts` 的
+ * `maskSpeechTags`）——两处必须**同源**，否则会出现"渲染认得出、计字不认"的分裂。
+ *
+ * ⚠ 这三个都是带 `g` 的正则常量，只在 `String.prototype.replace` 里用。
+ * 不要拿去 `.test()` / `.exec()`：`/g` 的 `lastIndex` 会跨调用残留，第二次就错位了。
+ */
+
+/** 官方 @ 串：`<qqbot-at-user id="<openid>" />`（客户端渲染成蓝色 @） */
+export const QQ_AT_TAG_RE = /<qqbot-at-user\s+id="([^"]+)"\s*\/?>/gu;
+/** 旧协议 @ 串：`<@userid>` / `<@!userid>` */
+export const QQ_AT_LEGACY_TAG_RE = /<@!?([0-9A-Za-z_-]{8,})>/gu;
+/** 表情串：`<faceType=1, faceId="…" />` */
+export const QQ_FACE_TAG_RE = /<faceType=\d+,\s*faceId="[^"]*"(?:,\s*ext="([^"]*)")?\s*\/?>/gu;
+
 function readableContent(raw: string): string {
   if (raw === '') return raw;
   return raw
-    .replace(/<qqbot-at-user\s+id="([^"]+)"\s*\/?>/gu, (_m, id: string) => atLabel(id))
-    .replace(/<@!?([0-9A-Za-z_-]{8,})>/gu, (_m, id: string) => atLabel(id))
-    .replace(/<faceType=\d+,\s*faceId="[^"]*"(?:,\s*ext="([^"]*)")?\s*\/?>/gu,
-      (_m, ext: string | undefined) => faceLabel(ext));
+    .replace(QQ_AT_TAG_RE, (_m, id: string) => atLabel(id))
+    .replace(QQ_AT_LEGACY_TAG_RE, (_m, id: string) => atLabel(id))
+    .replace(QQ_FACE_TAG_RE, (_m, ext: string | undefined) => faceLabel(ext));
 }
 
 /** `@…0006`：留尾四位，够分清是谁，又不摆 32 位乱码 */

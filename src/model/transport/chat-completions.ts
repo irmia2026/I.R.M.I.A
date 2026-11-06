@@ -30,6 +30,7 @@
  * （C 的判据是"每接一处都重跑字节判据"，多一次搬迁就多一次风险面）。
  */
 
+import { randomUUID } from 'node:crypto';
 import { DsClientError } from '../ds-client.ts';
 import type {
   DsIncompleteReason,
@@ -59,6 +60,58 @@ import type {
 const TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,128}$/u;
 
 const ERROR_DETAIL_LIMIT = 2_000;
+const TIMER_ROLE_AUDIT_ENV = 'IRMIA_TIMER_ROLE_AUDIT';
+const TIMER_MARKER = '[定时器触发] ';
+const TIMER_SCHEDULE_MARKER = '（计划时刻 ';
+
+let timerRoleAuditCaptured = false;
+
+interface TimerRoleAudit {
+  id: string;
+  model: string;
+  timerIndex: number;
+  timerRole: string;
+  nearbyRoles: Array<{ index: number; role: string }>;
+}
+
+function timerRoleAuditOf(req: TransportRequest): TimerRoleAudit | null {
+  if (process.env[TIMER_ROLE_AUDIT_ENV] !== '1' || timerRoleAuditCaptured) return null;
+  const rawMessages = req.body['messages'];
+  if (!Array.isArray(rawMessages)) return null;
+  const messages = rawMessages as ChatMessage[];
+  const lastDialogueIndex = messages.reduce((last, message, index) =>
+    message.role === 'user' || message.role === 'assistant' || message.role === 'tool' ? index : last, -1);
+  const timerIndex = messages.reduce((found, message, index) => {
+    const textParts = typeof message.content === 'string'
+      ? [message.content]
+      : Array.isArray(message.content)
+        ? message.content.filter((part): part is Extract<ChatContentPart, { type: 'text' }> => part.type === 'text').map(part => part.text)
+        : [];
+    const hasMarker = textParts.some(text => text.includes(TIMER_MARKER) && text.includes(TIMER_SCHEDULE_MARKER));
+    return hasMarker && index > lastDialogueIndex ? index : found;
+  }, -1);
+  if (timerIndex < 0) return null;
+
+  timerRoleAuditCaptured = true;
+  const nearbyRoles = messages
+    .slice(Math.max(0, timerIndex - 2), Math.min(messages.length, timerIndex + 3))
+    .map((message, offset) => ({ index: Math.max(0, timerIndex - 2) + offset, role: message.role }));
+  return {
+    id: randomUUID(),
+    model: typeof req.body['model'] === 'string' ? req.body['model'] : 'unknown',
+    timerIndex,
+    timerRole: messages[timerIndex]!.role,
+    nearbyRoles,
+  };
+}
+
+function timerRoleAuditLog(entry: Record<string, unknown>): void {
+  try {
+    console.info(`[timer-role-audit] ${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, ...entry })}`);
+  } catch {
+    // Diagnostics must never affect request delivery.
+  }
+}
 
 // ──────────────────────────────── Chat 的消息形状 ────────────────────────────────
 
@@ -684,16 +737,47 @@ function buildRequest(request: DsRequest, ctx: TransportBuildContext): Transport
 }
 
 async function send(ctx: TransportSendContext, req: TransportRequest): Promise<Response> {
-  return await ctx.fetchImpl(req.url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${ctx.apiKey}`,
-      accept: req.stream ? 'text/event-stream' : 'application/json',
-    },
-    body: JSON.stringify(req.body),
-    signal: ctx.signal,
-  });
+  const audit = timerRoleAuditOf(req);
+  if (audit !== null) {
+    timerRoleAuditLog({
+      phase: 'outbound',
+      auditId: audit.id,
+      protocol: 'chat-completions',
+      model: audit.model,
+      timerIndex: audit.timerIndex,
+      timerRole: audit.timerRole,
+      nearbyRoles: audit.nearbyRoles,
+    });
+  }
+  try {
+    const response = await ctx.fetchImpl(req.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${ctx.apiKey}`,
+        accept: req.stream ? 'text/event-stream' : 'application/json',
+      },
+      body: JSON.stringify(req.body),
+      signal: ctx.signal,
+    });
+    if (audit !== null) {
+      timerRoleAuditLog({
+        phase: 'response',
+        auditId: audit.id,
+        status: response.status,
+        requestId: response.headers.get('x-request-id')
+          ?? response.headers.get('request-id')
+          ?? response.headers.get('x-correlation-id')
+          ?? response.headers.get('cf-ray'),
+      });
+    }
+    return response;
+  } catch (error) {
+    if (audit !== null) {
+      timerRoleAuditLog({ phase: 'fetch-error', auditId: audit.id, errorName: error instanceof Error ? error.name : 'unknown' });
+    }
+    throw error;
+  }
 }
 
 export const chatCompletionsTransport: ModelTransport = {

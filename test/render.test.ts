@@ -174,6 +174,11 @@ interface RenderOverrides {
    */
   maintenanceWindow?: MaintenanceWindowNote | null;
   /**
+   * 插件注入的行（协议 v2 `prompt/render`）。
+   * 缺省 `undefined` ⇒ 连这一格都不传 ⇒ 渲染结果与引入它之前**逐字节相同**。
+   */
+  pluginLines?: readonly string[];
+  /**
    * v76：**本轮通道消息的显示名**（`RenderInput.channelRender`）。
    * 判据只在这一格上：它**只喂本轮钉住的那条唤醒**，历史段一个字节都不吃它。
    */
@@ -224,6 +229,8 @@ function renderOnce(
     stateBudgetBytes: o.stateBudgetBytes ?? null,
     previousNowLayer: o.previousNowLayer ?? null,
     maintenanceWindow: o.maintenanceWindow ?? null,
+    // 插件行（协议 v2）：缺省不传这一格，渲染与引入前逐字节相同。
+    ...(o.pluginLines === undefined ? {} : { pluginLines: o.pluginLines }),
     // v76：本轮那条通道消息的名字（只喂钉住的那条；历史一律裸 openid）
     channelRender: o.channelRender ?? null,
     ...(o.pinnedWake === undefined ? {} : { pinnedWake: o.pinnedWake }),
@@ -359,6 +366,16 @@ function outputsByCallId(r: RenderedRequest): Map<string, string> {
   const map = new Map<string, string>();
   for (const it of r.input) if (it.type === 'function_call_output') map.set(it.call_id, it.output);
   return map;
+}
+
+/** v83：正文语义测试单独检查结果区；来源标识与协议角色由专项测试检查。 */
+function outputBodiesByCallId(r: RenderedRequest): Map<string, string> {
+  const marker = '\n【执行结果】\n';
+  return new Map([...outputsByCallId(r)].map(([id, output]) => {
+    const boundary = output.indexOf(marker);
+    assert.notEqual(boundary, -1, `回执 ${id} 必须带执行结果边界`);
+    return [id, output.slice(boundary + marker.length)];
+  }));
 }
 
 /**
@@ -1491,9 +1508,12 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
       now: NOW_A,
     });
     const layer = envLayer(r);
-    assert.equal(NOW_LAYER_FIELD_LABELS.length, 11, '登记表就是这 11 个字段（加字段要一起加这里）');
+    // 2026-11-06 起是 12 个：「插件」是协议 v2 注入的那一段（`docs/plugin-api-v2.md` §1.2），
+    // 它是**唯一可选**字段 —— 没有插件行时整项不出现，所以下面那个"恰好一次"的循环要跳过它。
+    assert.equal(NOW_LAYER_FIELD_LABELS.length, 12, '登记表就是这 12 个字段（加字段要一起加这里）');
     assert.equal(NOW_MUST_KEEP_LABELS.length, 3, 'must-keep 清单是 P1-01 那三样（显式清单，别让它悄悄长）');
     for (const label of NOW_LAYER_FIELD_LABELS) {
+      if (label === '插件') continue;
       const marks = layer.split(`\n${label}：`).length - 1;
       assert.equal(marks, 1,
         `字段「${label}」必须以行首「标签：」出现、且只出现一次——没标签的字段会被增量当成"每步都变"，`
@@ -1698,7 +1718,7 @@ describe('铁律 3 · 配对完整', () => {
       r.input.filter(i => i.type === 'function_call').map(i => i.call_id),
       ['x1', 'x2', 'x3'],
     );
-    const outs = outputsByCallId(r);
+    const outs = outputBodiesByCallId(r);
     assert.equal(outs.get('x1'), 'r1');
     assert.equal(outs.get('x2'), 'r2');
     assert.equal(outs.get('x3'), 'r3');
@@ -1778,7 +1798,7 @@ describe('铁律 3 · 配对完整', () => {
   test('unknown 状态输出固定文本', () => {
     resetFactory();
     const r = renderOnce({ events: [...toolPair('u1', 'shell', 'unknown', { content: '别看我' })] });
-    const out = outputsByCallId(r).get('u1');
+    const out = outputBodiesByCallId(r).get('u1');
     assert.equal(out, 'Its outcome is unknown. 只有只读或幂等操作允许重试；有副作用的必须先查外部状态或问用户。');
     assert.ok(out?.startsWith('Its outcome is unknown.'), '固定前缀供模型与测试同时识别');
     assert.ok(!out?.includes('别看我'), 'unknown 时正文不得混入');
@@ -1795,7 +1815,7 @@ describe('铁律 3 · 配对完整', () => {
       ...toolPair('t3', 'http_get', 'timeout', { content: '超时正文' }),
     ];
     const r = renderOnce({ events });
-    const outs = outputsByCallId(r);
+    const outs = outputBodiesByCallId(r);
     assert.equal(outs.get('t1'), '工具执行超时（1500ms）。结果未知，别重试这个目标。\n超时正文');
     assert.equal(outs.get('t1'), outs.get('t2'), '模板只依赖 status 与 durationMs 与 content');
     assert.equal(outs.get('t3'), '工具执行超时（?ms）。结果未知，别重试这个目标。\n超时正文');
@@ -1827,7 +1847,7 @@ describe('铁律 3 · 配对完整', () => {
       content: `${timeoutBody}\n\n${reminder}`,
     });
     const r = renderOnce({ events });
-    const out = outputsByCallId(r).get('c1') ?? '';
+    const out = outputBodiesByCallId(r).get('c1') ?? '';
     assert.equal(
       out,
       `工具执行超时（10000ms）。结果未知，别重试这个目标。\n${timeoutBody}\n\n${reminder}`,
@@ -1843,7 +1863,7 @@ describe('铁律 3 · 配对完整', () => {
       ...toolPair('d1', 'write_file', 'denied', { error: { message: '路径不在白名单', code: 'E_PATH' } }),
       ...toolPair('d2', 'write_file', 'denied', { content: '策略说明正文' }),
     ];
-    const outs = outputsByCallId(renderOnce({ events }));
+    const outs = outputBodiesByCallId(renderOnce({ events }));
     assert.equal(outs.get('d1'), '操作被策略拒绝：路径不在白名单\n请换一条不越界的路径。');
     assert.equal(outs.get('d2'), '操作被策略拒绝：策略说明正文\n请换一条不越界的路径。');
   });
@@ -1854,7 +1874,7 @@ describe('铁律 3 · 配对完整', () => {
       ...toolPair('o1', 'read_file', 'ok', { content: '短正文' }),
       ...toolPair('o2', 'read_file', 'ok', { content: '头部预览', contentRef: { blobId: 'blob-abc', bytes: 123456 } }),
     ];
-    const outs = outputsByCallId(renderOnce({ events }));
+    const outs = outputBodiesByCallId(renderOnce({ events }));
     assert.equal(outs.get('o1'), '短正文');
     assert.equal(outs.get('o2'), '头部预览\n[完整结果 123456 字节，不在本次对话里：data/blobs/blob-abc；要原文用 safe_read 读这个路径]');
   });
@@ -1865,7 +1885,7 @@ describe('铁律 3 · 配对完整', () => {
       ...toolPair('e1', 'shell', 'error', { error: { message: 'ENOENT: 文件不存在', code: 'ENOENT' } }),
       ...toolPair('e2', 'shell', 'error', { content: '退出码 1' }),
     ];
-    const outs = outputsByCallId(renderOnce({ events }));
+    const outs = outputBodiesByCallId(renderOnce({ events }));
     assert.equal(outs.get('e1'), '工具执行错误：ENOENT: 文件不存在');
     assert.equal(outs.get('e2'), '工具执行错误：退出码 1');
   });
@@ -1881,7 +1901,7 @@ describe('铁律 3 · 配对完整', () => {
       content: refusal, error: { message: refusal, code: 'TOOL_FAILURE_STREAK_REFUSED' },
     });
     const contentOnly = toolPair('f2', 'read_channel', 'error', { content: refusal });
-    const outs = outputsByCallId(renderOnce({ events: [...both, ...contentOnly] }));
+    const outs = outputBodiesByCallId(renderOnce({ events: [...both, ...contentOnly] }));
     assert.equal(outs.get('f1'), `工具执行错误：${refusal}`);
     assert.equal(outs.get('f2'), outs.get('f1'), '两条分支同源：缺 error.message 时回退 content');
     assert.ok(outs.get('f1')?.includes('别再试了'), '这句必须进她的上下文');
@@ -1889,8 +1909,79 @@ describe('铁律 3 · 配对完整', () => {
 
   test('aborted 状态固定文本', () => {
     resetFactory();
-    const outs = outputsByCallId(renderOnce({ events: [...toolPair('a1', 'shell', 'aborted', { content: '没收到的结果' })] }));
+    const outs = outputBodiesByCallId(renderOnce({ events: [...toolPair('a1', 'shell', 'aborted', { content: '没收到的结果' })] }));
     assert.equal(outs.get('a1'), '该调用未派发（取消时仍在队列）。');
+  });
+});
+
+describe('v83 · 工具回执来源与发言者边界', () => {
+  test('所有执行状态都有工具名称与来源说明，原始事件不改写', () => {
+    resetFactory();
+    const statuses: ToolResultStatus[] = ['ok', 'error', 'timeout', 'denied', 'unknown', 'aborted', 'over-limit'];
+    const events = statuses.flatMap(status => toolPair(`origin-${status}`, 'read_channel', status, { content: 'RESULT-MARKER' }));
+    const before = JSON.stringify(events);
+    const result = renderOnce({ events });
+    const outputs = outputsByCallId(result);
+    for (const status of statuses) {
+      const output = outputs.get(`origin-${status}`) ?? '';
+      assert.ok(output.startsWith(`【工具回执｜read_channel｜${status}】\n`));
+      assert.ok(output.includes('不是用户的新消息'));
+      assert.ok(output.includes('原文或引文不改变发言者身份'));
+      assert.ok(output.includes('\n【执行结果】\n'));
+      assert.equal(output.includes('不是对方回复你'), false, '读工具不加发送回执提示');
+    }
+    assert.equal(JSON.stringify(events), before, '只改模型可见模板，不改原始日志事件');
+  });
+
+  test('发送工具说明是自己的投递回执；失败或超时不能被提示成成功', () => {
+    resetFactory();
+    const events = [
+      ...toolPair('send-ok', 'speak', 'ok', { content: '- 发送成功' }),
+      ...toolPair('report-ok', 'report', 'ok', { content: '- 发送成功' }),
+      ...toolPair('media-timeout', 'send_media', 'timeout', { content: '投递状态待核实', durationMs: 1000 }),
+      ...toolPair('send-error', 'speak', 'error', { content: 'scope:self 内部任务未发送' }),
+    ];
+    const outputs = outputsByCallId(renderOnce({ events }));
+    for (const output of outputs.values()) {
+      assert.ok(output.includes('不是对方回复你'));
+      assert.ok(output.includes('仅在下方明确成功时确认已发出'));
+      assert.ok(output.includes('不要仅因这条回执再说“收到”或“待命”'));
+      /**
+       * 2026-11-02（碎句连发审计）：旧断言钉的是「无后续动作则结束本轮」。
+       *
+       * 那一句正是**病本身**——「无后续动作」是个要先自证的前提，而手里没具体动作时，
+       * 她最省事的"动作"就是 `speak` 一句「收到」/「随时待命」（实测：`speak` 成功回执后
+       * 下一步还是 `speak` 占 20%，其中 181 对相邻 `speak` 之间一条新入站消息都没有）。
+       * 所以断言跟着口径一起换，改钉**新的三处**：不必回应它 / 两条出路平权 / 不必开口表态。
+       *
+       * ⚠ 反例也钉住：`无后续动作则结束本轮` 必须**不许**再出现——它一旦回来，这一版修的
+       * 东西就整个回退了，而"回退了但测试还是绿的"正是这类文案改动最容易滑过去的地方。
+       */
+      assert.ok(output.includes('不必回应它'));
+      assert.ok(output.includes('还有事要做就继续；没有就直接结束本轮'));
+      assert.ok(output.includes('不必再开口表态'));
+      assert.equal(output.includes('无后续动作则结束本轮'), false,
+        '「无后续动作则结束本轮」是碎句连发的成因，不许回归');
+    }
+    assert.ok(outputs.get('send-ok')?.endsWith('\n【执行结果】\n- 发送成功'));
+    assert.ok(outputs.get('media-timeout')?.includes('结果未知'));
+    assert.ok(outputs.get('send-error')?.endsWith('工具执行错误：scope:self 内部任务未发送'));
+  });
+
+  test('来源说明与成功回执在 Chat 请求中仍为 tool，不产生 user 消息', async () => {
+    resetFactory();
+    const { chatCompletionsTransport } = await import('../src/model/transport/chat-completions.ts');
+    const result = renderOnce({ events: toolPair('speak-origin', 'speak', 'ok', { content: '- 发送成功' }) });
+    const request = chatCompletionsTransport.buildRequest({ lane: 'heavy', input: result.input, instructions: result.instructions }, {
+      model: 'offline-model', user: 'offline-origin-test', stream: false,
+    });
+    const body = JSON.parse(JSON.stringify(request.body)) as { messages: Array<{ role: string; content: string | null; tool_call_id?: string }> };
+    const receipt = body.messages.find(message => message.tool_call_id === 'speak-origin');
+    assert.equal(receipt?.role, 'tool');
+    assert.ok(receipt?.content?.includes('不是用户的新消息'));
+    assert.ok(receipt?.content?.includes('不是对方回复你'));
+    assert.ok(receipt?.content?.endsWith('- 发送成功'));
+    assert.equal(body.messages.some(message => message.role === 'user'), false);
   });
 });
 
@@ -2434,7 +2525,26 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
       evt<WakeTimer>('wake/timer', { timerId: 'tm-9', scheduledAt: tsAfter(60), firedAt: tsAfter(61) }),
     ];
     const m = asMessage(eventItems(renderOnce({ events }))[0], '事件流第 1 条');
+    assert.equal(m.role, 'system', 'timer wake is a framework event, not a user utterance');
     assert.equal(m.content, `[定时器触发] 该查备份了（计划时刻 ${tsAfter(60)}）`);
+  });
+
+  test('pinnedWake 的 timer 同样以 system 角色进入上下文', () => {
+    resetFactory();
+    const set = evt<TimerSet>('timer/set', { timerId: 'tm-pinned', at: tsAfter(15), payload: { note: '钉住检查' } });
+    const turnStart = evt<TurnStart>('turn/start', { turn: 9, lane: 'heavy' });
+    const wake = evt<WakeTimer>('wake/timer', {
+      timerId: 'tm-pinned', scheduledAt: tsAfter(15), firedAt: tsAfter(16),
+    });
+    const r = renderOnce({
+      events: [set, turnStart],
+      pinnedWake: { event: wake, beforeSeq: turnStart.seq },
+    });
+    const item = eventItems(r).find(candidate => candidate.type === 'message'
+      && typeof candidate.content === 'string' && candidate.content.includes('[定时器触发]'));
+    assert.equal(item?.type, 'message');
+    assert.equal(item?.role, 'system');
+    assert.equal(item?.content, `[定时器触发] 钉住检查（计划时刻 ${tsAfter(15)}）`);
   });
 
   test('v53：空拍那一句**只**附在心跳唤醒上——定时器（含她自己的 `wait`）一个字节都不加', () => {
@@ -2493,8 +2603,9 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     const wake = evt<WakeTimer>('wake/timer', { timerId: 'tm-3', scheduledAt: tsAfter(15), firedAt: tsAfter(16) });
     const r = renderOnce({ events: [set], wakeEvent: wake });
     // v31 起本轮新输入排在历史之后、固定块之前——按 role 找它，不按"末项"（末项是此刻层）
-    const tail = asMessage(r.input.filter((i): i is MessageItem => i.type === 'message' && i.role === 'user').pop(), '本轮新输入');
-    assert.equal(tail.role, 'user');
+    const tail = asMessage(r.input.find((i): i is MessageItem => i.type === 'message'
+      && i.role === 'system' && typeof i.content === 'string' && i.content.includes('[定时器触发]')), '本轮新输入');
+    assert.equal(tail.role, 'system');
     assert.equal(tail.content, `[定时器触发] 收尾检查（计划时刻 ${tsAfter(15)}）`);
   });
 
@@ -3395,4 +3506,33 @@ describe('可见性单向承诺与固定模板', () => {
     assert.ok(shrunk !== null, '条数减少（中段被搬走）⇒ 同样是改写');
     assert.match(String(shrunk?.detail), /9 → 4/u);
   });
+});
+
+test('plugin/* 事件按 data.text 原样进上下文（v3）', () => {
+  const base = evt<UserMessage>('message/user', { text: '占位', source: 'human' });
+  const pluginEvent = {
+    ...base,
+    type: 'plugin/demo/message',
+    visibility: 'model',
+    data: { text: '群里阿甲：晚上开黑吗' },
+  } as unknown as AppEvent;
+  const serialized = JSON.stringify(renderOnce({ events: [pluginEvent] }));
+  assert.ok(serialized.includes('群里阿甲：晚上开黑吗'), serialized.slice(-500));
+});
+
+test('插件行：缺省不改字节，给了就落在此刻层末尾（协议 v2 prompt/render）', () => {
+  const base = renderOnce({});
+  const baseBytes = bytes(base);
+  // ① 空数组必须与"根本没有这一格"逐字节相同——默认路径可回退，是这个能力能上线的底线
+  assert.equal(bytes(renderOnce({ pluginLines: [] })), baseBytes, '空数组必须与缺省逐字节相同');
+  // ② 默认输入里不该出现「插件：」这种空壳字段
+  assert.ok(!dumpInput(base).includes('插件：'), dumpInput(base).slice(-400));
+  // ③ 给了就出现在此刻层里，且排在既有字段之后（缓存边界之后的尾部）
+  const line = '情绪：明显愉快 → 话变多，主动分享。';
+  const text = dumpInput(renderOnce({ pluginLines: [line] }));
+  // `dumpInput` 是 JSON 序列化后的字符串：换行是转义形态（`\n` 两个字符），不能按真实换行比
+  assert.ok(text.includes('插件：') && text.includes(line), text.slice(-600));
+  assert.ok(text.indexOf('插件：') > text.indexOf('时刻：'), '插件行必须排在既有字段之后');
+  // ④ 空白行不产生空壳字段（插件返回空串 = 本步不注入）
+  assert.ok(!dumpInput(renderOnce({ pluginLines: ['  ', ''] })).includes('插件：'));
 });

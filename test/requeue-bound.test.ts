@@ -72,7 +72,7 @@ interface Harness {
   log: EventLog;
   projection: Projection;
   append: (type: string, data: unknown, ts?: string) => AppEvent;
-  depsOf: (ds: DsClient) => AgentLoopDeps;
+  depsOf: (ds: DsClient, patch?: Partial<AgentLoopDeps>) => AgentLoopDeps;
   events: () => Promise<AppEvent[]>;
 }
 
@@ -95,9 +95,10 @@ async function makeHarness(t: TestContext): Promise<Harness> {
     for await (const event of log.readAll()) out.push(event);
     return out;
   };
-  const depsOf = (ds: DsClient): AgentLoopDeps => ({
+  const depsOf = (ds: DsClient, patch: Partial<AgentLoopDeps> = {}): AgentLoopDeps => ({
     log, ds, registry: makeRegistry(), projection, persona: PERSONA,
     now: () => NOW, timezone: TIMEZONE, workspaceRoot: dir,
+    ...patch,
   });
   return { log, projection, append, depsOf, events };
 }
@@ -204,4 +205,37 @@ test('A③ 判据分得开：超时/断流型失败**不被**当成服务端拒�
   const events = await harness.events();
   assert.equal(ofType<InputDeadLetter>(events, 'input/dead-letter').length, 0, '不是"服务端拒了请求"，不该进死信');
   assert.equal(ofType<InputRequeued>(events, 'input/requeued').length, 1, '这类失败重试是合理的');
+});
+test('A④ 纯内部 scope:self timer 失败 ⇒ 直接终态，不重投也不生成用户通报', async (t) => {
+  const harness = await makeHarness(t);
+  const wake = harness.append('wake/timer', {
+    timerId: 'timer-self-1',
+    scheduledAt: NOW,
+    firedAt: NOW,
+    payload: { scope: 'self', note: '内部巡检' },
+  });
+  const model = fakeModel([{
+    throws: new DsClientError({ kind: 'network', code: 'network_error', message: 'ECONNRESET' }),
+  }]);
+
+  const reason = await runTurn(harness.depsOf(model.ds, {
+    isInternalTimerWake: (event) => event.type === 'wake/timer'
+      && (event.data.payload as { scope?: string } | undefined)?.scope === 'self',
+  }), [wake]);
+  assert.equal(reason.kind, 'error');
+  const events = await harness.events();
+  assert.equal(ofType<InputRequeued>(events, 'input/requeued').length, 0, 'self timer 不得重投');
+  const dead = ofType<InputDeadLetter>(events, 'input/dead-letter');
+  assert.equal(dead.length, 1);
+  assert.equal(dead[0]!.data.reason, 'internal-timer');
+  assert.equal(dead[0]!.data.claimCount, 1);
+  assert.equal(
+    harness.projection.pending.some(item => item.wakeSeq === wake.seq), false,
+    '终态后同一 wakeSeq 不得再次进入 pending',
+  );
+  assert.equal(
+    ofType(events, 'wake/manual').filter(event => (event.data as { via?: string }).via === 'system').length,
+    0,
+    '内部 timer 失败不制造面向用户的放弃通报',
+  );
 });

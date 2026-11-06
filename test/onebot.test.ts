@@ -16,8 +16,9 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext, after, describe } from 'node:test';
 
@@ -813,6 +814,92 @@ describe('onebot：正向 ws 链路（假 NapCat）', () => {
     });
     // echo 必须唯一：配对全靠它
     assert.notEqual(sends[0]?.['echo'], sends[1]?.['echo']);
+  });
+
+  /**
+   * CQ 码里指向**本机文件**的媒体，`sendText` 必须先转成 `base64://` 再上线。
+   *
+   * 实测来历（2026-11-03）：`[CQ:image,file=1.jpg]` 到协议端得到
+   * `retcode=100 ENOENT: no such file or directory, stat '1.jpg'` —— 协议端跑在
+   * `100.68.92.32` 那台，stat 的是它自己的盘。`send_media` 早就能发本地图（走 `media.data`），
+   * 这条用例钉住"文本里塞的本地媒体走**同一条**出口"，否则 `speak` 能发表情包就只是句空话。
+   */
+  test('sendText：本机文件的 CQ 媒体在线上变成 base64://（协议端看不到我们的盘）', async (t) => {    const dir = mkdtempSync(join(tmpdir(), 'irmia-cq-send-'));
+    t.after(() => { rmSync(dir, { recursive: true, force: true }); });
+    const path = join(dir, 'sticker.png');
+    const bytes = Buffer.from('PNGDATA-贴纸');
+    writeFileSync(path, bytes);
+
+    const cat = await startFakeNapCat(t);
+    const { channel } = startChannel(cat);
+    t.after(() => { channel.stop(); });
+    await waitConnected(channel);
+
+    const outcome = await channel.sendText('group-at', '20002', `[CQ:image,file=${path}]`);
+    assert.equal(outcome.ok, true, `发送应当成功：${JSON.stringify(outcome)}`);
+
+    const sends = cat.actions().filter((call) => call['action'] === 'send_group_msg');
+    const params = sends[0]?.['params'] as Record<string, unknown>;
+    assert.equal(params['message'], `[CQ:image,file=base64://${bytes.toString('base64')},sub_type=1]`,
+      '线上那一段必须是 base64:// 且标成表情包，不能带着本机路径出去');
+    assert.ok(!String(params['message']).includes(dir),
+      '回执里也不能出现本机路径的残留');
+  });
+
+  /**
+   * 引用里的图**必须挂到这条唤醒上**，让它走跟新消息同一条看图流水线。
+   *
+   * 现场（2026-11-03 20:24，私聊）：她发了一张贴纸，用户引用它说"你描述这张"，
+   * 她手上只有 `[引用 #1447665289]` 和 `get_msg` 回来的一串 **url**，
+   * 于是把图描述成了完全不相干的东西。这里钉住"图会作为附件跟过来"。
+   */
+  test('引用里的图：get_msg 取回来挂成这条消息的附件，投递顺序不变', async (t) => {
+    const quotedUrl = 'https://x.test/quoted-sticker.png';
+    const cat = await startFakeNapCat(t);
+    const { channel, received } = startChannel(cat);
+    t.after(() => { channel.stop(); });
+    await waitConnected(channel);
+
+    cat.autoReply = false;
+    const asked: string[] = [];
+    cat.onText = (text) => {
+      const call = JSON.parse(text) as Record<string, unknown>;
+      const action = String(call['action']);
+      const echo = call['echo'];
+      if (action === 'get_msg') {
+        asked.push(String((call['params'] as Record<string, unknown>)['message_id']));
+        cat.replyJson({
+          status: 'ok', retcode: 0, echo,
+          data: {
+            message_id: 1447665289,
+            message: [
+              { type: 'image', data: { url: quotedUrl, summary: '[图片]' } },
+              { type: 'text', data: { text: ' 这个Niko团子总行了吧' } },
+            ],
+          },
+        });
+        return;
+      }
+      cat.replyJson({ status: 'ok', retcode: 0, data: {}, echo });
+    };
+
+    cat.sendJson({
+      post_type: 'message', message_type: 'private', sub_type: 'friend',
+      message_id: 370107487, user_id: 3652971137, self_id: 1018168937,
+      raw_message: '[CQ:reply,id=1447665289]你描述这张',
+      message: [
+        { type: 'reply', data: { id: '1447665289' } },
+        { type: 'text', data: { text: '你描述这张' } },
+      ],
+    });
+
+    await waitFor(() => received.length === 1, 8000, '私聊投递');
+    const data = received[0]!;
+    assert.match(String(data.text), /^\[引用 #1447665289\] 你描述这张/u,
+      '前缀必须一字不动地保留（她自己还得能对上 read_channel 那一行）');
+    assert.deepEqual(data.attachments, [{ type: 'image', url: quotedUrl }],
+      '被引用那条的图必须挂成附件，否则她会去猜');
+    assert.deepEqual(asked, ['1447665289'], '应当按那个 id 去 get_msg 一次');
   });
 
   /**

@@ -30,7 +30,7 @@ function enabledPlugin() {
 
 test('内置为空时组合保持不变，启用插件提供三类贡献', () => {
   const empty = composePluginRuntime(new PluginManager(tempDirSync('irmia-empty-')), []);
-  assert.deepEqual(empty, { packages: [], revision: pluginCompositionRevision([]), skillRoots: [], hookEntries: [], mcpServers: [], warnings: [] });
+  assert.deepEqual(empty, { packages: [], revision: pluginCompositionRevision([]), skillRoots: [], hookEntries: [], mcpServers: [], adapters: [], warnings: [] });
   const { manager } = enabledPlugin();
   const composed = composePluginRuntime(manager, []);
   assert.equal(composed.packages.length, 1);

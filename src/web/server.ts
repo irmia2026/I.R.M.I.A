@@ -742,6 +742,14 @@ export interface WebServerDeps {
    */
   pluginRuntime?: (() => PluginRuntimeComposition) | undefined;
   /**
+   * 启停插件后的**热重组装**口（宿主的 `applyPluginRuntime`，与熔断器同一条管道）。
+   *
+   * 给了它，enable/disable 当场重算技能根/hooks/MCP 声明，回执 `restartRequired=false`；
+   * 不给（CLI、测试）维持旧语义——回执如实说「重启后生效」。confirm/install 不触发。
+   */
+  pluginApply?: (() => Promise<void>) | undefined;
+  pluginApi?: ((request: { pluginId: string; suffix: string; query: URLSearchParams }) => Promise<unknown>) | undefined;
+  /**
    * 内置协议端（`channels.onebot.managed`，v34）。给了它才有 `GET/POST/PUT /api/protocol-side`：
    * 界面据此启停它、看它的状态、改它的目录。
    *
@@ -4003,6 +4011,11 @@ class WebServerImpl implements WebServer {
     }
 
     // 内置协议端（v34）：一条读、两条启停、一条写配置。三条**共用同一份视图**
+    if (path.startsWith('/api/plugin/')) {
+      await this.handlePluginApi(req, res, url);
+      return;
+    }
+
     // （buildProtocolSideView）——分开各拼一份响应，界面上的状态与刚做完的动作迟早对不上。
     // 它不走 /api/commands：那套是"事件日志写命令 + X-Confirm 危险短语"的通道，而这里的
     // 动作不写事件（启停一个外部进程不是 agent 的状态，与 set-key / dep-install 同一条理由），
@@ -4540,6 +4553,24 @@ class WebServerImpl implements WebServer {
    * 写配置那一半则走 `withConfigDoc`（它自己会落 `config/changed`）。形状不对就是 405：
    * "这个地址存在，但不是这个用法"与"没这个地址"是两件事。
    */
+  private async handlePluginApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (req.method !== 'GET') {
+      throw new HttpError(405, 'method-not-allowed', '插件视图只接受 GET');
+    }
+    const handler = this.deps.pluginApi;
+    if (handler === undefined) {
+      throw new HttpError(501, 'not-configured', '这个实例没有装配插件视图口');
+    }
+    const rest = url.pathname.slice('/api/plugin/'.length);
+    const slash = rest.indexOf('/');
+    const pluginId = slash < 0 ? rest : rest.slice(0, slash);
+    if (!/^[a-z][a-z0-9-]{1,40}$/.test(pluginId)) {
+      throw new HttpError(400, 'bad-plugin-id', '插件 id 不合法');
+    }
+    const suffix = slash < 0 ? '' : rest.slice(slash + 1);
+    sendJson(res, 200, await handler({ pluginId, suffix, query: url.searchParams }));
+  }
+
   private async handleProtocolSide(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
     if (path === '/api/protocol-side') {
       if (req.method !== 'GET') {
@@ -5766,7 +5797,8 @@ class WebServerImpl implements WebServer {
       case 'plugin-confirm':
       case 'plugin-enable':
       case 'plugin-disable': {
-        const result = runPluginCommand(command, payload, this.deps.plugins);
+        const result = await runPluginCommand(command, payload, this.deps.plugins,
+          this.deps.pluginApply === undefined ? {} : { apply: this.deps.pluginApply });
         sendJson(res, result.status, result.body);
         return;
       }

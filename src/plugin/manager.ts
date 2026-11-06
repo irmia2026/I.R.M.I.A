@@ -131,6 +131,28 @@ export class PluginManager {
     this.lifecycle.set(keyOf(id, contentHash), { ...state, enabled });
   }
 
+  /**
+   * 运行面已装配态的**拷贝**（key = `id\0hash`，value = 装配时它是否在组合里）。
+   *
+   * 给启停热更的回滚用：热重组装前先取一份，装失败就 `restoreApplied` 还回去——
+   * 否则「装配没成、requiresRestart 却已经清零」会把人骗进「以为生效了其实没有」。
+   */
+  appliedSnapshot(): Map<string, boolean> { return new Map(this.runtimeEnabled); }
+
+  /**
+   * 热重组装**开始前**调用：把 `runtimeEnabled` 刷成当前生命周期态，`active()` 的
+   * `requiresRestart` 门随之放行——`composePluginRuntime` 才会把刚启停的包收进新组合。
+   *
+   * 顺序不能反：必须先放行门、再重组装（组合是按 `active()` 算的）；装失败由调用方
+   * `restoreApplied` 回滚。没有配套回滚就不要调它。
+   */
+  markApplied(): void {
+    this.runtimeEnabled = new Map([...this.lifecycle].map(([key, value]) => [key, value.enabled]));
+  }
+
+  /** 热重组装失败时回滚到装配前快照：`requiresRestart` 保持 true，重启兜底这条路径不变。 */
+  restoreApplied(snapshot: Map<string, boolean>): void { this.runtimeEnabled = new Map(snapshot); }
+
   recordFailure(id: string, contentHash: string, reason: string): void {
     this.requirePackage(id, contentHash);
     this.emit('plugin/failed', { id, contentHash, reason });
