@@ -91,7 +91,6 @@ export interface SubagentProfile {
   contextLimit: number;
   /** 0.5–0.95，默认 0.7。 */
   compactAt: number;
-  maxTurns?: number;
   requires?: ProfileRequires;
   install?: ProfileInstallSource[];
   /** 隐式 Profile（general）不进 `GET /api/subagents/profiles`。 */
@@ -128,20 +127,8 @@ export interface ProfileSummary {
   missing: string[];
 }
 
-/** Profile 没写 `maxTurns` 时的兜底轮数（与 general 的出厂值同档）。 */
-export const DEFAULT_SUBAGENT_MAX_TURNS = 12;
-
 /**
- * `maxTurns` 的硬上限（P3.2.1）。
- *
- * Profile 是**数据**，写一个 `maxTurns: 1e9` 就等于"没有上限"——而这一层存在的理由正是
- * "不能无限跑"。超出即夹到本值：夹的是数字，不是静默放行（`normalizeProfile` 只接受正整数，
- * 非法值直接退回兜底）。
- */
-export const MAX_SUBAGENT_MAX_TURNS = 200;
-
-/**
- * Profile `systemPrompt` 的字符上限（P3.2.1）。
+ * P4.3：Profile `systemPrompt` 的字符上限。
  *
  * 它只**追加**在父人格 identity 之后，所以这条上限量的是"追加段最多能挤掉多少框架身份/工具契约"。
  * 超过即拒绝加载该 Profile（不截断）——截断会把一句写了一半的规则留在系统提示里。
@@ -196,7 +183,7 @@ export const BUILTIN_PROFILES: readonly SubagentProfile[] = [
     tools: 'readonly', workspace: 'own',
     skills: [], mcpServers: [], reasoningEffort: 'high',
     contextLimit: DEFAULT_PROFILE_CONTEXT_LIMIT, compactAt: DEFAULT_PROFILE_COMPACT_AT,
-    lane: 'heavy', maxTurns: 12, hidden: true,
+    lane: 'heavy', hidden: true,
   },
   {
     id: 'researcher', label: '调研',
@@ -211,7 +198,7 @@ export const BUILTIN_PROFILES: readonly SubagentProfile[] = [
     tools: ['read', 'write', 'network', 'report'], workspace: 'own',
     skills: ['auto-deep-research', 'quick-research'], mcpServers: [], reasoningEffort: 'max',
     contextLimit: DEFAULT_PROFILE_CONTEXT_LIMIT, compactAt: DEFAULT_PROFILE_COMPACT_AT,
-    lane: 'heavy', maxTurns: 16,
+    lane: 'heavy',
     requires: {skills: ['auto-deep-research', 'quick-research']},
     install: [
       {source: 'builtin:packs/subagents/skills/auto-deep-research', ref: '0.1.0-beta.14', sha256: '78feceacb2a50ea65d7c210b0d845737a0dcbcc056a643f3db5b89f19258fae3'},
@@ -248,7 +235,7 @@ export const BUILTIN_PROFILES: readonly SubagentProfile[] = [
     ],
     mcpServers: [], reasoningEffort: 'max',
     contextLimit: DEFAULT_PROFILE_CONTEXT_LIMIT, compactAt: DEFAULT_PROFILE_COMPACT_AT,
-    lane: 'heavy', maxTurns: 30,
+    lane: 'heavy',
     requires: {
       skills: [
         'dev-workflow', 'review', 'irmia-framework', 'plugin-dev',
@@ -289,7 +276,7 @@ export const BUILTIN_PROFILES: readonly SubagentProfile[] = [
       'xiaohongshu-post', 'douyin-script', 'event-architect', 'sevonsss-plan',
     ], mcpServers: [], reasoningEffort: 'high',
     contextLimit: DEFAULT_PROFILE_CONTEXT_LIMIT, compactAt: DEFAULT_PROFILE_COMPACT_AT,
-    lane: 'heavy', maxTurns: 20,
+    lane: 'heavy',
     requires: {
       skills: [
         'office', 'copywriting', 'human-writing',
@@ -460,8 +447,6 @@ function normalizeProfile(raw: unknown, fallbackId: string, base?: SubagentProfi
   const laneRaw = raw['lane'];
   const lane: ProfileLane | undefined = laneRaw === 'heavy' || laneRaw === 'light'
     ? laneRaw : fallback?.lane;
-  const maxTurns = typeof raw['maxTurns'] === 'number' && Number.isSafeInteger(raw['maxTurns']) && raw['maxTurns'] > 0
-    ? raw['maxTurns'] : fallback?.maxTurns;
 
   const workdir = readEnum(raw['workdir'], 'workdir', ['workspace', 'project', 'auto'] as const,
     fallback?.workdir ?? DEFAULT_PROFILE_WORKDIR, issues);
@@ -495,7 +480,6 @@ function normalizeProfile(raw: unknown, fallbackId: string, base?: SubagentProfi
     profile: {
       id, label, description, systemPrompt, workdir, shell, tools, workspace,
       skills, mcpServers, reasoningEffort, contextLimit, compactAt,
-      ...(maxTurns === undefined ? {} : {maxTurns}),
       ...(requires === undefined ? {} : {requires}),
       ...(install === undefined ? {} : {install}),
       ...(hidden ? {hidden: true} : {}),

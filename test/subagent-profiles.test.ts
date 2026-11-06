@@ -129,8 +129,6 @@ test('角色内容：researcher/worker/scribe 的 v2 字段与工具面（coder+
     assert.equal(profile.compactAt, 0.7);
   }
   assert.equal(registry.get('general')!.reasoningEffort, 'high', 'general 沿用现有默认档');
-  assert.equal(registry.get('worker')!.maxTurns, 30);
-  assert.equal(registry.get('researcher')!.maxTurns, 16);
   assert.equal(registry.get('coder'), null, 'coder 已随合并删除');
   assert.equal(registry.get('design'), null, 'design 已随合并删除');
 });

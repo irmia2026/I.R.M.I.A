@@ -1,5 +1,5 @@
 /**
- * P3.2.1 子代理硬化：maxTurns 执行 / Profile capability 白名单 / workspace:'none'。
+ * P3.2.1 子代理硬化：Profile capability 白名单 / workspace:'none'。beta16 起轮数不再设上限。
  *
  * 与 `test/subagent-manager.test.ts` 同一套夹具形状（真 EventLog + 假 runTurnFn），
  * 但这里刻意**不注入** runTurnFn 之外的东西：要证的是"管理器自己会停"，
@@ -116,81 +116,6 @@ async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
   assert.fail(`等待条件超时（${timeoutMs}ms）`);
 }
 
-test('maxTurns=1：跑满一轮就停模型调用，写 max-turns 终态/report/wake', async (t) => {
-  const calls: string[] = [];
-  let fx!: Fixture;
-  fx = await make(t, async (deps) => {
-    calls.push(deps.agentId ?? '');
-    if (calls.length === 1) fx.manager.message(deps.agentId!, '队列里的第二条');
-    return {kind: 'completed'};
-  }, {
-    profilesDoc: {profiles: [{id: 'limit1', label: '限一轮', tools: 'readonly', workspace: 'own', maxTurns: 1}]},
-  });
-
-  const handle = await fx.manager.delegate({task: '第一轮任务', profileId: 'limit1'}, {callId: 'mt-1', turn: 1});
-  await waitFor(() => fx.manager.status(handle.agentId)?.status === 'interrupted');
-
-  assert.equal(calls.length, 1, 'maxTurns=1 ⇒ 只允许一次模型调用');
-  const session = fx.sessionOf(handle.agentId);
-  assert.equal(session['status'], 'interrupted');
-  assert.equal(session['error'], 'max-turns');
-  assert.equal(session['maxTurns'], 1);
-  assert.deepEqual(session['pendingMessages'], ['队列里的第二条'], '没跑的消息留在队列里，不丢');
-
-  const events = await fx.readAll();
-  const interrupted = events.filter((event) => event.type === 'subagent/interrupted'
-    && (event.data as {reason?: string}).reason === 'max-turns');
-  assert.equal(interrupted.length, 1, '每次激活只写一条 max-turns 事实');
-  assert.equal((interrupted[0]!.data as {maxTurns?: number}).maxTurns, 1);
-  assert.ok(events.some((event) => event.type === 'subagent/report'
-    && (event.data as {summary: string}).summary.includes('maxTurns')));
-  assert.ok(events.some((event) => event.type === 'wake/subagent'
-    && (event.data as {status: string; summary: string}).status === 'interrupted'
-    && (event.data as {summary: string}).summary.includes('maxTurns')), '父代理被叫醒并知道这是暂停');
-
-  // 父代理继续：resume/续聊重新起算一次激活额度
-  fx.manager.message(handle.agentId, '继续做');
-  await waitFor(() => calls.length === 2 && fx.manager.status(handle.agentId)?.status === 'interrupted');
-  assert.equal(calls.length, 2);
-  assert.equal(fx.sessionOf(handle.agentId)['error'], 'max-turns');
-});
-
-test('maxTurns=2：第二次到上限即停，剩余队列保留', async (t) => {
-  const calls: string[] = [];
-  let fx!: Fixture;
-  fx = await make(t, async (deps) => {
-    calls.push(deps.agentId ?? '');
-    // 每轮都往队列里塞两条：没有上限时这个循环不会自己停
-    fx.manager.message(deps.agentId!, `第${calls.length}轮-A`);
-    fx.manager.message(deps.agentId!, `第${calls.length}轮-B`);
-    return {kind: 'completed'};
-  }, {
-    profilesDoc: {profiles: [{id: 'limit2', label: '限两轮', tools: 'readonly', workspace: 'own', maxTurns: 2}]},
-  });
-
-  const handle = await fx.manager.delegate({task: '长任务', profileId: 'limit2'}, {callId: 'mt-2', turn: 1});
-  await waitFor(() => fx.manager.status(handle.agentId)?.status === 'interrupted');
-
-  assert.equal(calls.length, 2, 'maxTurns=2 ⇒ 恰好两次模型调用');
-  const session = fx.sessionOf(handle.agentId);
-  assert.equal(session['status'], 'interrupted');
-  assert.equal(session['maxTurns'], 2);
-  assert.ok((session['pendingMessages'] as string[]).length > 0, '剩余消息没有被吞掉');
-
-  const events = await fx.readAll();
-  assert.equal(events.filter((event) => event.type === 'subagent/interrupted'
-    && (event.data as {reason?: string}).reason === 'max-turns').length, 1);
-});
-
-test('maxTurns 冻结在 session 上：老会话缺省取 Profile 值', async (t) => {
-  // 只验证解析链路：没有 maxTurns 字段的会话（P3.2 之前写下的）用 Profile 当前值。
-  const fx = await make(t, async () => ({kind: 'completed'}));
-  const handle = await fx.manager.delegate({task: '冻结'}, {callId: 'mt-freeze', turn: 1});
-  await waitFor(() => fx.manager.status(handle.agentId)?.status === 'completed');
-  assert.equal(fx.sessionOf(handle.agentId)['maxTurns'], 12, 'general Profile 的出厂 maxTurns');
-  assert.ok(existsSync(join(fx.dir, 'subagents', 'sessions', handle.agentId, 'session.json')));
-});
-
 test('恶意 profiles.json：speak/pwsh/未知写工具/递归工具一律拒绝并记录', async (t) => {
   let childDeps: AgentLoopDeps | null = null;
   const fx = await make(t, async (deps) => {
@@ -235,7 +160,7 @@ test('纵深防御：注入的恶意 Profile 也过运行期 capability 闸', as
   const stubProfile = {
     id: 'evil', label: '恶意', description: '', systemPrompt: '',
     tools: ['speak', 'pwsh', 'write_file_evil', 'safe_read', 'http_get'],
-    workspace: 'own', lane: 'heavy', maxTurns: 2,
+    workspace: 'own', lane: 'heavy',
   };
   const stub = {
     errors: [] as string[],

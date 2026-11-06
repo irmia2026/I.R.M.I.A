@@ -23,7 +23,6 @@ import { RENDER_VERSION } from '../model/render.ts';
 import type { ToolModelSpec } from '../tools/registry.ts';
 import {
   SubagentProfileRegistry, type SubagentProfile, type ProfileAvailability,
-  DEFAULT_SUBAGENT_MAX_TURNS, MAX_SUBAGENT_MAX_TURNS,
 } from './subagent-profiles.ts';
 import { SubagentPackageInstaller } from './subagent-packages.ts';
 import { healthcheckSubagentProfile } from './subagent-health.ts';
@@ -68,11 +67,8 @@ export interface AgentSession {
   tokens: {used: number; limit: number};
   workspace: string;
   /**
-   * P3.2.1：本次激活（delegate 首次 + 每次 resume/续聊）最多跑多少轮。
-   *
-   * 为什么冻结在 session 上而不是每次现读 Profile：Profile 是数据文件，跑着的时候被人改了
-   * 会让同一个会话的上限忽大忽小；resume/恢复必须按"创建时那份额度"继续。缺省（老会话）取
-   * Profile 当前值。
+   * 旧会话兼容字段：P3.2.1 曾用它限制一次激活的轮数。beta16 起子代理不再设轮数上限，
+   * 运行期忽略该字段；保留只是为了让旧 session.json 仍能读入。
    */
   maxTurns?: number;
   /**
@@ -386,19 +382,6 @@ function budgetHook(guard: BudgetGuard): AgentLoopBudget {
 }
 
 /**
- * 一次激活的轮数上限（P3.2.1）。
- *
- * 取值顺序：session 上冻结的那份（创建时写死，resume 沿用它）→ Profile 当前值 → 兜底。
- * 非法值一律回到安全档：<=0 用兜底，超大夹到硬上限（Profile 是数据，不能靠写大数绕过执行）。
- * 它取代的是"仅解析"：P3.2 的 `maxTurns` 只在 profiles.json 里躺着，运行期一个字都不读。
- */
-function maxTurnsOf(session: AgentSession, profile: SubagentProfile): number {
-  const raw = session.maxTurns ?? profile.maxTurns ?? DEFAULT_SUBAGENT_MAX_TURNS;
-  if (!Number.isSafeInteger(raw) || raw <= 0) return DEFAULT_SUBAGENT_MAX_TURNS;
-  return Math.min(raw, MAX_SUBAGENT_MAX_TURNS);
-}
-
-/**
  * P1 background AgentSession runtime. One instance is process-local; sessions are persisted under
  * <dataDir>/subagents/sessions/<agentId>/session.json and can be resumed by a new process.
  */
@@ -544,7 +527,6 @@ export class SubagentManager {
       }),
       tokens: {used: 0, limit: this.deps.config().budget.taskTokens},
       workspace,
-      maxTurns: effective.maxTurns ?? DEFAULT_SUBAGENT_MAX_TURNS,
       workspaceMode: effective.workspace,
       ...(projectRoot === null ? {} : {projectRoot}),
       reasoningEffort: effective.reasoningEffort ?? 'high',
@@ -857,7 +839,6 @@ export class SubagentManager {
     if (session.startedAt === session.updatedAt) {
       this.emit('subagent/started', {
         agentId, profileId: session.profileId, parentCallId: session.parentCallId, parentTurn: session.parentTurn,
-        maxTurns: maxTurnsOf(session, profile),
         reasoningEffort: session.reasoningEffort,
         reasoningEffortApplied: session.reasoningEffortApplied,
         contextLimit: session.contextLimit,
@@ -870,10 +851,6 @@ export class SubagentManager {
       }, session);
     }
 
-    // P3.2.1：本次激活的轮数额度（每次 delegate/resume 重新起算，见 `settleMaxTurns` 的说明）。
-    const maxTurns = maxTurnsOf(session, profile);
-    let turnsThisRun = 0;
-    let lastSteps = 0;
     let continuation: string | null = null;
     let contextReading: {tokens: number; source: 'provider' | 'estimated'} | null = null;
     // workspace:'none' = 没有文件面：**不创建目录**，文件工具一律不注册（最小权限）。
@@ -965,21 +942,21 @@ export class SubagentManager {
             break;
           }
         }
-        if (turnsThisRun >= maxTurns) {
-          // 到上限就**不再调用模型**：留下队列与 workspace，等父代理 resume/续聊。
-          this.settleMaxTurns(session, maxTurns, lastSteps);
-          return;
-        }
         const next = session.pendingMessages.shift() ?? continuation ?? this.initialText(session);
         continuation = null;
-        turnsThisRun += 1;
         const baseTokens = this.deps.projection.budget.tokensTask;
         const child = childProjectionOf(this.deps.projection);
         let lastText: string | null = null;
         let steps = 0;
         let turn = session.turn;
+        // 子代理是干重活的：不再设 step 工具数 / turn 步数两道次数上限（beta16）。
+        // token 的 task/daily 额度、最小环境、单工具超时与上下文压缩仍然保留。
         const guard = new BudgetGuard({
-          config: this.deps.config().budget,
+          config: {
+            ...this.deps.config().budget,
+            stepTools: Number.MAX_SAFE_INTEGER,
+            turnSteps: Number.MAX_SAFE_INTEGER,
+          },
           projection: child,
           emit: (type, data, visibility) => {
             const event = this.write(type, data, visibility, session);
@@ -1043,7 +1020,6 @@ export class SubagentManager {
           },
         };
         const reason = await (this.deps.runTurnFn ?? runTurn)(deps, wakes);
-        lastSteps = steps;
         session.turn = Math.max(session.turn, turn);
         session.tokens.used = Math.max(session.tokens.used, this.deps.projection.budget.tokensTask - baseTokens);
         session.updatedAt = this.deps.now();
@@ -1247,41 +1223,6 @@ export class SubagentManager {
     this.save(session);
     this.emit('subagent/interrupted', {agentId, turn: session.turn, reason: code}, session);
     this.emit('subagent/report', {agentId, kind: 'progress', reportId, summary, tokens: {...session.tokens}}, session);
-    this.emit('subagent/finished', {
-      agentId, status: 'interrupted', summary, steps, turn: session.turn, tokens: {...session.tokens},
-    }, session);
-    this.write('wake/subagent', {
-      agentId, parentCallId: session.parentCallId, status: 'interrupted', kind: 'progress',
-      summary, tokens: {...session.tokens}, reportId,
-    }, 'model', null);
-  }
-
-  /**
-   * P3.2.1：一次激活跑满 `maxTurns` 的收尾。
-   *
-   * 为什么是 `interrupted` 而不是 `completed`/`cancelled`：活没干完，但也不是失败——会话、队列、
-   * workspace 全留着，父代理 `subagent({action:"message"})`/resume 就能继续（"父可 resume/继续"的落点）。
-   * 为什么必须写 report + wake：上限是**框架替它停的手**，父代理下一轮必须知道"它不是想完了，
-   * 是被叫停了、队列里还有几条"，否则会把暂停读成完成。
-   * 语义是**每次激活的额度**（delegate 首次、每次 resume 各自重新起算）：累计值会让"父可继续"
-   * 变成空话——一 resume 就立刻再撞上限。
-   */
-  private settleMaxTurns(session: AgentSession, maxTurns: number, steps: number): void {
-    const agentId = session.agentId;
-    const pending = session.pendingMessages.length;
-    const reportId = `report-${agentId}-${session.turn}-max-turns`;
-    const summary = `已达到 maxTurns 上限（本次运行 ${maxTurns} 轮），子代理已停止调用模型，`
-      + '会话、队列与 workspace 均保留。'
-      + (pending > 0 ? `队列里还有 ${pending} 条消息。` : '')
-      + '父代理可以 resume 或追加消息让它继续（每次恢复重新起算 maxTurns）。';
-    session.status = 'interrupted';
-    session.error = 'max-turns';
-    session.updatedAt = this.deps.now();
-    this.save(session);
-    this.emit('subagent/interrupted', {agentId, turn: session.turn, reason: 'max-turns', maxTurns}, session);
-    this.emit('subagent/report', {
-      agentId, kind: 'progress', reportId, summary, tokens: {...session.tokens},
-    }, session);
     this.emit('subagent/finished', {
       agentId, status: 'interrupted', summary, steps, turn: session.turn, tokens: {...session.tokens},
     }, session);

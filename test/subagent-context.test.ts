@@ -53,7 +53,7 @@ async function make(t: TestContext, options: {
     id: 'context-test', label: '上下文测试', description: '', systemPrompt: '',
     tools: ['read', 'report'], workspace: 'own', workdir: 'workspace', shell: 'none',
     skills: [], mcpServers: [], reasoningEffort: options.effort ?? 'max',
-    contextLimit: options.contextLimit ?? 100_000, compactAt: 0.5, maxTurns: 20,
+    contextLimit: options.contextLimit ?? 100_000, compactAt: 0.5,
   }]}), 'utf8');
   const registry = new ToolRegistry();
   for (const name of ['safe_read', 'read_blob', 'grep', 'find', 'report', 'delegate', 'subagent', 'task']) {
