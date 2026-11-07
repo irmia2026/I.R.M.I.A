@@ -190,10 +190,12 @@ test('passive：本轮工具失败与 owner_setback 原因都严肃收敛', asyn
   assert.equal(setback.posts.length, 0);
 });
 
-test('passive：低情绪、骰子未命中都不发，阈值不做放宽', async (t) => {
-  const low = rig(t, { affect: true });
-  assert.equal(await passive(low.runtime), false);
-  assert.ok(low.events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'affect-too-low'));
+test('passive：低情绪不再拦发图；骰子未命中仍不发', async (t) => {
+  const low = rig(t, { affect: true, random: () => 0 });
+  assert.equal(await passive(low.runtime), true, '2026-11-07 起去掉情绪 <0.35 门槛，低情绪也能走概率');
+  assert.equal(low.posts.length, 1);
+  assert.equal(low.events.some((event) => event.type === 'sticker/skipped'
+    && (event.data as { reason: string }).reason === 'affect-too-low'), false);
   const dice = rig(t, { affect: true, state: joyful('owner_success'), random: () => 0.12 });
   assert.equal(await passive(dice.runtime), false);
   assert.ok(dice.events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'dice'));

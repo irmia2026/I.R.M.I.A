@@ -1885,7 +1885,7 @@ function defaultDocument(dir: string): JsonObject {
     stickers: {
       $comment: [
         '私聊默认允许贴纸；群聊还要 channels.<x>.stickers=true 才发。enabled=false 时主动/被动都停用。',
-        '被动默认 p=0.12、连续 4 轮未发且主导情绪 >=0.35 才候选；groups 是群功能总开关，默认关。',
+        '被动默认 p=0.12、连续 4 轮未发才候选（2026-11-07 去掉情绪 >=0.35 门槛）；groups 是群功能总开关，默认关。',
         'activeProbability：speak 带图时按此概率放行（0=永不，1=都尝试）；cooldownSeconds 是全局成功发图后的强制间隔。',
         '静默采收默认 p=0.15，0=关闭；enabled=false 也可关闭。私聊只收用户图，自我回声不收。',
         '打标默认开，单小时 20 张、并发 1；关闭后仍可入 inbox，但全部待审。拒绝图默认保留 7 天。',

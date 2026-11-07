@@ -170,10 +170,8 @@ export class StickerRuntime {
     }
     const dominant = (Object.keys(EMOTION_TAG) as EmotionName[]).reduce((a, b) => current.emotions[a] >= current.emotions[b] ? a : b);
     const value = current.emotions[dominant];
-    if (value < 0.35) {
-      this.deps.emit('sticker/skipped', { reason: 'affect-too-low' });
-      return false;
-    }
+    // 2026-11-07 用户拍板：去掉“主导情绪 < 0.35 就不发”的情绪门槛。
+    // 情绪层仍用于选标签；是否发由 passiveProbability、冷却和候选池决定。
     const dice = this.deps.random?.() ?? Math.random();
     if (dice >= config.stickers.passiveProbability) {
       this.deps.emit('sticker/skipped', { reason: 'dice' });
