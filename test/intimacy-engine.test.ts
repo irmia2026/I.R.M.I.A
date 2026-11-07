@@ -118,7 +118,8 @@ test('satisfaction: 调情慢、性行为快；发情后只有直接性行为能
   const estrusBase = {...base, desire: 100, restraint: 0, satisfaction: 20};
   const flirtEstrus = applyIntent({state: estrusBase, nowMs: NOW, sourceSeq: 3, intent: 'closeness', strength: 0.8,
     spontaneousChance: 0, timezone: 'Asia/Shanghai'});
-  assert.ok(flirtEstrus !== null && flirtEstrus.satisfaction === 20, '发情后调情不再满足');
+  assert.ok(flirtEstrus !== null && Math.abs(flirtEstrus.satisfaction - 24.8) < 1e-9,
+    '发情中调情仍给少量满足，避免状态卡死');
 
   const actEstrus = applyIntent({state: estrusBase, nowMs: NOW, sourceSeq: 4, intent: 'sexual_act', strength: 0.8,
     spontaneousChance: 0, timezone: 'Asia/Shanghai'});
@@ -237,6 +238,8 @@ test('render: four true labels, short behavior, maxLevel never caps readings, es
   assert.match(line, /克制：强烈/u, 'satisfaction/restraint labels are real, not capped');
   assert.match(line, /还忍得住/u);
   const estrusStrong = renderIntimacyNow({...state, desire: 100, restraint: 0}, {maxLevel: 'strong', nowMs: NOW});
+  assert.match(estrusStrong, /^发情中｜/u, '发情必须显式标在行首');
+  assert.match(estrusStrong, /克制：归零/u, '克制归零要直接显示');
   assert.match(estrusStrong, /不再收着/u, 'estrus behavior is available at strong');
   const estrusSubtle = renderIntimacyNow({...state, desire: 100, restraint: 0}, {maxLevel: 'subtle', nowMs: NOW});
   assert.match(estrusSubtle, /靠近一点/u, 'maxLevel caps outward behavior, not readings');

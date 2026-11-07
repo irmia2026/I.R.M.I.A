@@ -50,7 +50,7 @@ function behaviorOf(state: IntimacyState, maxLevel: IntimacyLevel): string {
   // 读数显示真实档位；maxLevel 只封顶“她表达得多明显”，不封顶读数本身。
   if (maxLevel === 'subtle') return '靠近一点，语气放软';
   // 克制归零 + 情欲满 = 发情；行为优先于其它读数的措辞。
-  if (state.restraint <= 0 && state.desire >= 100) return '不再收着，想让他现在就来';
+  if (state.restraint <= 0 && state.desire >= 100) return '发情中，不再收着，想让他现在就来';
   if (state.restraint >= 70) return '还忍得住';
   if (state.desire >= 70 && state.restraint < 35) {
     return maxLevel === 'obvious' ? '黏人，语气软下来' : '话往私密处带';
@@ -65,13 +65,16 @@ export function renderIntimacyNow(
   warn?: (line: string) => void,
 ): string {
   // maxLevel 只影响她对外表达得多明显，不封顶这四个读数：读数必须反映真实状态。
+  const estrus = options.maxLevel !== 'subtle' && state.restraint <= 0 && state.desire >= 100;
   const labels = [
     `亲密：${labelOf(state.intimacy)}`,
     `情欲：${labelOf(state.desire)}`,
     `满足：${labelOf(state.satisfaction)}`,
-    `克制：${labelOf(state.restraint)}`,
+    `克制：${estrus ? '归零' : labelOf(state.restraint)}`,
   ].join(' · ');
-  const line = `${labels} → ${behaviorOf(state, options.maxLevel)}。`;
+  const marker = estrus ? '发情中｜' : '';
+  const behavior = estrus ? '不再收着，想让他现在就来' : behaviorOf(state, options.maxLevel);
+  const line = `${marker}${labels} → ${behavior}。`;
   return fitLine(line, MAX_INTIMACY_LINE_CHARS, warn);
 }
 

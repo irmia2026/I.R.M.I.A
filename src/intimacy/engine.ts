@@ -57,8 +57,9 @@ export function applyIntent(input: IntimacyIntentInput): IntimacyUpdatedData | n
     // 普通调情只推动一点情欲；深夜聊天按倍率加速。
     desire = clamp(desire + 4 * strength * desireFactor);
     intimacy = clamp(intimacy + intimacyGain);
-    // 调情在没有发情时也会积累一点满足，但比直接性行为慢；发情后调情不再满足。
-    satisfaction = clamp(satisfaction + (estrus ? 0 : 3 * strength));
+    // 调情在没有发情时也会积累一点满足；发情中也保留少量满足，
+    // 否则“只调情/只亲近”的轮次会让发情永远停在 100/0，状态卡死。
+    satisfaction = clamp(satisfaction + (estrus ? 6 : 3) * strength);
     reasonCode = 'owner_closeness';
   } else if (input.intent === 'sexual_act') {
     // 被做性行为：未发情时情欲与满足一起涨，满足慢于情欲；发情后主要产生满足。

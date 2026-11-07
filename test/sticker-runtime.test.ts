@@ -196,7 +196,7 @@ test('passive：低情绪不再拦发图；骰子未命中仍不发', async (t) 
   assert.equal(low.posts.length, 1);
   assert.equal(low.events.some((event) => event.type === 'sticker/skipped'
     && (event.data as { reason: string }).reason === 'affect-too-low'), false);
-  const dice = rig(t, { affect: true, state: joyful('owner_success'), random: () => 0.12 });
+  const dice = rig(t, { affect: true, state: joyful('owner_success'), random: () => 0.3 });
   assert.equal(await passive(dice.runtime), false);
   assert.ok(dice.events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'dice'));
 });
