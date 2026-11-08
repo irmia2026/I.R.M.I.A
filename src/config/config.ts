@@ -920,6 +920,18 @@ export interface ChannelsConfig {
       autoStart?: boolean;
     };
   };
+  /**
+   * 灰港 Grayhaven：Agent observer WebSocket + HTTP command。
+   *
+   * observer 是只读事件流，控制型动作仍由 MCP 的 /v1/agent/ws 负责；
+   * token 只写环境变量名，值不落配置。
+   */
+  greyharbor: {
+    enabled: boolean;
+    baseUrl: string;
+    tokenEnv: string;
+    characterId: string;
+  };
 }
 
 /**
@@ -1398,6 +1410,12 @@ function buildDefaults(dir: string): AppConfig {
         tokenEnv: DEFAULT_ONEBOT_ACCESS_TOKEN_ENV,
         stickers: false,
       },
+      greyharbor: {
+        enabled: false,
+        baseUrl: 'http://127.0.0.1:3000',
+        tokenEnv: 'GREYHARBOR_TOKEN',
+        characterId: '',
+      },
     },
     alerts: { rateLimitMin: 30 },
     contextAudit: {
@@ -1863,6 +1881,8 @@ function defaultDocument(dir: string): JsonObject {
         '  两者从协议端自己的 config/onebot.json 里读，不需要两边各填一遍。dir 是它的安装目录（绝对路径，或相对 dataDir）。',
         '  为什么框架不打包它：SnowLuma 是“源码可见非商业许可”，自用可以、随框架分发不行——所以只在这里指向你自己装的目录。',
         '  不写 managed = 用外部的协议端，行为与以前完全一样；autoStart: false 则只登记不自动拉起（界面可手动启停）。',
+        'GreyHarbor：内置灰港 observer 通道。baseUrl 是游戏服务器地址；tokenEnv 指向 Agent token，characterId 是她自己的角色。',
+        '  它只开 /v1/agent/observe/ws 收事件，发言走 HTTP /commands；MCP 仍使用 /v1/agent/ws 控制连接，两者不互踢。',
       ],
       mentionKeywords: [...d.channels.mentionKeywords],
       qqOfficial: {
@@ -1880,6 +1900,12 @@ function defaultDocument(dir: string): JsonObject {
         // managed 只在写了的时候带上：它一出现就意味着"框架接管启动"，
         // 归一化时凭空补一个默认值，会把"用外部协议端"悄悄变成"框架接管"
         ...(d.channels.onebot.managed === undefined ? {} : { managed: d.channels.onebot.managed }),
+      },
+      greyharbor: {
+        enabled: d.channels.greyharbor.enabled,
+        baseUrl: d.channels.greyharbor.baseUrl,
+        tokenEnv: d.channels.greyharbor.tokenEnv,
+        characterId: d.channels.greyharbor.characterId,
       },
     },
     stickers: {
@@ -2399,6 +2425,19 @@ function parseQqOfficialChannel(raw: JsonValue | undefined, base: ChannelsConfig
   return out;
 }
 
+function parseGreyHarborChannel(
+  raw: JsonValue | undefined,
+  base: ChannelsConfig['greyharbor'],
+): ChannelsConfig['greyharbor'] {
+  const obj = objectOr(raw, 'channels.greyharbor');
+  return {
+    enabled: pickBoolean(obj['enabled'], 'channels.greyharbor.enabled', base.enabled),
+    baseUrl: pickHttpUrlOptional(obj['baseUrl'], 'channels.greyharbor.baseUrl') ?? base.baseUrl,
+    tokenEnv: pickEnvName(obj['tokenEnv'], 'channels.greyharbor.tokenEnv', base.tokenEnv),
+    characterId: pickString(obj['characterId'], 'channels.greyharbor.characterId', base.characterId) ?? '',
+  };
+}
+
 /**
  * 网关地址：只接受 ws:// 与 wss://。接受明文 `ws://` 是刻意的（本地调试要连假网关/反向代理），
  * 但本字段只在配置里能写——协议默认值永远是官方的 wss 地址。
@@ -2715,6 +2754,7 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     mentionKeywords: parseMentionKeywords(channelsRaw['mentionKeywords']),
     qqOfficial: parseQqOfficialChannel(channelsRaw['qqOfficial'], base.channels.qqOfficial),
     onebot: parseOneBotChannel(channelsRaw['onebot'], base.channels.onebot),
+    greyharbor: parseGreyHarborChannel(channelsRaw['greyharbor'], base.channels.greyharbor),
   };
 
   const webRaw = objectOr(doc['web'], 'web');

@@ -1354,7 +1354,7 @@ test('stickers：私聊开/群聊关与采收打标默认值、配置覆盖和�
   const defaults = defaultConfig(dir);
   assert.equal(defaults.stickers.enabled, true);
   assert.equal(defaults.stickers.groups, false);
-  assert.equal(defaults.stickers.passiveProbability, 0.12);
+  assert.equal(defaults.stickers.passiveProbability, 0.3);
   assert.equal(defaults.stickers.minTurnsBetween, 4);
   assert.equal(defaults.stickers.harvest.probability, 0.15);
   assert.equal(defaults.stickers.tagging.maxPerHour, 20);

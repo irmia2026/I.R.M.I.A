@@ -47,6 +47,10 @@ import {
   ONEBOT_CHANNEL_NAME, ONEBOT_REPLY_SCHEME, isOneBotFamilyChannel,
   parseReplyUrl as parseOneBotReplyUrl, replyUrlOf as oneBotReplyUrlOf,
 } from '../channel/onebot.ts';
+import {
+  GREYHARBOR_CHANNEL_NAME, GREYHARBOR_REPLY_SCHEME,
+  greyHarborReplyUrlOf, parseGreyHarborReplyUrl,
+} from '../channel/greyharbor.ts';
 import { CHAT_TYPE_LABELS, channelForNamespace, normalizeSid, parseSid, sessionLabelOf, type SessionEntry } from '../channel/sessions.ts';
 // 群里动静（notice）的形状与**逐字行文**都只有一处实现（`noticeLineText`）：这里只负责
 // "给它一个查得到名字的口"，不另写一份渲染（两处各写一遍迟早给出两种说法）
@@ -498,6 +502,7 @@ export function replyUrlForWake(
   wake: Pick<WakeChannel['data'], 'channel' | 'chatType' | 'chatId'>,
 ): string {
   if (isOneBotFamilyChannel(wake.channel)) return oneBotReplyUrlOf(wake);
+  if (wake.channel === GREYHARBOR_CHANNEL_NAME) return greyHarborReplyUrlOf(wake);
   return qqReplyUrlOf(wake);
 }
 
@@ -511,6 +516,12 @@ export function parseReplyUrlAny(url: string): ReplyUrlAnyParse {
     const parsed = parseOneBotReplyUrl(url);
     return parsed.ok
       ? { ok: true, channel: ONEBOT_CHANNEL_NAME, chatType: parsed.chatType, chatId: parsed.chatId }
+      : parsed;
+  }
+  if (url.startsWith(GREYHARBOR_REPLY_SCHEME)) {
+    const parsed = parseGreyHarborReplyUrl(url);
+    return parsed.ok
+      ? { ok: true, channel: GREYHARBOR_CHANNEL_NAME, chatType: parsed.chatType, chatId: parsed.chatId }
       : parsed;
   }
   const parsed = parseQqReplyUrl(url);
