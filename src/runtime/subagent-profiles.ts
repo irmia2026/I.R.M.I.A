@@ -247,8 +247,8 @@ export const BUILTIN_PROFILES: readonly SubagentProfile[] = [
     install: [
       {source: 'builtin:packs/subagents/skills/dev-workflow', ref: '0.1.0-beta.14', sha256: '1cd012549a0856b372e7a70c4278b4b05551a68e761ddc860cac5d6e6eceb7fd'},
       {source: 'builtin:packs/subagents/skills/review', ref: '0.1.0-beta.14', sha256: 'cc0dc605f98801e332b389f0ea9c9ebd1c50e4a7e83f0687b8df40a6fc641c40'},
-      {source: 'builtin:skills/irmia-framework', ref: '0.1.0-beta.14', sha256: '2367c25014db0dd55c442ec9b1b476a9584ca48f88efc323eb9e2f56c025129b'},
-      {source: 'builtin:skills/plugin-dev', ref: '0.1.0-beta.14', sha256: 'e4c06583a0d6dfccd4c074856d5b7648c17530895f9b5d060bbad6291e259b81'},
+      {source: 'builtin:skills/irmia-framework', ref: '0.1.0-beta.15', sha256: 'c5b7206cb481be22e1d4a1fd191a61d118b314682571eb4f6c1ead158d392656'},
+      {source: 'builtin:skills/plugin-dev', ref: '0.1.0-beta.14', sha256: '992edbce001b570b21f2fd403d45c3028cb0175ade9fc7a0f638ea09e6734296'},
       {source: 'builtin:packs/subagents/skills/design-taste-frontend', ref: '0.1.0-beta.14', sha256: 'd2e97dd47c76f17f30c02c9e370fb67860bd28dcc23654e923e081e0411aceaa', license: 'MIT'},
       // 外部设计 skill：已 vendor 到 packs，附 LICENSE + UPSTREAM.md。
       // impeccable 是离线静态版，不含引擎/下载器；telemetry 不可用。

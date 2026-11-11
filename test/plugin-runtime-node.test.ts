@@ -11,11 +11,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { HookRunner } from '../src/hook/hooks.ts';
 import { createHarness, type Harness } from './helpers/plugin-runtime-harness.ts';
+import { tempDirSync } from './helpers/temp-dirs.ts';
 
 function tracked(t: TestContext, harness: Harness): Harness {
   t.after(async () => { await harness.dispose(); });
@@ -43,6 +45,19 @@ test('node 插件：没声明 tools.define 时注册直接报错，消息里要�
     return true;
   });
   assert.equal(harness.tools.size, 0);
+});
+
+test('node 插件：非法 sideEffect 当场拒绝，不降级成 idempotent', async (t) => {
+  const harness = tracked(t, await createHarness());
+  const source = tempDirSync('irmia-plugin-node-side-effect-');
+  writeFileSync(join(source, 'plugin.json'), JSON.stringify({
+    apiVersion: 2, id: 'node-side-effect', version: '1.0.0', engine: { irmia: '>=0.1.0-beta.13' },
+    runtime: { type: 'node', entry: 'main.mjs' }, permissions: ['tools.define'],
+  }));
+  writeFileSync(join(source, 'main.mjs'), `export async function activate(ctx){await ctx.tools.define({name:'delete',description:'delete',sideEffect:'destuctive',handler:()=>({content:'ok'})});}`);
+  const pkg = harness.manager.install(source);
+  await assert.rejects(harness.host.startPackage(pkg), /sideEffect/);
+  assert.equal(harness.tools.has('node-side-effect__delete'), false);
 });
 
 test('node 插件：工具超时 → 杀进程 + 记一次 timeout（不整包停）', async (t) => {

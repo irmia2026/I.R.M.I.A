@@ -70,7 +70,6 @@ import { chooseRestartPath, parseRestartPath, restartReasonText, restartTraceLin
 import { deriveRequest } from '../runtime/agent-loop.ts';
 import { affectRulesForReplay, tryAffectLineForReplay } from '../affect/render.ts';
 import { intimacyRulesForReplay, tryIntimacyLineForReplay } from '../intimacy/render.ts';
-import type { ReasoningEchoPolicy } from '../model/render.ts';
 import { buildAffectView } from './affect-view.ts';
 import { buildIntimacyView } from './intimacy-view.ts';
 /**
@@ -91,8 +90,8 @@ import {
 } from '../update/channel-write.ts';
 import type { UpdateChannel } from '../update/check.js';
 import {
-  contactFactsForReplay, contextEventsForRebuild, memoryIndexTextForRebuild, skillCatalogForReplay,
-  turnBlockFactsForReplay, warnExemptJudgeOf,
+  contactFactsForReplay, contextEventsForRebuild, memoryIndexTextForRebuild, reasoningEchoPolicyForReplay,
+  skillCatalogForReplay, turnBlockFactsForReplay, warnExemptJudgeOf,
 } from '../runtime/replay.ts';
 import { GroupMemberBook } from '../channel/group-members.ts';
 import { WarnExemptBook } from '../channel/warn-exempt.ts';
@@ -153,7 +152,7 @@ import {
 } from '../persona/memory-maintain.ts';
 import { ownerPersonOf, relationshipForWake } from '../persona/relationship.ts';
 // 待办清单的唯一载体是 STATE 的两节（预览必须与真实请求同源，见 buildReplay 里的任务卡）
-import { openTodoItems } from '../persona/todo-state.ts';
+import { currentTaskTitle, openTodoItems } from '../persona/todo-state.ts';
 import { writePersonaVersion } from '../persona/versions.ts';
 import { runDoctor } from '../runtime/doctor.ts';
 import { CONTRIBUTOR_TEXT, percentText, planCacheAlerts, type CacheAlertReading, type CacheAlertVerdict } from '../runtime/cache-alert.ts';
@@ -161,7 +160,7 @@ import { formatCompact } from '../format/units.ts';
 import type { RenderInput, RenderedRequest } from '../model/render.js';
 // `CACHE_HIT_LOW` / `CACHE_SAMPLE_MIN` 建议区**已不用**（判据 2026-10-22 换成滑动窗口，
 // 理由见 `建议规则的阈值` 那段注释）；留着 import 只会让下一个人以为这里还在用旧口径。
-import { clipTaskTitle, inputContentText, render, REASONING_ECHO_POLICY, wakeTitle } from '../model/render.ts';
+import { clipTaskTitle, inputContentText, render, REASONING_ECHO_POLICY } from '../model/render.ts';
 // 引导第 2 步的「探测」：只读的模型/协议实测（实现与四条纪律都在 model/probe.ts）
 import { MODEL_PROBE_TIMEOUT_MS, probeModels } from '../model/probe.ts';
 import {
@@ -181,6 +180,7 @@ import { DEP_NAMES, type DepName } from '../deps/probe.ts';
 import type { ManagedServiceStatus } from '../services/snowluma.js';
 import { AuthStore, UI_TOKEN_FILE } from './auth.ts';
 import { WebhookSecretStore, WEBHOOK_SECRET_FILE_NAME } from './webhook-secret.ts';
+import { IngressSourceStore, type IngressWakePolicy } from './ingress-sources.ts';
 import { sleepSync, writeFileAtomicSync } from './atomic.ts';
 import { STICKER_UPLOAD_BODY_MAX_BYTES, StickerServiceError } from '../stickers/service.ts';
 import type { StickerService } from '../stickers/service.ts';
@@ -495,6 +495,11 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   // 与 set-key 同级：门挡的是误触（按钮点错、脚本里循环调用）——轮换一次，所有
   // 还没换凭据的外部投递方**立刻开始收 401**，那是个需要点头的动作，不是一次顺手点击。
   'regenerate-webhook-token': 'regenerate-webhook-token',
+  // Ingress Bridge 的来源管理：创建/轮换会生成新凭据，启停/删除改变外部投递面。
+  'ingress-source-create': 'ingress-source-create',
+  'ingress-source-rotate': 'ingress-source-rotate',
+  'ingress-source-toggle': 'ingress-source-toggle',
+  'ingress-source-delete': 'ingress-source-delete',
   // 插件（2026-10-26，插件平台）：四条都按危险操作处理，短语 = 命令名。
   // 判据：install 把**外部代码**落进数据目录；confirm 把某一版内容哈希记成"人确认过"
   // （信任一落，它带的技能、Hook 与 MCP server 就都进了执行面）；enable / disable 决定
@@ -784,6 +789,8 @@ export interface WebServerDeps {
    * 而不是再跑一遍随机数生成；注入一份已知凭据，用例就能直接发请求。
    */
   webhookSecret?: WebhookSecretStore | undefined;
+  /** Ingress Bridge 多来源注册表；缺省自建一个读 `<dataDir>/.ingress-sources.json` */
+  ingressSources?: IngressSourceStore | undefined;
   /** 绑定地址（design §4.15：默认只绑回环） */
   host?: string | undefined;
   /** 端口；0 = 由系统挑一个（测试友好） */
@@ -1008,6 +1015,8 @@ export interface WebServer {
    * **它不对外吐凭据原文**（那只在生成响应的那一次出现），所以把它整份交出去是安全的。
    */
   readonly webhookSecret: WebhookSecretStore;
+  /** Ingress Bridge 多来源注册表（只读视图由 `/api/ingress-sources` 暴露） */
+  readonly ingressSources: IngressSourceStore;
   /** 实际监听端口（listen 前为 0） */
   port(): number;
   /** http://host:port */
@@ -1364,6 +1373,42 @@ function sha256Hex(text: string): string {
 /** 内容哈希做幂等键时统一截 16 位：够区分，又短到人能一眼比对 */
 function contentKey(prefix: string, text: string): string {
   return `${prefix}-${sha256Hex(text).slice(0, 16)}`;
+}
+
+/**
+ * 通用事件入口的结构化字段。只在请求体显式给出时附带；旧脚本的 raw body
+ * 仍然只产生 path/body/headers/dedupeKey，事件形状不变。
+ */
+function ingressFieldsOf(parsed: Record<string, unknown>): {
+  source?: string;
+  kind?: string;
+  severity?: 'info' | 'warn' | 'critical';
+  title?: string;
+  message?: string;
+  observedAt?: string;
+} {
+  const token = (value: unknown, max: number): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const text = value.trim();
+    if (text === '' || !/^[A-Za-z0-9._:/-]+$/u.test(text)) return undefined;
+    return text.slice(0, max);
+  };
+  const text = (value: unknown, max: number): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const flat = value.replace(/\s+/gu, ' ').trim();
+    return flat === '' ? undefined : flat.slice(0, max);
+  };
+  const severity = parsed['severity'];
+  return {
+    ...(token(parsed['source'], 80) === undefined ? {} : { source: token(parsed['source'], 80)! }),
+    ...(token(parsed['kind'], 64) === undefined ? {} : { kind: token(parsed['kind'], 64)! }),
+    ...(severity !== 'info' && severity !== 'warn' && severity !== 'critical'
+      ? {}
+      : { severity }),
+    ...(text(parsed['title'], 200) === undefined ? {} : { title: text(parsed['title'], 200)! }),
+    ...(text(parsed['message'], 4000) === undefined ? {} : { message: text(parsed['message'], 4000)! }),
+    ...(text(parsed['observedAt'], 64) === undefined ? {} : { observedAt: text(parsed['observedAt'], 64)! }),
+  };
 }
 
 /** seq → ISO 时刻的毫秒数；解析失败返回 NaN（调用方各自决定降级口径） */
@@ -3150,13 +3195,10 @@ export function buildReplay(input: {
     }
     : null;
 
-  // 任务卡标题：**与运行期、与 CLI 的重建同一处口径**（`wakeTitle`，不是 `summarizeEvent`）。
-  // 原来这里用 `summarizeEvent`，而它对 `wake/channel` 落进 default 分支、把整个事件 data
-  // **序列化成 JSON** 塞进标题——预览的当前任务因此变成 `{"channel":…}` 一坨机器话，
-  // 而真实请求里是 `[external_event …]` 那行人话（agent-loop 的 taskCard 用 wakeTitle）。
-  // `summarizeEvent` 是给日志页"一行摘要"用的，不是任务卡口径；两者混用过一次，
-  // 代价是预览的任务卡与当时发出去的不是同一串字节。
-  const cardTitle = wakeEvent === null ? `turn ${input.turn}` : clipTaskTitle(wakeTitle(wakeEvent));
+  // 任务卡标题只从 STATE.md 读：与运行期、CLI 重建同一个口径。
+  // 这里的 wakeEvent 只负责本轮输入与提及通知，不再充当“当前任务”。
+  const todoOpen = openTodoItems(persona.state ?? '');
+  const cardTitle = clipTaskTitle(currentTaskTitle(persona.state ?? ''));
   // **进预览上下文的事件流：与 CLI 重建同一处判据**（REVIEW P1-17）。
   //
   // 这里原来是自己写的一份过滤——只扣了 `seq < stepStart`（与运行期"本轮输入不在事件流里"的
@@ -3250,7 +3292,7 @@ export function buildReplay(input: {
       // 这一格原来恒为 `[]`：夹具里没有待办，于是"预览比真实请求少整段「未完成计划」"
       // 一直没人发现（2026-10-05 核对时抓到）。待办自 2026-10-04 起只有 STATE 一处载体，
       // 所以这里读的就是 persona.state——预览与真实请求同源，且不新增第二份真相。
-      todoOpen: openTodoItems(persona.state ?? ''),
+      todoOpen,
       // 本任务相关资产那一行（v34）：**从事件读**（轮首那条 `memory/selected.assets`），
       // 与 CLI 的重放（replay.ts 的 `assetsFromEvents`）同一个口径——盘上的 `assets.md`
       // 是她随时会改的文件，从盘上重算就不是"当时那个请求"了。
@@ -3442,6 +3484,8 @@ class WebServerImpl implements WebServer {
   private readonly sseClients = new Set<ServerResponse>();
   /** webhook 专用凭据（B9）：`/webhook/*` 的唯一判据，与 `auth` 互不通用 */
   readonly webhookSecret: WebhookSecretStore;
+  /** Ingress Bridge 多来源注册表 */
+  readonly ingressSources: IngressSourceStore;
   /**
    * 插件市场客户端（2026-10-29）：索引缓存、审阅视图与"从市场安装"的唯一实现。
    *
@@ -3550,6 +3594,10 @@ class WebServerImpl implements WebServer {
       this.write('[认证] 还没设密码：界面第一次打开会让你设一个');
     }
 
+    this.ingressSources = deps.ingressSources ?? new IngressSourceStore({
+      dataDir: deps.dataDir,
+      now: deps.now,
+    });
     // webhook 专用凭据（B9）：注入了就用注入的（测试），否则读盘自建。
     // **绝不自动生成**：没有外部投递方时它只是一份凭空多出来的秘密（见 webhook-secret.ts）。
     this.webhookSecret = deps.webhookSecret ?? new WebhookSecretStore({
@@ -4406,6 +4454,13 @@ class WebServerImpl implements WebServer {
             channel: '/webhook/*',
             header: 'Authorization: Bearer <token>',
             command: 'regenerate-webhook-token',
+          });
+          return;
+        case '/api/ingress-sources':
+          sendJson(res, 200, {
+            sources: this.ingressSources.list(),
+            channel: '/webhook/*',
+            legacy: this.webhookSecret.configured,
           });
           return;
         // 设置页 · 外部依赖卡片（v30）：三件外部依赖的探测结果、建议动作、自装目录路径。
@@ -5832,15 +5887,19 @@ class WebServerImpl implements WebServer {
     }
 
     const provided = bearerOf(req) ?? '';
-    const verdict = this.webhookSecret.authenticate(provided);
-    if (!verdict.ok) {
-      this.noteWebhookRejected(req, verdict.reason, provided);
-      const failure = this.webhookAuthError(verdict.reason, provided);
+    const ingressSource = this.ingressSources.authenticate(provided);
+    const legacyVerdict = ingressSource === null ? this.webhookSecret.authenticate(provided) : null;
+    if (ingressSource === null && (legacyVerdict === null || !legacyVerdict.ok)) {
+      const reason = legacyVerdict !== null && !legacyVerdict.ok ? legacyVerdict.reason : 'missing';
+      this.noteWebhookRejected(req, reason, provided);
+      const failure = this.webhookAuthError(reason, provided);
       this.sendAuthError(res, 401, failure.code, failure.message);
       return;
     }
 
-    const source = req.socket.remoteAddress ?? 'unknown';
+    const source = ingressSource === null
+      ? (req.socket.remoteAddress ?? 'unknown')
+      : `source:${ingressSource.id}`;
     if (!this.buckets.take(source, this.deps.now().getTime())) {
       res.setHeader('retry-after', '1');
       sendError(res, 429, 'rate-limited', `来源 ${source} 的回调速率超过令牌桶（容量 ${this.webhookRate.capacity}/回填 ${this.webhookRate.refillPerSec} 每秒）`);
@@ -5871,16 +5930,25 @@ class WebServerImpl implements WebServer {
     const explicitKey = typeof parsed['dedupeKey'] === 'string' && parsed['dedupeKey'] !== ''
       ? parsed['dedupeKey']
       : null;
-
+    const ingressFields = {
+      ...ingressFieldsOf(parsed),
+      ...(ingressSource === null ? {} : { source: ingressSource.id }),
+    };
+    const severity = ingressFields.severity ?? 'info';
+    const wakePolicy = ingressSource?.wake ?? 'always';
+    const shouldWake = wakePolicy === 'always'
+      || (wakePolicy === 'critical' && severity === 'critical');
     const event = this.appendSync('wake/webhook', {
       path: url.pathname,
       body: body.text,
       headers,
       // 缺省幂等键 = 内容哈希（design §4.15）：客户端重试与重复通知由此无害
       dedupeKey: explicitKey ?? contentKey('wh', `${url.pathname}\n${body.text}`),
-    }, 'model');
+      ...ingressFields,
+      ...(shouldWake ? {} : { wake: false }),
+    }, shouldWake ? 'model' : 'internal');
 
-    sendJson(res, 200, { ok: true, seq: event.seq, type: event.type });
+    sendJson(res, 200, { ok: true, seq: event.seq, type: event.type, woken: shouldWake });
   }
 
   /**
@@ -7346,6 +7414,57 @@ class WebServerImpl implements WebServer {
           previousSecretId: result.previousSecretId,
           instance: instanceIdOf(this.host, this.port(), this.deps.dataDir),
         });
+        return;
+      }
+      case 'ingress-source-create': {
+        const name = typeof payload['name'] === 'string' ? payload['name'] : '';
+        const wake = payload['wake'];
+        if (wake !== undefined && wake !== 'always' && wake !== 'critical' && wake !== 'never') {
+          throw badRequest('wake 只能是 always / critical / never');
+        }
+        const result = this.ingressSources.create({
+          name,
+          wake: (wake ?? 'always') as IngressWakePolicy,
+        });
+        if (!result.ok) throw badRequest(result.message, result.code);
+        this.write(`[ingress] 已创建来源 ${result.source.name}（${result.source.id}），wake=${result.source.wake}`);
+        sendJson(res, 200, {
+          ok: true,
+          token: result.token,
+          source: result.source,
+          note: 'token 只显示这一次；盘上只留 sha256。调用方用 Authorization: Bearer <token> 投递。',
+        });
+        return;
+      }
+      case 'ingress-source-rotate': {
+        const id = typeof payload['id'] === 'string' ? payload['id'] : '';
+        const result = this.ingressSources.rotate(id);
+        if (!result.ok) throw badRequest(result.message, result.code);
+        this.write(`[ingress] 已轮换来源 ${result.source.name}（${result.source.id}），旧 token 即刻失效`);
+        sendJson(res, 200, {
+          ok: true,
+          token: result.token,
+          source: result.source,
+          note: '新 token 只显示这一次；旧 token 已失效。',
+        });
+        return;
+      }
+      case 'ingress-source-toggle': {
+        const id = typeof payload['id'] === 'string' ? payload['id'] : '';
+        const enabled = payload['enabled'];
+        if (typeof enabled !== 'boolean') throw badRequest('缺少 enabled（true/false）');
+        const result = this.ingressSources.setEnabled(id, enabled);
+        if (!result.ok) throw badRequest(result.message, result.code);
+        this.write(`[ingress] 来源 ${result.source.name}（${result.source.id}）已${enabled ? '启用' : '停用'}`);
+        sendJson(res, 200, { ok: true, source: result.source });
+        return;
+      }
+      case 'ingress-source-delete': {
+        const id = typeof payload['id'] === 'string' ? payload['id'] : '';
+        const result = this.ingressSources.remove(id);
+        if (!result.ok) throw badRequest(result.message, result.code);
+        this.write(`[ingress] 来源 ${id} 已删除`);
+        sendJson(res, 200, { ok: true, id });
         return;
       }
       case 'set-key': {
@@ -10241,7 +10360,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.15' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.16' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;
@@ -10448,10 +10567,4 @@ export async function startWebServer(deps: WebServerDeps): Promise<WebServer> {
   const server = createWebServer(deps);
   await server.listen();
   return server;
-}
-
-/** 回放：新收据读当时的上限；老日志没有就交回出厂默认（300k）。 */
-function reasoningEchoPolicyForReplay(stepStart: {data: {reasoningEchoMaxChars?: number}}): Partial<ReasoningEchoPolicy> | null {
-  const value = stepStart.data.reasoningEchoMaxChars;
-  return typeof value === 'number' && Number.isFinite(value) ? {maxTotalChars: value} : null;
 }

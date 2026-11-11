@@ -293,7 +293,7 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     const tk = speakToolkit(rec, async (_target, text) => { posted.push(text); return { ok: true, status: 200 }; });
 
     const spoken = '长任务跑完了，共 42 个文件。';
-    const result = await tk.byName('speak').handler({ text: spoken }, CTX);
+    const result = await tk.byName('speak').handler({ to: 'qq:group:G1', text: spoken }, CTX);
     assert.equal(result.isError, undefined, result.content);
     assert.ok(posted.length > 1, '这段话本来就该被切成多条气泡（否则这条用例没测到东西）');
 
@@ -307,24 +307,22 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     assert.equal(receipt['turn'], 3, 'turn 号：复盘用，也兜住旧事件没有 callId 的情形');
   });
 
-  test('投递失败 → **不算她说过**（没有那条回执，read_channel 里也就没有这一句）', async () => {
+  test('未投递 → **不算她说过**（没有那条回执，read_channel 里也就没有这一句）', async () => {
     const rec = recorder();
     const tk = speakToolkit(rec, async () => ({ ok: false, reason: '回投被拒：HTTP 403' }));
-    const result = await tk.byName('speak').handler({ text: '你好' }, CTX);
+    const result = await tk.byName('speak').handler({ to: 'qq:group:G1', text: '你好' }, CTX);
     assert.equal(result.isError, undefined, result.content);
-    assert.match(result.content, /^[- ]*失败，/um);
-    assert.equal(rec.all('speak/sent').some((data) => data['text'] !== undefined), false,
-      '没发出去就没有带文本的回执——否则她会以为自己答过了，而群里一个字都没有');
+    assert.match(result.content, /^[- ]*未投递，/um);
+    assert.equal(rec.all('speak/sent').some((data) => data['text'] !== undefined), false);
   });
 
-  test('这一轮没有 IM 会话可发 → 同样不写"她说过"（只落本机对话流那条）', async () => {
+  test('缺 to → 参数错误，不写任何发言或投递凭据', async () => {
     const rec = recorder();
     const tk = speakToolkit(rec, async () => ({ ok: true, status: 200 }), null);
     const result = await tk.byName('speak').handler({ text: '你好' }, CTX);
-    assert.match(result.content, /发送成功/u);
-    const channels = rec.all('speak/sent').map((data) => data['channel']);
-    assert.deepEqual(channels, ['log'], '只有本机对话流那一路（它不代表话到了那个会话）');
-    assert.equal(rec.all('speak/sent').some((data) => data['text'] !== undefined), false);
+    assert.equal(result.isError, true);
+    assert.match(result.content, /缺少必填参数 to/u);
+    assert.deepEqual(rec.all('speak/sent'), []);
   });
 
   test('中途被打断：只记**已经吐出去**的那几条，一个字都不多记', async (t) => {
@@ -351,7 +349,7 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     });
     const ctx: ToolContext = { ...CTX, interruptEpoch: () => epoch };
 
-    const result = await tk.byName('speak').handler({ text: '第一句在这里，第二句在这里，第三句在这里。' }, ctx);
+    const result = await tk.byName('speak').handler({ to: 'qq:group:G1', text: '第一句在这里，第二句在这里，第三句在这里。' }, ctx);
     assert.match(result.content, /发言被打断/u, result.content);
     assert.equal(posted.length, 2, '第二段之后被打断（否则这条用例没测到打断）');
 
@@ -427,18 +425,13 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
     assert.deepEqual(rec.all('speak/sent').map((data) => data['channel']), ['log']);
   });
 
-  test('这一轮没有可发会话 → 只落本机那条，且回执说清"只在本机、不等于他收到"', async (t) => {
+  test('report 缺 to → 参数错误，且不落本机发言或投递凭据', async () => {
     const rec = recorder();
     const tk = reportToolkit(rec, async () => ({ ok: true, status: 200 }), null);
     const result = await tk.byName('report').handler({ text: REPORT }, CTX);
-    assert.match(result.content, /发送成功/u, result.content);
-    // 2026-10-20：回执从三段压成一行（三个信息点：跳过+原因 / 只在本机≠他收到 / 带 `to`）。
-    // 这条用例原来钉的是"下一轮看不到这一篇"——那是 ② 的直接推论（没到那边，自然读不回来），
-    // 现在钉 ② 本身。
-          assert.match(result.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
-    assert.deepEqual(rec.all('speak/sent').map((data) => data['channel']), ['log'],
-      '只有本机对话流那一条（它不代表报告到了那边）');
-    assert.equal(rec.all('speak/sent').some((data) => deliveredToSid(data as never) !== null), false);
+    assert.equal(result.isError, true);
+    assert.match(result.content, /缺少必填参数 to/u);
+    assert.deepEqual(rec.all('speak/sent'), []);
   });
 
   test('`deliveredToSid` 的三个条件逐条判死（判据只有这一处）', () => {
@@ -461,16 +454,9 @@ describe('report · 与 speak 同一条"发出去过"的凭据', () => {
     const reportOut = (await reportToolkit(rec, async () => ({ ok: true, status: 200 }))
       .byName('report').handler({ text: REPORT, to: 'qq:group:G1' }, CTX)).content;
     const speakOut = (await reportToolkit(rec, async () => ({ ok: true, status: 200 }))
-      .byName('speak').handler({ text: '在的' }, CTX)).content;
-    /**
-     * v74（用户 2026-10-20 的**最终口径**）：回执压成三态（`发送成功` / `成功，但超25字限制（N 字）`
-     * / `失败，<原因>`），**一个字都不多印**——"不必重复发送"这条**规矩搬进 `SELF_BRIEF` §2.1**
-     * （她发之前就读得到；回执是最高频、后续 160 多个请求反复读回的一行，规矩不该每条回执付一遍）。
-     * 2026-10-21 补：三态里那条"超 25 字"只属于 `speak`——`report` 是发长文的那一件，
-     * 它**没有** 25 字建议线，成功回执固定 `发送成功`（长短一个样）。
-     */
+      .byName('speak').handler({ to: 'qq:group:G1', text: '在的' }, CTX)).content;
     assert.deepEqual(reportOut.split('\n').filter(line => line !== ''), ['- 发送成功'], reportOut);
-    assert.deepEqual(speakOut.split('\n').filter(line => line !== ''), ['- 发送成功'], speakOut);
+    assert.deepEqual(speakOut.split('\n').filter(line => line !== ''), ['- 已投递'], speakOut);
     assert.ok(SELF_BRIEF.includes('不必重复发送'), '规矩必须在自述里（她发之前就能看到）');
     assert.equal(reportOut.includes('不必重复发送'), false, '回执不再逐条付这句规矩');
     assert.equal(speakOut.includes('不必重复发送'), false, '回执不再逐条付这句规矩');

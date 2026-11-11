@@ -78,6 +78,8 @@ function fixture(options: FixtureOptions = {}): { repo: string; out: string; wor
   writeFileSync(join(repo, 'skills', 'fake-dev', 'SKILL.md'),
     '---\nname: fake-dev\ndescription: fake builtin skill\n---\nfake\n');
   writeFileSync(join(repo, 'LICENSE'), 'AGPL fake fixture\n');
+  mkdirSync(join(repo, 'sdk', 'node'), { recursive: true });
+  writeFileSync(join(repo, 'sdk', 'node', 'index.d.ts'), 'export interface PluginContext {}\n');
   // 仓库现场的 dist 双路径副本：归档必须排除。
   mkdirSync(join(repo, 'dist', 'packs'), { recursive: true });
   writeFileSync(join(repo, 'dist', 'packs', 'junk.txt'), 'must not be archived\n');
@@ -181,6 +183,7 @@ test('源码归档带齐内置包来源（packs/skills/tools），且排除 dist
   assert.ok(names.has('irmia-agent/LICENSE'), '归档根必须有 LICENSE（内置来源的许可证核验用）');
   assert.ok(names.has('irmia-agent/packaging/builtin-payload.mjs'), '归档要能重建：清单脚本本身也得在源码里');
   assert.ok(names.has('irmia-agent/src/runtime/subagent-profiles.ts'), '归档要能重建：Profile 清单必须在');
+  assert.ok(names.has('irmia-agent/sdk/node/index.d.ts'), '归档必须带开发期 SDK');
 
   // ② 仓库现场的 dist（尤其 dist/packs）不带进归档。
   const leaked = [...names].filter((name) => name === 'irmia-agent/dist'

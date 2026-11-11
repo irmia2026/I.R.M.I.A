@@ -250,10 +250,10 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
     if (mounted) setState(() => firstLoad = false);
   }
 
-  // ── 插件那一段的动作（安装 / 审核 / 启停）──
+  // ── 插件那一段的动作（安装 / 审核 / 启停 / 卸载）──
   //
-  // 四条命令都带 X-Confirm（短语 = 命令名）：服务端那道门挡的是误触，界面上对应的
-  // 确认对话框在 `PluginsPanel` 里（审核与启停各一个），这里只负责"发出去 + 回执"。
+  // 每条命令都带同名 X-Confirm：服务端那道门挡的是误触，界面上对应的
+  // 确认对话框在 `PluginsPanel` 里，这里只负责"发出去 + 回执"。
 
   Future<void> _runPluginAction(Future<void> Function() action) async {
     if (pluginBusy) return;
@@ -289,7 +289,9 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
         _toast(
           command == 'plugin-confirm'
               ? s.extPluginConfirmedToast(id)
-              : s.extPluginRestartToast(command == 'plugin-enable' ? s.extPluginEnable : s.extPluginDisable, id),
+              : command == 'plugin-uninstall'
+                  ? s.extPluginUninstalledToast(id)
+                  : s.extPluginRestartToast(command == 'plugin-enable' ? s.extPluginEnable : s.extPluginDisable, id),
           kind: ToastKind.success,
         );
       }

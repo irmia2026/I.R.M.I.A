@@ -40,7 +40,10 @@ class ChannelsPage extends StatefulWidget {
 /// 只拉通道/入站 webhook/文件/回投/告警五类事件的最近 50 条：
 /// types 过滤是 /api/events 的原生能力（listEvents 的 filters.types），旧服务端不认时退回全量段。
 const _eventTypes = 'wake/channel,wake/webhook,wake/file,speak/sent,alarm/sent';
-final _eventsQuery = Uri(path: '/api/events', queryParameters: const {'types': _eventTypes, 'limit': '50'}).toString();
+final _eventsQuery = Uri(
+  path: '/api/events',
+  queryParameters: const {'types': _eventTypes, 'limit': '50'},
+).toString();
 const _fallbackEventsQuery = '/api/events?limit=50';
 
 /// 列表宽度与窄窗阈值（AstrBot PlatformPage 的 bot-list 侧栏同宽）
@@ -54,33 +57,37 @@ const _hookEventTypes = {'wake/webhook', 'wake/file', 'alarm/sent'};
 
 /// 渠道 id → 名字（`qq-official` 那条跟着语言走；`OneBot 11` 是专有名词，不译）
 String _sourceOf(AppStrings s, String channel) => switch (channel) {
-      'qq-official' => s.chanSourceQqOfficial,
-      'onebot' => 'OneBot 11',
-      _ => channel.isEmpty ? s.chanSourceExternal : channel,
-    };
+  'qq-official' => s.chanSourceQqOfficial,
+  'onebot' => 'OneBot 11',
+  _ => channel.isEmpty ? s.chanSourceExternal : channel,
+};
 
 /// 会话类型 → 名字（`c2c` 这些 id 是判据、永不翻译）
 String _chatTypeLabel(AppStrings s, String type) => switch (type) {
-      'c2c' => s.chatTypeDirect,
-      'group-at' => s.overviewChatTypeGroupAt,
-      'group' => s.chatTypeGroup,
-      'guild' => s.overviewChatTypeGuild,
-      _ => '',
-    };
+  'c2c' => s.chatTypeDirect,
+  'group-at' => s.overviewChatTypeGroupAt,
+  'group' => s.chatTypeGroup,
+  'guild' => s.overviewChatTypeGuild,
+  _ => '',
+};
 
 /// 事件类型 → 名字（Webhook 与文件监听那张卡的三个触发源）
 String _eventTagLabel(AppStrings s, Object? type) => switch (type) {
-      'wake/webhook' => s.chanEventInboundWake,
-      'wake/file' => s.chanEventFile,
-      'alarm/sent' => s.chanAlertExit,
-      _ => s.chanEventGeneric,
-    };
+  'wake/webhook' => s.chanEventInboundWake,
+  'wake/file' => s.chanEventFile,
+  'alarm/sent' => s.chanAlertExit,
+  _ => s.chanEventGeneric,
+};
 
 /// 实测状态（kind 给 BreathDot，tone 给状态标签上色）/ 只读参数行 / 参数定义 / 渠道定义
 /// custom 为 null 时按 path 的配置点路径取值
 typedef _Status = ({String kind, String tone, String label, String note});
 typedef _Row = ({String label, String path, String? value});
-typedef _Spec = ({String label, String path, String? Function(_ChannelsPageState state)? custom});
+typedef _Spec = ({
+  String label,
+  String path,
+  String? Function(_ChannelsPageState state)? custom,
+});
 
 /// 就地可改的字段：kind 决定控件与提交值类型（`number` 提交数字，其余提交字符串）
 typedef _Field = ({String label, String path, String kind, String? hint});
@@ -93,17 +100,22 @@ typedef _ChannelDef = ({
   String id,
   String title,
   IconData icon,
+
   /// 状态判定用的配置点：两个通道看 enabled，webhook 项看出口地址
   String enabledPath,
+
   /// 可切换的布尔配置点；webhook 项为 null（它的「开」就是填上出口地址）
   String? switchPath,
   String channel,
   String hint,
   String blurb,
+
   /// 就地可改的字段；保存时只提交与生效值不同的项
   List<_Field> fields,
+
   /// 只读补充项：由其它字段推导出的组合值，或路径列表这类不适合单值文本框的东西
   List<_Spec> specs,
+
   /// 密钥字段（值写进本机密钥文件，不进 config.json）
   List<_SecretField> secrets,
 });
@@ -128,20 +140,54 @@ List<_SecretField> _onebotSecrets(AppStrings s) => <_SecretField>[
 /// 界面上填的是值（见 _qqSecrets 的密钥行），变量名以只读形态显示在密钥行里，
 /// 要用环境变量的高级用户直接改 config.json。
 List<_Field> _qqFields(AppStrings s) => <_Field>[
-  (label: s.chanQqApiBaseLabel, path: 'channels.qqOfficial.apiBase', kind: 'text', hint: s.chanQqUrlHint),
-  (label: s.chanQqTokenUrlLabel, path: 'channels.qqOfficial.tokenUrl', kind: 'text', hint: s.chanQqUrlHint),
-  (label: s.chanQqGatewayUrlLabel, path: 'channels.qqOfficial.gatewayUrl', kind: 'text', hint: s.chanQqGatewayHint),
+  (
+    label: s.chanQqApiBaseLabel,
+    path: 'channels.qqOfficial.apiBase',
+    kind: 'text',
+    hint: s.chanQqUrlHint,
+  ),
+  (
+    label: s.chanQqTokenUrlLabel,
+    path: 'channels.qqOfficial.tokenUrl',
+    kind: 'text',
+    hint: s.chanQqUrlHint,
+  ),
+  (
+    label: s.chanQqGatewayUrlLabel,
+    path: 'channels.qqOfficial.gatewayUrl',
+    kind: 'text',
+    hint: s.chanQqGatewayHint,
+  ),
 ];
 List<_Field> _onebotFields(AppStrings s) => <_Field>[
-  (label: s.chanOneBotWsLabel, path: 'channels.onebot.wsUrl', kind: 'text', hint: s.chanOneBotWsHint),
+  (
+    label: s.chanOneBotWsLabel,
+    path: 'channels.onebot.wsUrl',
+    kind: 'text',
+    hint: s.chanOneBotWsHint,
+  ),
 ];
 List<_Field> _hookFields(AppStrings s) => <_Field>[
-  (label: s.chanAlertWebhookLabel, path: 'alerts.webhookUrl', kind: 'text', hint: s.chanAlertWebhookHint),
-  (label: s.chanAlertRateLabel, path: 'alerts.rateLimitMin', kind: 'number', hint: s.chanAlertRateHint),
+  (
+    label: s.chanAlertWebhookLabel,
+    path: 'alerts.webhookUrl',
+    kind: 'text',
+    hint: s.chanAlertWebhookHint,
+  ),
+  (
+    label: s.chanAlertRateLabel,
+    path: 'alerts.rateLimitMin',
+    kind: 'number',
+    hint: s.chanAlertRateHint,
+  ),
 ];
 
 List<_Spec> _onebotSpecs(AppStrings s) => <_Spec>[
-  (label: s.chanEndpointLabel, path: 'channels.onebot.wsUrl · port', custom: _endpointOf),
+  (
+    label: s.chanEndpointLabel,
+    path: 'channels.onebot.wsUrl · port',
+    custom: _endpointOf,
+  ),
 ];
 List<_Spec> _hookSpecs(AppStrings s) => <_Spec>[
   (label: s.chanListenLabel, path: 'web.host · web.port', custom: _listenOf),
@@ -210,6 +256,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
   Map<String, dynamic>? keys;
   String? keysError;
 
+  /// Ingress Bridge 事件来源（GET /api/ingress-sources）：不经过 config.json。
+  List<Map<String, dynamic>> ingressSources = const [];
+  String? ingressError;
+  bool ingressBusy = false;
+
   /// 密钥输入框：值只写不读，提交后立刻清空（掩码以服务端为准）
   final Map<String, TextEditingController> _secretCtls = {};
 
@@ -217,16 +268,21 @@ class _ChannelsPageState extends State<ChannelsPage> {
   /// 所以得由人在这里告诉系统"那个会话是谁"。
   List<Map<String, dynamic>> sessions = const [];
   final Map<String, TextEditingController> _contactCtls = {};
+
   /// 群成员档案（GET /api/sessions 的 `groupMembers`）：键是群 sid，值是那个群里见过的人。
   /// 与联系人表分开：那是"会话"的名字（键是 sid），这是"群里的人"（键是 openid）——
   /// 群成员没私聊过她，压根没有 sid。
   Map<String, List<Map<String, dynamic>>> _groupMembers = {};
+
   /// 群成员名字的输入框（键是 openid；同样不重建，免得光标丢）
   final Map<String, TextEditingController> _memberCtls = {};
+
   /// 哪些群会话是展开的（默认收起：群里人多，全摊开会把卡片撑得很长）
   final Set<String> _expandedGroups = {};
+
   /// 正在改名的那个成员（openid）：只让一行变成输入框，其余保持列表形态（省空间）
   String? _editingMember;
+
   /// 预警豁免：单聊按会话（sid），群里按人（群 sid → openid 集合）。
   /// 默认两边都是空的 = **全都预警**（安全的那一侧）；群聊没有"整群豁免"这一档。
   /// 群聊场景开关（软提醒 = false / 硬拒绝 = true）。**立刻生效**：动作里同临界区改了内存那份。
@@ -263,7 +319,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
     widget.state.addListener(_onStateChange);
     unawaited(load());
     // 事件 15s 一跳（与 Web 端同频）；配置只在进页与下拉刷新时重读，免得卡片闪
-    _poll = Timer.periodic(const Duration(seconds: 15), (_) => unawaited(_loadEvents()));
+    _poll = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_loadEvents()),
+    );
   }
 
   @override
@@ -288,8 +347,18 @@ class _ChannelsPageState extends State<ChannelsPage> {
 
   Future<void> load() async {
     if (mounted) setState(() => refreshing = true);
-    await Future.wait([_loadConfig(), _loadEvents(), _loadKeys(), _loadSessions()]);
-    if (mounted) setState(() { firstLoad = false; refreshing = false; });
+    await Future.wait([
+      _loadConfig(),
+      _loadEvents(),
+      _loadKeys(),
+      _loadSessions(),
+      _loadIngressSources(),
+    ]);
+    if (mounted)
+      setState(() {
+        firstLoad = false;
+        refreshing = false;
+      });
   }
 
   /// 会话联系人（她见过的会话 + 现在给它们起的名字）。
@@ -351,7 +420,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
         for (final sess in next) {
           final sid = '${sess['sid']}';
           if (!_contactCtls.containsKey(sid)) {
-            _contactCtls[sid] = TextEditingController(text: '${sess['name'] ?? ''}');
+            _contactCtls[sid] = TextEditingController(
+              text: '${sess['name'] ?? ''}',
+            );
           }
         }
       });
@@ -387,7 +458,16 @@ class _ChannelsPageState extends State<ChannelsPage> {
         data = await widget.state.api.get(_fallbackEventsQuery);
       }
       final list = data is Map ? data['events'] : (data is List ? data : null);
-      if (mounted) setState(() { events = list is List ? list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList() : const []; evError = null; });
+      if (mounted)
+        setState(() {
+          events = list is List
+              ? list
+                    .whereType<Map>()
+                    .map((e) => e.cast<String, dynamic>())
+                    .toList()
+              : const [];
+          evError = null;
+        });
     } catch (err) {
       if (mounted) setState(() => evError = err.toString());
     }
@@ -433,11 +513,31 @@ class _ChannelsPageState extends State<ChannelsPage> {
     }
   }
 
+  /// Ingress Bridge 来源：只读视图；token/hash 不经过这里
+  Future<void> _loadIngressSources() async {
+    try {
+      final data = await widget.state.api.get('/api/ingress-sources');
+      if (!mounted) return;
+      final list = data is Map ? data['sources'] : null;
+      setState(() {
+        ingressSources = list is List
+            ? list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList()
+            : const [];
+        ingressError = null;
+      });
+    } catch (err) {
+      if (mounted) setState(() => ingressError = '$err');
+    }
+  }
+
   ({bool configured, String? mask}) _keyState(String keyName) {
     final raw = keys?[keyName];
     if (raw is! Map) return (configured: false, mask: null);
     final mask = raw['mask'];
-    return (configured: raw['configured'] == true, mask: mask is String ? mask : null);
+    return (
+      configured: raw['configured'] == true,
+      mask: mask is String ? mask : null,
+    );
   }
 
   /// 待写入的密钥：输入框非空即待保存（密钥只写不读，没有"改回原值"这回事）
@@ -463,13 +563,16 @@ class _ChannelsPageState extends State<ChannelsPage> {
     if (!confirmed || !mounted) return;
     setState(() => saving = true);
     try {
-      await widget.state.api
-          .post('/api/commands/set-key', {'name': field.keyName, 'value': ''}, confirm: 'set-key');
+      await widget.state.api.post('/api/commands/set-key', {
+        'name': field.keyName,
+        'value': '',
+      }, confirm: 'set-key');
       if (!mounted) return;
       _toast(s.settingsKeyCleared, kind: ToastKind.success);
       await _loadKeys();
     } catch (err) {
-      if (mounted) _toast(s.chanClearFailed(_clip('$err', 80)), kind: ToastKind.error);
+      if (mounted)
+        _toast(s.chanClearFailed(_clip('$err', 80)), kind: ToastKind.error);
     } finally {
       if (mounted) setState(() => saving = false);
     }
@@ -510,7 +613,8 @@ class _ChannelsPageState extends State<ChannelsPage> {
       if (field.kind != 'number') continue;
       final text = _ctl(field.path).text.trim();
       if (text.isEmpty) continue;
-      if (text != (_saved[field.path] ?? '') && num.tryParse(text) == null) return field.label;
+      if (text != (_saved[field.path] ?? '') && num.tryParse(text) == null)
+        return field.label;
     }
     return null;
   }
@@ -536,13 +640,16 @@ class _ChannelsPageState extends State<ChannelsPage> {
       }
     }
     final path = def.switchPath;
-    if (path != null && _switchDraft.containsKey(path)) out[path] = _switchDraft[path];
+    if (path != null && _switchDraft.containsKey(path))
+      out[path] = _switchDraft[path];
     return out;
   }
 
   /// 有无待保存内容：填了非法数字也算（否则按钮禁用，用户卡在那儿无路可走）；密钥框非空也算
   bool _dirty(_ChannelDef def) =>
-      _invalidNumber(def) != null || _dirtyFields(def).isNotEmpty || _pendingSecrets(def).isNotEmpty;
+      _invalidNumber(def) != null ||
+      _dirtyFields(def).isNotEmpty ||
+      _pendingSecrets(def).isNotEmpty;
 
   Future<void> _save(_ChannelDef def) async {
     final s = IrmiaStrings.read(context);
@@ -561,16 +668,20 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final written = <String>[];
     try {
       if (fields.isNotEmpty) {
-        await widget.state.api
-            .post('/api/commands/config-update', {'fields': fields}, confirm: 'config-update');
+        await widget.state.api.post('/api/commands/config-update', {
+          'fields': fields,
+        }, confirm: 'config-update');
         written.add(s.chanSavedFieldCount(fields.length));
       }
       // 密钥逐条写：一条失败不影响其余已写入的（界面按服务端返回的掩码重画状态）
       for (final entry in secrets.entries) {
-        await widget.state.api
-            .post('/api/commands/set-key', {'name': entry.key, 'value': entry.value}, confirm: 'set-key');
+        await widget.state.api.post('/api/commands/set-key', {
+          'name': entry.key,
+          'value': entry.value,
+        }, confirm: 'set-key');
       }
-      if (secrets.isNotEmpty) written.add(s.chanSavedSecretCount(secrets.length));
+      if (secrets.isNotEmpty)
+        written.add(s.chanSavedSecretCount(secrets.length));
       if (!mounted) return;
       for (final secret in def.secrets) {
         _secretCtl(secret.keyName).clear();
@@ -579,11 +690,17 @@ class _ChannelsPageState extends State<ChannelsPage> {
       if (secrets.isNotEmpty) await _loadKeys();
       if (!mounted) return;
       // 参数要重启接管；密钥写盘即刻可用（下次建连时读），不跟着喊重启
-      final restart = fields.isNotEmpty ? s.chanSavedRestartSuffix : s.chanSavedLiveSuffix;
-      _toast(s.chanSaved(written.join(s.settingsListAnd), restart), kind: ToastKind.success);
+      final restart = fields.isNotEmpty
+          ? s.chanSavedRestartSuffix
+          : s.chanSavedLiveSuffix;
+      _toast(
+        s.chanSaved(written.join(s.settingsListAnd), restart),
+        kind: ToastKind.success,
+      );
     } catch (err) {
       // 服务端写盘后会跑一次配置校验，失败即回滚原文件并说明原因：原样转达，不自己编一句
-      if (mounted) _toast(s.settingsSaveFailed(_clip('$err', 80)), kind: ToastKind.error);
+      if (mounted)
+        _toast(s.settingsSaveFailed(_clip('$err', 80)), kind: ToastKind.error);
     } finally {
       if (mounted) setState(() => saving = false);
     }
@@ -613,9 +730,14 @@ class _ChannelsPageState extends State<ChannelsPage> {
     if (alertTesting) return;
     setState(() => alertTesting = true);
     try {
-      final reply = await widget.state.api.post('/api/commands/webhook-test', const <String, dynamic>{});
+      final reply = await widget.state.api.post(
+        '/api/commands/webhook-test',
+        const <String, dynamic>{},
+      );
       if (!mounted) return;
-      final map = reply is Map ? reply.cast<String, dynamic>() : const <String, dynamic>{};
+      final map = reply is Map
+          ? reply.cast<String, dynamic>()
+          : const <String, dynamic>{};
       final url = map['url']?.toString() ?? '';
       if (map['sent'] == true || map['ok'] == true) {
         _toast(s.chanTestDelivered(url), kind: ToastKind.success);
@@ -624,7 +746,8 @@ class _ChannelsPageState extends State<ChannelsPage> {
         _toast(s.chanTestNotDelivered(reason), kind: ToastKind.error);
       }
     } catch (err) {
-      if (mounted) _toast(s.chanTestFailed(_clip('$err', 90)), kind: ToastKind.error);
+      if (mounted)
+        _toast(s.chanTestFailed(_clip('$err', 90)), kind: ToastKind.error);
     } finally {
       if (mounted) setState(() => alertTesting = false);
     }
@@ -644,12 +767,14 @@ class _ChannelsPageState extends State<ChannelsPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final target = _configKey.currentContext;
       if (target == null) return;
-      unawaited(Scrollable.ensureVisible(
-        target,
-        duration: IrmiaTheme.durCard,
-        curve: Curves.easeOutCubic,
-        alignment: 0.02,
-      ));
+      unawaited(
+        Scrollable.ensureVisible(
+          target,
+          duration: IrmiaTheme.durCard,
+          curve: Curves.easeOutCubic,
+          alignment: 0.02,
+        ),
+      );
     });
   }
 
@@ -660,11 +785,15 @@ class _ChannelsPageState extends State<ChannelsPage> {
 
   // ── 选中与视图位 ──
 
-  _ChannelDef _defOf(AppStrings s, String id) =>
-      _channels(s).firstWhere((def) => def.id == id, orElse: () => _channels(s).first);
+  _ChannelDef _defOf(AppStrings s, String id) => _channels(
+    s,
+  ).firstWhere((def) => def.id == id, orElse: () => _channels(s).first);
 
   /// 点行体 = 选中；窄窗同时切到详情视图（宽窗右侧原地换内容）
-  void _select(String id) => setState(() { selectedId = id; narrowDetail = true; });
+  void _select(String id) => setState(() {
+    selectedId = id;
+    narrowDetail = true;
+  });
 
   // ── 状态实测 ──
 
@@ -703,39 +832,108 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.of(context);
     // 配置没读到就不给结论：状态点走「状态未知」，不按缺省值猜开关
     if (cfg == null) {
-      return (kind: 'loading', tone: 'none', label: s.chanStatusUnknown, note: s.chanStatusUnknownNote);
+      return (
+        kind: 'loading',
+        tone: 'none',
+        label: s.chanStatusUnknown,
+        note: s.chanStatusUnknownNote,
+      );
     }
-    return def.id == _hookChannelId ? _hookStatus() : _channelStatus(def.enabledPath, def.channel);
+    return def.id == _hookChannelId
+        ? _hookStatus()
+        : _channelStatus(def.enabledPath, def.channel);
   }
 
   _Status _channelStatus(String enabledPath, String channel) {
     final s = IrmiaStrings.of(context);
     final last = _channelLast(channel);
-    if (_at(cfg, enabledPath) != true) return (kind: 'sleeping', tone: 'none', label: s.chanStatusOff, note: s.chanStatusOffNote);
-    if (last == null) return (kind: 'idle', tone: 'info', label: s.chanStatusOn, note: s.chanStatusOnNote);
-    return (kind: 'running', tone: 'ok', label: s.toolRunning, note: s.chanStatusRunningNote(AppState.hhmm(last['ts']?.toString() ?? ''), last['seq'] == null ? '' : ' · #${last['seq']}'));
+    if (_at(cfg, enabledPath) != true)
+      return (
+        kind: 'sleeping',
+        tone: 'none',
+        label: s.chanStatusOff,
+        note: s.chanStatusOffNote,
+      );
+    if (last == null)
+      return (
+        kind: 'idle',
+        tone: 'info',
+        label: s.chanStatusOn,
+        note: s.chanStatusOnNote,
+      );
+    return (
+      kind: 'running',
+      tone: 'ok',
+      label: s.toolRunning,
+      note: s.chanStatusRunningNote(
+        AppState.hhmm(last['ts']?.toString() ?? ''),
+        last['seq'] == null ? '' : ' · #${last['seq']}',
+      ),
+    );
   }
 
   _Status _hookStatus() {
     final s = IrmiaStrings.of(context);
-    final hits = [_lastOfType('wake/webhook'), _lastOfType('wake/file'), _lastOfType('alarm/sent')].whereType<Map<String, dynamic>>().toList()..sort((a, b) => (b['ts']?.toString() ?? '').compareTo(a['ts']?.toString() ?? ''));
+    final hits =
+        [
+          _lastOfType('wake/webhook'),
+          _lastOfType('wake/file'),
+          _lastOfType('alarm/sent'),
+        ].whereType<Map<String, dynamic>>().toList()..sort(
+          (a, b) =>
+              (b['ts']?.toString() ?? '').compareTo(a['ts']?.toString() ?? ''),
+        );
     if (hits.isEmpty) {
       return _text('alerts.webhookUrl') == null
-          ? (kind: 'sleeping', tone: 'none', label: s.chanStatusNoExit, note: s.chanStatusNoExitNote)
-          : (kind: 'idle', tone: 'info', label: s.chanStatusExitOn, note: s.chanStatusExitOnNote);
+          ? (
+              kind: 'sleeping',
+              tone: 'none',
+              label: s.chanStatusNoExit,
+              note: s.chanStatusNoExitNote,
+            )
+          : (
+              kind: 'idle',
+              tone: 'info',
+              label: s.chanStatusExitOn,
+              note: s.chanStatusExitOnNote,
+            );
     }
     final last = hits.first;
-    return (kind: 'running', tone: 'ok', label: s.toolRunning, note: s.chanStatusHookRunningNote(_eventTagLabel(s, last['type']), AppState.hhmm(last['ts']?.toString() ?? '')));
+    return (
+      kind: 'running',
+      tone: 'ok',
+      label: s.toolRunning,
+      note: s.chanStatusHookRunningNote(
+        _eventTagLabel(s, last['type']),
+        AppState.hhmm(last['ts']?.toString() ?? ''),
+      ),
+    );
   }
 
-  List<_Row> _rows(List<_Spec> specs) => [for (final s in specs) (label: s.label, path: s.path, value: s.custom?.call(this) ?? _text(s.path))];
+  List<_Row> _rows(List<_Spec> specs) => [
+    for (final s in specs)
+      (
+        label: s.label,
+        path: s.path,
+        value: s.custom?.call(this) ?? _text(s.path),
+      ),
+  ];
 
   /// 该项的活动：单通道看自己的通道事件，Webhook 项看三类事件
   List<Map<String, dynamic>> _feedOf(_ChannelDef def) {
     final list = def.id == _hookChannelId
         ? events.where((e) => _hookEventTypes.contains(e['type'])).toList()
-        : events.where((e) => e['data'] is Map && (e['data'] as Map)['channel'] == def.channel).toList();
-    list.sort((a, b) => (b['ts']?.toString() ?? '').compareTo(a['ts']?.toString() ?? ''));
+        : events
+              .where(
+                (e) =>
+                    e['data'] is Map &&
+                    (e['data'] as Map)['channel'] == def.channel,
+              )
+              .toList();
+    list.sort(
+      (a, b) =>
+          (b['ts']?.toString() ?? '').compareTo(a['ts']?.toString() ?? ''),
+    );
     return list;
   }
 
@@ -749,9 +947,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
   /// 顶部 2px 不定进度线（取 ui_kit 的 StateBlock.loading 线形态）：高度固定，
   /// 出现与消失都不推动内容（docs/astrbot-ux-interaction.md §五）。
   Widget _progressLine(bool active) => SizedBox(
-        height: 2,
-        child: active ? const StateBlock.loading(padding: EdgeInsets.zero) : null,
-      );
+    height: 2,
+    child: active ? const StateBlock.loading(padding: EdgeInsets.zero) : null,
+  );
 
   String _footnote(AppStrings s) => evError != null
       ? s.chanFootnoteError(evError!)
@@ -795,7 +993,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
                   ],
                 );
               }
-              return narrowDetail ? _detailPane(context, narrow: true) : _listPane(context, narrow: true);
+              return narrowDetail
+                  ? _detailPane(context, narrow: true)
+                  : _listPane(context, narrow: true);
             },
           ),
         ),
@@ -812,12 +1012,30 @@ class _ChannelsPageState extends State<ChannelsPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: EdgeInsets.fromLTRB(narrow ? 26 : 20, 14, narrow ? 16 : 8, 4),
+          padding: EdgeInsets.fromLTRB(
+            narrow ? 26 : 20,
+            14,
+            narrow ? 16 : 8,
+            4,
+          ),
           child: Row(
             children: [
-              Text(s.chanListHeader, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, letterSpacing: 0.3, color: scheme.onSurfaceVariant)),
+              Text(
+                s.chanListHeader,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               const Spacer(),
-              _iconAction(context, icon: Icons.refresh_rounded, tooltip: s.chanReloadAction, onPressed: () => unawaited(load())),
+              _iconAction(
+                context,
+                icon: Icons.refresh_rounded,
+                tooltip: s.chanReloadAction,
+                onPressed: () => unawaited(load()),
+              ),
             ],
           ),
         ),
@@ -825,8 +1043,15 @@ class _ChannelsPageState extends State<ChannelsPage> {
           child: RefreshIndicator(
             onRefresh: load,
             child: ListView(
-              padding: EdgeInsets.fromLTRB(narrow ? 18 : 12, 0, narrow ? 18 : 8, 24),
-              children: [for (final def in _channels(s)) _channelTile(context, def)],
+              padding: EdgeInsets.fromLTRB(
+                narrow ? 18 : 12,
+                0,
+                narrow ? 18 : 8,
+                24,
+              ),
+              children: [
+                for (final def in _channels(s)) _channelTile(context, def),
+              ],
             ),
           ),
         ),
@@ -852,7 +1077,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
             padding: const EdgeInsets.fromLTRB(10, 9, 6, 9),
             child: Row(
               children: [
-                Icon(def.icon, size: 18, color: selected ? scheme.primary : scheme.onSurfaceVariant),
+                Icon(
+                  def.icon,
+                  size: 18,
+                  color: selected ? scheme.primary : scheme.onSurfaceVariant,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -861,24 +1090,43 @@ class _ChannelsPageState extends State<ChannelsPage> {
                       Row(
                         children: [
                           Flexible(
-                            child: Text(def.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: selected ? scheme.primary : scheme.onSurface)),
+                            child: Text(
+                              def.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: selected
+                                    ? scheme.primary
+                                    : scheme.onSurface,
+                              ),
+                            ),
                           ),
                           const SizedBox(width: 6),
                           BreathDot(kind: status.kind, size: 7),
                         ],
                       ),
                       const SizedBox(height: 3),
-                      Text('${status.label} · ${def.blurb}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 11.5, height: 1.4, color: scheme.onSurfaceVariant)),
+                      Text(
+                        '${status.label} · ${def.blurb}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          height: 1.4,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
                     ],
                   ),
                 ),
-                _iconAction(context, icon: Icons.tune_rounded, tooltip: s.chanConfigAction, onPressed: () => _openConfig(def.id)),
+                _iconAction(
+                  context,
+                  icon: Icons.tune_rounded,
+                  tooltip: s.chanConfigAction,
+                  onPressed: () => _openConfig(def.id),
+                ),
               ],
             ),
           ),
@@ -947,6 +1195,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
       children: [
         _detailCard(context, def: def, status: status, rows: rows),
         const SizedBox(height: 16),
+        // 外部脚本的事件来源（Ingress Bridge）：只挂在事件与告警这一项下，放在告警配置之前。
+        if (def.id == _hookChannelId) ...[
+          _ingressSourcesCard(context),
+          const SizedBox(height: 20),
+        ],
         // 配置卡挂 _configKey：行尾齿轮滚到这张卡（状态卡上那枚「编辑配置」已按用户 ③ 去掉）
         KeyedSubtree(key: _configKey, child: _configCard(context, def)),
         const SizedBox(height: 20),
@@ -958,10 +1211,12 @@ class _ChannelsPageState extends State<ChannelsPage> {
           _contactsCard(context, def),
           const SizedBox(height: 20),
         ],
-        const SizedBox(height: 20),
-        // 「她怎么被称呼」：名单是**跨通道**的（谁喊她名字都算），所以放在通道相关的那几卡
-        // 之后、与「最近活动」之前——它是"外面的人怎么叫她"，不是某一条通道的属性
-        _mentionCard(context),
+        // 「她怎么被称呼」：名单是**跨通道**的（谁喊她名字都算），只属于消息通道。
+        // 事件与告警没有 @/提及语义，不能把这张卡带进去。
+        if (def.id != _hookChannelId) ...[
+          const SizedBox(height: 20),
+          _mentionCard(context),
+        ],
         const SizedBox(height: 20),
         // 用户 ④：这一段原来是"裸"在页面底上的——一个光标题加一列横贯整页的行，
         // 跟上面三张卡不是一个形态。现在它有同一套壳（surface / outlineVariant /
@@ -990,16 +1245,31 @@ class _ChannelsPageState extends State<ChannelsPage> {
           Row(
             children: [
               Expanded(
-                child: Text(s.chanRecentActivity, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                child: Text(
+                  s.chanRecentActivity,
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
               ),
-              _iconAction(context, icon: Icons.refresh_rounded, tooltip: s.chanReloadAction, onPressed: () => unawaited(load())),
+              _iconAction(
+                context,
+                icon: Icons.refresh_rounded,
+                tooltip: s.chanReloadAction,
+                onPressed: () => unawaited(load()),
+              ),
             ],
           ),
           const SizedBox(height: 12),
           _feed(context, feed),
           const SizedBox(height: 4),
           // 脚注收进卡里：与「会话联系人」的尾注同一档字号，卡片自带说明，不留孤零零一行在卡外
-          Text(_footnote(s), style: TextStyle(fontSize: 11, height: 1.6, color: scheme.onSurfaceVariant)),
+          Text(
+            _footnote(s),
+            style: TextStyle(
+              fontSize: 11,
+              height: 1.6,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );
@@ -1012,7 +1282,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final channels = cfg?['channels'];
     final raw = channels is Map ? channels['mentionKeywords'] : null;
     if (raw is! List) return const [];
-    return raw.whereType<String>().map((w) => w.trim()).where((w) => w.isNotEmpty).toList();
+    return raw
+        .whereType<String>()
+        .map((w) => w.trim())
+        .where((w) => w.isNotEmpty)
+        .toList();
   }
 
   /// 为什么要有这一条（用户 2026-10-02）：群里的人常不打 @ 直接喊名字，平台不会把那种句子
@@ -1037,12 +1311,22 @@ class _ChannelsPageState extends State<ChannelsPage> {
         children: [
           Row(
             children: [
-              Text(s.chanMentionTitle, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+              Text(
+                s.chanMentionTitle,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: scheme.onSurface,
+                ),
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   s.chanMentionNote,
-                  style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
               TextButton(
@@ -1065,8 +1349,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
               ],
             ),
           const SizedBox(height: 6),
-          Text(s.chanMentionHint,
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+          Text(
+            s.chanMentionHint,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          ),
         ],
       ),
     );
@@ -1084,12 +1370,18 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final problem = await widget.state.saveMentionKeywords(words);
     if (!mounted) return;
     if (problem != null) {
-      IrmiaToast.show(context, s.chanMentionSaveFailed(problem), kind: ToastKind.error);
+      IrmiaToast.show(
+        context,
+        s.chanMentionSaveFailed(problem),
+        kind: ToastKind.error,
+      );
       return;
     }
     IrmiaToast.show(
       context,
-      words.isEmpty ? s.chanMentionCleared : s.chanMentionSaved(words.join(s.chanJoinWords)),
+      words.isEmpty
+          ? s.chanMentionCleared
+          : s.chanMentionSaved(words.join(s.chanJoinWords)),
       kind: ToastKind.success,
     );
     await _loadConfig();
@@ -1109,7 +1401,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final scheme = Theme.of(context).colorScheme;
     // **只列本通道的会话**：sid 里就带着通道名（`qq:` 对官 bot、`onebot:` 对协议端），
     // 所以这张卡天然就是"这条通道里的谁是谁"——两台手机互相独立（用户 2026-10-02）。
-    final mine = sessions.where((sess) => '${sess['channel']}' == def.channel).toList();
+    final mine = sessions
+        .where((sess) => '${sess['channel']}' == def.channel)
+        .toList();
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
       decoration: BoxDecoration(
@@ -1123,7 +1417,14 @@ class _ChannelsPageState extends State<ChannelsPage> {
         children: [
           Row(
             children: [
-              Text(s.chanContactsTitle, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+              Text(
+                s.chanContactsTitle,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: scheme.onSurface,
+                ),
+              ),
               const SizedBox(width: 8),
               // **短标签 + 一行要点，长解释收进「说明」折叠**（用户 2026-10-05 定的文案规则）。
               //
@@ -1139,7 +1440,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
                   s.chanContactsNote,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             ],
@@ -1157,7 +1461,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
                 children: [
                   Text(
                     s.chanContactsDetail,
-                    style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.6,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
               ),
@@ -1174,19 +1482,26 @@ class _ChannelsPageState extends State<ChannelsPage> {
           //（与上面那张联系人表不同：那个要重启）。
           Row(
             children: [
-              Text(s.chanGroupSceneLabel, style: TextStyle(fontSize: 12, color: scheme.onSurface)),
+              Text(
+                s.chanGroupSceneLabel,
+                style: TextStyle(fontSize: 12, color: scheme.onSurface),
+              ),
               const SizedBox(width: 8),
               _warnChip(
                 context,
                 exempt: _groupSceneHardRefusal,
-                label: _groupSceneHardRefusal ? s.chanGroupSceneHard : s.chanGroupSceneSoft,
+                label: _groupSceneHardRefusal
+                    ? s.chanGroupSceneHard
+                    : s.chanGroupSceneSoft,
                 onTap: () => unawaited(_toggleGroupScene()),
               ),
             ],
           ),
           const SizedBox(height: 4),
-          Text(s.chanContactsRestartNote,
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+          Text(
+            s.chanContactsRestartNote,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          ),
         ],
       ),
     );
@@ -1198,7 +1513,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final sid = '${sess['sid']}';
     final members = _groupMembers[sid] ?? const <Map<String, dynamic>>[];
     final chat = sess['chatType'] == 'c2c' ? s.chatTypeDirect : s.chatTypeGroup;
-    final when = '${sess['lastSeenAt']}'.replaceFirst('T', ' ').split('.').first;
+    final when = '${sess['lastSeenAt']}'
+        .replaceFirst('T', ' ')
+        .split('.')
+        .first;
     // 备注（她写在别名名字后面括号里的那段口径）：**只读**，与名字分两处。
     // 为什么不让它进那个可编辑的格子：那一格保存时写回 `config.persona.contacts`（人声明的名字），
     // 备注长在她自己的 `MEMORIES/aliases.md` 里——把它塞进输入框，改一次名字就等于替她把口径
@@ -1217,92 +1535,109 @@ class _ChannelsPageState extends State<ChannelsPage> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-          Expanded(
-            // 身份文字 + **紧挨着它右边**的预警标签；这一行用 center 交叉轴对齐，
-            // 于是标签相对那两行文字**上下居中**（用户 2026-10-04 的口径：上下居中、跟在身份右边）。
-            child: Row(
-              children: [
-                Flexible(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(s.chanContactLine(chat, when),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 12, color: scheme.onSurface)),
-                      Text(sid,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontFamily: 'monospace', fontSize: 10.5)),
-                      // **她的备注另起一行，比 sid 还低一档**（用户 2026-10-04 报的 bug：
-                      // 备注原来混在名字里，长长的口径把那一格挤得只剩尾巴）。为什么不做成
-                      // 纯 hover 提示：这句是"她在群里怎么说话"的口径，看的人要能一眼扫到，
-                      // 而不是先猜到那儿有东西；所以常态可见，整行单行 + 省略号（行高不变），
-                      // 悬浮再给完整原话——那句话往往比一行宽。
-                      if (note.isNotEmpty)
-                        Tooltip(
-                          message: note,
-                          child: Text(s.chanContactNote(note),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 10.5,
-                                color: scheme.onSurfaceVariant.withValues(alpha: 0.85),
-                              )),
-                        ),
+              Expanded(
+                // 身份文字 + **紧挨着它右边**的预警标签；这一行用 center 交叉轴对齐，
+                // 于是标签相对那两行文字**上下居中**（用户 2026-10-04 的口径：上下居中、跟在身份右边）。
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            s.chanContactLine(chat, when),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: scheme.onSurface,
+                            ),
+                          ),
+                          Text(
+                            sid,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 10.5,
+                            ),
+                          ),
+                          // **她的备注另起一行，比 sid 还低一档**（用户 2026-10-04 报的 bug：
+                          // 备注原来混在名字里，长长的口径把那一格挤得只剩尾巴）。为什么不做成
+                          // 纯 hover 提示：这句是"她在群里怎么说话"的口径，看的人要能一眼扫到，
+                          // 而不是先猜到那儿有东西；所以常态可见，整行单行 + 省略号（行高不变），
+                          // 悬浮再给完整原话——那句话往往比一行宽。
+                          if (note.isNotEmpty)
+                            Tooltip(
+                              message: note,
+                              child: Text(
+                                s.chanContactNote(note),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  color: scheme.onSurfaceVariant.withValues(
+                                    alpha: 0.85,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (chat == s.chatTypeDirect) ...[
+                      const SizedBox(width: 10),
+                      _warnChip(
+                        context,
+                        exempt: _exemptSessions.contains(sid),
+                        onTap: () => unawaited(_toggleExemptSession(sid)),
+                      ),
                     ],
-                  ),
+                  ],
                 ),
-                if (chat == s.chatTypeDirect) ...[
-                  const SizedBox(width: 10),
-                  _warnChip(
-                    context,
-                    exempt: _exemptSessions.contains(sid),
-                    onTap: () => unawaited(_toggleExemptSession(sid)),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 200,
-            child: TextField(
-              controller: ctl,
-              decoration: InputDecoration(
-                hintText: s.chanContactHint,
-                isDense: true,
-                border: OutlineInputBorder(),
               ),
-              style: const TextStyle(fontSize: 12.5),
-            ),
-          ),
-          const SizedBox(width: 6),
-          _iconAction(
-            context,
-            icon: Icons.check_rounded,
-            tooltip: s.chanContactSaveTooltip,
-            onPressed: () => unawaited(_saveContact(sid)),
-          ),
-          // **展开按钮占一个恒定槽位（28）**：没有成员的会话也留着它。
-          // 用户 2026-10-04 指出的对齐问题：群聊多这一个图标，它的名字输入框就比单聊的
-          // 往左挪了一格——槽位固定之后，所有会话的输入框左边缘就都在同一条线上。
-          SizedBox(
-            width: 28,
-            child: members.isEmpty
-                ? null
-                : _iconAction(
-                    context,
-                    icon: _expandedGroups.contains(sid)
-                        ? Icons.expand_less_rounded
-                        : Icons.expand_more_rounded,
-                    tooltip: _expandedGroups.contains(sid) ? s.chanMembersCollapse : s.chanMembersExpand(members.length),
-                    onPressed: () => setState(() {
-                      if (!_expandedGroups.remove(sid)) _expandedGroups.add(sid);
-                    }),
+              const SizedBox(width: 12),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 200,
+                child: TextField(
+                  controller: ctl,
+                  decoration: InputDecoration(
+                    hintText: s.chanContactHint,
+                    isDense: true,
+                    border: OutlineInputBorder(),
                   ),
-          ),
+                  style: const TextStyle(fontSize: 12.5),
+                ),
+              ),
+              const SizedBox(width: 6),
+              _iconAction(
+                context,
+                icon: Icons.check_rounded,
+                tooltip: s.chanContactSaveTooltip,
+                onPressed: () => unawaited(_saveContact(sid)),
+              ),
+              // **展开按钮占一个恒定槽位（28）**：没有成员的会话也留着它。
+              // 用户 2026-10-04 指出的对齐问题：群聊多这一个图标，它的名字输入框就比单聊的
+              // 往左挪了一格——槽位固定之后，所有会话的输入框左边缘就都在同一条线上。
+              SizedBox(
+                width: 28,
+                child: members.isEmpty
+                    ? null
+                    : _iconAction(
+                        context,
+                        icon: _expandedGroups.contains(sid)
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        tooltip: _expandedGroups.contains(sid)
+                            ? s.chanMembersCollapse
+                            : s.chanMembersExpand(members.length),
+                        onPressed: () => setState(() {
+                          if (!_expandedGroups.remove(sid))
+                            _expandedGroups.add(sid);
+                        }),
+                      ),
+              ),
             ],
           ),
         ),
@@ -1331,7 +1666,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         decoration: BoxDecoration(
-          border: Border.all(color: exempt ? scheme.primary : scheme.outlineVariant),
+          border: Border.all(
+            color: exempt ? scheme.primary : scheme.outlineVariant,
+          ),
           borderRadius: BorderRadius.circular(5),
         ),
         child: Text(
@@ -1345,7 +1682,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
     );
   }
 
-  Widget _memberBlock(BuildContext context, String groupSid, List<Map<String, dynamic>> members) {
+  Widget _memberBlock(
+    BuildContext context,
+    String groupSid,
+    List<Map<String, dynamic>> members,
+  ) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
       // 右边留出 34 = 间距 6 + 图标 28：让这个块的右边缘与上面那排**名字输入框的右边缘**齐平
@@ -1359,7 +1700,8 @@ class _ChannelsPageState extends State<ChannelsPage> {
       child: Column(
         children: [
           for (var i = 0; i < members.length; i += 1) ...[
-            if (i > 0) Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
+            if (i > 0)
+              Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
             _memberRow(context, groupSid, members[i]),
           ],
         ],
@@ -1367,7 +1709,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
     );
   }
 
-  Widget _memberRow(BuildContext context, String groupSid, Map<String, dynamic> member) {
+  Widget _memberRow(
+    BuildContext context,
+    String groupSid,
+    Map<String, dynamic> member,
+  ) {
     final s = IrmiaStrings.of(context);
     final scheme = Theme.of(context).colorScheme;
     final openid = '${member['openid']}';
@@ -1376,7 +1722,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
       openid,
       () => TextEditingController(text: '${member['name'] ?? ''}'),
     );
-    final tail = openid.length <= 8 ? openid : openid.substring(openid.length - 8);
+    final tail = openid.length <= 8
+        ? openid
+        : openid.substring(openid.length - 8);
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
       child: Row(
@@ -1386,7 +1734,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
               child: TextField(
                 controller: ctl,
                 autofocus: true,
-                decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
                 style: const TextStyle(fontSize: 12.5),
                 onSubmitted: (_) => unawaited(_saveMember(openid, groupSid)),
               ),
@@ -1406,16 +1757,24 @@ class _ChannelsPageState extends State<ChannelsPage> {
                   const SizedBox(width: 10),
                   _warnChip(
                     context,
-                    exempt: (_exemptMembers[groupSid] ?? const <String>{}).contains(openid),
-                    onTap: () => unawaited(_toggleExemptMember(groupSid, openid)),
+                    exempt: (_exemptMembers[groupSid] ?? const <String>{})
+                        .contains(openid),
+                    onTap: () =>
+                        unawaited(_toggleExemptMember(groupSid, openid)),
                   ),
                 ],
               ),
             ),
           const SizedBox(width: 8),
           // openid 只给尾巴：认得出是哪个号就够，整串没人看（用户 2026-10-02 的口径）
-          Text(tail,
-              style: TextStyle(fontFamily: 'monospace', fontSize: 10.5, color: scheme.onSurfaceVariant)),
+          Text(
+            tail,
+            style: TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 10.5,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
           if (editing) ...[
             const SizedBox(width: 2),
             _iconAction(
@@ -1440,22 +1799,31 @@ class _ChannelsPageState extends State<ChannelsPage> {
       ),
     );
   }
+
   /// 单聊豁免开关（立刻生效：下一轮那条会话的消息就不过判定了）
   Future<void> _toggleExemptSession(String sid) async {
     final s = IrmiaStrings.read(context);
     final on = !_exemptSessions.contains(sid);
     try {
-      await widget.state.api.post(
-        '/api/commands/set-warn-exempt',
-        {'kind': 'session', 'sid': sid, 'on': on},
-        confirm: 'set-warn-exempt',
-      );
+      await widget.state.api.post('/api/commands/set-warn-exempt', {
+        'kind': 'session',
+        'sid': sid,
+        'on': on,
+      }, confirm: 'set-warn-exempt');
       if (!mounted) return;
-      IrmiaToast.show(context, on ? s.chanExemptSessionOn : s.chanExemptSessionOff,
-          kind: ToastKind.success);
+      IrmiaToast.show(
+        context,
+        on ? s.chanExemptSessionOn : s.chanExemptSessionOff,
+        kind: ToastKind.success,
+      );
       await load();
     } catch (err) {
-      if (mounted) IrmiaToast.show(context, s.settingsSaveFailed('$err'), kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(
+          context,
+          s.settingsSaveFailed('$err'),
+          kind: ToastKind.error,
+        );
     }
   }
 
@@ -1464,16 +1832,26 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.read(context);
     final on = !(_exemptMembers[groupSid] ?? const <String>{}).contains(openid);
     try {
-      await widget.state.api.post(
-        '/api/commands/set-warn-exempt',
-        {'kind': 'member', 'groupSid': groupSid, 'openid': openid, 'on': on},
-        confirm: 'set-warn-exempt',
-      );
+      await widget.state.api.post('/api/commands/set-warn-exempt', {
+        'kind': 'member',
+        'groupSid': groupSid,
+        'openid': openid,
+        'on': on,
+      }, confirm: 'set-warn-exempt');
       if (!mounted) return;
-      IrmiaToast.show(context, on ? s.chanExemptMemberOn : s.chanExemptMemberOff, kind: ToastKind.success);
+      IrmiaToast.show(
+        context,
+        on ? s.chanExemptMemberOn : s.chanExemptMemberOff,
+        kind: ToastKind.success,
+      );
       await load();
     } catch (err) {
-      if (mounted) IrmiaToast.show(context, s.settingsSaveFailed('$err'), kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(
+          context,
+          s.settingsSaveFailed('$err'),
+          kind: ToastKind.error,
+        );
     }
   }
 
@@ -1482,11 +1860,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.read(context);
     final next = !_groupSceneHardRefusal;
     try {
-      await widget.state.api.post(
-        '/api/commands/set-group-scene',
-        {'hardRefusal': next},
-        confirm: 'set-group-scene',
-      );
+      await widget.state.api.post('/api/commands/set-group-scene', {
+        'hardRefusal': next,
+      }, confirm: 'set-group-scene');
       if (!mounted) return;
       IrmiaToast.show(
         context,
@@ -1495,7 +1871,12 @@ class _ChannelsPageState extends State<ChannelsPage> {
       );
       await load();
     } catch (err) {
-      if (mounted) IrmiaToast.show(context, s.chanToggleFailed('$err'), kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(
+          context,
+          s.chanToggleFailed('$err'),
+          kind: ToastKind.error,
+        );
     }
   }
 
@@ -1503,21 +1884,31 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.read(context);
     final name = _memberCtls[openid]?.text.trim() ?? '';
     if (name.isEmpty) {
-      if (mounted) IrmiaToast.show(context, s.chanNameRequired, kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(context, s.chanNameRequired, kind: ToastKind.error);
       return;
     }
     try {
-      await widget.state.api.post(
-        '/api/commands/set-group-member',
-        {'openid': openid, 'name': name, 'groupSid': groupSid},
-        confirm: 'set-group-member',
-      );
+      await widget.state.api.post('/api/commands/set-group-member', {
+        'openid': openid,
+        'name': name,
+        'groupSid': groupSid,
+      }, confirm: 'set-group-member');
       if (!mounted) return;
-      IrmiaToast.show(context, s.chanMemberSaved(name), kind: ToastKind.success);
+      IrmiaToast.show(
+        context,
+        s.chanMemberSaved(name),
+        kind: ToastKind.success,
+      );
       _editingMember = null;
       await load();
     } catch (err) {
-      if (mounted) IrmiaToast.show(context, s.settingsSaveFailed('$err'), kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(
+          context,
+          s.settingsSaveFailed('$err'),
+          kind: ToastKind.error,
+        );
     }
   }
 
@@ -1525,11 +1916,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.read(context);
     final name = _contactCtls[sid]?.text.trim() ?? '';
     try {
-      await widget.state.api.post(
-        '/api/commands/set-contact',
-        {'sid': sid, 'name': name},
-        confirm: 'set-contact',
-      );
+      await widget.state.api.post('/api/commands/set-contact', {
+        'sid': sid,
+        'name': name,
+      }, confirm: 'set-contact');
       if (!mounted) return;
       IrmiaToast.show(
         context,
@@ -1538,7 +1928,12 @@ class _ChannelsPageState extends State<ChannelsPage> {
       );
       await load();
     } catch (err) {
-      if (mounted) IrmiaToast.show(context, s.settingsSaveFailed('$err'), kind: ToastKind.error);
+      if (mounted)
+        IrmiaToast.show(
+          context,
+          s.settingsSaveFailed('$err'),
+          kind: ToastKind.error,
+        );
     }
   }
 
@@ -1546,6 +1941,250 @@ class _ChannelsPageState extends State<ChannelsPage> {
 
   /// 一张卡装下该渠道的全部可写项。脏 = 与生效值逐字段比较，因此改回原值就自动干净——
   /// 不额外维护草稿状态机，也不存在 Web 端「改回原值仍显示 N 项改动」那种假脏。
+  String _wakePolicyLabel(AppStrings s, Object? value) => switch (value) {
+        'critical' => s.ingressWakeCritical,
+        'never' => s.ingressWakeNever,
+        _ => s.ingressWakeAlways,
+      };
+
+  /// Ingress Bridge：外部脚本的事件来源。token 只在创建/轮换的响应里出现一次。
+  Widget _ingressSourcesCard(BuildContext context) {
+    final s = IrmiaStrings.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  s.ingressTitle,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: ingressBusy ? null : () => unawaited(_createIngressSource()),
+                icon: const Icon(Icons.add_rounded, size: 18),
+                label: Text(s.ingressCreate),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            s.ingressIntro,
+            style: TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 12),
+          if (ingressError != null)
+            Text(ingressError!, style: TextStyle(fontSize: 12, color: scheme.error))
+          else if (ingressSources.isEmpty)
+            Text(s.ingressEmpty,
+                style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant))
+          else
+            for (final source in ingressSources) _ingressSourceRow(context, s, source),
+          const SizedBox(height: 10),
+          Text(
+            s.ingressLegacyNote,
+            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _ingressSourceRow(BuildContext context, AppStrings s, Map<String, dynamic> source) {
+    final scheme = Theme.of(context).colorScheme;
+    final id = '${source['id'] ?? ''}';
+    final name = '${source['name'] ?? id}';
+    final enabled = source['enabled'] == true;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: scheme.onSurface)),
+                Text('$id · ${_wakePolicyLabel(s, source['wake'])}',
+                    style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          Switch(
+            value: enabled,
+            onChanged: ingressBusy ? null : (value) => unawaited(_toggleIngressSource(id, value)),
+          ),
+          IconButton(
+            tooltip: s.ingressRotate,
+            onPressed: ingressBusy ? null : () => unawaited(_rotateIngressSource(id)),
+            icon: const Icon(Icons.autorenew_rounded, size: 18),
+          ),
+          IconButton(
+            tooltip: s.ingressDelete,
+            onPressed: ingressBusy ? null : () => unawaited(_deleteIngressSource(id, name)),
+            icon: const Icon(Icons.delete_outline_rounded, size: 18),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _createIngressSource() async {
+    final s = IrmiaStrings.of(context);
+    final nameCtl = TextEditingController();
+    var wake = 'always';
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Text(s.ingressCreateTitle),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtl,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: s.ingressNameLabel,
+                  hintText: s.ingressNameHint,
+                ),
+              ),
+              const SizedBox(height: 14),
+              DropdownButtonFormField<String>(
+                value: wake,
+                decoration: InputDecoration(labelText: s.ingressWakeLabel),
+                items: [
+                  DropdownMenuItem(value: 'always', child: Text(s.ingressWakeAlways)),
+                  DropdownMenuItem(value: 'critical', child: Text(s.ingressWakeCritical)),
+                  DropdownMenuItem(value: 'never', child: Text(s.ingressWakeNever)),
+                ],
+                onChanged: (value) {
+                  if (value != null) setDialogState(() => wake = value);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: Text(s.ingressCancel)),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop({
+                'name': nameCtl.text.trim(),
+                'wake': wake,
+              }),
+              child: Text(s.ingressCreateAction),
+            ),
+          ],
+        ),
+      ),
+    );
+    nameCtl.dispose();
+    if (result == null || result['name']!.isEmpty) return;
+    await _runIngressCommand(
+      'ingress-source-create',
+      result,
+      tokenFromResponse: true,
+    );
+  }
+
+  Future<void> _rotateIngressSource(String id) async {
+    await _runIngressCommand(
+      'ingress-source-rotate',
+      {'id': id},
+      tokenFromResponse: true,
+    );
+  }
+
+  Future<void> _toggleIngressSource(String id, bool enabled) async {
+    await _runIngressCommand(
+      'ingress-source-toggle',
+      {'id': id, 'enabled': enabled},
+      tokenFromResponse: false,
+    );
+  }
+
+  Future<void> _deleteIngressSource(String id, String name) async {
+    final s = IrmiaStrings.of(context);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(s.ingressDeleteTitle),
+        content: Text(s.ingressDeleteBody(name)),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(s.ingressCancel)),
+          FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: Text(s.ingressDeleteAction)),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _runIngressCommand('ingress-source-delete', {'id': id}, tokenFromResponse: false);
+  }
+
+  Future<void> _runIngressCommand(
+    String command,
+    Map<String, dynamic> body, {
+    required bool tokenFromResponse,
+  }) async {
+    if (ingressBusy) return;
+    setState(() => ingressBusy = true);
+    try {
+      final response = await widget.state.api.post(
+        '/api/commands/$command',
+        body,
+        confirm: command,
+      );
+      final token = response is Map ? response['token'] : null;
+      await _loadIngressSources();
+      if (!mounted) return;
+      if (tokenFromResponse && token is String && token.isNotEmpty) {
+        await _showIngressToken(token);
+      }
+    } catch (err) {
+      if (mounted) {
+        final s = IrmiaStrings.of(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(s.ingressOperationFailed('$err'))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => ingressBusy = false);
+    }
+  }
+
+  Future<void> _showIngressToken(String token) async {
+    final s = IrmiaStrings.of(context);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(s.ingressTokenTitle),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(s.ingressTokenIntro),
+            const SizedBox(height: 10),
+            SelectableText(token, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: Text(s.ingressTokenClose)),
+        ],
+      ),
+    );
+  }
+
   Widget _configCard(BuildContext context, _ChannelDef def) {
     final s = IrmiaStrings.of(context);
     final scheme = Theme.of(context).colorScheme;
@@ -1557,7 +2196,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
       decoration: BoxDecoration(
         color: scheme.surface,
         borderRadius: BorderRadius.circular(IrmiaTheme.radiusCard),
-        border: Border.all(color: _configPulse ? scheme.primary : scheme.outlineVariant),
+        border: Border.all(
+          color: _configPulse ? scheme.primary : scheme.outlineVariant,
+        ),
         boxShadow: IrmiaTheme.hairline,
       ),
       child: Column(
@@ -1567,7 +2208,10 @@ class _ChannelsPageState extends State<ChannelsPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: Text(s.chanConfigTitle, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                child: Text(
+                  def.id == _hookChannelId ? s.chanHookConfigTitle : s.chanConfigTitle,
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
               ),
               _badge(s.chanNeedsRestart, IrmiaTheme.warn),
             ],
@@ -1576,7 +2220,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
             padding: const EdgeInsets.only(top: 6),
             child: Text(
               s.chanConfigNote,
-              style: TextStyle(fontSize: 12.5, height: 1.5, color: scheme.onSurfaceVariant),
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.5,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
           ),
           Align(
@@ -1585,7 +2233,11 @@ class _ChannelsPageState extends State<ChannelsPage> {
               label: s.chanDetailsLabel,
               child: Text(
                 s.chanConfigDetail,
-                style: TextStyle(fontSize: 11.5, height: 1.6, color: scheme.onSurfaceVariant),
+                style: TextStyle(
+                  fontSize: 11.5,
+                  height: 1.6,
+                  color: scheme.onSurfaceVariant,
+                ),
               ),
             ),
           ),
@@ -1613,31 +2265,43 @@ class _ChannelsPageState extends State<ChannelsPage> {
                 const SizedBox(width: 6),
                 TextButton(
                   key: const ValueKey('alert-test'),
-                  onPressed: alertTesting ? null : () => unawaited(_testAlertExit()),
+                  onPressed: alertTesting
+                      ? null
+                      : () => unawaited(_testAlertExit()),
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     minimumSize: const Size(0, 36),
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                   child: alertTesting
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : Text(s.chanTestAlert),
                 ),
               ],
               const Spacer(),
-              if (dirty) ...[
-                const DirtyPill(),
-                const SizedBox(width: 10),
-              ],
+              if (dirty) ...[const DirtyPill(), const SizedBox(width: 10)],
               FilledButton(
-                onPressed: (dirty && !saving) ? () => unawaited(_save(def)) : null,
+                onPressed: (dirty && !saving)
+                    ? () => unawaited(_save(def))
+                    : null,
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
                   minimumSize: const Size(0, 36),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
                 child: saving
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     : Text(count > 0 ? s.chanSaveWithCount(count) : s.save),
               ),
             ],
@@ -1655,17 +2319,27 @@ class _ChannelsPageState extends State<ChannelsPage> {
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.fromLTRB(12, 4, 6, 4),
-      decoration: BoxDecoration(color: scheme.surfaceContainer, borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl)),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+      ),
       child: Row(
         children: [
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(s.chanEnableLabel, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500)),
+                Text(
+                  s.chanEnableLabel,
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500),
+                ),
                 Text(
                   on ? s.chanEnableNoteOn : s.chanEnableNoteOff,
-                  style: TextStyle(fontSize: 11.5, height: 1.5, color: scheme.onSurfaceVariant),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.5,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
@@ -1674,7 +2348,8 @@ class _ChannelsPageState extends State<ChannelsPage> {
             value: on,
             onChanged: saving
                 ? null
-                : (next) => setState(() => _switchDraft[def.switchPath!] = next),
+                : (next) =>
+                      setState(() => _switchDraft[def.switchPath!] = next),
           ),
         ],
       ),
@@ -1693,8 +2368,13 @@ class _ChannelsPageState extends State<ChannelsPage> {
       hintFontSize: 12.5,
       base: InputDecoration(
         isDense: true,
-        hintText: state.configured ? s.chanSecretHintConfigured : s.chanSecretHintPaste(field.label),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        hintText: state.configured
+            ? s.chanSecretHintConfigured
+            : s.chanSecretHintPaste(field.label),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: 10,
+        ),
       ),
     );
     return Padding(
@@ -1711,12 +2391,23 @@ class _ChannelsPageState extends State<ChannelsPage> {
                   children: [
                     Text(field.label, style: const TextStyle(fontSize: 12.5)),
                     const SizedBox(width: 6),
-                    Icon(Icons.lock_outline_rounded, size: 12, color: scheme.onSurfaceVariant),
+                    Icon(
+                      Icons.lock_outline_rounded,
+                      size: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ],
                 ),
                 Padding(
                   padding: const EdgeInsets.only(top: 3),
-                  child: Text(field.hint, style: TextStyle(fontSize: 11, height: 1.5, color: scheme.onSurfaceVariant)),
+                  child: Text(
+                    field.hint,
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.5,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -1751,7 +2442,9 @@ class _ChannelsPageState extends State<ChannelsPage> {
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: TextButton(
-                      onPressed: saving ? null : () => unawaited(_clearSecret(field)),
+                      onPressed: saving
+                          ? null
+                          : () => unawaited(_clearSecret(field)),
                       style: TextButton.styleFrom(
                         foregroundColor: IrmiaTheme.danger,
                         padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1774,10 +2467,13 @@ class _ChannelsPageState extends State<ChannelsPage> {
     final s = IrmiaStrings.of(context);
     final scheme = Theme.of(context).colorScheme;
     if (keys == null) {
-      return Text(keysError != null ? s.chanStatusUnknown : s.settingsReading,
-          style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant));
+      return Text(
+        keysError != null ? s.chanStatusUnknown : s.settingsReading,
+        style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+      );
     }
-    if (!state.configured) return _badge(s.settingsNotConfigured, scheme.onSurfaceVariant);
+    if (!state.configured)
+      return _badge(s.settingsNotConfigured, scheme.onSurfaceVariant);
     return _badge(s.chanSecretConfigured(state.mask ?? '…'), IrmiaTheme.ok);
   }
 
@@ -1796,11 +2492,25 @@ class _ChannelsPageState extends State<ChannelsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(field.label, style: const TextStyle(fontSize: 12.5)),
-                Text(field.path, style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: scheme.onSurfaceVariant)),
+                Text(
+                  field.path,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
                 if (field.hint != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 3),
-                    child: Text(field.hint!, style: TextStyle(fontSize: 11, height: 1.5, color: scheme.onSurfaceVariant)),
+                    child: Text(
+                      field.hint!,
+                      style: TextStyle(
+                        fontSize: 11,
+                        height: 1.5,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -1817,8 +2527,13 @@ class _ChannelsPageState extends State<ChannelsPage> {
               style: const TextStyle(fontSize: 12.5),
               decoration: InputDecoration(
                 isDense: true,
-                hintText: field.kind == 'number' ? s.chanNumberHint : s.chanNotSetHint,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                hintText: field.kind == 'number'
+                    ? s.chanNumberHint
+                    : s.chanNotSetHint,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 10,
+                ),
               ),
             ),
           ),
@@ -1831,7 +2546,12 @@ class _ChannelsPageState extends State<ChannelsPage> {
 /// 状态卡：状态点 + 标题 + 状态标签 + 状态说明与提示 + 只读补充项。
 /// 右上角原先有一枚「编辑配置」——用户 ③ 说它没意义了：配置卡就在同一页的下面，
 /// 这枚按钮只是同页滚动，去掉。行尾那枚齿轮仍然滚到配置卡（见 `_configKey`）。
-Widget _detailCard(BuildContext context, {required _ChannelDef def, required _Status status, required List<_Row> rows}) {
+Widget _detailCard(
+  BuildContext context, {
+  required _ChannelDef def,
+  required _Status status,
+  required List<_Row> rows,
+}) {
   final s = IrmiaStrings.of(context);
   final scheme = Theme.of(context).colorScheme;
   final tone = _toneColor(context, status.tone);
@@ -1850,12 +2570,32 @@ Widget _detailCard(BuildContext context, {required _ChannelDef def, required _St
           children: [
             BreathDot(kind: status.kind, size: 8),
             const SizedBox(width: 8),
-            Flexible(child: Text(def.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
+            Flexible(
+              child: Text(
+                def.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
             const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-              decoration: BoxDecoration(color: tone.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl)),
-              child: Text(status.label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: tone)),
+              decoration: BoxDecoration(
+                color: tone.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+              ),
+              child: Text(
+                status.label,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w500,
+                  color: tone,
+                ),
+              ),
             ),
           ],
         ),
@@ -1865,7 +2605,14 @@ Widget _detailCard(BuildContext context, {required _ChannelDef def, required _St
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 8),
-              Text('${status.note}\n${def.hint}', style: TextStyle(fontSize: 12, height: 1.65, color: scheme.onSurfaceVariant)),
+              Text(
+                '${status.note}\n${def.hint}',
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.65,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
               if (rows.isNotEmpty)
                 // 配置点路径属技术字段：默认收在「详情」里（§3.4）；可写字段在下面的配置卡
                 DetailFold(
@@ -1892,7 +2639,10 @@ Widget _paramRow(BuildContext context, _Row row) {
   return Container(
     margin: const EdgeInsets.only(top: 8),
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-    decoration: BoxDecoration(color: scheme.surfaceContainer, borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl)),
+    decoration: BoxDecoration(
+      color: scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+    ),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1902,12 +2652,30 @@ Widget _paramRow(BuildContext context, _Row row) {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(row.label, style: const TextStyle(fontSize: 12.5)),
-              Text(row.path, style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: scheme.onSurfaceVariant)),
+              Text(
+                row.path,
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
             ],
           ),
         ),
         const SizedBox(width: 12),
-        Expanded(child: Text(row.value ?? s.settingsNotConfigured, style: TextStyle(fontSize: 12.5, height: 1.5, color: row.value == null ? scheme.onSurfaceVariant : scheme.onSurface))),
+        Expanded(
+          child: Text(
+            row.value ?? s.settingsNotConfigured,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.5,
+              color: row.value == null
+                  ? scheme.onSurfaceVariant
+                  : scheme.onSurface,
+            ),
+          ),
+        ),
       ],
     ),
   );
@@ -1921,12 +2689,20 @@ Widget _feed(BuildContext context, List<Map<String, dynamic>> events) {
   if (events.isEmpty) {
     return HintLine(s.chanFeedEmpty);
   }
-  return CappedChildren(children: [
-    for (var i = 0; i < events.length; i += 1) _feedRow(context, events[i], index: i, divider: i > 0),
-  ]);
+  return CappedChildren(
+    children: [
+      for (var i = 0; i < events.length; i += 1)
+        _feedRow(context, events[i], index: i, divider: i > 0),
+    ],
+  );
 }
 
-Widget _feedRow(BuildContext context, Map<String, dynamic> event, {required int index, required bool divider}) {
+Widget _feedRow(
+  BuildContext context,
+  Map<String, dynamic> event, {
+  required int index,
+  required bool divider,
+}) {
   final s = IrmiaStrings.of(context);
   final scheme = Theme.of(context).colorScheme;
   final chatType = _chatTypeLabel(s, _field(event, 'chatType'));
@@ -1936,19 +2712,39 @@ Widget _feedRow(BuildContext context, Map<String, dynamic> event, {required int 
     key: ValueKey('feed-row-$index'),
     width: double.infinity,
     padding: const EdgeInsets.symmetric(vertical: 9),
-    decoration: divider ? BoxDecoration(border: Border(top: BorderSide(color: scheme.outlineVariant))) : null,
+    decoration: divider
+        ? BoxDecoration(
+            border: Border(top: BorderSide(color: scheme.outlineVariant)),
+          )
+        : null,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            Text(AppState.hhmm(event['ts']?.toString() ?? ''), style: TextStyle(fontFamily: 'monospace', fontSize: 11.5, color: scheme.onSurfaceVariant)),
+            Text(
+              AppState.hhmm(event['ts']?.toString() ?? ''),
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 11.5,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
             const SizedBox(width: 8),
-            Text('${_sourceOf(s, _field(event, 'channel'))}${chatType.isEmpty ? '' : ' · $chatType'}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+            Text(
+              '${_sourceOf(s, _field(event, 'channel'))}${chatType.isEmpty ? '' : ' · $chatType'}',
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
         ),
         const SizedBox(height: 3),
-        Text(_clip(text, 40), style: const TextStyle(fontSize: 13.5, height: 1.5)),
+        Text(
+          _clip(text, 40),
+          style: const TextStyle(fontSize: 13.5, height: 1.5),
+        ),
       ],
     ),
   );
@@ -1956,16 +2752,30 @@ Widget _feedRow(BuildContext context, Map<String, dynamic> event, {required int 
 
 /// 行尾 icon-only 操作按钮（照 AstrBot `ConversationPage.vue:170-181` 的 actions 列）：
 /// 28×28 命中区、16px 图标，文案由 tooltip 承担
-Widget _iconAction(BuildContext context, {required IconData icon, required String tooltip, required VoidCallback? onPressed, Color? color}) {
+Widget _iconAction(
+  BuildContext context, {
+  required IconData icon,
+  required String tooltip,
+  required VoidCallback? onPressed,
+  Color? color,
+}) {
   final scheme = Theme.of(context).colorScheme;
   return IconButton(
-    icon: Icon(icon, size: 16, color: color ?? (onPressed == null ? scheme.outlineVariant : scheme.onSurfaceVariant)),
+    icon: Icon(
+      icon,
+      size: 16,
+      color:
+          color ??
+          (onPressed == null ? scheme.outlineVariant : scheme.onSurfaceVariant),
+    ),
     tooltip: tooltip,
     onPressed: onPressed,
     padding: EdgeInsets.zero,
     constraints: const BoxConstraints.tightFor(width: 28, height: 28),
     visualDensity: VisualDensity.compact,
-    style: IconButton.styleFrom(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+    style: IconButton.styleFrom(
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
   );
 }
 
@@ -1977,7 +2787,10 @@ Widget _badge(String text, Color tone) {
       color: tone.withValues(alpha: 0.12),
       borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
     ),
-    child: Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: tone)),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: tone),
+    ),
   );
 }
 
@@ -1998,9 +2811,12 @@ String _field(Map<String, dynamic> event, String key) {
 
 Color _toneColor(BuildContext context, String tone) {
   final scheme = Theme.of(context).colorScheme;
-  return tone == 'ok' ? IrmiaTheme.ok : tone == 'info' ? scheme.primary : scheme.onSurfaceVariant;
+  return tone == 'ok'
+      ? IrmiaTheme.ok
+      : tone == 'info'
+      ? scheme.primary
+      : scheme.onSurfaceVariant;
 }
-
 
 String? _endpointOf(_ChannelsPageState state) {
   final ws = state._text('channels.onebot.wsUrl');
@@ -2011,10 +2827,14 @@ String? _endpointOf(_ChannelsPageState state) {
 /// 入站监听地址 = 本地观测/回调 HTTP 服务的实际绑定
 String? _listenOf(_ChannelsPageState state) {
   final port = _at(state.cfg, 'web.port');
-  return port is num ? 'http://${state._text('web.host') ?? '127.0.0.1'}:${port.toInt()}' : null;
+  return port is num
+      ? 'http://${state._text('web.host') ?? '127.0.0.1'}:${port.toInt()}'
+      : null;
 }
 
 String _clip(String text, int max) {
   final runes = text.runes;
-  return runes.length <= max ? text : '${String.fromCharCodes(runes.take(max))}$kEllipsis';
+  return runes.length <= max
+      ? text
+      : '${String.fromCharCodes(runes.take(max))}$kEllipsis';
 }

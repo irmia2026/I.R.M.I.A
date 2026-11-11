@@ -59,7 +59,7 @@ import { isDsClientError, isReasoningEchoRejection } from '../model/ds-client.ts
 // 判据（`serverRejectionOf`）与脱敏/区段口径都在那个模块里，本文件只负责"什么时候写、写哪份"。
 import { rejectRecordOf, serverRejectionOf } from '../model/reject-record.ts';
 import type { HistoryAppendBaseline, MachineFacts, MaintenanceWindowNote, PinnedWake, RenderChannelContext, RenderImageRef, RenderPersona, RenderedRequest, TurnBlockFacts, UsageFacts } from '../model/render.js';
-import { REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity, clipTaskTitle, historyAppendCheckOf, reasoningEchoBudgetOf, render, renderWake, stateBytesOf, wakeTitle } from '../model/render.ts';
+import { RENDER_VERSION, assertReasoningEchoIntegrity, clipTaskTitle, historyAppendCheckOf, reasoningEchoBudgetOf, render, renderWake, stateBytesOf } from '../model/render.ts';
 import type { ReasoningEchoDropGroup, ReasoningEchoPolicy, ReasoningEchoRepair } from '../model/render.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import {
@@ -70,7 +70,7 @@ import type { ContactFacts } from '../model/self-brief.ts';
 import { renderMentionNote } from '../model/self-brief.ts';
 import { sidOf } from '../channel/sessions.ts';
 // 待办清单的唯一载体是 STATE 的两节（见 persona/todo-state.ts）：任务卡只从那里读
-import { openTodoItems } from '../persona/todo-state.ts';
+import { currentTaskTitle, openTodoItems } from '../persona/todo-state.ts';
 import type { RelationshipNote } from '../persona/relationship.ts';
 import type { EventLog } from '../log/event-log.js';
 import type {
@@ -1236,7 +1236,7 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
         // 提及那一轮：标题就是那句通知——与上面给"本轮新输入"的是**同一串字节**
         //（裁剪口径同 `clipTaskTitle`：调用方给的标题本来就是它裁过的）。
         // 其余轮次原样转手（`wakeTitle` 的一行摘要：任务卡标题该是人写的那句话本身）。
-        title: mentionNotice === null ? input.taskCard.title : clipTaskTitle(mentionNotice.text),
+        title: input.taskCard.title,
         turn: input.taskCard.turn,
         step: input.taskCard.step,
         todoOpen: [...input.taskCard.todoOpen],
@@ -1319,8 +1319,7 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     // 渲染层据此逐字段比对、逐字节不变的那些不发。缺省 null ⇒ 每个字段都发
     // （重放/子代理/诊断那些旧调用点因此与引入这一版之前逐字节相同）。
     previousNowLayer: input.previousNowLayer ?? null,
-    // 思维链上限（v73）：生产三条路都不传 ⇒ 出厂（全量 + 总字符硬上限）；
-    // 只有 `TurnRunner` 的 400 自救会传"连硬上限都不设"，所以它是唯一会看到不同字节的调用点。
+    // v87：缺省不限字符、只追加；显式数值只用于旧请求回放与兼容诊断。
     reasoningEcho: input.reasoningEcho ?? null,
   });
   return rendered;
@@ -1825,7 +1824,7 @@ export class TurnRunner {
       }),
       ...(this.deps.affectRulesEnabled === true ? {affectRules:true} : {}),
       ...(this.deps.intimacyRulesEnabled === true ? {intimacyRules:true} : {}),
-      ...(this.deps.reasoningEcho?.maxTotalChars == null ? {} : {reasoningEchoMaxChars: this.deps.reasoningEcho.maxTotalChars}),
+      ...(this.deps.reasoningEcho === undefined ? {} : {reasoningEchoMaxChars: this.deps.reasoningEcho?.maxTotalChars ?? null}),
       // **本步用的通道显示名**（2026-10-22）：与 `renderVersion` / `personaHash` 同一类指纹——
       // "这一份请求当时装配时，宿主给她配的名字是什么"。值取的就是刚递给 `deriveAt` 的**同一份**
       // （`this.deps.channelRender`，见 `deriveAt` 里那一格），所以重放读它 = 当时那份字节，
@@ -3169,18 +3168,10 @@ export class TurnRunner {
   }
 
   private taskCard(step: number): { title: string; turn: number; step: number; todoOpen: string[]; assets?: string } {
-    const first = this.wakeEvents[0];
-    // 标题用 wakeTitle（人读摘要），不是 renderWake（给模型看的带来源标注版）：
-    // 否则任务卡会写成「[界面消息] 看一眼日志」
-    //
-    // **提及那一轮的换法不在这里**（v35 收敛，2026-10-06）：那是"这一轮她到底看到哪句话"的判据，
-    // 归 `deriveRequest()` 一处管——它手上才有**盖章过**的 contact。原先在这里另换一次，
-    // 用的是没盖章的那份，于是标题与本轮新输入差着两小段；重放那一侧更是完全没换，
-    // 标题直接成了正文原文。这里只给"其余轮次"的标题（`wakeTitle`）。
-    // 提及那一轮的结果：`taskCard.title` 会被 `deriveRequest` 换成那句通知。
-    const title = first === undefined
-      ? ''
-      : clipTaskTitle(wakeTitle(first, this.timerPayloads()));
+    // 任务卡标题只从 STATE.md 的清单读：这是“她自己写的当前任务”，不是“谁叫醒了她”。
+    // 唤醒正文仍然在本轮输入里（renderWake）；两件事分开，群消息才不会看起来像派给她的活。
+    const todoOpen = openTodoItems(this.deps.persona.state ?? '');
+    const title = clipTaskTitle(currentTaskTitle(this.deps.persona.state ?? ''));
     // 本任务相关资产那一行（v34）：**只在有任务卡时**才存在，且整轮原样转手（deps 里那份是
     // 轮首算好的，见 real-loop 的 agentDeps）。她 turn 内改了 STATE 不影响它——它说的不是状态，
     // 是"这件事可能用得上哪几件工具"，一轮之内本来就不会变。
@@ -3198,7 +3189,7 @@ export class TurnRunner {
       // 为什么每次现取而不缓存：`deps.persona` 在运行期是 getter（real-loop），而 `todo` 写完
       // 会触发 `onPersonaUpdated` → 从盘上重载 STATE → 同一轮的后续 step 立刻看得见新清单。
       // 这与固定块取轮首快照那条纪律**不冲突**：任务卡在此刻层（逐 step 变），它本来就该是最新的。
-      todoOpen: openTodoItems(this.deps.persona.state ?? ''),
+      todoOpen,
       ...(assets === '' ? {} : { assets }),
     };
   }
@@ -3498,7 +3489,7 @@ export class TurnRunner {
       ...(this.deps.maxContextImages === undefined
         ? {}
         : { maxContextImages: this.deps.maxContextImages }),
-      // 思维链上限（v73）：缺省不传 ⇒ 出厂（全量 + 硬上限）；自救那一支显式给"不限"。
+      // v87 缺省就是只追加；显式覆盖只用于旧请求回放、诊断与自救。
       ...(args.reasoningEcho === undefined ? {} : { reasoningEcho: args.reasoningEcho }),
     });
     // **400 自救的那一拍不参与中段改写判据**（v76）：它用"连硬上限都不设"的口径重渲染，
@@ -3824,26 +3815,14 @@ export interface CompactionDecisionView {
   /** ④甲 闸门量：`(参照点, 遮蔽点]` 之间的可见历史规模；`threshold`/`monotonic`/`no-shrink` 时缺席 */
   maskedTokens?: number;
   /**
-   * **回传集合的字符账**（**v75 加，每轮都有**）：`echoChars` = **会回传的总字符**
-   * （= 真回传的 `echoCharsKept` + 已被挤掉的），`echoCharsLimit` = 生效上限
-   * （`REASONING_ECHO_POLICY.maxTotalChars`；`null` = 出厂没设上限）。
-   *
-   * 三个数都从 `reasoningEchoBudgetOf`（= `reasoningEchoPlan`）来，与渲染层**同一处判据**：
-   * 第二条进门路是 `echoChars > echoCharsLimit`，判据用到的数必须能从日志读回来。
-   *
-   * ⚠ **判据读 `echoChars`（总量）、不读 `echoCharsKept`**：后者一驱逐一压就"变好看"
-   * （被压回上限以内），拿它当压力读会在真正出事的那一刻失去信号——2026-10-21 凌晨那 39 分钟
-   * 正是这个形状（`kept` 一直 ≤ 300K，驱逐一直在发生）。
+   * 回传集合的字符观测账，与渲染层同源。v87 起默认只追加，`echoChars === echoCharsKept`、
+   * `echoCharsLimit === null`；这些字段不参与是否压缩的判定。
    */
   echoChars: number;
-  /** 真正留在请求里的那一份（`echoChars - 被挤掉的`）；只服务观测，不参与判据 */
   echoCharsKept: number;
   echoCharsLimit: number | null;
-  /**
-   * **哪一条判据把这一拍推过第一道门的**（**v75 加**；`threshold` 时缺席 = 谁都没推）。
-   * 见 `log/types.ts` 的 `CompactionDecision.trigger`。
-   */
-  trigger?: 'history-tokens' | 'echo-chars';
+  /** 当前唯一自动触发来源；旧日志里的 `echo-chars` 只由事件读侧保留。 */
+  trigger?: 'history-tokens';
 }
 
 /**
@@ -3876,8 +3855,6 @@ export interface CompactionDecisionInput {
   turnStartSeq: number | null;
   /** `null` 与"没有这一格"同义：压缩没配（子代理等宿主不要求压缩），判定停在第一道门 */
   cfg: HandoffOptions & { thresholdTokens: number } | null;
-  /** 思维链回传字符上限（随压缩阈值缩放；缺省 = 出厂 300k，给旧调用点） */
-  echoMaxChars?: number;
 }
 
 /**
@@ -3904,35 +3881,18 @@ export function compactionDecision(input: CompactionDecisionInput): CompactionDe
   const historyTokens = estimateHistoryTokens(events);
   // 没配压缩时阈值这一格没有真值可言：写 0 会读成"阈值 0 却不压"，那是假话
   const thresholdTokens = cfg?.thresholdTokens ?? 0;
-  /**
-   * **回传字符账**（v75 的第二条触发）：与渲染层**同一处判据**（`reasoningEchoBudgetOf`
-   * → `reasoningEchoPlan`），遮蔽点取"已有摘要的覆盖点"（与 `estimateHistoryTokens` 同一份口径：
-   * 压在遮蔽点之前的思维链本来就不回传）。
-   *
-   * 为什么要它（结构性的理由，不是"多一道保险"）：`historyTokens` 是**估算器的 token 账**，
-   * 而"回传字符顶穿 300K"是**渲染层的字符账**——两者不是同一把尺（估算器按 1.5 字/token 折算，
-   * 实测偏低 1.6× 左右）。2026-10-21 凌晨那 39 分钟里，`historyTokens` 一直没到 200,000 的线，
-   * 而回传字符早就顶穿 300K、渲染层每笔都在挤最老的组 ⇒ 压缩线**根本没被叫到**。
-   * 把字符这一侧接上压缩线，"顶穿"就从"渲染层每笔微调"变成"一次遮蔽点把它整段移走"。
-   */
-  const echo = reasoningEchoBudgetOf(
-    events,
-    maxSummaryCoverage(events),
-    input.echoMaxChars === undefined ? REASONING_ECHO_POLICY : { ...REASONING_ECHO_POLICY, maxTotalChars: input.echoMaxChars },
-    );
-  const echoOver = echo.limit !== null && echo.chars > echo.limit;
+  // 思维链字符只留观测账；v87 起它不设独立上限，也不再绕过下面的历史阈值触发压缩。
+  const echo = reasoningEchoBudgetOf(events, maxSummaryCoverage(events));
   const base = {
     turn, historyTokens, thresholdTokens,
     echoChars: echo.chars, echoCharsKept: echo.kept, echoCharsLimit: echo.limit,
   };
 
-  // ① 进门：**两条路**——可见历史过阈值（老口径），或者回传字符过上限（v75 加）。
-  //   没配压缩那一支照旧停在第一道门（它连阈值都没有，压缩这种事对它不成立）。
-  if (cfg === null || (!echoOver && historyTokens <= cfg.thresholdTokens)) {
+  // ① 唯一自动进门路：可见历史估算越过用户配置的压缩线。
+  if (cfg === null || historyTokens <= cfg.thresholdTokens) {
     return { ...base, reason: 'threshold' };
   }
-  // 进了门就把"哪条路"记下来：`reason` 只说"第一条拦下它的是谁"，说不出"谁把它推进来的"
-  const trigger: 'history-tokens' | 'echo-chars' = echoOver ? 'echo-chars' : 'history-tokens';
+  const trigger = 'history-tokens' as const;
 
   // ② 遮蔽点：**本 turn 的 `turn/end`**（`includeInFlightTurn`，2026-10-06 改）。
   // 交接发生在 turn 收尾之后，所以把刚跑完的这一轮一起折进笔记是安全的——而留着它
@@ -3976,12 +3936,7 @@ export function compactionDecision(input: CompactionDecisionInput): CompactionDe
   // **第一次折叠不受它管**（参照点为 0）：没有"上一次交接"就没有"新闭合的历史"；
   // 这一次折叠的收益是**整条历史**（阈值刚被它推过），拿增量卡它只会让第一次永远压不动。
   // 闸门量照旧算出来（留痕要能回答"参照点当时是几、量出来多少"），但参照点为 0 时不拦。
-  //
-  // ⚠ **v75：这条闸门对 `echoOver` 那一支不需要特例**（曾经想加 `!echoOver`，读了数之后删掉了）：
-  // `echoChars` 量的正是"遮蔽点之后全部 model 可见思维链"，而闸门量的是同一个窗口里的 token
-  // ⇒ `echoChars > 300,000` 必然意味着那个窗口 ≳ 20 万 token，远在 `RECENT_TAIL_TOKENS`（2 万）
-  // 之上。加一条"特权分支"只会多一条**走不到、也就测不到**的路（这个仓库对"测不到的分支"的
-  // 态度见 `handoff-note.test.ts` 的"两个消费者、同一把尺"那一组）。
+  // v87 不再给思维链字符设特权分支；所有自动折叠都走同一道收益闸门。
   const maskedTokens = estimateMaskedTokens(events, previousCoveredUpToSeq, coveredUpToSeq);
   if (previousCoveredUpToSeq > 0 && maskedTokens < RECENT_TAIL_TOKENS) {
     return { ...base, trigger, reason: 'gate', coveredUpToSeq, previousCoveredUpToSeq, maskedTokens };

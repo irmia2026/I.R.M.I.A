@@ -260,16 +260,14 @@ test('有 3 条新消息 ⇒ 只给这 3 条（不再把之前的旧话一起倒
 
 // ──────────────────────────────── ② 增量：一条没有 ⇒ 一句话（且很短） ────────────────────────────────
 
-test('一条新的都没有 ⇒ 只有一句"没有新消息"（断言回执很短、且没有那个框）', async (t) => {
+test('一条新的都没有 ⇒ 逐字一句短回执，且没有消息框', async (t) => {
   const rig = await makeRig(t);
   rig.write(1);
   await rig.read({ sid: SID, limit: 5 });
   const out = await rig.read({ sid: SID, limit: 20 });
-  assert.match(out.content, /^没有新消息/u, `第一句必须是那四个字：\n${out.content}`);
-  assert.equal(out.content.includes('[external_event'), false, `不许返回一大段旧内容：\n${out.content}`);
-  assert.ok(out.content.length < 300,
-    `这条回执要短（旧口径下这类调用中位 759 字、最大 8182 字）：实际 ${out.content.length} 字\n${out.content}`);
-  assert.equal(rowNos(out.content).length, 0, '一条消息行都不许有');
+  assert.equal(out.content, '你已读过此会话，截至现在没有新消息');
+  assert.equal(out.content.includes('[external_event'), false);
+  assert.equal(rowNos(out.content).length, 0);
 });
 
 // ──────────────────────────────── ③ 跨重启：水位从日志读回来 ────────────────────────────────
@@ -296,7 +294,7 @@ test('跨重启：没有新消息时也只有一句话（不因为重启就换�
   for (let no = 1; no <= 20; no += 1) rig.write(no);
   await rig.read({ sid: SID, limit: 20 });
   const after = await rig.read({ sid: SID, limit: 20 }, { fresh: true });
-  assert.match(after.content, /^没有新消息/u, `重启后也不许换回一整屏旧内容：\n${after.content}`);
+  assert.equal(after.content, '你已读过此会话，截至现在没有新消息');
   assert.equal(after.content.includes('[external_event'), false, `不许有框：\n${after.content}`);
 });
 
@@ -377,7 +375,7 @@ test('这一轮没人叫她、也没有新消息 ⇒ 照旧一句话（旧提及
   for (let no = 1; no <= 8; no += 1) rig.write(no, no === 7 ? { at: true } : {});
   await rig.read({ sid: SID, limit: 8 });
   const out = await rig.read({ sid: SID, limit: 20 }, { fresh: true });
-  assert.match(out.content, /^没有新消息/u, `没人叫她、也没有新的 ⇒ 一句话：\n${out.content}`);
+  assert.equal(out.content, '你已读过此会话，截至现在没有新消息');
   assert.equal(out.content.includes('第 7 句'), false,
     `旧提及不许因为"曾经点过她"就每次冒出来：\n${out.content}`);
 });
@@ -479,17 +477,13 @@ test('⑦ v67 描述与行为一致：默认=增量 · 翻历史不改已读 · 
   const specs = registry.listForModel({ includeDestructive: true });
   assert.equal(specs.length, 22, `代码口径的件数变了（22 = 运行期 23 − mcp）：${specs.length}`);
   const catalogTotal = registry.catalogTokens({ includeDestructive: true });
-  // v79（2026-10-23）：**5323 → 5366（+43）**——`http_get` 描述 **54 → 86（+32）**
-  // ＋ `url` 参数 +7（私网/环回被 SSRF 拒绝）＋ `max_chars` 参数 +4（印出 500000 上限）。
-  // v80（2026-10-23）：`read_channel` 翻页一页的条数 50 → 15 ⇒ **5366，未动**（等宽替换：`before` /
-  // `limit` 两个参数描述里各换一个两位数，`estimateTokens` 那把尺一分不差）。件数仍是 22。
-  // 要动这个数就同批复测 `docs/design.md §4.18` 与 `render.ts` 的 **v80** 那一篇。
-  assert.equal(catalogTotal, 5366,
-    `整段 tools 的代码口径变了（v79 实测 5366 = v74 的 5323 + 43 [http_get 描述 +32 / url +7 /`
-    + ` max_chars +4]；件数仍是 22）：`
-    + `要动这个数就同批复测 docs/design.md §4.18 与 render.ts 的 v79 那一篇（现在 ${catalogTotal}）`);
+  // v88（2026-11-11）：工具描述与新增 resolve_attachment 之后的当前代实测值。
+  // 预算门仍是 5500；这里只记录**当前代码口径**，改动工具描述时同批复测。
+  assert.equal(catalogTotal, 5092,
+    `整段 tools 的代码口径变了（当前代 5092；件数仍是 22）：`
+    + `要动这个数就同批复测 docs/design.md §4.18 与工具描述（现在 ${catalogTotal}）`);
   assert.ok(5500 - catalogTotal >= 30, `上界 5500 只剩 ${5500 - catalogTotal}（判据 ≥30）`);
-  assert.equal(catalogTotal + 110, 5476, '运行期口径（+ mcp 110，推算值）');
+  assert.equal(catalogTotal + 110, 5202, '运行期口径（+ mcp 110，推算值）');
   // 单件那一件：描述 90 ＋ sid 参数 39 ＋ 名字 4
   assert.equal(
     estimateTokens(tool.name) + tokens + estimateTokens(JSON.stringify(tool.parameters) ?? ''),

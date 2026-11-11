@@ -63,7 +63,7 @@ class _FakeApi extends IrmiaApi {
   }
 }
 
-const _hookChannel = 'Webhook 与文件监听';
+const _hookChannel = '事件与告警';
 
 Map<String, dynamic> _config({String webhookUrl = 'https://example.test/hook'}) => {
       'channels': {
@@ -184,3 +184,4 @@ void main() {
     expect(find.textContaining('先在管控页保存出口地址'), findsOneWidget);
   });
 }
+

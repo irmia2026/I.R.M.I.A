@@ -27,7 +27,7 @@ import type {
 } from '../src/log/types.ts';
 import { defaultVisibility, isTopLevelEvent } from '../src/log/types.ts';
 import type { DsClient, DsRequest, DsStreamResult } from '../src/model/ds-client.ts';
-import { clipTaskTitle, wakeTitle } from '../src/model/render.ts';
+import { currentTaskTitle } from '../src/persona/todo-state.ts';
 import { deriveRequest, runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import { BudgetGuard } from '../src/runtime/budget-guard.ts';
 import { EVENT_LOG_DIR_NAME, recover } from '../src/runtime/recover.ts';
@@ -261,9 +261,8 @@ function rebuildChildRequest(
     taskCard: firstWake === null
       ? null
       : {
-        // 标题口径必须与运行期同源（agent-loop 的 taskCard 用 wakeTitle；replay 也是）。
-        // 这里曾经写成 renderWake——那个版本带 `[界面消息]` 来源标注，只该给模型看。
-        title: clipTaskTitle(wakeTitle(firstWake)),
+        // 标题口径必须与运行期同源：任务卡只读 STATE.md 的当前任务，不复制唤醒正文。
+        title: currentTaskTitle(PERSONA.state),
         turn: stepStart.data.turn,
         step: stepStart.data.step,
         todoOpen: [],

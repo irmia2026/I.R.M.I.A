@@ -30,7 +30,7 @@
 
 import type { AppEvent, WakeJob } from '../log/types.js';
 import { formatExact } from '../format/units.ts';
-import { reasoningEchoOf, renderExternalEvent, renderWake, wakeTitle } from '../model/render.ts';
+import { reasoningEchoOf, reasoningEchoPolicyOf, renderExternalEvent, renderWake, wakeTitle, type ReasoningEchoPolicy } from '../model/render.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -772,6 +772,7 @@ export function estimateMaskedTokens(
 export function estimateHistoryTokens(
   events: readonly AppEvent[],
   coveredUpToSeq?: number,
+  reasoningEcho?: Partial<ReasoningEchoPolicy> | null,
 ): number {
   let covered = 0;
   if (coveredUpToSeq === undefined) {
@@ -788,7 +789,7 @@ export function estimateHistoryTokens(
   // seq → 实际会进请求的正文。不在里面的一个 token 都不算——渲染层对它们**一个字节都不推**。
   // 同一个纯函数、没有第二份判据。
   const echoed = new Map(
-    reasoningEchoOf(events, covered).map(entry => [entry.seq, entry.text] as const),
+    reasoningEchoOf(events, covered, reasoningEchoPolicyOf(reasoningEcho)).map(entry => [entry.seq, entry.text] as const),
   );
   let tokens = 0;
   for (const e of events) {

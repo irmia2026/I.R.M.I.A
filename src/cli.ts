@@ -45,6 +45,7 @@ import {
   buildReplayReport, formatReplaySummary, formatRequestDiff, jsonBytes as jsonBytesOf,
 } from './runtime/replay.ts';
 import { formatDoctor, runDoctor } from './runtime/doctor.ts';
+import { checkPlugin, formatPluginDevReport, smokePlugin } from './plugin/devtools.ts';
 import { cacheAlertReadings } from './runtime/cache-alert.ts';
 import { BudgetGuard, pickSoftRatio } from './runtime/budget-guard.ts';
 import { LOCK_FILE_NAME } from './runtime/instance-lock.ts';
@@ -92,6 +93,8 @@ export const USAGE: readonly string[] = [
   '  skill confirm <name> [--by B]         人类确认一个技能：写 skill/installed{by:human}（要求主进程未运行）',
   '  skill reindex [--dry]                 人工归集一次：用当前信任表重建技能索引快照并追加 skill/index',
   '                                        （要求主进程未运行；--dry 只打印将要写的内容与 seq，不写盘）',
+  '  plugin check <dir> [--json]           只读校验插件清单、入口、声明、限额与 Python AST',
+  '  plugin smoke <dir> [--json]           在临时目录真实激活并回收代码插件；不连真实聊天/模型/网络',
   '  replay <turn> <step> [--out F] [--diff]',
   '                                        重建该次模型请求体（日志 + 三指纹）；--diff 与当前口径并排对照',
   '  export --from <seq> --to <seq> [--out F]',
@@ -2576,6 +2579,39 @@ export async function runCli(argv: readonly string[], io: CliIO, ctx: CliContext
     io.out('请求体（JSON）:');
     io.out(JSON.stringify(report.request, null, 2));
     return 0;
+  }
+
+  if (command === 'plugin') {
+    const sub = rest[0];
+    if (sub === '--help' || sub === '-h') {
+      for (const line of USAGE.filter((line) => line.includes('plugin '))) io.out(line);
+      return 0;
+    }
+    if (sub !== 'check' && sub !== 'smoke') {
+      io.err('plugin: 需要子命令 check 或 smoke');
+      io.err(usageFor('plugin check'));
+      io.err(usageFor('plugin smoke'));
+      return 2;
+    }
+    const args = rest.slice(1);
+    const json = args.includes('--json');
+    const paths = args.filter((arg) => arg !== '--json');
+    if (paths.length !== 1 || paths[0]!.startsWith('--')) {
+      io.err(`plugin ${sub}: 需要一个插件目录，且只支持 --json`);
+      io.err(usageFor(`plugin ${sub}`));
+      return 2;
+    }
+    try {
+      const report = sub === 'check'
+        ? checkPlugin(paths[0]!, ctx.cwd ?? process.cwd())
+        : await smokePlugin(paths[0]!, ctx.cwd ?? process.cwd());
+      if (json) io.out(JSON.stringify(report, null, 2));
+      else for (const line of formatPluginDevReport(report)) io.out(line);
+      return 0;
+    } catch (error) {
+      io.err(`plugin ${sub} 失败：${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
   }
 
   if (command === 'export') {

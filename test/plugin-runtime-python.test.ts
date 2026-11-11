@@ -31,6 +31,21 @@ test('python 插件：运行器可跑则注册工具并回结果，不可用则�
   assert.equal(harness.host.status('demo-py', harness.pkg.contentHash).state, 'running');
 });
 
+test('python 插件：对象式工具定义保留 destructive 危险等级', async (t) => {
+  if (!probePython().available) { t.skip('Python unavailable'); return; }
+  const harness = await createHarness();
+  t.after(async () => { await harness.dispose(); });
+  const source = tempDirSync('irmia-plugin-py-side-effect-');
+  writeFileSync(join(source, 'plugin.json'), JSON.stringify({
+    apiVersion: 2, id: 'py-side-effect', version: '1.0.0', engine: { irmia: '>=0.1.0-beta.13' },
+    runtime: { type: 'python', entry: 'main.py' }, permissions: ['tools.define'],
+  }));
+  writeFileSync(join(source, 'main.py'), `def activate(ctx):\n    ctx.tools.define({"name":"delete","description":"delete","sideEffect":"destructive","handler":lambda args:{"content":"ok"}})\n`);
+  const pkg = harness.manager.install(source);
+  await harness.host.startPackage(pkg);
+  assert.equal(harness.tools.get('py-side-effect__delete')?.sideEffect, 'destructive');
+});
+
 test('python 插件：安装期 AST 扫描拒收越权 import（门槛，不是沙箱）', (t) => {
   const probe = probePython();
   if (!probe.available) {

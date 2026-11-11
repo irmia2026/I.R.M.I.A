@@ -77,10 +77,10 @@ enum AppLanguage {
   /// **每一条都用自己的语言写**（中文那项写"中文"、英文那项写"English"）——
   /// 切到英文之后还看得见"中文"，才能切回来。这是唯一一处不做翻译的文案。
   String get endonym => switch (this) {
-        AppLanguage.system => 'system',
-        AppLanguage.zh => '中文',
-        AppLanguage.en => 'English',
-      };
+    AppLanguage.system => 'system',
+    AppLanguage.zh => '中文',
+    AppLanguage.en => 'English',
+  };
 
   /// 把「跟随系统」解析成具体语言。
   ///
@@ -682,6 +682,9 @@ abstract class AppStrings {
   /// 标签：上下文分界
   String get tagContextBoundary;
 
+  /// 标签：外部事件（Ingress webhook）
+  String get tagWebhook;
+
   /// 注入卡标题
   String get injectionCardTitle;
 
@@ -1274,702 +1277,1045 @@ abstract class AppStrings {
 
   /// 主循环（heavy）
   String get settingsLaneHeavyLabel;
+
   /// 轻量（light）
   String get settingsLaneLightLabel;
+
   /// turn 主循环使用的模型
   String get settingsLaneHeavyNote;
+
   /// 必要性判断、压缩摘要与守卫分类使用的模型
   String get settingsLaneLightNote;
+
   /// 框架托管
   String get settingsDepSourceManaged;
+
   /// 系统 PATH
   String get settingsDepSourceSystemPath;
+
   /// 版本未知
   String get settingsDepVersionUnknown;
+
   /// 路径未知
   String get settingsDepPathUnknown;
+
   /// 监听地址不能为空：空值等于监听所有网卡，未保存
   String get settingsSysHostEmptyError;
+
   /// $label不能为空，未保存
   String settingsSysEmptyError(String label);
+
   /// $label要填整数，未保存
   String settingsSysIntRequired(String label);
+
   /// $label要在 1~65535 之间，未保存
   String settingsSysPortRange(String label);
+
   /// $label最小是 1，未保存
   String settingsSysMinOne(String label);
+
   /// $label要填小数（0.8 表示 80%），未保存
   String settingsSysRatioRequired(String label);
+
   /// $label是比例，要落在 0~1 之间（不含 0），未保存
   String settingsSysRatioRange(String label);
+
   /// $label最小是 $lo，未保存
   String settingsSysMin(String label, int lo);
+
   /// $label最大是 $hi，未保存
   String settingsSysMax(String label, int hi);
+
   /// 监听地址
   String get settingsSysHostLabel;
+
   /// 本机用就填 127.0.0.1；端口 1~65535。留空等于监听所有网卡，会被拦下。
   String get settingsSysHostNote;
+
   /// 端口
   String get settingsSysPortLabel;
+
   /// 时区
   String get settingsSysTimezoneLabel;
+
   /// IANA 名称，例如 Asia/Shanghai。预算的「今日」按它切分。
   String get settingsSysTimezoneNote;
+
   /// 预算 · 步内工具调用上限
   String get settingsSysStepToolsLabel;
+
   /// 单个 step 里最多调几次工具。
   String get settingsSysStepToolsNote;
+
   /// 预算 · 单 turn 步数上限
   String get settingsSysTurnStepsLabel;
+
   /// 一个 turn 最多走多少步。
   String get settingsSysTurnStepsNote;
+
   /// 预算 · 任务 token 上限
   String get settingsSysTaskTokensLabel;
+
   /// 单个任务累计上限；填原值，20M 这类简写不接受。口径是非缓存 token（真花钱的那部分），不是账单上的用量。
   String get settingsSysTaskTokensNote;
+
   /// 预算 · 每日 token 上限
   String get settingsSysDailyTokensLabel;
+
   /// 每日累计上限，按上面的时区切分。口径同上一行：只数没命中缓存的那部分。
   String get settingsSysDailyTokensNote;
+
   /// 预算 · 软阈值
   String get settingsSysSoftRatioLabel;
+
   /// 0~1 的小数：0.8 就是 80%。到这一线先提示收尾，越过才硬停。
   String get settingsSysSoftRatioNote;
+
   /// 预算 · 连续失败上限
   String get settingsSysFailStreakLabel;
+
   /// 连续失败这么多次就告警并进入暂停。
   String get settingsSysFailStreakNote;
+
   /// 心跳间隔 · 平均（分钟）
   String get settingsSysHeartbeatLabel;
+
   /// 她平均多久自己醒一次——越大越省 token，越小越常醒。两端仍由上下限兜住：不因这个数改变，安静不足下限不会醒、到了上限必然会醒。
   String get settingsSysHeartbeatNote;
+
   /// 上下文 · 压缩线（token 估算）
   String get settingsSysCompactionLabel;
+
   /// 可见历史攒到这么多 token（估算）就折成一篇交接笔记，压缩只遮蔽、不删除。单位是估算器读数，不是供方计数（估算比供方偏低约 1.65~1.66 倍）。填原值：200000 这类写法不接受；调小 = 压得更勤，而每次压缩自己也要花一次调用…
   String get settingsSysCompactionNote;
+
   /// 她只能在配置里的工作目录（trust.workspaceRoot）中活动；越界的读写与命令会被拒绝。
   String get settingsTrustConsequenceWorkspaceUnknown;
+
   /// 她只能在 $root 里活动；越界的读写与命令会被拒绝。
   String settingsTrustConsequenceWorkspace(String root);
+
   /// 她能读写整台电脑上的文件、也能在任意目录跑命令。
   String get settingsTrustConsequenceFull;
+
   /// 只限工作目录
   String get settingsTrustLabelWorkspace;
+
   /// 完全信任
   String get settingsTrustLabelFull;
+
   /// 凭据状态读取失败（响应不是对象）
   String get settingsWebhookStateNotObject;
+
   /// 协议端状态读取失败（响应不是对象）
   String get settingsProtocolStateNotObject;
+
   /// 依赖报告读取失败
   String get settingsDepsReadFailed;
+
   /// 密钥状态读取失败
   String get settingsKeysReadFailed;
+
   /// 运行数据读取失败
   String get settingsProjectionReadFailed;
+
   /// 模型名不能为空，未保存
   String get settingsModelNameRequired;
+
   /// Base URL 不能为空，未保存
   String get settingsBaseUrlRequired;
+
   /// 没有需要保存的改动
   String get settingsNoChanges;
+
   /// 模型设置
   String get settingsWrittenModelSettings;
+
   /// 密钥
   String get settingsWrittenKey;
+
   /// ，进程重启后生效
   String get settingsRestartSuffix;
+
   /// 保存失败：$err
   String settingsSaveFailed(String err);
+
   /// 清除后需重新填写；来自环境变量的值不受影响。
   String get settingsClearKeyBody;
+
   /// 清除
   String get settingsClear;
+
   /// 已清除本地密钥
   String get settingsKeyCleared;
+
   /// 清除失败：$err
   String settingsClearFailed(String err);
+
   /// 模型密钥与系统信息需要生效配置才能显示。请确认主进程已启动。
   String get settingsConfigErrorHint;
+
   /// 配置不可用。
   String get settingsConfigUnavailable;
+
   /// 本地服务 /api/config 未返回配置内容。
   String get settingsConfigUnavailableHint;
+
   /// 密钥状态读取失败（$keysError）。密钥徽章不可用，模型名与 Base URL 仍可保存。
   String settingsKeysReadFailedHint(String keysError);
+
   /// 读不到 config.json，这一页显示的是当前生效的那份（保存仍会写进文件）。
   String get settingsConfigFallbackNote;
+
   /// 上面有改动还没生效：模型名、端点与协议是启动参数，要重启进程才接管——在那之前跑的还是启动时那份。保存本身是成功的，框里显示的就是盘上那份。
   String get settingsModelRestartNote;
+
   /// 现在跑的是 $lane=$model @ $baseUrl
   ///
   /// **运行期**那条读数的句式（2026-10-21）：里面三个值全部来自服务端**生效配置**
   /// （`GET /api/config` 不带 `source=saved`），不是本页正在编辑的盘上那份。
   /// 它与输入框并排摆着，就是为了让"我刚存的值"与"它此刻真正在用的值"同屏可见。
   String settingsModelRunningNow(String lane, String model, String baseUrl);
+
   /// 密钥只写不读：本页显示的始终是掩码，完整值仅在建立连接时读取一次。保存写入 config.json 与 data/.keys.json，进程重启后接管（环境变量优先于文件）。
   String get settingsKeysNote;
+
   /// 已配置；粘贴新密钥可覆盖
   String get settingsKeyConfiguredHint;
+
   /// sk-…
   String get settingsKeySampleHint;
+
   /// 模型名
   String get settingsModelName;
+
   /// API 根地址，不含 /responses。
   String get settingsBaseUrlNote;
+
   /// 协议
   String get settingsModelProtocol;
+
   /// 先按 Responses；探测到不支持才切（推荐）
   String get settingsModelProtocolAuto;
+
   /// 强制走 Chat（没有"必须回传思维链"的要求 ⇒ 更不容易 400，但思维链展示更少）
   String get settingsModelProtocolChat;
+
   /// 强制走 Responses（对方不支持时会直接失败，不自动切）
   String get settingsModelProtocolResponses;
+
   /// 环境变量 $envName 优先；它没有值时使用此处的值（写入 data/.keys.json，只写不读）。
   String settingsKeyEnvNote(String envName);
+
   /// 清除密钥
   String get settingsClearKey;
+
   /// 读取中…
   String get settingsReading;
+
   /// 状态读取失败
   String get settingsStateReadFailed;
+
   /// 未配置
   String get settingsNotConfigured;
+
   /// 她说话时的节奏：一条条往外蹦、每条之间隔多久。只影响投递手感，不影响说话内容。
   String get settingsSpeakNote;
+
   /// 打字节奏
   String get settingsSpeakTyping;
+
   /// 开着：按“这段话要打多久”逐条发出，像人在打字（对方也随时能插话打断）。关掉：一次发完，内容尽快到手。
   String get settingsSpeakTypingNote;
+
   /// 打字速度
   String get settingsSpeakSpeed;
+
   /// 字/分钟
   String get settingsSpeakSpeedUnit;
+
   /// 默认 90（中文手机输入的常见速度）。调大说得更快、等待更短；范围 30~600。
   String get settingsSpeakSpeedNote;
+
   /// 当前生效
   String get settingsCurrentlyActive;
+
   /// $saved 字/分钟 · 逐条发
   String settingsSpeakTypingOn(String saved);
+
   /// $saved 字/分钟 · 一次发完
   String settingsSpeakTypingOff(String saved);
+
   /// 已开启打字节奏（重启后接管）
   String get settingsSpeakTypingEnabled;
+
   /// 已关闭打字节奏（重启后接管）
   String get settingsSpeakTypingDisabled;
+
   /// 打字速度要在 30~600 之间
   String get settingsSpeakSpeedRange;
+
   /// 已保存（重启后接管）
   String get settingsSavedRestartNote;
+
   /// 已保存，立刻生效（不用重启）
   String get settingsSavedLive;
+
   /// 已保存，重启后生效
   String get settingsSavedRestart;
+
   /// 全部就绪
   String get settingsDepsAllReady;
+
   /// 建议安装的外部依赖，可由框架一键安装。
   String get settingsDepsNote;
+
   /// 依赖报告读取失败（$depsError）。装不了也看不见状态时，先在命令行确认主进程已启动。
   String settingsDepsReadFailedHint(String depsError);
+
   /// 正在探测本机的 pwsh / ripgrep / es.exe / python …
   String get settingsDepsProbing;
+
   /// 安装位置：<数据目录>/tools/<名字>/。装完立即生效——探测结论会在安装后复检并刷新，下一次工具调用用的就是新引擎。
   String get settingsDepsInstallLocation;
+
   /// 已就绪·托管
   String get settingsDepReadyManaged;
+
   /// 已就绪·系统
   String get settingsDepReadySystem;
+
   /// 版本不符
   String get settingsDepMismatch;
+
   /// 未安装
   String get settingsDepMissing;
+
   /// 无需操作
   String get settingsDepNoAction;
+
   /// 安装中…
   String get settingsDepInstalling;
+
   /// 安装
   String get settingsInstall;
+
   /// 下载页
   String get settingsDownloadPage;
+
   /// 打开下载页
   String get settingsOpenDownloadPage;
+
   /// 下载并安装
   String get settingsDownloadAndInstall;
+
   /// 安装请求失败：$err
   String settingsInstallRequestFailed(String err);
+
   /// 下载失败
   String get settingsStepDownloadFailed;
+
   /// 解压失败
   String get settingsStepExtractFailed;
+
   /// 装完复检没通过
   String get settingsStepVerifyFailed;
+
   /// 安装失败
   String get settingsStepInstallFailed;
+
   /// 已用默认程序打开 $url
   String settingsOpenedUrl(String url);
+
   /// 未知
   String get settingsUnknown;
+
   /// 需重启
   String get settingsRestartRequired;
+
   /// 协议端（可选）
   String get settingsProtocolTitle;
+
   /// 可选：由框架拉起的 OneBot 协议端，背后是一个真实 QQ 号。它与官方 Bot 各是一条独立的入站通道，装不装都不影响另一条。
   String get settingsProtocolNote;
+
   /// 协议端状态读取失败：$protocolError
   String settingsProtocolError(String protocolError);
+
   /// 这张卡读不到不影响其它设置。先确认主进程已启动，再点重试；在读到状态之前，这里不提供开关、目录与一键安装——那等于让你在看不到当前值的情况下写它。
   String get settingsProtocolErrorHint;
+
   /// 正在读取协议端状态…
   String get settingsProtocolLoading;
+
   /// 还没配置内置协议端。
   String get settingsProtocolEmpty;
+
   /// 不开也照常用：官方 Bot 那条通道不受影响。要用这条路，点下面的「一键安装」把装与配一次做完。
   String get settingsProtocolEmptyHint;
+
   /// 启用内置协议端
   String get settingsProtocolEnabled;
+
   /// 框架启动时自动连接；关闭后可在双端手动填写和配置。
   String get settingsProtocolEnabledNote;
+
   /// 安装目录
   String get settingsInstallDir;
+
   /// <协议端安装目录>
   String get settingsInstallDirHint;
+
   /// 保存目录
   String get settingsSaveDir;
+
   /// 协议端安装目录（绝对路径）。Lite 包解压后入口 index.mjs 就在这一层，没有 dist/ 子目录；「一键安装」会自动填好。
   String get settingsInstallDirNote;
+
   /// 一键安装
   String get settingsOneClickInstall;
+
   /// 从 SnowLuma 官方 Release 下载 Lite 包；自动下载失败时，自行下载并填写安装目录。此包不随框架分发，不得用于商业使用。
   String get settingsOneClickInstallNote;
+
   /// 使用前提：本机已登录 QQ 客户端（Bot 账号）。
   String get settingsOneClickPrerequisite;
+
   /// 正在从官方 Releases 下载并解压。要下 4.6 MB，视网速可能要一两分钟——先别急，也别再点一次。分步记录（下到哪一步、下多大）会在这一步结束时一次性列出来：这条端点是同步请求，不是流，中间插不进进度行。
   String get settingsInstallRunningNote;
+
   /// 手动出路：从 $protocolDownloadUrl 下载发行包，解压后把那个目录填到下面的「安装目录」，再点「保存目录」、打开开关——效果与一键安装一样，只是这几步由你做。
   String settingsInstallManualRoute(String protocolDownloadUrl);
+
   /// 过程记录：（这次没有——失败发生在动手之前）
   String get settingsInstallLogEmpty;
+
   /// 过程记录：
   String get settingsInstallLog;
+
   /// 已经装好了。下一步：先重启服务，再扫码。
   String get settingsInstalledNextTitle;
+
   /// ① 重启服务：运行中的协议端实例是按启动时的配置建的，重启之后它才会按刚写好的配置被拉起（框架不替你重启——重启自己失败就什么都不剩了）。\n② 再扫码：重启后这张卡上会出现「打开面板」，点开在那边先读并同意用户协议与隐私政策（那是法律性质…
   String get settingsInstalledNextBody;
+
   /// （还没填安装目录）
   String get settingsInstallDirEmpty;
+
   /// 已找到可执行入口
   String get settingsEntryFound;
+
   /// 目录里没有可执行入口
   String get settingsEntryMissing;
+
   /// 入口要重启后才核对
   String get settingsEntryPendingRestart;
+
   /// 对接点：$wsUrl
   String settingsEndpointPoint(String wsUrl);
+
   /// 启动
   String get settingsStart;
+
   /// 停止
   String get settingsStop;
+
   /// 打开面板
   String get settingsOpenPanel;
+
   /// 本次进程启动时还没读到这段配置：框架现在不持有它的实例，「启动/停止」要等重启进程之后才有效。
   String get settingsProtocolNotAttachedNote;
+
   /// ① 进程
   String get settingsChainProcess;
+
   /// 未观测
   String get settingsChainUnobserved;
+
   /// 本进程没有实例，这一档没人在看
   String get settingsChainNoInstance;
+
   /// 没在跑
   String get settingsChainNotRunning;
+
   /// 没有监听到它的面板端口
   String get settingsChainNoPort;
+
   /// 本次进程拉起
   String get settingsChainSpawned;
+
   /// 本次进程之前就在跑
   String get settingsChainDiscovered;
+
   /// 只探到端口
   String get settingsChainPortOnly;
+
   /// 在跑
   String get settingsChainRunning;
+
   /// 监听 $url
   String settingsChainListening(String url);
+
   /// ② OneBot 配置
   String get settingsChainOneBotConfig;
+
   /// 带 token
   String get settingsChainWithToken;
+
   /// 无 token（协议端未开校验）
   String get settingsChainNoToken;
+
   /// 在
   String get settingsChainPresent;
+
   /// 端点 $ws
   String settingsChainEndpoint(String ws);
+
   /// 读不出
   String get settingsChainUnreadable;
+
   /// 缺失
   String get settingsChainMissing;
+
   /// 未登录 QQ：这一份是登录之后才生成的
   String get settingsChainMissingDetail;
+
   /// ③ 适配器
   String get settingsChainAdapter;
+
   /// 已连上
   String get settingsChainConnected;
+
   /// 已收 $delivered 条
   String settingsChainDelivered(String delivered);
+
   /// 重连中
   String get settingsChainReconnecting;
+
   /// 第 $attempts 次退避
   String settingsChainBackoff(String attempts);
+
   /// 没端点可连
   String get settingsChainNoEndpoint;
+
   /// 协议端的 OneBot 配置还没出现，配置里也没有手填地址
   String get settingsChainNoEndpointDetail;
+
   /// 未启用
   String get settingsChainDisabled;
+
   /// 未装配
   String get settingsChainNotAssembled;
+
   /// 本进程没有 OneBot 适配器
   String get settingsChainNotAssembledDetail;
+
   /// 这一档没有数据
   String get settingsChainNoData;
+
   /// 初始凭据（本次启动从它的输出里捕到，用户 $user / 口令 $masked）
   String settingsCredentialCaptured(String user, String masked);
+
   /// 初始凭据（从框架自己的启动留痕里捞回来的：用户 $user / 口令 $masked；若它之后又重启过，这条就作废了）
   String settingsCredentialFromLog(String user, String masked);
+
   /// 初始凭据找不回来：它只在启动时往自己的输出里打一次（关掉程序就没了）。要拿到一条可用的，就让框架重启它一次（那一次的输出会被捕获并显示在这里）。
   String get settingsCredentialLost;
+
   /// 协议与隐私政策还没同意——面板解锁之前，接入 QQ 的入口是锁着的。
   String get settingsConsentPending;
+
   /// 初始口令还没改：两个门里第一个就是改密，面板会一直要求你先改它。
   String get settingsPasswordUnchanged;
+
   /// 扫码登录在 $webuiUrl 里做（框架不代管 QQ 登录态）。
   String settingsQrLoginAt(String webuiUrl);
+
   /// 凭据已复制（用户 + 口令）
   String get settingsCredentialCopied;
+
   /// 复制凭据
   String get settingsCopyCredential;
+
   /// 也可以自己来：从 $protocolDownloadUrl 下载发行包解压，把那个目录填在上面。这条路在一键安装失败、或者你想自己控制版本时用；框架也从同一个地址代下载，不随框架分发它（许可是"源码可见非商业"，自用没问题）。
   String settingsManualDownloadGuide(String protocolDownloadUrl);
+
   /// 第三方组件：SnowLuma
   String get settingsProtocolThirdPartyTitle;
+
   /// SnowLuma 是独立第三方项目，由 SnowLumaDevs 开发与维护：本项目只是代为从官方 Releases 下载、解压并托管它的进程，不修改它的任何文件。使用须遵守其 EULA 与 LICENSE，且仅限非商业用途。
   String get settingsProtocolThirdPartyNote;
+
   /// 官方项目
   String get settingsProtocolOfficialProject;
+
   /// 官方站点
   String get settingsProtocolOfficialSite;
+
   /// 许可（EULA / LICENSE）
   String get settingsProtocolLicenseRow;
+
   /// 改动已写入 config.json，但要重启进程才接管：运行中的协议端实例是按启动时那份配置建的。重启之前，这里显示的状态仍是本次启动的那一个。
   String get settingsProtocolRestartNote;
+
   /// 安装目录不能为空
   String get settingsInstallDirRequired;
+
   /// 已请求启动
   String get settingsStartRequested;
+
   /// 已请求停止
   String get settingsStopRequested;
+
   /// 安装请求失败：$err（请求没走到安装那一步，先确认主进程在跑）
   String settingsInstallRequestFailedHint(String err);
+
   /// 一键安装失败：原因见卡片
   String get settingsOneClickFailed;
+
   /// 安装失败，服务端没有给出原因（回执里没有 detail）
   String get settingsInstallNoReason;
+
   /// 已装好
   String get settingsInstalledOk;
+
   /// 已装好并用它配好了；重启一下就能用
   String get settingsInstalledConfigured;
+
   /// 已装好，但自动配置没写成：见卡片里的说明
   String get settingsInstalledNotConfigured;
+
   /// （重启进程后接管）
   String get settingsRestartSuffixParen;
+
   /// 已生成
   String get settingsGenerated;
+
   /// 还没有生成
   String get settingsNotGenerated;
+
   /// 外部系统往这台实例投递用的专用凭据（POST /webhook/*）。
   String get settingsWebhookNote;
+
   /// 凭据状态读取失败（$webhookError）。状态看不见时先别按"重新生成"：轮换不可逆（旧的那份当场失效），而此刻你并不知道有没有人在用它。
   String settingsWebhookErrorHint(String webhookError);
+
   /// 正在读取 webhook 凭据状态…
   String get settingsWebhookLoading;
+
   /// 当前凭据
   String get settingsWebhookCurrent;
+
   /// 凭据 $secretId · 生成于 $createdAt
   String settingsWebhookCurrentValue(String secretId, String createdAt);
+
   /// 这条通道现在一律 401（没有凭据就没人投得进来）。按下面的按钮生成一份。
   String get settingsWebhookNotConfiguredNote;
+
   /// 上次轮换
   String get settingsWebhookRotated;
+
   /// 从未
   String get settingsWebhookNever;
+
   /// 发起方：$by
   String settingsWebhookBy(String by);
+
   /// 重新生成
   String get settingsRegenerate;
+
   /// 生成 webhook 凭据
   String get settingsGenerateWebhook;
+
   /// /webhook/* 不认界面凭据（也不认迁移期那份 data/.ui-token）：这条通道只认上面那份专用凭据。它是给外部系统的——投得进来，读不到 /api/* 上的任何东西。
   String get settingsWebhookCredentialNote;
+
   /// 重新生成 webhook 凭据
   String get settingsRegenerateTitle;
+
   /// 上一份会当场失效：已经在用它的外部脚本会立刻开始收 401——记得把新凭据一起换过去。新凭据只显示一次。
   String get settingsRegenerateBody;
+
   /// 服务端没有回凭据原文，请再按一次；若反复如此，去看主进程日志
   String get settingsNoTokenReturned;
+
   /// 上一份已当场失效（还在用它的外部脚本会开始收 401）。
   String get settingsWebhookRotatedNote;
+
   /// 生成失败：$err
   String settingsGenerateFailed(String err);
+
   /// 长期记忆（MEMORIES/ 与 diary/）由谁维护：框架替你管，还是她自己读、自己写、自己整理。
   String get settingsMemoryNote;
+
   /// 尚未生效
   String get settingsNotInEffect;
+
   /// 让框架自动管记忆（关掉 = 她只知道自己有这些文件，读、写、整理全归她）
   String get settingsMemoryEnableLabel;
+
   /// 开着：框架生成并维护 MEMORIES/INDEX.md，每轮把索引注入固定块，并每日整理一次。
   String get settingsMemoryEnableNote;
+
   /// 框架自动管记忆（每轮注入索引、每日整理）
   String get settingsMemoryOn;
+
   /// 她自己管（框架不生成、不注入、不整理）
   String get settingsMemoryOff;
+
   /// 不受这个开关影响的两条路：MEMORIES/aliases.md 参与「会话认人 / 关注名单」属于通道侧；STATE.md（她当前状态）是独立的一层。
   String get settingsMemoryUnaffectedNote;
+
   /// 这一项是进程启动时读的：保存写进 config.json，重启后接管。关掉不会删任何文件。
   String get settingsMemoryRestartNote;
+
   /// 关掉之后框架不生成、不注入、不整理，但她照旧能自己读写那些文件。为什么留这个开关：给只想让 agent 自己管记忆的人一条干净的路。每日整理的时间点由 wake.memoryMaintainCron 定（默认每日一次）：过期的流水账并进 f…
   String get settingsMemoryDetail;
+
   /// 代价：她可能忘记整理，facts.md 会一直长下去，索引也不再更新——这些都归她自己。
   String get settingsMemoryCost;
+
   /// 已改为框架自动管记忆（重启后接管）
   String get settingsMemoryOnSaved;
+
   /// 已改为她自己管记忆（重启后接管）
   String get settingsMemoryOffSaved;
+
   /// 她的活动边界：整台电脑，或只有一个工作目录。越界就是拒绝，不是提醒。
   String get settingsTrustNote;
+
   /// 她能碰到多远
   String get settingsTrustReachLabel;
+
   /// 两档各自管什么写在选项里，改哪一档就按哪一档的后果算。
   String get settingsTrustReachNote;
+
   /// 只限工作目录（路径未读到）
   String get settingsTrustWorkspaceUnknownPath;
+
   /// 只限工作目录 · $root
   String settingsTrustWorkspaceValue(String root);
+
   /// 完全信任（整台电脑）
   String get settingsTrustFullValue;
+
   /// 上面选的那一档还没生效：盘上已经写下了，但正跑着的这个进程用的仍是启动时读到的那份——重启后接管。在那之前，她照旧按当前生效的那一档活动。
   String get settingsTrustPendingNote;
+
   /// 工作目录由服务端算出来（默认 <配置目录>/workspace），界面上不手填：同一条边界写两个值，就一定会出现"配置说 A、实际拦在 B"。
   String get settingsTrustRootNote;
+
   /// 它是边界，不是提醒：越界的读写与命令一律被拒绝。
   String get settingsTrustBoundaryNote;
+
   /// 它管 fs 工具族（safe_read / safe_write / safe_edit / rg_search 等）与 pwsh：前者经同一条路径判定，后者的 workdir 与命令行里的路径一起受管。它与 destructive 开关、…
   String get settingsTrustRulesDetail;
+
   /// 改成完全信任
   String get settingsTrustFullTitle;
+
   /// 这是一条边界，撤掉它她是真的能做到上面这些事。确定吗？
   String get settingsTrustFullConfirmTail;
+
   /// 已改为只限工作目录；越界的读写与命令会被拒绝（重启进程后接管）
   String get settingsTrustWorkspaceSaved;
+
   /// 已改为完全信任（重启进程后接管）
   String get settingsTrustFullSaved;
+
   /// 监听地址、时区、六条预算与心跳都是这个进程的启动参数：在这里改，保存写进 config.json，重启后生效。压缩线那一行例外——它写完立刻生效（服务端在同一个临界区里也改了内存那份）。
   String get settingsSystemNote;
+
   /// 数据目录
   String get settingsDataDir;
+
   /// 启动时定下的路径：事件日志、人格资产与密钥都在它下面，换它等于让下一个进程从空目录开始。
   String get settingsDataDirNote;
+
   /// 数据目录在这里改不了（它决定她的全部身家落在哪，且进程启动时就定下了）；其余字段保存后重启进程生效——压缩线那一行除外，它保存完就当拍接管。
   String get settingsSystemFootnote;
+
   /// 立刻生效
   String get settingsLiveNow;
+
   /// 编辑
   String get settingsEdit;
+
   /// 进来这个界面用的凭据：改密码与登出。
   String get settingsAccountNote;
+
   /// 旧的共享 token
   String get settingsAccountLegacyBadge;
+
   /// 会话凭据
   String get settingsAccountSessionBadge;
+
   /// 当前实例
   String get settingsAccountInstance;
+
   /// 凭据按实例分文件存（%APPDATA%\\Irmia\\sessions）：同一台机器上开第二个实例不会把这一份顶掉。
   String get settingsAccountInstanceNote;
+
   /// 这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与退出登录都做不成（结束实例不受影响）。先设置一个密码，之后按会话登录/退出登录。
   String get settingsAccountLegacyNote;
+
   /// 改密码
   String get settingsChangePassword;
+
   /// 退出登录（清除本机凭据）
   String get settingsLogout;
+
   /// 先去设置密码
   String get settingsSetPasswordFirst;
+
   /// 密码已改；这台界面已经换上新凭据
   String get settingsPasswordChanged;
+
   /// 退出登录这条路（与「结束实例」的区别写在这里）：作废会话、清本机凭据、停后端——下次要用密码进来。
   String get settingsLogoutBody;
+
   /// 结束实例（设置页那颗按钮 / 它的确认框标题）
   String get settingsCloseInstance;
+
   /// 结束实例的确认框正文：停后端、回选择页，**登录状态保留**——回来点「进入」就能进。
   String get settingsCloseInstanceBody;
+
   /// 门上那句中性提示：会话凭据失效了，请重新登录（不是错误，是"该走哪一扇门"）。
   String get gateHintSessionExpired;
+
   /// 门上那句中性提示：这台实例还没有密码，先设一个。
   String get gateHintSetupNeeded;
+
   /// 门前等待那一屏的第二半句："后端还没起来（正在等 :7788）"（2026-10-26）。
   String gateWaitingBackend(int port);
   // ── 门上那三档（2026-10-28：连不上 / 正在启动 / 密码不对，各说各的）──
   /// ①「连不上」那一档：后端还没起来（[address] 形如 `127.0.0.1:7788`），界面会自动重探。
   String gateBackendDown(String address);
+
   /// ②「正在启动」那一档：端口在听、重活没干完。[phase] 是 [backendPhaseLabel] 翻过的人话
   /// （空串 = 这一版后端不报阶段）。
   String gateBackendStarting(String phase);
+
   /// 服务端报的启动阶段 → 人话：`events` 事件回放 · `mcp` 外部工具 · `channels` 消息通道 ·
   /// `ready` 就绪；认不出的原样显示（将来后端加了新阶段，界面不该吞掉它）。
   String backendPhaseLabel(String phase);
+
   /// 门前那行小字：`第 N 秒 · 已重试 M 次`（别再让人猜"它到底还在试没有"）。
   String gateBackendProgress(int seconds, int retries);
+
   /// 60 秒仍未就绪时追加的那一句（给一条去处的线索）。
   String get gateBackendLogHint;
   // ── 实例选择页（2026-10，多实例：结束实例 → 回到这里选一台 / 新建一台）──
   /// 页标题
   String get pickerTitle;
+
   /// 页说明（上一台实例已经结束：后端停了，但登录状态保留——点「进入」就直接回来；实例之间完全隔离）
   String get pickerBody;
+
   /// 正在读实例列表…
   String get pickerLoading;
+
   /// 还没有登记过实例（空表）
   String get pickerEmpty;
+
   /// 读不出实例列表（文件不在或已损坏）——只能新建
   String get pickerUnreadable;
+
   /// 列表里那一行的状态词：运行中
   String get pickerRunning;
+
   /// 列表里那一行的状态词：未运行
   String get pickerStopped;
+
   /// 默认实例的徽章
   String get pickerDefaultBadge;
+
   /// 没票（或票已失效）那台的按钮：要走密码门
   String get pickerLogin;
+
   /// 没票且未运行那台的按钮：先拉起，再走密码门
   String get pickerStart;
+
   /// 正在启动…
   String get pickerStarting;
+
   /// 有票且运行中那台的按钮：点一下直接进壳（不打密码门）
   String get pickerEnter;
+
   /// 有票但未运行那台的按钮：先拉起，再拿票直接进
   String get pickerStartEnter;
+
   /// 正在进入…（有票、正在验票那一拍）
   String get pickerEntering;
+
   /// 忘记凭据（每行的小字动作 / 它的确认框标题）：只清本机 token，不停实例
   String get pickerForget;
+
   /// 「登录状态已失效，需要重新登录」那一行轻提示（票被服务端判了 401 之后）
   String get pickerSessionExpired;
+
   /// 新建实例（按钮 / 表单标题）
   String get pickerNew;
+
   /// 删除（按钮）
   String get pickerDelete;
+
   /// 新建表单：名字
   String get pickerNewNameLabel;
+
   /// 新建表单：数据目录
   String get pickerNewDirLabel;
+
   /// 新建表单：创建
   String get pickerNewCreate;
+
   /// 「目录已存在且非空」那条路上的第二个动作
   String get pickerNewUseDir;
+
   /// 删除确认框标题
   String get pickerDeleteTitle;
+
   /// 删除确认框正文（带参数：要删的那台的名字）
   String pickerDeleteBody(String name);
+
   /// 「忘记凭据」的确认框正文（带参数：那台实例的名字）——只清本机 token 这一条边界
   String pickerForgetBody(String name);
+
   /// 删除确认框里的说明（只删条目 vs 连目录一起删，后者不可恢复）
   String get pickerDeleteNote;
+
   /// 删除确认框：只删条目（默认，目录留着）
   String get pickerDeleteKeepDir;
+
   /// 删除确认框：连数据目录一起删
   String get pickerDeleteWithDir;
+
   /// 改名（名字旁那个小铅笔的提示 / 按钮）
   String get pickerRename;
+
   /// 改名对话框标题
   String get pickerRenameTitle;
+
   /// 改名对话框正文（说清"改过之后后端不再覆盖"这条语义）
   String get pickerRenameBody;
+
   /// 改名对话框：保存
   String get pickerRenameSave;
+
   /// 出错：名字空着
   String get pickerProblemNameRequired;
+
   /// 出错：登记表里没有可用的启动路径（node / 入口）
   String get pickerProblemNoLauncher;
+
   /// 出错：后端没能启动
   String get pickerProblemLaunchFailed;
+
   /// 出错：7788 起找不到空闲端口
   String get pickerProblemPortUnavailable;
+
   /// 出错：删不掉（实例列表文件写不进去）
   String get pickerProblemRemoveFailed;
+
   /// 出错：改不了名（实例列表文件写不进去）
   String get pickerProblemRenameFailed;
+
   /// 出错（带参数）：目录已存在且非空
   String pickerProblemDirNotEmpty(String dir);
+
   /// 出错（带参数）：等就绪超时——说清"等了多久、它到哪一步"，而不是只说"超时"
   String pickerProblemNotReady(int seconds, String phase, String port);
+
   /// 出错（带参数）：那个端口上住着另一台实例
   String pickerProblemPortTaken(String id);
+
   /// 出错（带参数）：它在跑，先结束它再删
   String pickerProblemCannotDeleteRunning(String name);
+
   /// 出错（带参数）：默认实例不能删
   String pickerProblemCannotDeleteDefault(String name);
+
   /// 正在启动某台实例（带参数：它的名字）
   String pickerStartingNamed(String name);
+
   /// 「将使用端口 :7789」（新建表单里那行读数）
   String pickerNewPort(String port);
+
   /// 删除按钮为什么是灰的（带参数：运行中 / 默认）
   String pickerDeleteDisabled(String reason);
+
   /// 选择页正在等一台实例就绪（带参数：已等秒数 / 阶段人话；phase 空串 = 不报阶段）
   String pickerWaitingReady(int seconds, String phase);
+
   /// 等待期间那颗按钮：「停止等待」
   String get pickerStopWaiting;
+
   /// 门上那句中性提示：这台实例已设过密码，请用密码登录（设置页收到 409 之后换门）。
   String get gateHintAlreadyInitialized;
+
   /// 界面版本与运行期投影数据。
   String get settingsAboutNote;
+
   /// Flutter 原生界面
   String get settingsAboutBadge;
+
   /// 版本
   String get settingsVersionLabel;
+
   /// 守护天数
   String get settingsGuardedDays;
+
   /// 事件水位
   String get settingsWatermark;
+
   /// 运行数据读取失败（$projError），守护天数与事件水位不可用。
   String settingsProjectionReadFailedHint(String projError);
+
   /// 守护天数与事件水位取自运行期投影（GET /api/projection），为实测值。
   String get settingsProjectionFootnote;
+
   /// $days 天
   String settingsDaysCount(String days);
+
   /// $days 天（自 $stamp）
   String settingsDaysSince(String days, String stamp);
+
   /// destructive 工具策略
   String get settingsDestructivePolicy;
+
   /// 修改
   String get settingsModify;
+
   /// 全关（一件都不给她看）
   String get settingsPolicyNoneOption;
+
   /// 全开（清单里全给）
   String get settingsPolicyAllOption;
+
   /// 按名单（只给勾中的那几件）
   String get settingsPolicyListOption;
+
   /// 按名单开放
   String get settingsPolicyListTitle;
+
   /// 没拿到工具清单（注册表可能还没起来）——先去「扩展 · 工具」看一眼再回来。
   String get settingsPolicyNoTools;
+
   /// 修改 destructive 工具策略
   String get settingsDestructiveTitle;
+
   /// 这会让她能看到并调用会改动本机的工具（写文件、跑命令等）。确定吗？
   String get settingsDestructiveRelaxedBody;
+
   /// 改回受限档：她将看不到 destructive 工具（更安全）。确定吗？
   String get settingsDestructiveRestrictedBody;
+
   /// 全开
   String get settingsPolicyAll;
+
   /// 按名单（空）
   String get settingsPolicyListEmpty;
+
   /// 全关
   String get settingsPolicyNone;
   // ── 设置页：手写的那几条（拼接 / 插值表达式 / 语序）──────────────
@@ -2059,6 +2405,7 @@ abstract class AppStrings {
 
   /// `保存（N 件）`
   String settingsPolicySave(int count);
+
   /// `已装好 <版本>，并用它配好了；重启一下就能用。` / `…，但自动配置那一步没成。`（失败时是「安装失败」）
   String settingsInstallHead(bool ok, String? version, bool configured);
 
@@ -2138,6 +2485,78 @@ abstract class AppStrings {
 
   /// Webhook 与文件监听
   String get chanHookTitle;
+
+  /// 事件与告警的配置标题（不是消息通道配置）
+  String get chanHookConfigTitle;
+
+  /// 事件入口
+  String get ingressTitle;
+
+  /// 新建来源
+  String get ingressCreate;
+
+  /// 外部监控脚本投递说明
+  String get ingressIntro;
+
+  /// 还没有事件来源。
+  String get ingressEmpty;
+
+  /// 旧版全局 webhook token 仍然可用。
+  String get ingressLegacyNote;
+
+  /// 轮换 token
+  String get ingressRotate;
+
+  /// 删除来源
+  String get ingressDelete;
+
+  /// 新建事件来源
+  String get ingressCreateTitle;
+
+  /// 来源名
+  String get ingressNameLabel;
+
+  /// 来源名示例
+  String get ingressNameHint;
+
+  /// 唤醒策略
+  String get ingressWakeLabel;
+
+  /// 每个事件都唤醒
+  String get ingressWakeAlways;
+
+  /// 仅 critical 唤醒
+  String get ingressWakeCritical;
+
+  /// 只落库，不唤醒
+  String get ingressWakeNever;
+
+  /// 取消
+  String get ingressCancel;
+
+  /// 创建
+  String get ingressCreateAction;
+
+  /// 删除事件来源
+  String get ingressDeleteTitle;
+
+  /// 删除来源说明
+  String ingressDeleteBody(String name);
+
+  /// 删除
+  String get ingressDeleteAction;
+
+  /// 来源 token
+  String get ingressTokenTitle;
+
+  /// token 只显示一次
+  String get ingressTokenIntro;
+
+  /// 关闭
+  String get ingressTokenClose;
+
+  /// 操作失败：…
+  String ingressOperationFailed(String reason);
 
   /// 出口地址为空时告警仅写入日志。
   String get chanHookHint;
@@ -2906,11 +3325,15 @@ abstract class AppStrings {
   String extPluginReviewBody(String id, String hash);
   String get extPluginEnable;
   String get extPluginDisable;
+  String get extPluginUninstall;
   String extPluginEnableTitle(String id);
   String extPluginDisableTitle(String id);
+  String extPluginUninstallTitle(String id);
+  String get extPluginUninstallBody;
   String get extPluginRestartBody;
   String get extPluginInstalledToast;
   String extPluginConfirmedToast(String id);
+  String extPluginUninstalledToast(String id);
   String extPluginRestartToast(String action, String id);
   String extPluginFailed(String reason);
   // 隔离态
@@ -3793,6 +4216,7 @@ abstract class AppStrings {
 
   String get affectTitle;
   String get affectSystem;
+
   /// 表情包读不出来（带原始错误）
   String stickersLoadFailed(String error);
   String get affectInvalidData;
@@ -3814,15 +4238,18 @@ abstract class AppStrings {
 
   String get moodHeroTitle;
   String get moodUpdatedJustNow;
+
   /// 情绪系统关闭时，页头更新时间那一格的说法（不显示假时间）
   String get moodAffectOff;
   String moodUpdatedMinutesAgo(int minutes);
   String moodState(String key);
   String moodHeadline(String key);
   String moodDescription(String key);
+
   /// 情绪系统开着、评价器也开着，但暂时还没有新评价
   String get moodNoNewAppraisalTitle;
   String get moodNoNewAppraisalBody;
+
   /// 情绪系统开着，但评价器这个独立开关没开（情绪永远不会更新）
   String get moodEvaluatorOffState;
   String get moodEvaluatorOffTitle;
@@ -3871,6 +4298,7 @@ abstract class AppStrings {
   String get moodSheetRecentCause;
   String get moodSheetSnapshot;
   String get moodSheetSnapshotValue;
+
   /// 详情浮层底部「请求侧」那一块：请求里真实注入的情绪行 + 状态时刻
   String get moodSheetRequestLabel;
   String get moodSheetRenderLine;
@@ -4086,7 +4514,12 @@ abstract class AppStrings {
   String get logsTypeStickerTagged;
   String get logsTypeStickerReviewed;
   String logsAffectSummary(String reason, String emotion, String strength);
-  String logsStickerSentSummary(String source, String tag, String position, int candidates);
+  String logsStickerSentSummary(
+    String source,
+    String tag,
+    String position,
+    int candidates,
+  );
   String logsStickerTaggedSummary(List<String> tags, String confidence);
   String logsStickerSource(String source);
   String logsStickerPosition(String position);
@@ -4096,6 +4529,7 @@ abstract class AppStrings {
   String get stickerTitle;
   String get stickerBlurb;
   String get stickerTabLibrary;
+
   /// 库筛选：全部标签
   String get stickerFilterAll;
   String get stickerTabTagging;
@@ -4108,9 +4542,11 @@ abstract class AppStrings {
   String get stickerHarvestEnabled;
   String get stickerTaggingEnabled;
   String get stickerHarvestProbability;
+
   /// 设置：每次 speak 带表情时放行的概率
   String get stickerActiveProbability;
   String get stickerActiveProbabilityHint;
+
   /// 设置：成功发图后的熔断秒数
   String get stickerCooldownSeconds;
   String get stickerCooldownSecondsHint;
@@ -4139,6 +4575,7 @@ abstract class AppStrings {
   String get stickerNoEvents;
   String get stickerNoPending;
   String get stickerNoRejected;
+
   /// 当前标签/状态筛选下没有图
   String get stickerNoMatches;
   String get stickerIntensityLabel;
@@ -4288,9 +4725,11 @@ class ZhStrings extends AppStrings {
   @override
   String configReadFailed(String reason) => '配置读取失败：$reason';
   @override
-  String requestWaiting(String request, int seconds) => '正在等 $request（已 $seconds 秒）';
+  String requestWaiting(String request, int seconds) =>
+      '正在等 $request（已 $seconds 秒）';
   @override
-  String requestTimeout(String request, int seconds, bool maybeDone) => maybeDone
+  String requestTimeout(String request, int seconds, bool maybeDone) =>
+      maybeDone
       ? '$request 等了 $seconds 秒没有回执。这次动作可能已经生效——先去那一页看看，再决定要不要重试。'
       : '$request 等了 $seconds 秒没有回音。这次没回来，点「重试」再来一次。';
   @override
@@ -4399,8 +4838,7 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingStepNameTitle => '她叫什么';
   @override
-  String get onboardingStepNameNote =>
-      '名字是她的身份，下面那份词表决定群里喊哪些词算在叫她（不打 @ 也算）。';
+  String get onboardingStepNameNote => '名字是她的身份，下面那份词表决定群里喊哪些词算在叫她（不打 @ 也算）。';
   @override
   String get onboardingStepNameHint =>
       '写进 persona/IDENTITY.md 的「名字：」那一行（旧版本有快照，人格配置页能回滚），界面上的称呼就是它。';
@@ -4410,15 +4848,18 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingStepApiTitle => 'API 配置';
   @override
-  String get onboardingStepApiNote => '她用的是哪家模型。写进 config.json 与 data/.keys.json，进程重启后接管。';
+  String get onboardingStepApiNote =>
+      '她用的是哪家模型。写进 config.json 与 data/.keys.json，进程重启后接管。';
   @override
   String get onboardingStepChannelTitle => '消息适配器';
   @override
-  String get onboardingStepChannelNote => '她从哪个通道收消息。QQ 官方 Bot 的 AppID 与 AppSecret 就填在下面。';
+  String get onboardingStepChannelNote =>
+      '她从哪个通道收消息。QQ 官方 Bot 的 AppID 与 AppSecret 就填在下面。';
   @override
   String get onboardingStepPersonaTitle => '人格';
   @override
-  String get onboardingStepPersonaNote => '她是谁。这一段写进 persona/IDENTITY.md，是她的常驻人格。';
+  String get onboardingStepPersonaNote =>
+      '她是谁。这一段写进 persona/IDENTITY.md，是她的常驻人格。';
   @override
   String get onboardingStepTrustTitle => '信任范围';
   @override
@@ -4438,9 +4879,11 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingChannelRecommendTail => ' 作为消息适配器';
   @override
-  String get onboardingQqTileDetail => '官方开放平台那条通道：可以扫码创建，也可以直接填 AppID / AppSecret（只写不读）。';
+  String get onboardingQqTileDetail =>
+      '官方开放平台那条通道：可以扫码创建，也可以直接填 AppID / AppSecret（只写不读）。';
   @override
-  String get onboardingQqCredentialsTitle => 'QQ 官方 Bot 凭据（存在本机 data/.keys.json，不进 config.json）';
+  String get onboardingQqCredentialsTitle =>
+      'QQ 官方 Bot 凭据（存在本机 data/.keys.json，不进 config.json）';
   @override
   String get onboardingQqAppIdLabel => 'AppID';
   @override
@@ -4453,13 +4896,15 @@ class ZhStrings extends AppStrings {
   String onboardingSecretConfigured(String? mask) =>
       mask == null || mask.isEmpty ? '已配置；粘贴新值可覆盖' : '已配置（$mask）；粘贴新值可覆盖';
   @override
-  String get onboardingQqCredentialsNote => '填完两个凭据会自动勾上 QQ 官方 Bot；也可以先跳过，之后在「消息适配器」页里补。';
+  String get onboardingQqCredentialsNote =>
+      '填完两个凭据会自动勾上 QQ 官方 Bot；也可以先跳过，之后在「消息适配器」页里补。';
   @override
   String get onboardingQqEntryScan => '扫码创建（推荐）';
   @override
   String get onboardingQqEntryManual => '填写凭据';
   @override
-  String get onboardingQqBindIntro => '用手机 QQ 扫码：会自动创建官方 Bot，并把 AppID / AppSecret 写进本机。';
+  String get onboardingQqBindIntro =>
+      '用手机 QQ 扫码：会自动创建官方 Bot，并把 AppID / AppSecret 写进本机。';
   @override
   String get onboardingQqBindStart => '扫码创建';
   @override
@@ -4471,7 +4916,8 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingQqBindSuccess => '绑定成功';
   @override
-  String get onboardingQqBindSavedNote => 'AppID 与 AppSecret 已保存并启用（写入 data/.keys.json；通道配置重启后生效）。';
+  String get onboardingQqBindSavedNote =>
+      'AppID 与 AppSecret 已保存并启用（写入 data/.keys.json；通道配置重启后生效）。';
   @override
   String get onboardingQqBindRegenerate => '二维码过期了，重新生成';
   @override
@@ -4481,7 +4927,8 @@ class ZhStrings extends AppStrings {
   @override
   String onboardingQqBindAppId(String appId) => 'AppID：$appId';
   @override
-  String onboardingQqBindTokenOk(int expiresIn) => '连接测试通过：access_token 已换取（有效期 $expiresIn 秒）。';
+  String onboardingQqBindTokenOk(int expiresIn) =>
+      '连接测试通过：access_token 已换取（有效期 $expiresIn 秒）。';
   @override
   String onboardingQqBindTokenFailed(String reason) => '连接测试没通过：$reason';
   @override
@@ -4523,7 +4970,8 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingDepsRetry => '重试';
   @override
-  String onboardingDepsLastRun(int ok, int failed) => '上次装完：成功 $ok / 失败 $failed';
+  String onboardingDepsLastRun(int ok, int failed) =>
+      '上次装完：成功 $ok / 失败 $failed';
   @override
   String onboardingDepsReadFailed(String reason) => '读不到依赖状态：$reason';
   @override
@@ -4541,7 +4989,8 @@ class ZhStrings extends AppStrings {
   @override
   String onboardingChannelSaveFailed(String reason) => '通道开关没写进去：$reason';
   @override
-  String onboardingSecretsSaveFailed(String reason) => 'AppID / AppSecret 没写进去：$reason';
+  String onboardingSecretsSaveFailed(String reason) =>
+      'AppID / AppSecret 没写进去：$reason';
   @override
   String onboardingApiKeyWritten(String gates) => '密钥已写入 $gates';
   @override
@@ -4605,11 +5054,13 @@ class ZhStrings extends AppStrings {
   @override
   String get onboardingProbeEmptyList => '这个端点没有返回模型；模型名只能手填。';
   @override
-  String onboardingProbeBadge(String protocol, bool supported) => '$protocol ${supported ? '✓' : '✗'}';
+  String onboardingProbeBadge(String protocol, bool supported) =>
+      '$protocol ${supported ? '✓' : '✗'}';
   @override
   String get onboardingProbeUnreachable => '探测失败：连不上这个端点（网络不可达或超时）。可以继续手填模型名。';
   @override
-  String get onboardingProbeUnauthorized => '探测失败：密钥无效（401/403）。检查 API Key 后重试，或继续手填模型名。';
+  String get onboardingProbeUnauthorized =>
+      '探测失败：密钥无效（401/403）。检查 API Key 后重试，或继续手填模型名。';
   @override
   String get onboardingProbeNoModels => '探测失败：该端点没有 /models，只能手填模型名。';
   @override
@@ -4655,6 +5106,8 @@ class ZhStrings extends AppStrings {
   String get tagInjection => '注入预警';
   @override
   String get tagContextBoundary => '上下文分界';
+  @override
+  String get tagWebhook => '外部事件';
   @override
   String get injectionCardTitle => '外部消息里有想指挥她的迹象';
   @override
@@ -4757,6 +5210,7 @@ class ZhStrings extends AppStrings {
     if (wan >= 100) return '${wan.round()} 万字';
     return '${wan.toStringAsFixed(1)} 万字';
   }
+
   @override
   String get toastContextCleared => '上下文已清空，后面的对话从零开始';
   @override
@@ -4819,7 +5273,8 @@ class ZhStrings extends AppStrings {
   @override
   String get stringsOverrideNone => '未使用覆盖（默认文案）';
   @override
-  String stringsOverrideLoaded(int zh, int en) => '已加载 ${zh + en} 条覆盖（zh $zh / en $en）';
+  String stringsOverrideLoaded(int zh, int en) =>
+      '已加载 ${zh + en} 条覆盖（zh $zh / en $en）';
   @override
   String stringsOverrideFailed(String reason) => '解析失败：$reason';
   @override
@@ -4830,7 +5285,8 @@ class ZhStrings extends AppStrings {
   String get stringsOverrideBadRoot =>
       '顶层不是 JSON 对象（应为 {"zh": {…}, "en": {…}} 或 {"键": "文案"}）';
   @override
-  String stringsOverrideIgnored(int count) => '有 $count 条键没被采用（不认识的键或值不是字符串，详情见启动日志）';
+  String stringsOverrideIgnored(int count) =>
+      '有 $count 条键没被采用（不认识的键或值不是字符串，详情见启动日志）';
   @override
   String stringsOverrideExported(String path) => '模板已写到：$path';
   @override
@@ -4921,13 +5377,15 @@ class ZhStrings extends AppStrings {
   @override
   String get overviewExternalSessions => '外部会话';
   @override
-  String get overviewExternalSessionsNote => '经由消息适配器添加的会话。平台推给我们的消息存入信箱，由 Agent 自行查看。';
+  String get overviewExternalSessionsNote =>
+      '经由消息适配器添加的会话。平台推给我们的消息存入信箱，由 Agent 自行查看。';
   @override
   String get overviewExternalSessionsLoading => '正在读外部会话…';
   @override
   String get overviewExternalSessionsErrorHint => '状态与用量不受影响；读到数据后这张卡会自己出现。';
   @override
-  String get overviewNoAccumulatedMessages => '没有积累的消息（信箱里是空的；群里没 @ 她的消息，要官方 Bot 先推给我们才进得来）。';
+  String get overviewNoAccumulatedMessages =>
+      '没有积累的消息（信箱里是空的；群里没 @ 她的消息，要官方 Bot 先推给我们才进得来）。';
   @override
   String get overviewLevelCritical => '严重';
   @override
@@ -4947,7 +5405,8 @@ class ZhStrings extends AppStrings {
   @override
   String get overviewTimers => '定时器';
   @override
-  String get overviewTimersNote => '她自己布防的唤醒（timer 工具的 action=set）。到点会把她叫起来，撤销只对还没触发的那些有效。';
+  String get overviewTimersNote =>
+      '她自己布防的唤醒（timer 工具的 action=set）。到点会把她叫起来，撤销只对还没触发的那些有效。';
   @override
   String get overviewNoTimers => '眼下没有排着的定时器。';
   @override
@@ -5000,7 +5459,8 @@ class ZhStrings extends AppStrings {
   @override
   String overviewTimerCancelled(String timerId) => '已撤销定时器 $timerId：到点不会再醒';
   @override
-  String overviewTimerCancelFailed(String timerId, String reason) => '撤销 $timerId 失败：$reason';
+  String overviewTimerCancelFailed(String timerId, String reason) =>
+      '撤销 $timerId 失败：$reason';
   @override
   String overviewTimerCancelToastFailed(String reason) => '撤销失败：$reason';
   @override
@@ -5014,9 +5474,11 @@ class ZhStrings extends AppStrings {
   @override
   String overviewDeadDiscarded(int seq) => '已丢弃 seq $seq：它不会再被执行，日志里仍留着那条输入';
   @override
-  String overviewDeadActionFailed(String verb, int seq, String reason) => '$verb seq $seq 失败：$reason';
+  String overviewDeadActionFailed(String verb, int seq, String reason) =>
+      '$verb seq $seq 失败：$reason';
   @override
-  String overviewDeadActionToastFailed(String verb, String reason) => '$verb失败：$reason';
+  String overviewDeadActionToastFailed(String verb, String reason) =>
+      '$verb失败：$reason';
   @override
   String overviewHistoricalBadge(String label) =>
       label.isEmpty ? '已恢复 · 历史' : '$label · 已恢复 · 历史';
@@ -5050,14 +5512,16 @@ class ZhStrings extends AppStrings {
   @override
   String overviewFrameworkNotesError(String reason) => '框架提示读取失败：$reason';
   @override
-  String overviewContextTokens(String used, String budget) => '$used / $budget tok';
+  String overviewContextTokens(String used, String budget) =>
+      '$used / $budget tok';
   @override
   String overviewContextSubline(int percent, String keep, String stamp) =>
       '占预算 $percent% · 保留历史思维链：$keep · 取自 $stamp 那一拍';
   @override
   String overviewContextShare(int share) => '$share%';
   @override
-  String overviewContextLegendNumbers(String tokens, int share) => '$tokens · $share%';
+  String overviewContextLegendNumbers(String tokens, int share) =>
+      '$tokens · $share%';
   @override
   String overviewContextError(String reason) => '上下文构成读取失败：$reason';
   @override
@@ -5089,7 +5553,8 @@ class ZhStrings extends AppStrings {
   @override
   String settingsSysRatioRequired(String label) => '$label要填小数（0.8 表示 80%），未保存';
   @override
-  String settingsSysRatioRange(String label) => '$label是比例，要落在 0~1 之间（不含 0），未保存';
+  String settingsSysRatioRange(String label) =>
+      '$label是比例，要落在 0~1 之间（不含 0），未保存';
   @override
   String settingsSysMin(String label, int lo) => '$label最小是 $lo，未保存';
   @override
@@ -5097,7 +5562,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsSysHostLabel => '监听地址';
   @override
-  String get settingsSysHostNote => '本机用就填 127.0.0.1；端口 1~65535。留空等于监听所有网卡，会被拦下。';
+  String get settingsSysHostNote =>
+      '本机用就填 127.0.0.1；端口 1~65535。留空等于监听所有网卡，会被拦下。';
   @override
   String get settingsSysPortLabel => '端口';
   @override
@@ -5115,11 +5581,13 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsSysTaskTokensLabel => '预算 · 任务 token 上限';
   @override
-  String get settingsSysTaskTokensNote => '单个任务累计上限；填原值，20M 这类简写不接受。口径是非缓存 token（真花钱的那部分），不是账单上的用量。';
+  String get settingsSysTaskTokensNote =>
+      '单个任务累计上限；填原值，20M 这类简写不接受。口径是非缓存 token（真花钱的那部分），不是账单上的用量。';
   @override
   String get settingsSysDailyTokensLabel => '预算 · 每日 token 上限';
   @override
-  String get settingsSysDailyTokensNote => '每日累计上限，按上面的时区切分。口径同上一行：只数没命中缓存的那部分。';
+  String get settingsSysDailyTokensNote =>
+      '每日累计上限，按上面的时区切分。口径同上一行：只数没命中缓存的那部分。';
   @override
   String get settingsSysSoftRatioLabel => '预算 · 软阈值';
   @override
@@ -5131,7 +5599,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsSysHeartbeatLabel => '心跳间隔 · 平均（分钟）';
   @override
-  String get settingsSysHeartbeatNote => '她平均多久自己醒一次——越大越省 token，越小越常醒。两端仍由上下限兜住：不因这个数改变，安静不足下限不会醒、到了上限必然会醒。';
+  String get settingsSysHeartbeatNote =>
+      '她平均多久自己醒一次——越大越省 token，越小越常醒。两端仍由上下限兜住：不因这个数改变，安静不足下限不会醒、到了上限必然会醒。';
   @override
   String get settingsSysCompactionLabel => '上下文 · 压缩线（token 估算）';
   @override
@@ -5141,9 +5610,11 @@ class ZhStrings extends AppStrings {
       '填原值：200000 这类写法不接受；调小 = 压得更勤，而每次压缩自己也要花一次调用。'
       '改完立刻生效，不用重启。';
   @override
-  String get settingsTrustConsequenceWorkspaceUnknown => '她只能在配置里的工作目录（trust.workspaceRoot）中活动；越界的读写与命令会被拒绝。';
+  String get settingsTrustConsequenceWorkspaceUnknown =>
+      '她只能在配置里的工作目录（trust.workspaceRoot）中活动；越界的读写与命令会被拒绝。';
   @override
-  String settingsTrustConsequenceWorkspace(String root) => '她只能在 $root 里活动；越界的读写与命令会被拒绝。';
+  String settingsTrustConsequenceWorkspace(String root) =>
+      '她只能在 $root 里活动；越界的读写与命令会被拒绝。';
   @override
   String get settingsTrustConsequenceFull => '她能读写整台电脑上的文件、也能在任意目录跑命令。';
   @override
@@ -5175,7 +5646,8 @@ class ZhStrings extends AppStrings {
   @override
   String settingsSaveFailed(String err) => '保存失败：$err';
   @override
-  String get settingsClearKeyBody => '清除后需重新填写；同一个环境变量下的几格会一起清空（同名的只能同值）；来自环境变量的值不受影响。';
+  String get settingsClearKeyBody =>
+      '清除后需重新填写；同一个环境变量下的几格会一起清空（同名的只能同值）；来自环境变量的值不受影响。';
   @override
   String get settingsClear => '清除';
   @override
@@ -5189,16 +5661,20 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsConfigUnavailableHint => '本地服务 /api/config 未返回配置内容。';
   @override
-  String settingsKeysReadFailedHint(String keysError) => '密钥状态读取失败（$keysError）。密钥徽章不可用，模型名与 Base URL 仍可保存。';
+  String settingsKeysReadFailedHint(String keysError) =>
+      '密钥状态读取失败（$keysError）。密钥徽章不可用，模型名与 Base URL 仍可保存。';
   @override
-  String get settingsConfigFallbackNote => '读不到 config.json，这一页显示的是当前生效的那份（保存仍会写进文件）。';
+  String get settingsConfigFallbackNote =>
+      '读不到 config.json，这一页显示的是当前生效的那份（保存仍会写进文件）。';
   @override
-  String get settingsModelRestartNote => '上面有改动还没生效：模型名、端点与协议是启动参数，要重启进程才接管——在那之前跑的还是启动时那份。保存本身是成功的，框里显示的就是盘上那份。';
+  String get settingsModelRestartNote =>
+      '上面有改动还没生效：模型名、端点与协议是启动参数，要重启进程才接管——在那之前跑的还是启动时那份。保存本身是成功的，框里显示的就是盘上那份。';
   @override
   String settingsModelRunningNow(String lane, String model, String baseUrl) =>
       '现在跑的是 $lane=$model @ $baseUrl';
   @override
-  String get settingsKeysNote => '密钥只写不读：本页显示的始终是掩码，完整值仅在建立连接时读取一次。保存写入 config.json 与 data/.keys.json，进程重启后接管（环境变量优先于文件）。';
+  String get settingsKeysNote =>
+      '密钥只写不读：本页显示的始终是掩码，完整值仅在建立连接时读取一次。保存写入 config.json 与 data/.keys.json，进程重启后接管（环境变量优先于文件）。';
   @override
   String get settingsKeyConfiguredHint => '已配置；粘贴新密钥可覆盖';
   @override
@@ -5212,11 +5688,14 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsModelProtocolAuto => '先按 Responses；探测到不支持才切（推荐）';
   @override
-  String get settingsModelProtocolChat => '强制走 Chat（没有"必须回传思维链"的要求 ⇒ 更不容易 400，但思维链展示更少）';
+  String get settingsModelProtocolChat =>
+      '强制走 Chat（没有"必须回传思维链"的要求 ⇒ 更不容易 400，但思维链展示更少）';
   @override
-  String get settingsModelProtocolResponses => '强制走 Responses（对方不支持时会直接失败，不自动切）';
+  String get settingsModelProtocolResponses =>
+      '强制走 Responses（对方不支持时会直接失败，不自动切）';
   @override
-  String settingsKeyEnvNote(String envName) => '环境变量 $envName 优先；它没有值时使用此处的值（写入 data/.keys.json，只写不读）。';
+  String settingsKeyEnvNote(String envName) =>
+      '环境变量 $envName 优先；它没有值时使用此处的值（写入 data/.keys.json，只写不读）。';
   @override
   String get settingsClearKey => '清除密钥';
   @override
@@ -5230,13 +5709,15 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsSpeakTyping => '打字节奏';
   @override
-  String get settingsSpeakTypingNote => '开着：按“这段话要打多久”逐条发出，像人在打字（对方也随时能插话打断）。关掉：一次发完，内容尽快到手。';
+  String get settingsSpeakTypingNote =>
+      '开着：按“这段话要打多久”逐条发出，像人在打字（对方也随时能插话打断）。关掉：一次发完，内容尽快到手。';
   @override
   String get settingsSpeakSpeed => '打字速度';
   @override
   String get settingsSpeakSpeedUnit => '字/分钟';
   @override
-  String get settingsSpeakSpeedNote => '默认 90（中文手机输入的常见速度）。调大说得更快、等待更短；范围 30~600。';
+  String get settingsSpeakSpeedNote =>
+      '默认 90（中文手机输入的常见速度）。调大说得更快、等待更短；范围 30~600。';
   @override
   String get settingsCurrentlyActive => '当前生效';
   @override
@@ -5260,11 +5741,14 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsDepsNote => '建议安装的外部依赖，可由框架一键安装。';
   @override
-  String settingsDepsReadFailedHint(String depsError) => '依赖报告读取失败（$depsError）。装不了也看不见状态时，先在命令行确认主进程已启动。';
+  String settingsDepsReadFailedHint(String depsError) =>
+      '依赖报告读取失败（$depsError）。装不了也看不见状态时，先在命令行确认主进程已启动。';
   @override
-  String get settingsDepsProbing => '正在探测本机的 pwsh / ripgrep / es.exe / python …';
+  String get settingsDepsProbing =>
+      '正在探测本机的 pwsh / ripgrep / es.exe / python …';
   @override
-  String get settingsDepsInstallLocation => '安装位置：<数据目录>/tools/<名字>/。装完立即生效——探测结论会在安装后复检并刷新，下一次工具调用用的就是新引擎。';
+  String get settingsDepsInstallLocation =>
+      '安装位置：<数据目录>/tools/<名字>/。装完立即生效——探测结论会在安装后复检并刷新，下一次工具调用用的就是新引擎。';
   @override
   String get settingsDepReadyManaged => '已就绪·托管';
   @override
@@ -5304,17 +5788,21 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsProtocolTitle => '协议端（可选）';
   @override
-  String get settingsProtocolNote => '可选：由框架拉起的 OneBot 协议端，背后是一个真实 QQ 号。它与官方 Bot 各是一条独立的入站通道，装不装都不影响另一条。';
+  String get settingsProtocolNote =>
+      '可选：由框架拉起的 OneBot 协议端，背后是一个真实 QQ 号。它与官方 Bot 各是一条独立的入站通道，装不装都不影响另一条。';
   @override
-  String settingsProtocolError(String protocolError) => '协议端状态读取失败：$protocolError';
+  String settingsProtocolError(String protocolError) =>
+      '协议端状态读取失败：$protocolError';
   @override
-  String get settingsProtocolErrorHint => '这张卡读不到不影响其它设置。先确认主进程已启动，再点重试；在读到状态之前，这里不提供开关、目录与一键安装——那等于让你在看不到当前值的情况下写它。';
+  String get settingsProtocolErrorHint =>
+      '这张卡读不到不影响其它设置。先确认主进程已启动，再点重试；在读到状态之前，这里不提供开关、目录与一键安装——那等于让你在看不到当前值的情况下写它。';
   @override
   String get settingsProtocolLoading => '正在读取协议端状态…';
   @override
   String get settingsProtocolEmpty => '还没配置内置协议端。';
   @override
-  String get settingsProtocolEmptyHint => '不开也照常用：官方 Bot 那条通道不受影响。要用这条路，点下面的「一键安装」把装与配一次做完。';
+  String get settingsProtocolEmptyHint =>
+      '不开也照常用：官方 Bot 那条通道不受影响。要用这条路，点下面的「一键安装」把装与配一次做完。';
   @override
   String get settingsProtocolEnabled => '启用内置协议端';
   @override
@@ -5326,11 +5814,13 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsSaveDir => '保存目录';
   @override
-  String get settingsInstallDirNote => '协议端安装目录（绝对路径）。Lite 包解压后入口 index.mjs 就在这一层，没有 dist/ 子目录；「一键安装」会自动填好。';
+  String get settingsInstallDirNote =>
+      '协议端安装目录（绝对路径）。Lite 包解压后入口 index.mjs 就在这一层，没有 dist/ 子目录；「一键安装」会自动填好。';
   @override
   String get settingsOneClickInstall => '一键安装';
   @override
-  String get settingsOneClickInstallNote => '从 SnowLuma 官方 Release 下载 Lite 包；自动下载失败时，自行下载并填写安装目录。此包不随框架分发，不得用于商业使用。';
+  String get settingsOneClickInstallNote =>
+      '从 SnowLuma 官方 Release 下载 Lite 包；自动下载失败时，自行下载并填写安装目录。此包不随框架分发，不得用于商业使用。';
   @override
   String get settingsOneClickPrerequisite => '使用前提：本机已登录 QQ 客户端（Bot 账号）。';
   @override
@@ -5339,7 +5829,8 @@ class ZhStrings extends AppStrings {
       '分步记录（下到哪一步、下多大）会在这一步结束时一次性列出来：'
       '这条端点是同步请求，不是流，中间插不进进度行。';
   @override
-  String settingsInstallManualRoute(String protocolDownloadUrl) => '手动出路：从 $protocolDownloadUrl 下载发行包，解压后把那个目录填到下面的「安装目录」，再点「保存目录」、打开开关——效果与一键安装一样，只是这几步由你做。';
+  String settingsInstallManualRoute(String protocolDownloadUrl) =>
+      '手动出路：从 $protocolDownloadUrl 下载发行包，解压后把那个目录填到下面的「安装目录」，再点「保存目录」、打开开关——效果与一键安装一样，只是这几步由你做。';
   @override
   String get settingsInstallLogEmpty => '过程记录：（这次没有——失败发生在动手之前）';
   @override
@@ -5371,7 +5862,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsOpenPanel => '打开面板';
   @override
-  String get settingsProtocolNotAttachedNote => '本次进程启动时还没读到这段配置：框架现在不持有它的实例，「启动/停止」要等重启进程之后才有效。';
+  String get settingsProtocolNotAttachedNote =>
+      '本次进程启动时还没读到这段配置：框架现在不持有它的实例，「启动/停止」要等重启进程之后才有效。';
   @override
   String get settingsChainProcess => '① 进程';
   @override
@@ -5431,17 +5923,21 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsChainNoData => '这一档没有数据';
   @override
-  String settingsCredentialCaptured(String user, String masked) => '初始凭据（本次启动从它的输出里捕到，用户 $user / 口令 $masked）';
+  String settingsCredentialCaptured(String user, String masked) =>
+      '初始凭据（本次启动从它的输出里捕到，用户 $user / 口令 $masked）';
   @override
-  String settingsCredentialFromLog(String user, String masked) => '初始凭据（从框架自己的启动留痕里捞回来的：用户 $user / 口令 $masked；若它之后又重启过，这条就作废了）';
+  String settingsCredentialFromLog(String user, String masked) =>
+      '初始凭据（从框架自己的启动留痕里捞回来的：用户 $user / 口令 $masked；若它之后又重启过，这条就作废了）';
   @override
-  String get settingsCredentialLost => '初始凭据找不回来：它只在启动时往自己的输出里打一次（关掉程序就没了）。要拿到一条可用的，就让框架重启它一次（那一次的输出会被捕获并显示在这里）。';
+  String get settingsCredentialLost =>
+      '初始凭据找不回来：它只在启动时往自己的输出里打一次（关掉程序就没了）。要拿到一条可用的，就让框架重启它一次（那一次的输出会被捕获并显示在这里）。';
   @override
   String get settingsConsentPending => '协议与隐私政策还没同意——面板解锁之前，接入 QQ 的入口是锁着的。';
   @override
   String get settingsPasswordUnchanged => '初始口令还没改：两个门里第一个就是改密，面板会一直要求你先改它。';
   @override
-  String settingsQrLoginAt(String webuiUrl) => '扫码登录在 $webuiUrl 里做（框架不代管 QQ 登录态）。';
+  String settingsQrLoginAt(String webuiUrl) =>
+      '扫码登录在 $webuiUrl 里做（框架不代管 QQ 登录态）。';
   @override
   String get settingsCredentialCopied => '凭据已复制（用户 + 口令）';
   @override
@@ -5465,7 +5961,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsProtocolLicenseRow => '许可（EULA / LICENSE）';
   @override
-  String get settingsProtocolRestartNote => '改动已写入 config.json，但要重启进程才接管：运行中的协议端实例是按启动时那份配置建的。重启之前，这里显示的状态仍是本次启动的那一个。';
+  String get settingsProtocolRestartNote =>
+      '改动已写入 config.json，但要重启进程才接管：运行中的协议端实例是按启动时那份配置建的。重启之前，这里显示的状态仍是本次启动的那一个。';
   @override
   String get settingsInstallDirRequired => '安装目录不能为空';
   @override
@@ -5473,7 +5970,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsStopRequested => '已请求停止';
   @override
-  String settingsInstallRequestFailedHint(String err) => '安装请求失败：$err（请求没走到安装那一步，先确认主进程在跑）';
+  String settingsInstallRequestFailedHint(String err) =>
+      '安装请求失败：$err（请求没走到安装那一步，先确认主进程在跑）';
   @override
   String get settingsOneClickFailed => '一键安装失败：原因见卡片';
   @override
@@ -5493,15 +5991,18 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsWebhookNote => '外部系统往这台实例投递用的专用凭据（POST /webhook/*）。';
   @override
-  String settingsWebhookErrorHint(String webhookError) => '凭据状态读取失败（$webhookError）。状态看不见时先别按"重新生成"：轮换不可逆（旧的那份当场失效），而此刻你并不知道有没有人在用它。';
+  String settingsWebhookErrorHint(String webhookError) =>
+      '凭据状态读取失败（$webhookError）。状态看不见时先别按"重新生成"：轮换不可逆（旧的那份当场失效），而此刻你并不知道有没有人在用它。';
   @override
   String get settingsWebhookLoading => '正在读取 webhook 凭据状态…';
   @override
   String get settingsWebhookCurrent => '当前凭据';
   @override
-  String settingsWebhookCurrentValue(String secretId, String createdAt) => '凭据 $secretId · 生成于 $createdAt';
+  String settingsWebhookCurrentValue(String secretId, String createdAt) =>
+      '凭据 $secretId · 生成于 $createdAt';
   @override
-  String get settingsWebhookNotConfiguredNote => '这条通道现在一律 401（没有凭据就没人投得进来）。按下面的按钮生成一份。';
+  String get settingsWebhookNotConfiguredNote =>
+      '这条通道现在一律 401（没有凭据就没人投得进来）。按下面的按钮生成一份。';
   @override
   String get settingsWebhookRotated => '上次轮换';
   @override
@@ -5513,11 +6014,13 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsGenerateWebhook => '生成 webhook 凭据';
   @override
-  String get settingsWebhookCredentialNote => '/webhook/* 不认界面凭据（也不认迁移期那份 data/.ui-token）：这条通道只认上面那份专用凭据。它是给外部系统的——投得进来，读不到 /api/* 上的任何东西。';
+  String get settingsWebhookCredentialNote =>
+      '/webhook/* 不认界面凭据（也不认迁移期那份 data/.ui-token）：这条通道只认上面那份专用凭据。它是给外部系统的——投得进来，读不到 /api/* 上的任何东西。';
   @override
   String get settingsRegenerateTitle => '重新生成 webhook 凭据';
   @override
-  String get settingsRegenerateBody => '上一份会当场失效：已经在用它的外部脚本会立刻开始收 401——记得把新凭据一起换过去。新凭据只显示一次。';
+  String get settingsRegenerateBody =>
+      '上一份会当场失效：已经在用它的外部脚本会立刻开始收 401——记得把新凭据一起换过去。新凭据只显示一次。';
   @override
   String get settingsNoTokenReturned => '服务端没有回凭据原文，请再按一次；若反复如此，去看主进程日志';
   @override
@@ -5525,21 +6028,26 @@ class ZhStrings extends AppStrings {
   @override
   String settingsGenerateFailed(String err) => '生成失败：$err';
   @override
-  String get settingsMemoryNote => '长期记忆（MEMORIES/ 与 diary/）由谁维护：框架替你管，还是她自己读、自己写、自己整理。';
+  String get settingsMemoryNote =>
+      '长期记忆（MEMORIES/ 与 diary/）由谁维护：框架替你管，还是她自己读、自己写、自己整理。';
   @override
   String get settingsNotInEffect => '尚未生效';
   @override
-  String get settingsMemoryEnableLabel => '让框架自动管记忆（关掉 = 她只知道自己有这些文件，读、写、整理全归她）';
+  String get settingsMemoryEnableLabel =>
+      '让框架自动管记忆（关掉 = 她只知道自己有这些文件，读、写、整理全归她）';
   @override
-  String get settingsMemoryEnableNote => '开着：框架生成并维护 MEMORIES/INDEX.md，每轮把索引注入固定块，并每日整理一次。';
+  String get settingsMemoryEnableNote =>
+      '开着：框架生成并维护 MEMORIES/INDEX.md，每轮把索引注入固定块，并每日整理一次。';
   @override
   String get settingsMemoryOn => '框架自动管记忆（每轮注入索引、每日整理）';
   @override
   String get settingsMemoryOff => '她自己管（框架不生成、不注入、不整理）';
   @override
-  String get settingsMemoryUnaffectedNote => '不受这个开关影响的两条路：MEMORIES/aliases.md 参与「会话认人 / 关注名单」属于通道侧；STATE.md（她当前状态）是独立的一层。';
+  String get settingsMemoryUnaffectedNote =>
+      '不受这个开关影响的两条路：MEMORIES/aliases.md 参与「会话认人 / 关注名单」属于通道侧；STATE.md（她当前状态）是独立的一层。';
   @override
-  String get settingsMemoryRestartNote => '这一项是进程启动时读的：保存写进 config.json，重启后接管。关掉不会删任何文件。';
+  String get settingsMemoryRestartNote =>
+      '这一项是进程启动时读的：保存写进 config.json，重启后接管。关掉不会删任何文件。';
   @override
   String get settingsMemoryDetail =>
       '关掉之后框架不生成、不注入、不整理，但她照旧能自己读写那些文件。'
@@ -5548,7 +6056,8 @@ class ZhStrings extends AppStrings {
       '过期的流水账并进 facts.md，另写一篇 diary/。'
       'facts.md 的 !pinned 分区与条目 TTL 也归框架维护。';
   @override
-  String get settingsMemoryCost => '代价：她可能忘记整理，facts.md 会一直长下去，索引也不再更新——这些都归她自己。';
+  String get settingsMemoryCost =>
+      '代价：她可能忘记整理，facts.md 会一直长下去，索引也不再更新——这些都归她自己。';
   @override
   String get settingsMemoryOnSaved => '已改为框架自动管记忆（重启后接管）';
   @override
@@ -5566,9 +6075,11 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsTrustFullValue => '完全信任（整台电脑）';
   @override
-  String get settingsTrustPendingNote => '上面选的那一档还没生效：盘上已经写下了，但正跑着的这个进程用的仍是启动时读到的那份——重启后接管。在那之前，她照旧按当前生效的那一档活动。';
+  String get settingsTrustPendingNote =>
+      '上面选的那一档还没生效：盘上已经写下了，但正跑着的这个进程用的仍是启动时读到的那份——重启后接管。在那之前，她照旧按当前生效的那一档活动。';
   @override
-  String get settingsTrustRootNote => '工作目录由服务端算出来（默认 <配置目录>/workspace），界面上不手填：同一条边界写两个值，就一定会出现"配置说 A、实际拦在 B"。';
+  String get settingsTrustRootNote =>
+      '工作目录由服务端算出来（默认 <配置目录>/workspace），界面上不手填：同一条边界写两个值，就一定会出现"配置说 A、实际拦在 B"。';
   @override
   String get settingsTrustBoundaryNote => '它是边界，不是提醒：越界的读写与命令一律被拒绝。';
   @override
@@ -5588,13 +6099,16 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsTrustFullSaved => '已改为完全信任（重启进程后接管）';
   @override
-  String get settingsSystemNote => '监听地址、时区、六条预算与心跳都是这个进程的启动参数：在这里改，保存写进 config.json，重启后生效。压缩线那一行例外——它写完立刻生效（服务端在同一个临界区里也改了内存那份）。';
+  String get settingsSystemNote =>
+      '监听地址、时区、六条预算与心跳都是这个进程的启动参数：在这里改，保存写进 config.json，重启后生效。压缩线那一行例外——它写完立刻生效（服务端在同一个临界区里也改了内存那份）。';
   @override
   String get settingsDataDir => '数据目录';
   @override
-  String get settingsDataDirNote => '启动时定下的路径：事件日志、人格资产与密钥都在它下面，换它等于让下一个进程从空目录开始。';
+  String get settingsDataDirNote =>
+      '启动时定下的路径：事件日志、人格资产与密钥都在它下面，换它等于让下一个进程从空目录开始。';
   @override
-  String get settingsSystemFootnote => '数据目录在这里改不了（它决定她的全部身家落在哪，且进程启动时就定下了）；其余字段保存后重启进程生效——压缩线那一行除外，它保存完就当拍接管。';
+  String get settingsSystemFootnote =>
+      '数据目录在这里改不了（它决定她的全部身家落在哪，且进程启动时就定下了）；其余字段保存后重启进程生效——压缩线那一行除外，它保存完就当拍接管。';
   @override
   String get settingsLiveNow => '立刻生效';
   @override
@@ -5608,7 +6122,8 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsAccountInstance => '当前实例';
   @override
-  String get settingsAccountInstanceNote => '凭据按实例分文件存（%APPDATA%\\Irmia\\sessions）：同一台机器上开第二个实例不会把这一份顶掉。';
+  String get settingsAccountInstanceNote =>
+      '凭据按实例分文件存（%APPDATA%\\Irmia\\sessions）：同一台机器上开第二个实例不会把这一份顶掉。';
   @override
   String get settingsAccountLegacyNote =>
       '这一份用的是旧的共享 token（这台实例还没设过密码），服务端不认它开出的"会话"：改密码与退出登录都做不成（结束实例不受影响）。'
@@ -5622,12 +6137,14 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsPasswordChanged => '密码已改；这台界面已经换上新凭据';
   @override
-    String get settingsLogoutBody => '退出登录：清掉本机保存的凭据、停掉它的后端进程，然后回到实例选择页'
-        '——下次进来要重新登录（用密码）。只是关掉实例、保留登录状态的话，用「结束实例」。';
+  String get settingsLogoutBody =>
+      '退出登录：清掉本机保存的凭据、停掉它的后端进程，然后回到实例选择页'
+      '——下次进来要重新登录（用密码）。只是关掉实例、保留登录状态的话，用「结束实例」。';
   @override
   String get settingsCloseInstance => '结束实例';
   @override
-  String get settingsCloseInstanceBody => '结束实例：停掉它的后端进程（不再跑心跳、不再收消息），回到实例选择页。'
+  String get settingsCloseInstanceBody =>
+      '结束实例：停掉它的后端进程（不再跑心跳、不再收消息），回到实例选择页。'
       '登录状态保留——下次从选择页点「进入」就直接回来，不用输密码。';
   @override
   String get gateHintSessionExpired => '会话凭据已失效，请重新登录。';
@@ -5645,21 +6162,23 @@ class ZhStrings extends AppStrings {
       : '后端正在启动（阶段：${phase.trim()}）。正在重试…';
   @override
   String backendPhaseLabel(String phase) => switch (phase.trim()) {
-        'events' => '事件回放',
-        'mcp' => '外部工具',
-        'channels' => '消息通道',
-        'ready' => '就绪',
-        final other => other,
-      };
+    'events' => '事件回放',
+    'mcp' => '外部工具',
+    'channels' => '消息通道',
+    'ready' => '就绪',
+    final other => other,
+  };
   @override
-  String gateBackendProgress(int seconds, int retries) => '第 $seconds 秒 · 已重试 $retries 次';
+  String gateBackendProgress(int seconds, int retries) =>
+      '第 $seconds 秒 · 已重试 $retries 次';
   @override
   String get gateBackendLogHint => '后端一直没就绪：看 %LOCALAPPDATA%\\Irmia\\gui.log';
   // ── 实例选择页（2026-10）──
   @override
   String get pickerTitle => '选择实例';
   @override
-  String get pickerBody => '上一台实例已经结束：后端进程停了（不再跑心跳、不再收消息），登录状态保留——点「进入」就直接回来。'
+  String get pickerBody =>
+      '上一台实例已经结束：后端进程停了（不再跑心跳、不再收消息），登录状态保留——点「进入」就直接回来。'
       '在这里选一台继续，或者新建一台。实例之间完全隔离：各自的数据、各自的密码、各自的编辑权限。';
   @override
   String get pickerLoading => '正在读实例列表…';
@@ -5706,7 +6225,8 @@ class ZhStrings extends AppStrings {
   @override
   String pickerDeleteBody(String name) => '删除「$name」？';
   @override
-  String pickerForgetBody(String name) => '忘记「$name」的凭据？只清掉这台机器上保存的那一份登录凭据：'
+  String pickerForgetBody(String name) =>
+      '忘记「$name」的凭据？只清掉这台机器上保存的那一份登录凭据：'
       '实例还在跑，登记表里的条目也不动。下次进来要用密码。';
   @override
   String get pickerDeleteNote =>
@@ -5736,9 +6256,11 @@ class ZhStrings extends AppStrings {
   @override
   String get pickerProblemRemoveFailed => '删不掉：实例列表文件写不进去（可能被占用）。再试一次。';
   @override
-  String get pickerProblemRenameFailed => '改不了名：实例列表文件写不进去（可能被占用）。名字还是原来那个，再试一次。';
+  String get pickerProblemRenameFailed =>
+      '改不了名：实例列表文件写不进去（可能被占用）。名字还是原来那个，再试一次。';
   @override
-  String pickerProblemDirNotEmpty(String dir) => '目录已存在且非空：$dir。换个名字，或者选择「用这个目录」。';
+  String pickerProblemDirNotEmpty(String dir) =>
+      '目录已存在且非空：$dir。换个名字，或者选择「用这个目录」。';
   @override
   String pickerProblemNotReady(int seconds, String phase, String port) =>
       '已经等了 $seconds 秒，它还在启动${phase.trim().isEmpty ? '' : '（阶段：${phase.trim()}）'}：'
@@ -5749,11 +6271,14 @@ class ZhStrings extends AppStrings {
   @override
   String get pickerStopWaiting => '停止等待';
   @override
-  String pickerProblemPortTaken(String id) => '那个端口上住着另一台实例（$id）：没有连它——实例之间不许串。';
+  String pickerProblemPortTaken(String id) =>
+      '那个端口上住着另一台实例（$id）：没有连它——实例之间不许串。';
   @override
-  String pickerProblemCannotDeleteRunning(String name) => '「$name」正在运行：先登录进去结束它，再回来删。';
+  String pickerProblemCannotDeleteRunning(String name) =>
+      '「$name」正在运行：先登录进去结束它，再回来删。';
   @override
-  String pickerProblemCannotDeleteDefault(String name) => '「$name」是默认实例：不能删（数据目录还在用）。';
+  String pickerProblemCannotDeleteDefault(String name) =>
+      '「$name」是默认实例：不能删（数据目录还在用）。';
   @override
   String pickerStartingNamed(String name) => '正在启动「$name」…（首次启动要几十秒）';
   @override
@@ -5771,9 +6296,11 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsWatermark => '事件水位';
   @override
-  String settingsProjectionReadFailedHint(String projError) => '运行数据读取失败（$projError），守护天数与事件水位不可用。';
+  String settingsProjectionReadFailedHint(String projError) =>
+      '运行数据读取失败（$projError），守护天数与事件水位不可用。';
   @override
-  String get settingsProjectionFootnote => '守护天数与事件水位取自运行期投影（GET /api/projection），为实测值。';
+  String get settingsProjectionFootnote =>
+      '守护天数与事件水位取自运行期投影（GET /api/projection），为实测值。';
   @override
   String settingsDaysCount(String days) => '$days 天';
   @override
@@ -5795,9 +6322,11 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsDestructiveTitle => '修改 destructive 工具策略';
   @override
-  String get settingsDestructiveRelaxedBody => '这会让她能看到并调用会改动本机的工具（写文件、跑命令等）。确定吗？';
+  String get settingsDestructiveRelaxedBody =>
+      '这会让她能看到并调用会改动本机的工具（写文件、跑命令等）。确定吗？';
   @override
-  String get settingsDestructiveRestrictedBody => '改回受限档：她将看不到 destructive 工具（更安全）。确定吗？';
+  String get settingsDestructiveRestrictedBody =>
+      '改回受限档：她将看不到 destructive 工具（更安全）。确定吗？';
   @override
   String get settingsPolicyAll => '全开';
   @override
@@ -5822,7 +6351,8 @@ class ZhStrings extends AppStrings {
       '装好后 agent 就能用它（rg_search / es_search 会随之注册；'
       'Python 还会顺带引导 pip，让她能自己 pip install 扩能力）。';
   @override
-  String settingsDepReadyToast(String label, String version) => '$label 已就绪（$version）';
+  String settingsDepReadyToast(String label, String version) =>
+      '$label 已就绪（$version）';
   @override
   String settingsStepErrorToast(String step, String error) => '$step：$error';
   @override
@@ -5831,7 +6361,8 @@ class ZhStrings extends AppStrings {
   String settingsOpenUrlFailed(String url, String? hint) =>
       '打不开浏览器，地址是 $url${hint == null ? '' : '（$hint）'}';
   @override
-  String settingsInstalledVersion(String? version) => '已装好${version == null ? '' : ' $version'}';
+  String settingsInstalledVersion(String? version) =>
+      '已装好${version == null ? '' : ' $version'}';
   @override
   String settingsWriteErrorNote(String writeError) =>
       '自动配置没写成：$writeError。装好的目录已经替你填在下面的「安装目录」里，'
@@ -5839,7 +6370,8 @@ class ZhStrings extends AppStrings {
   @override
   String settingsChainSince(String when) => '$when 起';
   @override
-  String settingsChainUnreadableDetail(String path) => '那份文件在（$path）但端点解析失败——要人去修它';
+  String settingsChainUnreadableDetail(String path) =>
+      '那份文件在（$path）但端点解析失败——要人去修它';
   @override
   String settingsProtocolToggled(bool on, bool restart) =>
       '${on ? '已开启' : '已关闭'}内置协议端${restart ? '（重启进程后接管）' : ''}';
@@ -5868,9 +6400,11 @@ class ZhStrings extends AppStrings {
   @override
   String settingsDepsSuggested(int count) => '建议安装 $count 项';
   @override
-  String settingsDepPipReady(String version) => 'pip $version（她可以自己 pip install 扩能力）';
+  String settingsDepPipReady(String version) =>
+      'pip $version（她可以自己 pip install 扩能力）';
   @override
-  String settingsDepPurposeImpact(String purpose, String impact) => '$purpose。$impact';
+  String settingsDepPurposeImpact(String purpose, String impact) =>
+      '$purpose。$impact';
   @override
   String settingsInstallTitle(String label) => '安装 $label';
   @override
@@ -5923,47 +6457,91 @@ class ZhStrings extends AppStrings {
   @override
   String get chanQqTitle => 'QQ 官方 Bot API';
   @override
-  String get chanQqHint => 'AppID 与 AppSecret 在下面直接填值（存在本机 data/.keys.json，不进 config.json）；两者齐备才建连。';
+  String get chanQqHint =>
+      'AppID 与 AppSecret 在下面直接填值（存在本机 data/.keys.json，不进 config.json）；两者齐备才建连。';
   @override
-  String get chanOneBotHint => '协议端（NapCat / go-cqhttp）的正向 WebSocket；access_token 在下面直接填值。';
+  String get chanOneBotHint =>
+      '协议端（NapCat / go-cqhttp）的正向 WebSocket；access_token 在下面直接填值。';
   @override
   String get chanOneBotBlurb => '协议端正向 WebSocket';
   @override
-  String get chanHookTitle => 'Webhook 与文件监听';
+  String get chanHookTitle => '事件与告警';
+  @override
+  String get chanHookConfigTitle => '告警出口与监听';
   @override
   String get chanHookHint => '出口地址为空时告警仅写入日志。';
   @override
-  String get chanHookBlurb => '告警出口 · 入站监听';
+  String get chanHookBlurb => '告警出口 · 文件唤醒 · 事件来源';
+  @override
+  String get ingressTitle => '事件入口';
+  @override
+  String get ingressCreate => '新建来源';
+  @override
+  String get ingressIntro => '外部监控脚本用自己的 token 向 /webhook/* 投递事件；可单独设置唤醒策略，token 盘上只留 sha256。';
+  @override
+  String get ingressEmpty => '还没有事件来源。';
+  @override
+  String get ingressLegacyNote => '旧版全局 webhook token 仍然可用；来源 token 与它互不影响。';
+  @override
+  String get ingressRotate => '轮换 token';
+  @override
+  String get ingressDelete => '删除来源';
+  @override
+  String get ingressCreateTitle => '新建事件来源';
+  @override
+  String get ingressNameLabel => '来源名';
+  @override
+  String get ingressNameHint => '例如 backup-job / home-assistant';
+  @override
+  String get ingressWakeLabel => '唤醒策略';
+  @override
+  String get ingressWakeAlways => '每个事件都唤醒';
+  @override
+  String get ingressWakeCritical => '仅 critical 唤醒';
+  @override
+  String get ingressWakeNever => '只落库，不唤醒';
+  @override
+  String get ingressCancel => '取消';
+  @override
+  String get ingressCreateAction => '创建';
+  @override
+  String get ingressDeleteTitle => '删除事件来源';
+  @override
+  String ingressDeleteBody(String name) => '删除「$name」后，它的 token 立即失效。';
+  @override
+  String get ingressDeleteAction => '删除';
+  @override
+  String get ingressTokenTitle => '来源 token';
+  @override
+  String get ingressTokenIntro => '这串 token 只显示一次，请现在复制到调用方：';
+  @override
+  String get ingressTokenClose => '关闭';
+  @override
+  String ingressOperationFailed(String reason) => '操作失败：$reason';
   @override
   String get chanConfigReadFailed => '配置读取失败';
   @override
   String get chanKeysReadFailed => '密钥状态读取失败';
   @override
-  String chanClearSecretTitle(String label) =>
-      '清除密钥 · $label';
+  String chanClearSecretTitle(String label) => '清除密钥 · $label';
   @override
   String get chanClearSecretBody => '清除后需重新填写。';
   @override
-  String chanClearFailed(String reason) =>
-      '清除失败：$reason';
+  String chanClearFailed(String reason) => '清除失败：$reason';
   @override
-  String chanNotANumber(String field) =>
-      '$field 需要填数字，未保存';
+  String chanNotANumber(String field) => '$field 需要填数字，未保存';
   @override
   String get chanNothingToSave => '没有需要保存的改动';
   @override
-  String chanSavedFieldCount(int count) =>
-      '$count 项参数';
+  String chanSavedFieldCount(int count) => '$count 项参数';
   @override
-  String chanSavedSecretCount(int count) =>
-      '$count 项密钥';
+  String chanSavedSecretCount(int count) => '$count 项密钥';
   @override
   String get chanSavedRestartSuffix => '，进程重启后接管';
   @override
   String get chanSavedLiveSuffix => '，下次建连时生效';
   @override
-  String chanSaved(String parts, String suffix) =>
-      '已保存$parts$suffix';
+  String chanSaved(String parts, String suffix) => '已保存$parts$suffix';
   @override
   String get chanReloaded => '已按生效配置重新加载';
   @override
@@ -5973,8 +6551,7 @@ class ZhStrings extends AppStrings {
   String chanTestNotDelivered(String reason) =>
       "没送到${reason.isEmpty ? '：出口没有应答' : '：$reason'}";
   @override
-  String chanTestFailed(String reason) =>
-      '测试失败：$reason';
+  String chanTestFailed(String reason) => '测试失败：$reason';
   @override
   String get chanStatusUnknown => '状态未知';
   @override
@@ -5999,11 +6576,9 @@ class ZhStrings extends AppStrings {
   @override
   String get chanStatusExitOnNote => '尚无触发记录：入站唤醒与文件事件均为空。';
   @override
-  String chanStatusHookRunningNote(String tag, String at) =>
-      '最近一条 $tag $at。';
+  String chanStatusHookRunningNote(String tag, String at) => '最近一条 $tag $at。';
   @override
-  String chanFootnoteError(String error) =>
-      '通道活动读取失败（$error）。状态按配置文件判定。';
+  String chanFootnoteError(String error) => '通道活动读取失败（$error）。状态按配置文件判定。';
   @override
   String chanFootnoteCount(int count) =>
       '通道活动取自最近 50 条通道相关事件（实收 $count 条），状态据此判定。';
@@ -6040,13 +6615,11 @@ class ZhStrings extends AppStrings {
   @override
   String get chanMentionHint => '改完立刻生效（下一句消息就按新名单判），不用重启。';
   @override
-  String chanMentionSaveFailed(String problem) =>
-      '没写进去：$problem';
+  String chanMentionSaveFailed(String problem) => '没写进去：$problem';
   @override
   String get chanMentionCleared => '已设为"只认 @ 叫她"';
   @override
-  String chanMentionSaved(String words) =>
-      '记下了：$words';
+  String chanMentionSaved(String words) => '记下了：$words';
   @override
   String get chanContactsTitle => '会话联系人';
   @override
@@ -6054,7 +6627,8 @@ class ZhStrings extends AppStrings {
   @override
   String get chanDetailsLabel => '说明';
   @override
-  String get chanContactsDetail => '群聊里只有 @ 她或喊她的名字才会进对话流；其余能不能收到取决于官方 Bot 的消息权限——平台推给我们的，照旧进信箱。在群里 @ 过她的人会自动登记到那个群下面（她再看到就不只是 openid）——'
+  String get chanContactsDetail =>
+      '群聊里只有 @ 她或喊她的名字才会进对话流；其余能不能收到取决于官方 Bot 的消息权限——平台推给我们的，照旧进信箱。在群里 @ 过她的人会自动登记到那个群下面（她再看到就不只是 openid）——'
       '展开可以改名。她自己记的备注（写在名字后括号里的那段）只在这里显示，不算名字、也改不动——那一格保存的是名字，备注留在她自己的记忆里。';
   @override
   String get chanContactsEmpty => '还没有会话跟她说过话。等有人先来一句，这里就会列出那个会话。';
@@ -6067,11 +6641,9 @@ class ZhStrings extends AppStrings {
   @override
   String get chanContactsRestartNote => '改完需要重启主进程才生效（联系人表不在热更名单里）。';
   @override
-  String chanContactLine(String chat, String when) =>
-      '$chat｜最后 $when';
+  String chanContactLine(String chat, String when) => '$chat｜最后 $when';
   @override
-  String chanContactNote(String note) =>
-      '备注：$note';
+  String chanContactNote(String note) => '备注：$note';
   @override
   String get chanContactHint => '这是谁（留空 = 不署名）';
   @override
@@ -6079,8 +6651,7 @@ class ZhStrings extends AppStrings {
   @override
   String get chanMembersCollapse => '收起群成员';
   @override
-  String chanMembersExpand(int count) =>
-      '展开群成员（$count）';
+  String chanMembersExpand(int count) => '展开群成员（$count）';
   @override
   String get chanWarnExempt => '框架预警：已豁免';
   @override
@@ -6088,8 +6659,7 @@ class ZhStrings extends AppStrings {
   @override
   String get chanMemberSaveTooltip => '保存这个名字（下一轮生效）';
   @override
-  String chanMemberNameTooltip(String who) =>
-      '给 $who 起个名字';
+  String chanMemberNameTooltip(String who) => '给 $who 起个名字';
   @override
   String get chanExemptSessionOn => '已豁免这个单聊的框架预警';
   @override
@@ -6103,18 +6673,15 @@ class ZhStrings extends AppStrings {
   @override
   String get chanGroupSceneSoftToast => '群聊场景已切回软提醒：框架提醒她，判断留给她';
   @override
-  String chanToggleFailed(String err) =>
-      '切换失败：$err';
+  String chanToggleFailed(String err) => '切换失败：$err';
   @override
   String get chanNameRequired => '名字不能为空';
   @override
-  String chanMemberSaved(String name) =>
-      '已记为「$name」——下一轮她就这么叫他';
+  String chanMemberSaved(String name) => '已记为「$name」——下一轮她就这么叫他';
   @override
   String get chanContactCleared => '已清除这个会话的名字';
   @override
-  String chanContactSaved(String name) =>
-      '已记为「$name」——重启主进程后她就用这个名字认人';
+  String chanContactSaved(String name) => '已记为「$name」——重启主进程后她就用这个名字认人';
   @override
   String get chanConfigTitle => '通道配置';
   @override
@@ -6122,12 +6689,12 @@ class ZhStrings extends AppStrings {
   @override
   String get chanConfigNote => '写入 config.json，重启后接管；清空一项 = 回到默认值。';
   @override
-  String get chanConfigDetail => '密钥类字段直接填值：它存本机密钥文件，不进 config.json。环境变量优先于这些文件。';
+  String get chanConfigDetail =>
+      '密钥类字段直接填值：它存本机密钥文件，不进 config.json。环境变量优先于这些文件。';
   @override
   String get chanTestAlert => '测试告警出口';
   @override
-  String chanSaveWithCount(int count) =>
-      '保存（$count 项改动）';
+  String chanSaveWithCount(int count) => '保存（$count 项改动）';
   @override
   String get chanEnableLabel => '启用该通道';
   @override
@@ -6137,18 +6704,15 @@ class ZhStrings extends AppStrings {
   @override
   String get chanSecretHintConfigured => '已配置；粘贴新值可覆盖';
   @override
-  String chanSecretHintPaste(String label) =>
-      '粘贴$label';
+  String chanSecretHintPaste(String label) => '粘贴$label';
   @override
-  String chanSecretConfigured(String mask) =>
-      '已配置 $mask';
+  String chanSecretConfigured(String mask) => '已配置 $mask';
   @override
   String get chanNumberHint => '数字';
   @override
   String get chanNotSetHint => '未设置';
   @override
-  String chanReadonlyFold(int count) =>
-      '只读项（$count 项）';
+  String chanReadonlyFold(int count) => '只读项（$count 项）';
   @override
   String get chanChannelIdLabel => '通道 id';
   @override
@@ -6170,17 +6734,13 @@ class ZhStrings extends AppStrings {
   @override
   String get schedCancelPlan => '取消安排';
   @override
-  String schedCancelled(String timerId) =>
-      '已取消 $timerId：到点不会再醒';
+  String schedCancelled(String timerId) => '已取消 $timerId：到点不会再醒';
   @override
-  String schedCancelFailed(String timerId, String err) =>
-      '取消 $timerId 失败：$err';
+  String schedCancelFailed(String timerId, String err) => '取消 $timerId 失败：$err';
   @override
-  String schedCancelFailedShort(String err) =>
-      '取消失败：$err';
+  String schedCancelFailedShort(String err) => '取消失败：$err';
   @override
-  String schedBuilt(String when, String note) =>
-      '已经排上了：$when · $note';
+  String schedBuilt(String when, String note) => '已经排上了：$when · $note';
   @override
   String get schedBuiltToast => '已排上这条安排';
   @override
@@ -6205,10 +6765,10 @@ class ZhStrings extends AppStrings {
   @override
   String get schedLoading => '正在读她排着的安排…';
   @override
-  String schedLoadFailed(String error) =>
-      '读不到日程：$error';
+  String schedLoadFailed(String error) => '读不到日程：$error';
   @override
-  String get schedLoadHint => '这一页读的是投影 /api/projection 里的 timers：刷新一次试试；一直读不到说明主进程那边有问题。';
+  String get schedLoadHint =>
+      '这一页读的是投影 /api/projection 里的 timers：刷新一次试试；一直读不到说明主进程那边有问题。';
   @override
   String get schedStatThisWeek => '本周安排';
   @override
@@ -6235,32 +6795,25 @@ class ZhStrings extends AppStrings {
   @override
   String get schedNextWeek => '下一周';
   @override
-  String schedUnplaceable(int count) =>
-      '画不出这一周的周期条目：$count 条（在清单里）';
+  String schedUnplaceable(int count) => '画不出这一周的周期条目：$count 条（在清单里）';
   @override
-  String schedTimeRecurring(String hour, String minute) =>
-      '$hour:$minute · 周期';
+  String schedTimeRecurring(String hour, String minute) => '$hour:$minute · 周期';
   @override
-  String schedMonthDay(int month, int day) =>
-      '$month月$day日';
+  String schedMonthDay(int month, int day) => '$month月$day日';
   @override
   String get schedRecurringPill => '周期';
   @override
   String get schedWeekEmpty => '这一周还没有安排。';
   @override
-  String schedWeekHidden(int hidden) =>
-      '这一周还有 $hidden 条没摆下，看右边的清单';
+  String schedWeekHidden(int hidden) => '这一周还有 $hidden 条没摆下，看右边的清单';
   @override
   String get schedListTitle => '安排清单';
   @override
-  String schedFilterDay(String day) =>
-      '只看 $day';
+  String schedFilterDay(String day) => '只看 $day';
   @override
-  String schedFilterQuery(String query) =>
-      '匹配「$query」';
+  String schedFilterQuery(String query) => '匹配「$query」';
   @override
-  String schedFilterCount(int count) =>
-      '$count 条';
+  String schedFilterCount(int count) => '$count 条';
   @override
   String get schedShowAll => '看全部';
   @override
@@ -6278,11 +6831,9 @@ class ZhStrings extends AppStrings {
   @override
   String get schedFieldWhen => '执行时间';
   @override
-  String schedDetailRecurring(String label) =>
-      '周期 $label（下一次在服务端重排）';
+  String schedDetailRecurring(String label) => '周期 $label（下一次在服务端重排）';
   @override
-  String schedDetailTimeSuffix(String label) =>
-      ' · 周期 $label';
+  String schedDetailTimeSuffix(String label) => ' · 周期 $label';
   @override
   String get schedFieldWhy => '为什么安排它';
   @override
@@ -6292,23 +6843,19 @@ class ZhStrings extends AppStrings {
   @override
   String get schedFieldDuration => '时长';
   @override
-  String schedMinutes(Object? dur) =>
-      '$dur 分钟';
+  String schedMinutes(Object? dur) => '$dur 分钟';
   @override
-  String schedMinutesDefault(Object? dur) =>
-      '$dur 分钟（约定值：这条没写 dur）';
+  String schedMinutesDefault(Object? dur) => '$dur 分钟（约定值：这条没写 dur）';
   @override
   String get schedFieldAfter => '到点后';
   @override
   String get schedUnwritten => '未写';
   @override
-  String schedWakeReceipt(String text) =>
-      '已经跟她说了一句：『$text』';
+  String schedWakeReceipt(String text) => '已经跟她说了一句：『$text』';
   @override
   String get schedSeeChat => '去聊天页看她的反应';
   @override
-  String schedBuiltReceipt(String text) =>
-      '$text —— 这条是你直接排的：她到点会读到你的理由。';
+  String schedBuiltReceipt(String text) => '$text —— 这条是你直接排的：她到点会读到你的理由。';
   @override
   String get schedChoiceNotify => '到点提醒我';
   @override
@@ -6334,13 +6881,11 @@ class ZhStrings extends AppStrings {
   @override
   String get schedViewList => '列表';
   @override
-  String schedRecurringLine(String label) =>
-      '周期 · $label';
+  String schedRecurringLine(String label) => '周期 · $label';
   @override
   String get schedChorePill => '她的内务';
   @override
-  String schedWillSay(String label) =>
-      '到点会说：$label';
+  String schedWillSay(String label) => '到点会说：$label';
   @override
   String get schedErrDate => '「日期」看不懂：写 今天 / 明天 / 后天 或 2026-10-20 都行。';
   @override
@@ -6356,14 +6901,11 @@ class ZhStrings extends AppStrings {
   @override
   String get schedErrBrief => '写一句话再让她排（她读到的就是这一句）。';
   @override
-  String schedWakePrefix(String text) =>
-      '请帮我排一条安排：$text';
+  String schedWakePrefix(String text) => '请帮我排一条安排：$text';
   @override
-  String schedWakeFailed(String err) =>
-      '没能把这句话送到她那里：$err';
+  String schedWakeFailed(String err) => '没能把这句话送到她那里：$err';
   @override
-  String schedCreateFailed(String err) =>
-      '这条安排没能排上：$err';
+  String schedCreateFailed(String err) => '这条安排没能排上：$err';
   @override
   String get schedCardLead => '一般更建议交给她建：她会自己写"为什么"，到点先确认还值不值得做。直接建是给你急用的。';
   @override
@@ -6425,11 +6967,9 @@ class ZhStrings extends AppStrings {
   @override
   String get schedCreateNote => '建好之后它就是一条真安排：到点她会看见你写的这句。';
   @override
-  String schedSidWithName(String name, String short) =>
-      '$name（$short）';
+  String schedSidWithName(String name, String short) => '$name（$short）';
   @override
-  String schedMonthDayRaw(Object month, Object day) =>
-      '$month月$day日';
+  String schedMonthDayRaw(Object month, Object day) => '$month月$day日';
   @override
   String schedWhenStamp(int month, int day, String time) =>
       '$month月$day日 · $time';
@@ -6448,14 +6988,11 @@ class ZhStrings extends AppStrings {
   @override
   String get schedWeekdaySun => '周日';
   @override
-  String schedCronDaily(String time) =>
-      '每天 $time';
+  String schedCronDaily(String time) => '每天 $time';
   @override
-  String schedCronRange(String from, String to) =>
-      '$from至周$to';
+  String schedCronRange(String from, String to) => '$from至周$to';
   @override
-  String schedCronWeekly(String weekdays, String time) =>
-      '每周$weekdays $time';
+  String schedCronWeekly(String weekdays, String time) => '每周$weekdays $time';
   @override
   String get schedCatWork => '工作 / 学习';
   @override
@@ -6481,11 +7018,13 @@ class ZhStrings extends AppStrings {
   @override
   String get extSectionToolsBlurb => '随程序一起来的工具：按组开关，关掉即从她的清单里拿掉';
   @override
-  String get extSectionHooksBlurb => '执行点钩子：PreToolUse / PostToolUse / Wake 三处可插入外部命令';
+  String get extSectionHooksBlurb =>
+      '执行点钩子：PreToolUse / PostToolUse / Wake 三处可插入外部命令';
   @override
   String get extSectionPlugins => 'Plugins';
   @override
-  String get extSectionPluginsBlurb => '按整包哈希审核 Skills、Hooks 与 MCP 贡献；人工启停在重启后生效';
+  String get extSectionPluginsBlurb =>
+      '按整包哈希审核贡献、代码权限与网络白名单；代码插件即时起停，声明式包重启后生效';
   @override
   String get extPluginInstall => '安装插件';
   @override
@@ -6506,20 +7045,22 @@ class ZhStrings extends AppStrings {
   String extPluginStat(int count) => '$count 个插件包';
   @override
   String extPluginState(String state) => switch (state) {
-        'untrusted' => '待审核',
-        'disabled' => '已停用',
-        'enabled' => '已启用',
-        'invalid' => '无效',
-        'quarantined' => '已隔离',
-        'probing' => '正在探测',
-        _ => state,
-      };
+    'untrusted' => '待审核',
+    'disabled' => '已停用',
+    'enabled' => '已启用',
+    'invalid' => '无效',
+    'quarantined' => '已隔离',
+    'probing' => '正在探测',
+    _ => state,
+  };
   @override
   String get extPluginRestartRequired => '重启后生效';
   @override
-  String extPluginContributions(int skills, int hooks, int mcp) => 'Skills $skills · Hooks $hooks · MCP $mcp';
+  String extPluginContributions(int skills, int hooks, int mcp) =>
+      'Skills $skills · Hooks $hooks · MCP $mcp';
   @override
-  String extPluginVersionHash(String version, String hash) => '版本 $version · 哈希 $hash';
+  String extPluginVersionHash(String version, String hash) =>
+      '版本 $version · 哈希 $hash';
   @override
   String get extPluginPermissionsLabel => '权限';
   @override
@@ -6530,27 +7071,37 @@ class ZhStrings extends AppStrings {
   String extPluginReviewTitle(String id) => '审核插件 $id';
   @override
   String extPluginReviewBody(String id, String hash) =>
-      '请核对 $id 的整包哈希 $hash、贡献与权限。插件贡献属于可信代码，不是安全沙箱；确认只绑定这一个哈希。';
+      '请核对 $id 的整包哈希 $hash、贡献、权限、命名 Hooks、net.allow 与运行时。插件是确认后的可信代码，不是安全沙箱；确认只绑定这一个哈希。';
   @override
   String get extPluginEnable => '启用';
   @override
   String get extPluginDisable => '停用';
   @override
+  String get extPluginUninstall => '卸载';
+  @override
   String extPluginEnableTitle(String id) => '启用插件 $id？';
   @override
   String extPluginDisableTitle(String id) => '停用插件 $id？';
   @override
-  String get extPluginRestartBody => '人工启停只写入下一份生效状态，重启主进程后才接管；不会立即改变当前贡献。';
+  String extPluginUninstallTitle(String id) => '卸载插件 $id？';
+  @override
+  String get extPluginUninstallBody => '先停止进程，再删除当前哈希的包目录；插件数据、状态与配置会保留。';
+  @override
+  String get extPluginRestartBody => '代码插件会即时启动或停止；声明式包只写入下一份生效状态，重启主进程后才接管。';
   @override
   String get extPluginInstalledToast => '已安装，等待审核；安装不代表已信任或启用';
   @override
   String extPluginConfirmedToast(String id) => '$id 的当前哈希已确认，仍需单独启用';
   @override
-  String extPluginRestartToast(String action, String id) => '$id 已$action，重启后生效';
+  String extPluginUninstalledToast(String id) => '$id 的当前包已卸载；数据、状态与配置仍保留';
+  @override
+  String extPluginRestartToast(String action, String id) =>
+      '$id 已$action；代码插件即时生效，声明式包重启后生效';
   @override
   String extPluginFailed(String reason) => '插件操作失败：$reason';
   @override
-  String extPluginCircuit(String contribution, int count) => '故障贡献 $contribution · 连续失败 $count 次';
+  String extPluginCircuit(String contribution, int count) =>
+      '故障贡献 $contribution · 连续失败 $count 次';
   @override
   String extPluginCircuitReason(String reason) => '故障原因：$reason';
   @override
@@ -6564,8 +7115,7 @@ class ZhStrings extends AppStrings {
   @override
   String get extDataReadFailed => '数据读取失败';
   @override
-  String extBadStructure(Object? endpoint) =>
-      '本地服务 /api/$endpoint 的响应不是预期结构。';
+  String extBadStructure(Object? endpoint) => '本地服务 /api/$endpoint 的响应不是预期结构。';
   @override
   String get extBackToList => '扩展项列表';
   @override
@@ -6578,7 +7128,8 @@ class ZhStrings extends AppStrings {
   @override
   String get extNoSkills => '还没有安装技能。';
   @override
-  String get extNoSkillsHint => '技能是一个目录：skills/<name>/SKILL.md。扫描到之后要过信任门（在这里确认）才进 catalog。';
+  String get extNoSkillsHint =>
+      '技能是一个目录：skills/<name>/SKILL.md。扫描到之后要过信任门（在这里确认）才进 catalog。';
   @override
   String get extPendingTitle => '待确认';
   @override
@@ -6592,18 +7143,21 @@ class ZhStrings extends AppStrings {
   @override
   String get extIgnoredTitle => '已忽略';
   @override
-  String get extIgnoredHint => '仅本机备忘（落 data/skills-ignored.json）：不写事件、不进 catalog，换台机器不会跟着走。';
+  String get extIgnoredHint =>
+      '仅本机备忘（落 data/skills-ignored.json）：不写事件、不进 catalog，换台机器不会跟着走。';
   @override
   String get extRejectedTitle => '被拒绝的目录';
   @override
-  String get extRejectedHint => 'frontmatter 非法或重名：这些目录她读不到，修好 SKILL.md 后重新扫描即可。';
+  String get extRejectedHint =>
+      'frontmatter 非法或重名：这些目录她读不到，修好 SKILL.md 后重新扫描即可。';
   @override
-  String extRejectedLine(Object? dir, Object? reason) =>
-      '$dir：$reason';
+  String extRejectedLine(Object? dir, Object? reason) => '$dir：$reason';
   @override
-  String get extGuideSkillPath => '技能就在 <项目根>/skills/<name>/SKILL.md：目录名即技能名（小写字母、数字、连字符）。';
+  String get extGuideSkillPath =>
+      '技能就在 <项目根>/skills/<name>/SKILL.md：目录名即技能名（小写字母、数字、连字符）。';
   @override
-  String get extGuideSkillTrust => '扫描之后要过信任门——只有你在这里点「确认」写下 skill/installed，它才进 catalog。';
+  String get extGuideSkillTrust =>
+      '扫描之后要过信任门——只有你在这里点「确认」写下 skill/installed，它才进 catalog。';
   @override
   String get extInCatalogBadge => '已进 catalog';
   @override
@@ -6613,8 +7167,7 @@ class ZhStrings extends AppStrings {
   @override
   String get extFieldSizeHash => '体积与指纹';
   @override
-  String extSizeHash(int bytes, String short) =>
-      '$bytes 字节 · $short';
+  String extSizeHash(int bytes, String short) => '$bytes 字节 · $short';
   @override
   String get extFieldTrustDetail => '信任详情';
   @override
@@ -6628,42 +7181,36 @@ class ZhStrings extends AppStrings {
   @override
   String get extActionIgnore => '忽略：收进「已忽略」，不写事件、不进 catalog';
   @override
-  String extConfirmedToast(String name) =>
-      '已确认：$name 已进入 catalog';
+  String extConfirmedToast(String name) => '已确认：$name 已进入 catalog';
   @override
-  String extConfirmFailed(String reason) =>
-      '确认失败：$reason';
+  String extConfirmFailed(String reason) => '确认失败：$reason';
   @override
-  String extIgnoredToast(String name) =>
-      '已忽略：$name（仅本机备忘）';
+  String extIgnoredToast(String name) => '已忽略：$name（仅本机备忘）';
   @override
-  String extRestoredToast(String name) =>
-      '已放回待确认：$name';
+  String extRestoredToast(String name) => '已放回待确认：$name';
   @override
-  String extOpFailed(String reason) =>
-      '操作失败：$reason';
+  String extOpFailed(String reason) => '操作失败：$reason';
   @override
-  String extRetireTitle(String name) =>
-      '停用技能 · $name';
+  String extRetireTitle(String name) => '停用技能 · $name';
   @override
-  String get extRetireBody => '停用 = 收进「已忽略」，她下一轮就不再看到它（catalog 里没有它）。技能文件一个字节都不动，想放回来点「恢复」即可。';
+  String get extRetireBody =>
+      '停用 = 收进「已忽略」，她下一轮就不再看到它（catalog 里没有它）。技能文件一个字节都不动，想放回来点「恢复」即可。';
   @override
   String get extDisable => '停用';
   @override
-  String extDeleteSkillTitle(String name) =>
-      '删除技能 · $name';
+  String extDeleteSkillTitle(String name) => '删除技能 · $name';
   @override
-  String get extDeleteBody => '整个目录会移进回收站（<dataDir>/trash/），「不是 rm -rf」：内容一个字节不改，把那一份移回原处就恢复。删掉之后她下一轮就看不到它了——只想让她暂时看不到，用「停用」。';
+  String get extDeleteBody =>
+      '整个目录会移进回收站（<dataDir>/trash/），「不是 rm -rf」：内容一个字节不改，把那一份移回原处就恢复。删掉之后她下一轮就看不到它了——只想让她暂时看不到，用「停用」。';
   @override
   String get extDelete => '删除';
   @override
-  String extDeletedToast(String name) =>
-      '已删除：$name 已移进回收站（内容未改，可移回恢复）';
+  String extDeletedToast(String name) => '已删除：$name 已移进回收站（内容未改，可移回恢复）';
   @override
-  String extDeleteFailed(String reason) =>
-      '删除失败：$reason';
+  String extDeleteFailed(String reason) => '删除失败：$reason';
   @override
-  String get extCreateHint => '会在 skills/<名字>/SKILL.md 生成一份符合规范的骨架，然后停在待确认——确认之前她看不到它。名字只能用英文小写、数字与连字符（目录名即技能名）。';
+  String get extCreateHint =>
+      '会在 skills/<名字>/SKILL.md 生成一份符合规范的骨架，然后停在待确认——确认之前她看不到它。名字只能用英文小写、数字与连字符（目录名即技能名）。';
   @override
   String get extFieldSkillName => '技能名';
   @override
@@ -6678,52 +7225,53 @@ class ZhStrings extends AppStrings {
   String extSkillCreatedToast(String path) =>
       "已生成 ${path.isEmpty ? 'SKILL.md' : path}，在「待确认」里等你的确认";
   @override
-  String extCreateSkillFailed(String reason) =>
-      '新建失败：$reason';
+  String extCreateSkillFailed(String reason) => '新建失败：$reason';
   @override
   String get extAddServer => '添加服务';
   @override
-  String extMcpSummary(int servers, int running, int tools, String pendingPart) =>
-      '$servers 个服务 · $running 已运行 · 工具 $tools 件$pendingPart';
+  String extMcpSummary(
+    int servers,
+    int running,
+    int tools,
+    String pendingPart,
+  ) => '$servers 个服务 · $running 已运行 · 工具 $tools 件$pendingPart';
   @override
-  String extPendingGrants(int count) =>
-      '待批：她递来的申请单（$count）';
+  String extPendingGrants(int count) => '待批：她递来的申请单（$count）';
   @override
-  String extUnpreparedGrants(int count) =>
-      '还没有进入待批（$count）';
+  String extUnpreparedGrants(int count) => '还没有进入待批（$count）';
   @override
   String get extUnpreparedTitle => '这些申请单还没被框架拾取';
   @override
-  String get extUnpreparedHint => '框架每一拍扫一次申请单目录。刚写完的等下一拍；一直停在这里的多半是没通过校验——那一拍会落一条结局（驳回理由在「已答复」那一段里），文件本身不会被删。';
+  String get extUnpreparedHint =>
+      '框架每一拍扫一次申请单目录。刚写完的等下一拍；一直停在这里的多半是没通过校验——那一拍会落一条结局（驳回理由在「已答复」那一段里），文件本身不会被删。';
   @override
   String get extConfigProblems => '配置问题';
   @override
-  String get extConfigProblemsHint => '已声明但读不出来：修好 config.json 的 mcp.servers 后重新加载。';
+  String get extConfigProblemsHint =>
+      '已声明但读不出来：修好 config.json 的 mcp.servers 后重新加载。';
   @override
   String get extAnsweredTitle => '已答复的申请单';
   @override
-  String get extAnsweredHint => '她递过的单子与它们的结局。批准之后由框架写 config.json；"批准了但没装成"会如实写在这一行里（那与"被驳回"是两件事）。';
+  String get extAnsweredHint =>
+      '她递过的单子与它们的结局。批准之后由框架写 config.json；"批准了但没装成"会如实写在这一行里（那与"被驳回"是两件事）。';
   @override
-  String get extGuideMcp1 => '一个 MCP 服务就是一个可执行程序：主进程按需拉起它、空闲 5 分钟回收，所以"没在跑"是常态。';
+  String get extGuideMcp1 =>
+      '一个 MCP 服务就是一个可执行程序：主进程按需拉起它、空闲 5 分钟回收，所以"没在跑"是常态。';
   @override
-  String get extGuideMcp2 => '工具默认不信任（sideEffect = destructive）：要在 config.json 里为它显式声明才降级，配置改完要重启主进程才接管。';
+  String get extGuideMcp2 =>
+      '工具默认不信任（sideEffect = destructive）：要在 config.json 里为它显式声明才降级，配置改完要重启主进程才接管。';
   @override
   String get extGuideMcp3 => '她可以自己发起增删（写一份申请单，见上面「待批」那一段）——你在这里点批准或驳回即可。';
   @override
-  String extGrantRejectedToast(String suffix) =>
-      '已驳回$suffix——她下一拍会收到这条决定';
+  String extGrantRejectedToast(String suffix) => '已驳回$suffix——她下一拍会收到这条决定';
   @override
-  String extGrantApprovedToast(String suffix) =>
-      '已批准并写进配置$suffix';
+  String extGrantApprovedToast(String suffix) => '已批准并写进配置$suffix';
   @override
-  String extGrantApprovedFailedToast(String failure) =>
-      '已批准，但执行没成功：$failure';
+  String extGrantApprovedFailedToast(String failure) => '已批准，但执行没成功：$failure';
   @override
-  String extGrantDecideFailed(String reason) =>
-      '没能记下这个决定：$reason';
+  String extGrantDecideFailed(String reason) => '没能记下这个决定：$reason';
   @override
-  String get extGrantAfterSkillInstall =>
-      '批准之后装进技能根 skills/<名字>；不会自动执行，要她读才会读';
+  String get extGrantAfterSkillInstall => '批准之后装进技能根 skills/<名字>；不会自动执行，要她读才会读';
   @override
   String get extGrantAfterSkillRemove => '批准之后整目录移进回收站（data/trash/），可移回';
   @override
@@ -6745,15 +7293,19 @@ class ZhStrings extends AppStrings {
   @override
   String grantInboxCommand(String command) => '命令：$command';
   @override
-  String grantInboxRiskSkillScripts(int count) => '带 $count 个可执行脚本；不会自动执行，批准只把它装进技能根。';
+  String grantInboxRiskSkillScripts(int count) =>
+      '带 $count 个可执行脚本；不会自动执行，批准只把它装进技能根。';
   @override
-  String get grantInboxRiskSkillInstall => '不会自动执行：批准只是把它装进技能根（skills/），她读的时候才用到。';
+  String get grantInboxRiskSkillInstall =>
+      '不会自动执行：批准只是把它装进技能根（skills/），她读的时候才用到。';
   @override
   String get grantInboxRiskSkillRemove => '整目录移进回收站（data/trash/），可移回。';
   @override
-  String get grantInboxRiskMcpAdd => '批准后写进配置（config.json 的 mcp.servers[]），它会拉起一个本机进程。';
+  String get grantInboxRiskMcpAdd =>
+      '批准后写进配置（config.json 的 mcp.servers[]），它会拉起一个本机进程。';
   @override
-  String get grantInboxRiskMcpRemove => '从配置里删掉这一条（config.json 的 mcp.servers[]）。';
+  String get grantInboxRiskMcpRemove =>
+      '从配置里删掉这一条（config.json 的 mcp.servers[]）。';
   @override
   String get grantInboxRiskUnknown => '这张单子要做什么，只有详情里说得清。';
   @override
@@ -6801,12 +7353,12 @@ class ZhStrings extends AppStrings {
   @override
   String get extNoServersHint1 => '一个服务就是一个可执行程序：主进程按需拉起、空闲 5 分钟回收，所以「没在跑」是常态。';
   @override
-  String get extNoServersHint2 => '它的工具默认按 destructive 处理，在 config.json 里显式声明才降级；改完要重启主进程才接管。';
+  String get extNoServersHint2 =>
+      '它的工具默认按 destructive 处理，在 config.json 里显式声明才降级；改完要重启主进程才接管。';
   @override
   String get extDisabledBadge => '已停用';
   @override
-  String extToolCountBadge(int count) =>
-      '$count 件工具';
+  String extToolCountBadge(int count) => '$count 件工具';
   @override
   String get extCollapseServer => '折叠这个服务';
   @override
@@ -6814,18 +7366,15 @@ class ZhStrings extends AppStrings {
   @override
   String get extNoDesc => '（没写它做什么——她在索引里只看到这个名字）';
   @override
-  String extSelfReportedDesc(String desc) =>
-      '$desc（它自报的）';
+  String extSelfReportedDesc(String desc) => '$desc（它自报的）';
   @override
   String get extFieldCommand => '启动命令';
   @override
   String get extFieldEnv => '环境变量';
   @override
-  String extLastRun(String at, String suffix) =>
-      '最近一次运行记录：$at$suffix';
+  String extLastRun(String at, String suffix) => '最近一次运行记录：$at$suffix';
   @override
-  String extPidLine(Object? pid) =>
-      '日志里的 pid：$pid';
+  String extPidLine(Object? pid) => '日志里的 pid：$pid';
   @override
   String get extStartingProcess => '正在拉起进程…';
   @override
@@ -6837,8 +7386,7 @@ class ZhStrings extends AppStrings {
   @override
   String get extNoToolDesc => '（这个服务没给描述）';
   @override
-  String extToolsAllListed(int count) =>
-      '清单是完整的：$count 件全在上面。';
+  String extToolsAllListed(int count) => '清单是完整的：$count 件全在上面。';
   @override
   String get extNoChange => '配置本来就是这样，没有改动';
   @override
@@ -6849,20 +7397,22 @@ class ZhStrings extends AppStrings {
   String extMcpToggledToast(String name, String action, String outcome) =>
       '$name 已$action：$outcome';
   @override
-  String extToggleFailed(String reason) =>
-      '切换失败：$reason';
+  String extToggleFailed(String reason) => '切换失败：$reason';
   @override
   String get extEditMcpTitle => '编辑 MCP 服务';
   @override
   String get extAddMcpTitle => '添加 MCP 服务';
   @override
-  String get extMcpFormLead => '一个服务 = 一段启动命令。保存写进 config.json 的 mcp.servers[]，写完即生效：调用走内置的 mcp 工具（它按需拉起这个服务，默认空闲 5 分钟回收）。';
+  String get extMcpFormLead =>
+      '一个服务 = 一段启动命令。保存写进 config.json 的 mcp.servers[]，写完即生效：调用走内置的 mcp 工具（它按需拉起这个服务，默认空闲 5 分钟回收）。';
   @override
   String get extFieldServerName => '服务名';
   @override
-  String get extServerNameHint => '给这个服务起的名字，调用时用得到（只允许字母、数字、- 与 _，如 filesystem）';
+  String get extServerNameHint =>
+      '给这个服务起的名字，调用时用得到（只允许字母、数字、- 与 _，如 filesystem）';
   @override
-  String get extCommandHint => '要拉起的程序：uvx … 或 node D:\\…\\cli.js（绝对路径 .exe 也行）。启动器须在白名单里（node、uvx、python），不许内联执行；npx 在 Windows 上起不来';
+  String get extCommandHint =>
+      '要拉起的程序：uvx … 或 node D:\\…\\cli.js（绝对路径 .exe 也行）。启动器须在白名单里（node、uvx、python），不许内联执行；npx 在 Windows 上起不来';
   @override
   String get extFieldDesc => 'desc（它是干什么的）';
   @override
@@ -6880,22 +7430,21 @@ class ZhStrings extends AppStrings {
   @override
   String get extFieldTestTimeout => '测试连接超时（毫秒）';
   @override
-  String get extTestTimeoutHint => '首次拉包可能要 30s 以上；只影响这个对话框里的「测试连接」（500–60000），不写进配置';
+  String get extTestTimeoutHint =>
+      '首次拉包可能要 30s 以上；只影响这个对话框里的「测试连接」（500–60000），不写进配置';
   @override
   String get extEnableSwitchLabel => '启用这个服务（关掉 = 配置留着但不起进程，调用也不会拉起它）';
   @override
   String get extNameAndCommandRequired => '服务名与 command 都得填';
   @override
-  String extSaveFailed(String reason) =>
-      '保存失败：$reason';
+  String extSaveFailed(String reason) => '保存失败：$reason';
   @override
   String extMcpSavedToast(String saved, String outcome, String note) =>
       '$saved：$outcome$note';
   @override
   String get extFillCommandFirst => '先填 command 再测';
   @override
-  String extTestFailed(String reason) =>
-      '测试失败：$reason';
+  String extTestFailed(String reason) => '测试失败：$reason';
   @override
   String get extConnectOk => '连接成功';
   @override
@@ -6906,30 +7455,28 @@ class ZhStrings extends AppStrings {
   @override
   String get extProbeNoTools => '它声明了 tools 能力但清单是空的：这个服务当前不提供工具。';
   @override
-  String extProtocolLine(String version, String peer) =>
-      '协议版本 $version$peer';
+  String extProtocolLine(String version, String peer) => '协议版本 $version$peer';
   @override
-  String extProbeShutdown(String stages) =>
-      '进程已收掉（$stages）——不留后台进程。';
+  String extProbeShutdown(String stages) => '进程已收掉（$stages）——不留后台进程。';
   @override
   String get extUnknownReason => '未知原因';
   @override
-  String extStderrTail(Object? tail) =>
-      '它的 stderr 尾部：$tail';
+  String extStderrTail(Object? tail) => '它的 stderr 尾部：$tail';
   @override
   String get extGotIt => '知道了';
   @override
-  String extDeleteServerTitle(String name) =>
-      '删除 MCP 服务 · $name';
+  String extDeleteServerTitle(String name) => '删除 MCP 服务 · $name';
   @override
-  String get extDeleteServerBody => '从 config.json 的 mcp.servers[] 里删掉这一条。她的 mcp 工具里不再有这个服务。程序本体不会被卸载。';
+  String get extDeleteServerBody =>
+      '从 config.json 的 mcp.servers[] 里删掉这一条。她的 mcp 工具里不再有这个服务。程序本体不会被卸载。';
   @override
   String extServerDeletedToast(String name, String outcome) =>
       '已删除 $name：$outcome';
   @override
   String get extNoToolRegistry => '还没有工具注册表。';
   @override
-  String get extNoToolRegistryHint => '注册表由运行期装配；本进程读到空清单时不会有条目。MCP 服务的工具不在这个清单里：走内置的 mcp 工具按需看。';
+  String get extNoToolRegistryHint =>
+      '注册表由运行期装配；本进程读到空清单时不会有条目。MCP 服务的工具不在这个清单里：走内置的 mcp 工具按需看。';
   @override
   String get extRefresh => '刷新';
   @override
@@ -6938,7 +7485,8 @@ class ZhStrings extends AppStrings {
   @override
   String get extToolsHint1 => '关掉一件工具不改变能力边界，只是把它的名字从她的清单里拿掉——她下一轮就看不见它了。';
   @override
-  String get extToolsHint2 => 'destructive 类工具本身还有一道独立的开关（tools.destructiveEnabled），这里关不掉那一道。';
+  String get extToolsHint2 =>
+      'destructive 类工具本身还有一道独立的开关（tools.destructiveEnabled），这里关不掉那一道。';
   @override
   String extGroupSummary(int on, int total, String note) =>
       '$on / $total 件启用$note';
@@ -6957,25 +7505,20 @@ class ZhStrings extends AppStrings {
   @override
   String get extToggleOnMessage => '开启：放回她的工具清单';
   @override
-  String extToolFailureLine(String name, String reason) =>
-      '$name：$reason';
+  String extToolFailureLine(String name, String reason) => '$name：$reason';
   @override
-  String extAllToggledToast(String state, int count) =>
-      '$state（$count 件）';
+  String extAllToggledToast(String state, int count) => '$state（$count 件）';
   @override
-  String extSomeFailedToast(int count, String first) =>
-      '有 $count 件没改成：$first';
+  String extSomeFailedToast(int count, String first) => '有 $count 件没改成：$first';
   @override
-  String extRequiredParam(Object? name) =>
-      '$name（必填）';
+  String extRequiredParam(Object? name) => '$name（必填）';
   @override
   String get extAddHook => '添加钩子';
   @override
   String extHookBoundaryNote(String relative) =>
       '$relative 定义的是「谁能改我」：agent 对它只读（写入口被路径守卫拒绝），只有你在这里能改。这类操作都要求确认短语，改完要重启主进程才装配。';
   @override
-  String extHooksSummary(int enabled, int total) =>
-      '$enabled 条生效 / 共 $total 条';
+  String extHooksSummary(int enabled, int total) => '$enabled 条生效 / 共 $total 条';
   @override
   String get extHooksTitle => '钩子条目';
   @override
@@ -6987,9 +7530,11 @@ class ZhStrings extends AppStrings {
   @override
   String get extInvalidEntriesHint => '无效条目不影响其余配置生效，但需要修掉——它现在一条都不会跑。';
   @override
-  String get extHookBoundary1 => '这条线画在"谁能改我"上：钩子能拒绝工具调用、能改写参数，所以 agent 永远改不了这份文件。';
+  String get extHookBoundary1 =>
+      '这条线画在"谁能改我"上：钩子能拒绝工具调用、能改写参数，所以 agent 永远改不了这份文件。';
   @override
-  String get extHookBoundary2 => '从界面写它要带确认短语（X-Confirm: hook-save / hook-remove），写完重启主进程才装配。';
+  String get extHookBoundary2 =>
+      '从界面写它要带确认短语（X-Confirm: hook-save / hook-remove），写完重启主进程才装配。';
   @override
   String get extFieldEvent => '事件';
   @override
@@ -7003,18 +7548,19 @@ class ZhStrings extends AppStrings {
   @override
   String get extDeleteHookTooltip => '删除这条钩子';
   @override
-  String extHookToggledToast(String state) =>
-      '已$state这条钩子——重启主进程后装配';
+  String extHookToggledToast(String state) => '已$state这条钩子——重启主进程后装配';
   @override
   String get extEditHookTitle => '编辑钩子';
   @override
-  String get extHookDialogNote => '钩子会在执行点上跑一条外部命令：stdin 收一段 JSON 上下文，退出码 2 = 拒绝（唯一强制通道），其他非零码不阻塞主流程。这份配置对 agent 只读。';
+  String get extHookDialogNote =>
+      '钩子会在执行点上跑一条外部命令：stdin 收一段 JSON 上下文，退出码 2 = 拒绝（唯一强制通道），其他非零码不阻塞主流程。这份配置对 agent 只读。';
   @override
   String get extFieldExecutionPoint => '执行点';
   @override
   String get extFieldMatcher => 'matcher（正则）';
   @override
-  String get extWakeMatcherHint => '对唤醒来源匹配：timer|file|webhook|manual|heartbeat';
+  String get extWakeMatcherHint =>
+      '对唤醒来源匹配：timer|file|webhook|manual|heartbeat';
   @override
   String get extToolMatcherHint => '对工具名匹配：safe_edit|safe_write';
   @override
@@ -7045,20 +7591,15 @@ class ZhStrings extends AppStrings {
   @override
   String get extReading => '读取中…';
   @override
-  String extStatSkills(int active, int pending) =>
-      '$active 已生效 · $pending 待确认';
+  String extStatSkills(int active, int pending) => '$active 已生效 · $pending 待确认';
   @override
-  String extStatMcp(int servers, int running) =>
-      '$servers 个服务 · $running 已运行';
+  String extStatMcp(int servers, int running) => '$servers 个服务 · $running 已运行';
   @override
-  String extStatTools(int on, int total) =>
-      '$on 件启用 / 共 $total';
+  String extStatTools(int on, int total) => '$on 件启用 / 共 $total';
   @override
-  String extStatHooks(int total, String suffix) =>
-      '$total 条$suffix';
+  String extStatHooks(int total, String suffix) => '$total 条$suffix';
   @override
-  String extPendingPart(int count) =>
-      ' · 待批 $count';
+  String extPendingPart(int count) => ' · 待批 $count';
   @override
   String get extNoReasonGiven => '（没有写理由）';
   @override
@@ -7066,19 +7607,15 @@ class ZhStrings extends AppStrings {
   @override
   String get extServerNoReason => '（服务端没有给原因）';
   @override
-  String extReasonParen(String reason) =>
-      '（$reason）';
+  String extReasonParen(String reason) => '（$reason）';
   @override
   String get extEnabledWord => '启用';
   @override
-  String extSavedWho(String who) =>
-      '已保存$who';
+  String extSavedWho(String who) => '已保存$who';
   @override
-  String extSavedWhoDisabled(String who) =>
-      '已保存$who（停用状态）';
+  String extSavedWhoDisabled(String who) => '已保存$who（停用状态）';
   @override
-  String extIndentedNote(String descNote) =>
-      '　$descNote';
+  String extIndentedNote(String descNote) => '　$descNote';
   @override
   String extPeerVersion(Object? name, Object? version) =>
       ' · 对面自称 $name $version';
@@ -7087,8 +7624,7 @@ class ZhStrings extends AppStrings {
   @override
   String get extAllOffWord => '已全关';
   @override
-  String extEnabledPart(int on) =>
-      ' · $on 条生效';
+  String extEnabledPart(int on) => ' · $on 条生效';
   @override
   String get extDisabledWord => '停用';
 
@@ -7142,37 +7678,40 @@ class ZhStrings extends AppStrings {
   String updateCheckFailed(String reason) => '检查更新失败：$reason';
   @override
   String updateReasonText(String reason) => switch (reason) {
-        'up-to-date' => '已是最新',
-        'older-than-current' => '站点上的版本比当前旧',
-        'channel-mismatch' => '通道不一致',
-        'prerelease' => 'stable 通道不把预发布当更新',
-        'pending' => '站点还没发完（_pending）',
-        'newer' => '有新版本',
-        'below-minimum' => '低于最低可用版本',
-        'network' => '网络不通',
-        'timeout' => '超时',
-        'bad-json' => '返回的不是合法 JSON',
-        'bad-shape' => '返回内容不符合约定',
-        'too-large' => '返回内容过大',
-        'bad-endpoint' => '端点地址不可用',
-        'bad-current-version' => '当前版本号无法解析',
-        'never-checked' => '还没查过',
-        _ when reason.startsWith('http-') => 'HTTP ${reason.substring(5)}',
-        _ => reason.isEmpty ? '未知原因' : reason,
-      };
+    'up-to-date' => '已是最新',
+    'older-than-current' => '站点上的版本比当前旧',
+    'channel-mismatch' => '通道不一致',
+    'prerelease' => 'stable 通道不把预发布当更新',
+    'pending' => '站点还没发完（_pending）',
+    'newer' => '有新版本',
+    'below-minimum' => '低于最低可用版本',
+    'network' => '网络不通',
+    'timeout' => '超时',
+    'bad-json' => '返回的不是合法 JSON',
+    'bad-shape' => '返回内容不符合约定',
+    'too-large' => '返回内容过大',
+    'bad-endpoint' => '端点地址不可用',
+    'bad-current-version' => '当前版本号无法解析',
+    'never-checked' => '还没查过',
+    _ when reason.startsWith('http-') => 'HTTP ${reason.substring(5)}',
+    _ => reason.isEmpty ? '未知原因' : reason,
+  };
   @override
   String trayUpdateItem(String latest) => '有新版本 v$latest · 查看';
   @override
   String trayUpdateRequiredItem(String latest) => '有新版本 v$latest · 请升级';
   @override
-  String trayUpdateTooltip(String name, String latest) => '$name · 有新版本 v$latest';
+  String trayUpdateTooltip(String name, String latest) =>
+      '$name · 有新版本 v$latest';
   @override
-  String trayUpdateRequiredTooltip(String name, String latest) => '$name · 需要升级到 v$latest';
+  String trayUpdateRequiredTooltip(String name, String latest) =>
+      '$name · 需要升级到 v$latest';
 
   // ── 更新检查：三处共用的那几句 ──
 
   @override
-  String updateNewVersionTitle(String latest, String current) => '有新版本 v$latest（当前 v$current）';
+  String updateNewVersionTitle(String latest, String current) =>
+      '有新版本 v$latest（当前 v$current）';
   @override
   String get updateRequiredNotice => '低于最低可用版本，请先升级';
   @override
@@ -7202,14 +7741,15 @@ class ZhStrings extends AppStrings {
   @override
   String get updateReleasePage => '官方发布页';
   @override
-  String updatePlatformLine(String os, String arch, String kind) => '$os $arch · ${updateKindLabel(kind)}';
+  String updatePlatformLine(String os, String arch, String kind) =>
+      '$os $arch · ${updateKindLabel(kind)}';
   @override
   String updateKindLabel(String kind) => switch (kind) {
-        'installer' => '安装包',
-        'portable' => '便携版',
-        'update' => '更新包',
-        _ => kind,
-      };
+    'installer' => '安装包',
+    'portable' => '便携版',
+    'update' => '更新包',
+    _ => kind,
+  };
   @override
   String get updateChannelSwitchNote => '切换会清掉 12/24 小时的节流，并立刻查一次。';
   @override
@@ -7228,24 +7768,23 @@ class ZhStrings extends AppStrings {
   @override
   String stickersLoadFailed(String error) => '表情包读不出来：$error';
   @override
-  String affectSaved(bool enabled, bool applied) => applied
-      ? (enabled ? '已开启情绪系统，下一轮生效' : '已关闭情绪系统，下一轮生效')
-      : '配置已保存，等待生效';
+  String affectSaved(bool enabled, bool applied) =>
+      applied ? (enabled ? '已开启情绪系统，下一轮生效' : '已关闭情绪系统，下一轮生效') : '配置已保存，等待生效';
   @override
   String affectSaveFailed(String reason) => '情绪开关保存失败：$reason';
   @override
   String affectLoadFailed(String reason) => '情绪状态读取失败：$reason';
   @override
   String affectReason(String code) => switch (code) {
-        'owner_setback' => '用户遇到困难',
-        'owner_success' => '用户有了进展',
-        'friendly_contact' => '最近的友善交流',
-        'unfriendly_contact' => '有依据的不友善交流',
-        'task_success' => '刚完成的任务',
-        'task_failure' => '刚遇到的执行挫折',
-        'new_discovery' => '刚发现的新信息',
-        _ => '近期经历',
-      };
+    'owner_setback' => '用户遇到困难',
+    'owner_success' => '用户有了进展',
+    'friendly_contact' => '最近的友善交流',
+    'unfriendly_contact' => '有依据的不友善交流',
+    'task_success' => '刚完成的任务',
+    'task_failure' => '刚遇到的执行挫折',
+    'new_discovery' => '刚发现的新信息',
+    _ => '近期经历',
+  };
 
   // ── 情绪页（设计稿 2026-10-31）──────────────────────────────────────
   @override
@@ -7266,32 +7805,32 @@ class ZhStrings extends AppStrings {
   String moodUpdatedMinutesAgo(int minutes) => '$minutes 分钟前';
   @override
   String moodState(String key) => switch (key) {
-        'positive' => '积极而轻快',
-        'low' => '情绪正在回落',
-        'quiet' => '状态平稳',
-        'off' => '情绪系统已关闭',
-        _ => '状态稳定',
-      };
+    'positive' => '积极而轻快',
+    'low' => '情绪正在回落',
+    'quiet' => '状态平稳',
+    'off' => '情绪系统已关闭',
+    _ => '状态稳定',
+  };
   @override
   String moodHeadline(String key) => switch (key) {
-        'joy' => '心情不错，愿意多说两句。',
-        'warmth' => '温和，想靠近一点。',
-        'concern' => '平静，带一点牵挂。',
-        'shyness' => '有点害羞，话到嘴边又收住。',
-        'distress' => '情绪偏低，正在慢慢恢复。',
-        'irritation' => '有点烦，正在平复。',
-        'off' => '情绪系统现在是关着的。',
-        'empty' => '还没有新的情绪变化。',
-        _ => '平静，没有明显的起伏。',
-      };
+    'joy' => '心情不错，愿意多说两句。',
+    'warmth' => '温和，想靠近一点。',
+    'concern' => '平静，带一点牵挂。',
+    'shyness' => '有点害羞，话到嘴边又收住。',
+    'distress' => '情绪偏低，正在慢慢恢复。',
+    'irritation' => '有点烦，正在平复。',
+    'off' => '情绪系统现在是关着的。',
+    'empty' => '还没有新的情绪变化。',
+    _ => '平静，没有明显的起伏。',
+  };
   @override
   String moodDescription(String key) => switch (key) {
-        'positive' => '整体心境偏向积极。她更愿意回应，也愿意分享此刻的想法。',
-        'low' => '整体心境偏低。她在慢慢平复，正常任务仍会照常进行。',
-        'off' => '打开后她才会有一层当前情绪，会影响语气与表情包。',
-        'empty' => '等下一次评价之后，这里会显示她的心境。',
-        _ => '整体心境偏向温和。她仍在留意最近的对话，并不急着打扰你。',
-      };
+    'positive' => '整体心境偏向积极。她更愿意回应，也愿意分享此刻的想法。',
+    'low' => '整体心境偏低。她在慢慢平复，正常任务仍会照常进行。',
+    'off' => '打开后她才会有一层当前情绪，会影响语气与表情包。',
+    'empty' => '等下一次评价之后，这里会显示她的心境。',
+    _ => '整体心境偏向温和。她仍在留意最近的对话，并不急着打扰你。',
+  };
   @override
   String get moodNoNewAppraisalTitle => '暂时没有新评价。';
   @override
@@ -7314,16 +7853,16 @@ class ZhStrings extends AppStrings {
   String get moodArousalLabel => '活跃程度';
   @override
   String moodValenceWord(String key) => switch (key) {
-        'high' => '积极',
-        'low' => '偏低',
-        _ => '温和',
-      };
+    'high' => '积极',
+    'low' => '偏低',
+    _ => '温和',
+  };
   @override
   String moodArousalWord(String key) => switch (key) {
-        'high' => '较活跃',
-        'low' => '低活跃',
-        _ => '适中',
-      };
+    'high' => '较活跃',
+    'low' => '低活跃',
+    _ => '适中',
+  };
   @override
   String moodArousalValue(int percent) => '$percent%';
   @override
@@ -7336,14 +7875,14 @@ class ZhStrings extends AppStrings {
   String get moodEmotionsEmpty => '还没有可显示的情绪维度。';
   @override
   String moodEmotion(String key) => switch (key) {
-        'joy' => '喜悦',
-        'distress' => '低落',
-        'concern' => '关切',
-        'irritation' => '烦躁',
-        'warmth' => '温暖',
-        'shyness' => '害羞',
-        _ => key,
-      };
+    'joy' => '喜悦',
+    'distress' => '低落',
+    'concern' => '关切',
+    'irritation' => '烦躁',
+    'warmth' => '温暖',
+    'shyness' => '害羞',
+    _ => key,
+  };
   @override
   String get moodTimelineTitle => '心境轨迹';
   @override
@@ -7370,15 +7909,16 @@ class ZhStrings extends AppStrings {
   String get moodFactorsEmpty => '还没有新的情绪影响。';
   @override
   String moodSource(String code) => switch (code) {
-        'task' => '任务',
-        'discovery' => '探索',
-        'chat' => '对话',
-        _ => '其他',
-      };
+    'task' => '任务',
+    'discovery' => '探索',
+    'chat' => '对话',
+    _ => '其他',
+  };
   @override
   String moodFactorMeta(String time, String source) => '$time · $source';
   @override
-  String moodFactorEffect(String emotion, String strength) => '$emotion $strength';
+  String moodFactorEffect(String emotion, String strength) =>
+      '$emotion $strength';
   @override
   String get moodSheetTitle => '状态详情';
   @override
@@ -7458,19 +7998,19 @@ class ZhStrings extends AppStrings {
   String get intimacyNoData => '还没有读数';
   @override
   String intimacyMetric(String key) => switch (key) {
-        'intimacy' => '亲密',
-        'desire' => '情欲',
-        'satisfaction' => '满足',
-        'restraint' => '克制',
-        _ => key,
-      };
+    'intimacy' => '亲密',
+    'desire' => '情欲',
+    'satisfaction' => '满足',
+    'restraint' => '克制',
+    _ => key,
+  };
   @override
   String intimacyLevel(String key) => switch (key) {
-        'subtle' => '含蓄',
-        'obvious' => '明显',
-        'strong' => '强烈',
-        _ => key,
-      };
+    'subtle' => '含蓄',
+    'obvious' => '明显',
+    'strong' => '强烈',
+    _ => key,
+  };
   @override
   String intimacyLevelValue(String level) => '档位 ${intimacyLevel(level)}';
   @override
@@ -7480,7 +8020,8 @@ class ZhStrings extends AppStrings {
   @override
   String get intimacyCausesEmpty => '还没有新的变化。';
   @override
-  String intimacyCauseLabel(String label) => label.trim().isEmpty ? '近期经历' : label;
+  String intimacyCauseLabel(String label) =>
+      label.trim().isEmpty ? '近期经历' : label;
   @override
   String get intimacyHistoryTitle => '最近走势';
   @override
@@ -7516,11 +8057,11 @@ class ZhStrings extends AppStrings {
   @override
   String intimacyLoadFailed(String reason) => '亲密状态读取失败：$reason';
   @override
-  String intimacySaved(bool enabled, bool applied) => applied
-      ? (enabled ? '已开启亲密，下一轮生效' : '已关闭亲密，下一轮生效')
-      : '配置已保存，等待生效';
+  String intimacySaved(bool enabled, bool applied) =>
+      applied ? (enabled ? '已开启亲密，下一轮生效' : '已关闭亲密，下一轮生效') : '配置已保存，等待生效';
   @override
-  String intimacyLevelSaved(String level, bool applied) => applied ? '上限已设为 $level' : '配置已保存，等待生效';
+  String intimacyLevelSaved(String level, bool applied) =>
+      applied ? '上限已设为 $level' : '配置已保存，等待生效';
   @override
   String intimacySaveFailed(String reason) => '亲密设置保存失败：$reason';
 
@@ -7671,42 +8212,47 @@ class ZhStrings extends AppStrings {
   @override
   String get logsTypeStickerReviewed => '表情包审核';
   @override
-  String logsAffectSummary(String reason, String emotion, String strength) => '$reason · $emotion $strength';
+  String logsAffectSummary(String reason, String emotion, String strength) =>
+      '$reason · $emotion $strength';
   @override
-  String logsStickerSentSummary(String source, String tag, String position, int candidates) =>
-      '$source · ${tag.isEmpty ? '无标签' : tag} · $position · 候选 $candidates';
+  String logsStickerSentSummary(
+    String source,
+    String tag,
+    String position,
+    int candidates,
+  ) => '$source · ${tag.isEmpty ? '无标签' : tag} · $position · 候选 $candidates';
   @override
   String logsStickerTaggedSummary(List<String> tags, String confidence) =>
       '${tags.isEmpty ? '无标签' : tags.join(' / ')} · 置信 $confidence';
   @override
   String logsStickerSource(String source) => switch (source) {
-        'active' => '主动',
-        'passive' => '被动',
-        _ => source,
-      };
+    'active' => '主动',
+    'passive' => '被动',
+    _ => source,
+  };
   @override
   String logsStickerPosition(String position) => switch (position) {
-        'after' => '配文后',
-        'before' => '配文前',
-        'only' => '单独发送',
-        _ => position,
-      };
+    'after' => '配文后',
+    'before' => '配文前',
+    'only' => '单独发送',
+    _ => position,
+  };
   @override
   String logsStickerHarvestResult(String result) => switch (result) {
-        'auto-approved' => '自动入库',
-        'pending' => '待审',
-        'rejected' => '已拒绝',
-        _ => result,
-      };
+    'auto-approved' => '自动入库',
+    'pending' => '待审',
+    'rejected' => '已拒绝',
+    _ => result,
+  };
   @override
   String logsStickerReviewAction(String action) => switch (action) {
-        'approve' => '批准',
-        'reject' => '拒绝',
-        'restore' => '恢复',
-        'delete' => '删除',
-        'block' => '停用',
-        _ => action,
-      };
+    'approve' => '批准',
+    'reject' => '拒绝',
+    'restore' => '恢复',
+    'delete' => '删除',
+    'block' => '停用',
+    _ => action,
+  };
 
   @override
   String get stickerTitle => '表情包';
@@ -7727,7 +8273,8 @@ class ZhStrings extends AppStrings {
   @override
   String get stickerUpload => '上传贴纸';
   @override
-  String get stickerUploadHint => '支持 PNG / JPEG / GIF / WebP，单张不超过 8MB。先打标预览，确认后才入库。';
+  String get stickerUploadHint =>
+      '支持 PNG / JPEG / GIF / WebP，单张不超过 8MB。先打标预览，确认后才入库。';
   @override
   String get stickerEnabled => '启用表情包';
   @override
@@ -7739,7 +8286,8 @@ class ZhStrings extends AppStrings {
   @override
   String get stickerActiveProbability => '允许发送频率';
   @override
-  String get stickerActiveProbabilityHint => '每次 speak 带表情时按这个概率放行；0 = 永不，1 = 都尝试。';
+  String get stickerActiveProbabilityHint =>
+      '每次 speak 带表情时按这个概率放行；0 = 永不，1 = 都尝试。';
   @override
   String get stickerCooldownSeconds => '熔断间隔（秒）';
   @override
@@ -7801,28 +8349,29 @@ class ZhStrings extends AppStrings {
   @override
   String get stickerConfidence => '打标置信度';
   @override
-  String stickerStats(int approved, int pending, int sent) => '已入库 $approved · 待审 $pending · 今日发送 $sent';
+  String stickerStats(int approved, int pending, int sent) =>
+      '已入库 $approved · 待审 $pending · 今日发送 $sent';
   @override
   String stickerSource(String source) => switch (source) {
-        'owner' => '用户',
-        'collected' => '采收',
-        'plugin' => '插件',
-        _ => source,
-      };
+    'owner' => '用户',
+    'collected' => '采收',
+    'plugin' => '插件',
+    _ => source,
+  };
   @override
   String stickerIntensity(String intensity) => switch (intensity) {
-        'strong' => '强烈',
-        'mild' => '轻微',
-        _ => '明显',
-      };
+    'strong' => '强烈',
+    'mild' => '轻微',
+    _ => '明显',
+  };
   @override
   String stickerStatus(String status) => switch (status) {
-        'pending' => '待审',
-        'approved' => '已入库',
-        'rejected' => '已拒绝',
-        'blocked' => '已停用',
-        _ => status,
-      };
+    'pending' => '待审',
+    'approved' => '已入库',
+    'rejected' => '已拒绝',
+    'blocked' => '已停用',
+    _ => status,
+  };
   @override
   String stickerUseCount(int count) => '使用 $count 次';
   @override
@@ -8048,11 +8597,13 @@ class EnStrings extends AppStrings {
   @override
   String configReadFailed(String reason) => 'Failed to read config: $reason';
   @override
-  String requestWaiting(String request, int seconds) => 'Waiting on $request ($seconds s)';
+  String requestWaiting(String request, int seconds) =>
+      'Waiting on $request ($seconds s)';
   @override
-  String requestTimeout(String request, int seconds, bool maybeDone) => maybeDone
+  String requestTimeout(String request, int seconds, bool maybeDone) =>
+      maybeDone
       ? '$request got no answer for $seconds s. This action may already have taken effect — '
-          'check that page first, then decide whether to retry.'
+            'check that page first, then decide whether to retry.'
       : '$request got no answer for $seconds s. This one did not come back — press Retry.';
   @override
   String requestStreamStalled(int seconds) =>
@@ -8091,7 +8642,9 @@ class EnStrings extends AppStrings {
       if (backendPid > 0) 'new pid $backendPid',
       if (portReady) 'port ready',
     ];
-    return parts.isEmpty ? 'the server gave no evidence (no pid, no port)' : parts.join(' · ');
+    return parts.isEmpty
+        ? 'the server gave no evidence (no pid, no port)'
+        : parts.join(' · ');
   }
 
   @override
@@ -8112,7 +8665,8 @@ class EnStrings extends AppStrings {
       'Do not press it again just yet: the machine may already be restarting, and the UI will '
       'reconnect on its own and tell you how it went.';
   @override
-  String get restartNoConclusion => 'Restart dispatched, but the server returned no verdict';
+  String get restartNoConclusion =>
+      'Restart dispatched, but the server returned no verdict';
   @override
   String get restartBackReady => 'Ready: the backend is back';
   @override
@@ -8139,7 +8693,7 @@ class EnStrings extends AppStrings {
       'This ends the backend as well (including the protocol side it started), '
       'then closes this window.\n'
       '${busy ? 'She is in the middle of a turn: that turn will be interrupted and settled '
-          'by the recovery flow on the next start.\n' : ''}'
+                'by the recovery flow on the next start.\n' : ''}'
       'Windows has no externally reachable graceful shutdown, so this is a hard kill: '
       'you may have to log the protocol side in again in its WebUI.\n'
       'To close only the UI (she keeps running in the background), use "Quit UI" in the tray.';
@@ -8151,15 +8705,18 @@ class EnStrings extends AppStrings {
   String quitAllFailed(String reason) =>
       'The backend did not stop: $reason (the UI was left open so you are not misled)';
   @override
-  String get quitAllDone => 'Quit everything: the UI and the backend are both gone';
+  String get quitAllDone =>
+      'Quit everything: the UI and the backend are both gone';
 
   @override
-  String get onboardingManualSaved => 'Guide finished; the steps you changed were saved';
+  String get onboardingManualSaved =>
+      'Guide finished; the steps you changed were saved';
   @override
   String get onboardingManualNoChanges =>
       'Just had a look: nothing was changed and nothing was written';
   @override
-  String get onboardingManualOpenBadge => 'Opened manually · not part of the first-run check';
+  String get onboardingManualOpenBadge =>
+      'Opened manually · not part of the first-run check';
 
   // ── First-run guide (six-step card) ──
   @override
@@ -8221,13 +8778,16 @@ class EnStrings extends AppStrings {
   @override
   String get onboardingQqAppIdLabel => 'AppID';
   @override
-  String get onboardingQqAppIdHint => 'The bot ID from the open-platform console.';
+  String get onboardingQqAppIdHint =>
+      'The bot ID from the open-platform console.';
   @override
   String get onboardingQqAppSecretLabel => 'AppSecret';
   @override
-  String get onboardingQqAppSecretHint => 'The secret used to fetch an access_token.';
+  String get onboardingQqAppSecretHint =>
+      'The secret used to fetch an access_token.';
   @override
-  String onboardingSecretConfigured(String? mask) => mask == null || mask.isEmpty
+  String onboardingSecretConfigured(String? mask) =>
+      mask == null || mask.isEmpty
       ? 'Configured; paste a new value to overwrite'
       : 'Configured ($mask); paste a new value to overwrite';
   @override
@@ -8246,9 +8806,11 @@ class EnStrings extends AppStrings {
   @override
   String get onboardingQqBindStarting => 'Requesting a QR code from QQ…';
   @override
-  String get onboardingQqBindWaitScan => 'Scan the QR code in the browser with mobile QQ.';
+  String get onboardingQqBindWaitScan =>
+      'Scan the QR code in the browser with mobile QQ.';
   @override
-  String get onboardingQqBindWaiting => 'Waiting for the scan… (checking every 2 seconds; you can cancel)';
+  String get onboardingQqBindWaiting =>
+      'Waiting for the scan… (checking every 2 seconds; you can cancel)';
   @override
   String get onboardingQqBindSuccess => 'Bound successfully';
   @override
@@ -8256,7 +8818,8 @@ class EnStrings extends AppStrings {
       'The AppID and AppSecret are saved and enabled (written to data/.keys.json; the channel configuration '
       'takes effect after a restart).';
   @override
-  String get onboardingQqBindRegenerate => 'The QR code expired — generate a new one';
+  String get onboardingQqBindRegenerate =>
+      'The QR code expired — generate a new one';
   @override
   String get onboardingQqBindTestConnection => 'Test connection';
   @override
@@ -8267,13 +8830,17 @@ class EnStrings extends AppStrings {
   String onboardingQqBindTokenOk(int expiresIn) =>
       'Connection test passed: access_token obtained (valid for $expiresIn s).';
   @override
-  String onboardingQqBindTokenFailed(String reason) => 'Connection test failed: $reason';
+  String onboardingQqBindTokenFailed(String reason) =>
+      'Connection test failed: $reason';
   @override
-  String onboardingQqBindStartFailed(String reason) => 'Could not start the QR binding: $reason';
+  String onboardingQqBindStartFailed(String reason) =>
+      'Could not start the QR binding: $reason';
   @override
-  String onboardingQqBindStatusFailed(String reason) => 'Could not read the QR status: $reason';
+  String onboardingQqBindStatusFailed(String reason) =>
+      'Could not read the QR status: $reason';
   @override
-  String get onboardingOnebotDetail => 'You can configure it separately after setup.';
+  String get onboardingOnebotDetail =>
+      'You can configure it separately after setup.';
   // 英文那份里那个 `名字：` 是 IDENTITY.md 里**真的那一行**（数据，不是界面词），不能翻。
   @override
   String get onboardingPersonaHint =>
@@ -8295,9 +8862,11 @@ class EnStrings extends AppStrings {
   String get onboardingStepDepsNote =>
       'Without them some tools do not work: the pwsh tools, rg for grep, es for find, and the python lane.';
   @override
-  String get onboardingDepsInstallLabel => 'Download and install these external dependencies';
+  String get onboardingDepsInstallLabel =>
+      'Download and install these external dependencies';
   @override
-  String get onboardingDepsAllReady => 'All four are already in place; just press Done.';
+  String get onboardingDepsAllReady =>
+      'All four are already in place; just press Done.';
   @override
   String get onboardingDepsStatusReady => 'ready';
   @override
@@ -8309,28 +8878,34 @@ class EnStrings extends AppStrings {
   @override
   String onboardingDepsItemFailed(String reason) => 'failed: $reason';
   @override
-  String onboardingDepsSummary(int ok, int failed) => 'Done $ok / failed $failed';
+  String onboardingDepsSummary(int ok, int failed) =>
+      'Done $ok / failed $failed';
   @override
   String get onboardingDepsRetry => 'Retry';
   @override
-  String onboardingDepsLastRun(int ok, int failed) => 'Last run: done $ok / failed $failed';
+  String onboardingDepsLastRun(int ok, int failed) =>
+      'Last run: done $ok / failed $failed';
   @override
-  String onboardingDepsReadFailed(String reason) => 'Could not read the dependency status: $reason';
+  String onboardingDepsReadFailed(String reason) =>
+      'Could not read the dependency status: $reason';
   @override
   String get onboardingDepsUnavailable =>
       'This backend has no dependency manager wired in, so nothing can be installed; just press Done.';
   @override
   String get onboardingRestartTitle => 'Restart needed';
   @override
-  String get onboardingRestartBody => 'The dependencies are installed; restart the UI for them to take effect.';
+  String get onboardingRestartBody =>
+      'The dependencies are installed; restart the UI for them to take effect.';
   @override
   String get onboardingRestartNow => 'Restart now';
   @override
   String get onboardingRestartLater => 'Later';
   @override
-  String onboardingOpenLinkFailed(String url) => 'Could not open a browser; the address is $url';
+  String onboardingOpenLinkFailed(String url) =>
+      'Could not open a browser; the address is $url';
   @override
-  String onboardingChannelSaveFailed(String reason) => 'The channel switch was not saved: $reason';
+  String onboardingChannelSaveFailed(String reason) =>
+      'The channel switch was not saved: $reason';
   @override
   String onboardingSecretsSaveFailed(String reason) =>
       'The AppID / AppSecret were not saved: $reason';
@@ -8355,13 +8930,16 @@ class EnStrings extends AppStrings {
   @override
   String get onboardingModelLabel => 'Model';
   @override
-  String get onboardingModelRequired => 'The model name cannot be empty; nothing was saved';
+  String get onboardingModelRequired =>
+      'The model name cannot be empty; nothing was saved';
   @override
   String get onboardingBaseUrlLabel => 'Base URL';
   @override
-  String get onboardingBaseUrlRequired => 'The Base URL cannot be empty; nothing was saved';
+  String get onboardingBaseUrlRequired =>
+      'The Base URL cannot be empty; nothing was saved';
   @override
-  String get onboardingBaseUrlNote => 'API root URL, without the /responses suffix.';
+  String get onboardingBaseUrlNote =>
+      'API root URL, without the /responses suffix.';
   @override
   String get onboardingApiKeyLabel => 'API key';
   @override
@@ -8397,9 +8975,11 @@ class EnStrings extends AppStrings {
   @override
   String get onboardingProbeNoMatch => 'No matching models';
   @override
-  String get onboardingProbeEmptyList => 'This endpoint returned no models; type the model name manually.';
+  String get onboardingProbeEmptyList =>
+      'This endpoint returned no models; type the model name manually.';
   @override
-  String onboardingProbeBadge(String protocol, bool supported) => '$protocol ${supported ? '✓' : '✗'}';
+  String onboardingProbeBadge(String protocol, bool supported) =>
+      '$protocol ${supported ? '✓' : '✗'}';
   @override
   String get onboardingProbeUnreachable =>
       'Probe failed: cannot reach this endpoint (network unreachable or timed out). You can still type the model name manually.';
@@ -8415,7 +8995,8 @@ class EnStrings extends AppStrings {
   @override
   String onboardingProbeFailed(String reason) => 'Probe failed: $reason';
   @override
-  String onboardingProbeOnlyProtocol(String protocol) => 'This endpoint only supports $protocol';
+  String onboardingProbeOnlyProtocol(String protocol) =>
+      'This endpoint only supports $protocol';
   @override
   String onboardingProbeWarning(String warning) => 'Note: $warning';
 
@@ -8430,13 +9011,15 @@ class EnStrings extends AppStrings {
   @override
   String get jumpToLatestNew => 'New messages · Jump to latest';
   @override
-  String get earlierFailed => 'Earlier records failed to load. Scroll up to retry.';
+  String get earlierFailed =>
+      'Earlier records failed to load. Scroll up to retry.';
   @override
   String get noEarlier => 'No earlier records';
   @override
   String get historyErrorTitle => 'Failed to load conversation';
   @override
-  String get historyErrorMessage => 'Could not read the conversation from the main process.';
+  String get historyErrorMessage =>
+      'Could not read the conversation from the main process.';
   @override
   String get chatEmptyTitle => 'No conversation yet';
   @override
@@ -8444,7 +9027,8 @@ class EnStrings extends AppStrings {
   @override
   String get chatEmptyAction => 'Type a message';
   @override
-  String get chatEmptyHint => 'Send something below and the conversation shows up here.';
+  String get chatEmptyHint =>
+      'Send something below and the conversation shows up here.';
   @override
   String get tagFrameworkNotice => 'Framework notice';
   @override
@@ -8454,11 +9038,15 @@ class EnStrings extends AppStrings {
   @override
   String get tagContextBoundary => 'Context boundary';
   @override
-  String get injectionCardTitle => 'An outside message looks like it is trying to direct her';
+  String get tagWebhook => 'External event';
+  @override
+  String get injectionCardTitle =>
+      'An outside message looks like it is trying to direct her';
   @override
   String get unnamedSender => 'Unnamed conversation';
   @override
-  String receivedFrom(String sender, String id) => 'Received from $sender ($id)';
+  String receivedFrom(String sender, String id) =>
+      'Received from $sender ($id)';
   @override
   String get dash => '—';
   @override
@@ -8510,7 +9098,8 @@ class EnStrings extends AppStrings {
   @override
   String get contextCompactedHere => 'Context compacted here';
   @override
-  String get contextClearedHereDetail => 'Nothing before this line counts toward her context';
+  String get contextClearedHereDetail =>
+      'Nothing before this line counts toward her context';
   @override
   String get contextCompactedHereDetail =>
       'Everything before this line is replaced by a handover note and no longer counted turn by turn';
@@ -8555,12 +9144,15 @@ class EnStrings extends AppStrings {
     if (k >= 100) return '${k.round()}k';
     return '${k.toStringAsFixed(1)}k';
   }
+
   @override
-  String get toastContextCleared => 'Context cleared. The conversation starts from zero.';
+  String get toastContextCleared =>
+      'Context cleared. The conversation starts from zero.';
   @override
   String toastClearFailed(String reason) => 'Clear failed: $reason';
   @override
-  String get toastDream => 'Asked her to dream — the result is written to memory, visible in Logs';
+  String get toastDream =>
+      'Asked her to dream — the result is written to memory, visible in Logs';
   @override
   String toastTriggerFailed(String reason) => 'Trigger failed: $reason';
   @override
@@ -8572,11 +9164,13 @@ class EnStrings extends AppStrings {
   @override
   String get settingsTitle => 'Settings';
   @override
-  String get settingsSubtitle => 'Status, channels, persona and local parameters';
+  String get settingsSubtitle =>
+      'Status, channels, persona and local parameters';
   @override
   String get settingsSectionUi => 'Interface';
   @override
-  String get settingsUiNote => 'Theme and window behaviour. Local only, never written to config.';
+  String get settingsUiNote =>
+      'Theme and window behaviour. Local only, never written to config.';
   @override
   String get instantApply => 'Applies immediately';
   @override
@@ -8622,11 +9216,13 @@ class EnStrings extends AppStrings {
   @override
   String get stringsOverrideNone => 'No overrides (built-in text)';
   @override
-  String stringsOverrideLoaded(int zh, int en) => 'Loaded ${zh + en} override(s) (zh $zh / en $en)';
+  String stringsOverrideLoaded(int zh, int en) =>
+      'Loaded ${zh + en} override(s) (zh $zh / en $en)';
   @override
   String stringsOverrideFailed(String reason) => 'Parse failed: $reason';
   @override
-  String stringsOverrideUnreadable(String detail) => 'Cannot read the file ($detail)';
+  String stringsOverrideUnreadable(String detail) =>
+      'Cannot read the file ($detail)';
   @override
   String stringsOverrideBadJson(String detail) => 'Invalid JSON ($detail)';
   @override
@@ -8638,7 +9234,8 @@ class EnStrings extends AppStrings {
   @override
   String stringsOverrideExported(String path) => 'Template written to $path';
   @override
-  String stringsOverrideExportFailed(String reason) => 'Could not write the template: $reason';
+  String stringsOverrideExportFailed(String reason) =>
+      'Could not write the template: $reason';
   @override
   String stringsOverrideOpenFailed(String path) => 'Could not open $path';
 
@@ -8668,7 +9265,8 @@ class EnStrings extends AppStrings {
   String get settingsNavAbout => 'About';
   // ── Overview page ──
   @override
-  String get overviewSubtitle => 'Current status, usage, and things waiting for you';
+  String get overviewSubtitle =>
+      'Current status, usage, and things waiting for you';
   @override
   String get overviewSectionAdvice => 'Suggestions';
   @override
@@ -8678,7 +9276,8 @@ class EnStrings extends AppStrings {
       'Persona assets are not initialized yet: IDENTITY.md is still the template. '
       'Fill in who she is and how she speaks.';
   @override
-  String get overviewNoPendingCalls => 'Nothing is waiting for a decision right now';
+  String get overviewNoPendingCalls =>
+      'Nothing is waiting for a decision right now';
   @override
   String get overviewTimerCancelTitle => 'Cancel this timer?';
   @override
@@ -8708,7 +9307,8 @@ class EnStrings extends AppStrings {
   @override
   String get overviewActFallback => 'Open';
   @override
-  String get overviewDeadLettersUnread => 'Dead-letter details are unavailable; refresh and look again.';
+  String get overviewDeadLettersUnread =>
+      'Dead-letter details are unavailable; refresh and look again.';
   @override
   String get overviewUnknownSession => 'Unknown chat';
   @override
@@ -8791,9 +9391,11 @@ class EnStrings extends AppStrings {
   String get overviewContextErrorHint =>
       'Status and usage are unaffected; this block returns once the data is readable.';
   @override
-  String get overviewContextEmpty => 'No requests yet — numbers appear after her next turn';
+  String get overviewContextEmpty =>
+      'No requests yet — numbers appear after her next turn';
   @override
-  String get overviewContextNotObject => 'The response was not a context breakdown';
+  String get overviewContextNotObject =>
+      'The response was not a context breakdown';
   @override
   String get overviewContextKeepOn => 'on';
   @override
@@ -8820,7 +9422,8 @@ class EnStrings extends AppStrings {
   String overviewTimerCancelFailed(String timerId, String reason) =>
       'Could not cancel $timerId: $reason';
   @override
-  String overviewTimerCancelToastFailed(String reason) => 'Cancel failed: $reason';
+  String overviewTimerCancelToastFailed(String reason) =>
+      'Cancel failed: $reason';
   @override
   String overviewMarkFailedToast(String reason) => 'Could not mark it: $reason';
   @override
@@ -8838,10 +9441,12 @@ class EnStrings extends AppStrings {
   String overviewDeadActionFailed(String verb, int seq, String reason) =>
       '$verb seq $seq failed: $reason';
   @override
-  String overviewDeadActionToastFailed(String verb, String reason) => '$verb failed: $reason';
+  String overviewDeadActionToastFailed(String verb, String reason) =>
+      '$verb failed: $reason';
   @override
-  String overviewHistoricalBadge(String label) =>
-      label.isEmpty ? 'recovered · historical' : '$label · recovered · historical';
+  String overviewHistoricalBadge(String label) => label.isEmpty
+      ? 'recovered · historical'
+      : '$label · recovered · historical';
   @override
   String overviewSourceFramework(String? fingerprint) => fingerprint == null
       ? 'Source: the framework itself'
@@ -8851,11 +9456,14 @@ class EnStrings extends AppStrings {
   @override
   String overviewQuote(String text) => '“$text”';
   @override
-  String overviewGroupsCount(int count) => count == 1 ? '1 group' : '$count groups';
+  String overviewGroupsCount(int count) =>
+      count == 1 ? '1 group' : '$count groups';
   @override
-  String overviewSinglesCount(int count) => count == 1 ? '1 direct chat' : '$count direct chats';
+  String overviewSinglesCount(int count) =>
+      count == 1 ? '1 direct chat' : '$count direct chats';
   @override
-  String overviewOthersCount(int count) => count == 1 ? '1 other' : '$count others';
+  String overviewOthersCount(int count) =>
+      count == 1 ? '1 other' : '$count others';
   @override
   String overviewUnreadTotal(int count) => '$count unread in total';
   @override
@@ -8864,7 +9472,8 @@ class EnStrings extends AppStrings {
   @override
   String overviewUnreadBadge(int count) => '$count unread';
   @override
-  String overviewTimersWaiting(int count) => count == 1 ? '1 waiting' : '$count waiting';
+  String overviewTimersWaiting(int count) =>
+      count == 1 ? '1 waiting' : '$count waiting';
   @override
   String overviewTimerCron(String cron) => 'recurring $cron';
   @override
@@ -8876,16 +9485,19 @@ class EnStrings extends AppStrings {
   String overviewFrameworkNotesError(String reason) =>
       'Could not read framework notes: $reason';
   @override
-  String overviewContextTokens(String used, String budget) => '$used / $budget tok';
+  String overviewContextTokens(String used, String budget) =>
+      '$used / $budget tok';
   @override
   String overviewContextSubline(int percent, String keep, String stamp) =>
       '$percent% of budget · keep historical reasoning: $keep · from the $stamp step';
   @override
   String overviewContextShare(int share) => '$share%';
   @override
-  String overviewContextLegendNumbers(String tokens, int share) => '$tokens · $share%';
+  String overviewContextLegendNumbers(String tokens, int share) =>
+      '$tokens · $share%';
   @override
-  String overviewContextError(String reason) => 'Could not read the context breakdown: $reason';
+  String overviewContextError(String reason) =>
+      'Could not read the context breakdown: $reason';
   @override
   String get settingsLaneHeavyLabel => 'Main loop (heavy)';
   @override
@@ -8893,7 +9505,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsLaneHeavyNote => 'The model the turn main loop uses';
   @override
-  String get settingsLaneLightNote => 'The model used for necessity checks, compaction summaries, and guard classification';
+  String get settingsLaneLightNote =>
+      'The model used for necessity checks, compaction summaries, and guard classification';
   @override
   String get settingsDepSourceManaged => 'managed by the framework';
   @override
@@ -8903,37 +9516,49 @@ class EnStrings extends AppStrings {
   @override
   String get settingsDepPathUnknown => 'path unknown';
   @override
-  String get settingsSysHostEmptyError => 'Listen address cannot be empty: an empty value means listening on all interfaces; not saved';
+  String get settingsSysHostEmptyError =>
+      'Listen address cannot be empty: an empty value means listening on all interfaces; not saved';
   @override
-  String settingsSysEmptyError(String label) => '$label cannot be empty; not saved';
+  String settingsSysEmptyError(String label) =>
+      '$label cannot be empty; not saved';
   @override
-  String settingsSysIntRequired(String label) => '$label must be an integer; not saved';
+  String settingsSysIntRequired(String label) =>
+      '$label must be an integer; not saved';
   @override
-  String settingsSysPortRange(String label) => '$label must be between 1 and 65535; not saved';
+  String settingsSysPortRange(String label) =>
+      '$label must be between 1 and 65535; not saved';
   @override
-  String settingsSysMinOne(String label) => '$label must be at least 1; not saved';
+  String settingsSysMinOne(String label) =>
+      '$label must be at least 1; not saved';
   @override
-  String settingsSysRatioRequired(String label) => '$label must be a decimal (0.8 means 80%); not saved';
+  String settingsSysRatioRequired(String label) =>
+      '$label must be a decimal (0.8 means 80%); not saved';
   @override
-  String settingsSysRatioRange(String label) => '$label is a ratio and must be within 0–1 (0 excluded); not saved';
+  String settingsSysRatioRange(String label) =>
+      '$label is a ratio and must be within 0–1 (0 excluded); not saved';
   @override
-  String settingsSysMin(String label, int lo) => '$label must be at least $lo; not saved';
+  String settingsSysMin(String label, int lo) =>
+      '$label must be at least $lo; not saved';
   @override
-  String settingsSysMax(String label, int hi) => '$label must be at most $hi; not saved';
+  String settingsSysMax(String label, int hi) =>
+      '$label must be at most $hi; not saved';
   @override
   String get settingsSysHostLabel => 'Listen address';
   @override
-  String get settingsSysHostNote => 'For local use, enter 127.0.0.1; the port must be 1–65535. Leaving it empty means listening on all interfaces, and it will be blocked.';
+  String get settingsSysHostNote =>
+      'For local use, enter 127.0.0.1; the port must be 1–65535. Leaving it empty means listening on all interfaces, and it will be blocked.';
   @override
   String get settingsSysPortLabel => 'Port';
   @override
   String get settingsSysTimezoneLabel => 'Time zone';
   @override
-  String get settingsSysTimezoneNote => 'IANA name, for example Asia/Shanghai. The budget "today" is split by it.';
+  String get settingsSysTimezoneNote =>
+      'IANA name, for example Asia/Shanghai. The budget "today" is split by it.';
   @override
   String get settingsSysStepToolsLabel => 'Budget · tool calls per step';
   @override
-  String get settingsSysStepToolsNote => 'How many tool calls a single step may make.';
+  String get settingsSysStepToolsNote =>
+      'How many tool calls a single step may make.';
   @override
   String get settingsSysTurnStepsLabel => 'Budget · steps per turn';
   @override
@@ -8941,41 +9566,53 @@ class EnStrings extends AppStrings {
   @override
   String get settingsSysTaskTokensLabel => 'Budget · task token cap';
   @override
-  String get settingsSysTaskTokensNote => 'Cumulative cap per task; enter the raw value — shorthand such as 20M is not accepted. The metric is non-cached tokens (what you actually pay for), not the usage on your bill.';
+  String get settingsSysTaskTokensNote =>
+      'Cumulative cap per task; enter the raw value — shorthand such as 20M is not accepted. The metric is non-cached tokens (what you actually pay for), not the usage on your bill.';
   @override
   String get settingsSysDailyTokensLabel => 'Budget · daily token cap';
   @override
-  String get settingsSysDailyTokensNote => 'Cumulative cap per day, split by the time zone above. Same metric as the line above: only the part that missed the cache counts.';
+  String get settingsSysDailyTokensNote =>
+      'Cumulative cap per day, split by the time zone above. Same metric as the line above: only the part that missed the cache counts.';
   @override
   String get settingsSysSoftRatioLabel => 'Budget · soft threshold';
   @override
-  String get settingsSysSoftRatioNote => 'A decimal from 0 to 1: 0.8 means 80%. At this line she gets a wrap-up warning; only crossing it hard-stops.';
+  String get settingsSysSoftRatioNote =>
+      'A decimal from 0 to 1: 0.8 means 80%. At this line she gets a wrap-up warning; only crossing it hard-stops.';
   @override
   String get settingsSysFailStreakLabel => 'Budget · consecutive failure cap';
   @override
-  String get settingsSysFailStreakNote => 'After this many consecutive failures she raises an alert and pauses.';
+  String get settingsSysFailStreakNote =>
+      'After this many consecutive failures she raises an alert and pauses.';
   @override
   String get settingsSysHeartbeatLabel => 'Heartbeat interval · mean (minutes)';
   @override
-  String get settingsSysHeartbeatNote => 'How often she wakes on average — larger saves tokens, smaller wakes her more often. Both ends are still bounded by the floor and ceiling: they do not change with this number, she will not wake below the quiet floor, and she must wake by the ceiling.';
+  String get settingsSysHeartbeatNote =>
+      'How often she wakes on average — larger saves tokens, smaller wakes her more often. Both ends are still bounded by the floor and ceiling: they do not change with this number, she will not wake below the quiet floor, and she must wake by the ceiling.';
   @override
-  String get settingsSysCompactionLabel => 'Context · compaction line (token estimate)';
+  String get settingsSysCompactionLabel =>
+      'Context · compaction line (token estimate)';
   @override
-  String get settingsSysCompactionNote => 'When the visible history reaches this many tokens (estimated), it is folded into a handover note; compaction only masks, never deletes. The unit is the estimator reading, not the provider count (the estimate runs about 1.65–1.66× lower). Enter the raw value: 200000-style notation is not accepted; lower = more frequent compaction, and each compaction costs a call of its own. Takes effect immediately, no restart needed.';
+  String get settingsSysCompactionNote =>
+      'When the visible history reaches this many tokens (estimated), it is folded into a handover note; compaction only masks, never deletes. The unit is the estimator reading, not the provider count (the estimate runs about 1.65–1.66× lower). Enter the raw value: 200000-style notation is not accepted; lower = more frequent compaction, and each compaction costs a call of its own. Takes effect immediately, no restart needed.';
   @override
-  String get settingsTrustConsequenceWorkspaceUnknown => 'She can only work inside the workspace directory configured in trust.workspaceRoot; reads, writes, and commands outside it are refused.';
+  String get settingsTrustConsequenceWorkspaceUnknown =>
+      'She can only work inside the workspace directory configured in trust.workspaceRoot; reads, writes, and commands outside it are refused.';
   @override
-  String settingsTrustConsequenceWorkspace(String root) => 'She can only work inside $root; reads, writes, and commands outside it are refused.';
+  String settingsTrustConsequenceWorkspace(String root) =>
+      'She can only work inside $root; reads, writes, and commands outside it are refused.';
   @override
-  String get settingsTrustConsequenceFull => 'She can read and write files anywhere on this computer and run commands in any directory.';
+  String get settingsTrustConsequenceFull =>
+      'She can read and write files anywhere on this computer and run commands in any directory.';
   @override
   String get settingsTrustLabelWorkspace => 'Workspace only';
   @override
   String get settingsTrustLabelFull => 'Full trust';
   @override
-  String get settingsWebhookStateNotObject => 'Could not read the credential state (the response was not an object)';
+  String get settingsWebhookStateNotObject =>
+      'Could not read the credential state (the response was not an object)';
   @override
-  String get settingsProtocolStateNotObject => 'Could not read the protocol-side state (the response was not an object)';
+  String get settingsProtocolStateNotObject =>
+      'Could not read the protocol-side state (the response was not an object)';
   @override
   String get settingsDepsReadFailed => 'Could not read the dependency report';
   @override
@@ -8983,7 +9620,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsProjectionReadFailed => 'Could not read runtime data';
   @override
-  String get settingsModelNameRequired => 'Model name cannot be empty; not saved';
+  String get settingsModelNameRequired =>
+      'Model name cannot be empty; not saved';
   @override
   String get settingsBaseUrlRequired => 'Base URL cannot be empty; not saved';
   @override
@@ -8993,11 +9631,13 @@ class EnStrings extends AppStrings {
   @override
   String get settingsWrittenKey => 'API key';
   @override
-  String get settingsRestartSuffix => '; takes effect after the process restarts';
+  String get settingsRestartSuffix =>
+      '; takes effect after the process restarts';
   @override
   String settingsSaveFailed(String err) => 'Save failed: $err';
   @override
-  String get settingsClearKeyBody => 'After clearing you have to enter it again; gates that share the same environment variable are cleared together (one name, one value); values from environment variables are not affected.';
+  String get settingsClearKeyBody =>
+      'After clearing you have to enter it again; gates that share the same environment variable are cleared together (one name, one value); values from environment variables are not affected.';
   @override
   String get settingsClear => 'Clear';
   @override
@@ -9005,24 +9645,31 @@ class EnStrings extends AppStrings {
   @override
   String settingsClearFailed(String err) => 'Clear failed: $err';
   @override
-  String get settingsConfigErrorHint => 'Model keys and system information need the active config. Make sure the main process is running.';
+  String get settingsConfigErrorHint =>
+      'Model keys and system information need the active config. Make sure the main process is running.';
   @override
   String get settingsConfigUnavailable => 'Config unavailable.';
   @override
-  String get settingsConfigUnavailableHint => 'The local service /api/config returned no config content.';
+  String get settingsConfigUnavailableHint =>
+      'The local service /api/config returned no config content.';
   @override
-  String settingsKeysReadFailedHint(String keysError) => 'Could not read the key status ($keysError). The key badge is unavailable; model names and Base URLs can still be saved.';
+  String settingsKeysReadFailedHint(String keysError) =>
+      'Could not read the key status ($keysError). The key badge is unavailable; model names and Base URLs can still be saved.';
   @override
-  String get settingsConfigFallbackNote => 'config.json could not be read, so this page shows the config that is now in effect (saving still writes to the file).';
+  String get settingsConfigFallbackNote =>
+      'config.json could not be read, so this page shows the config that is now in effect (saving still writes to the file).';
   @override
-  String get settingsModelRestartNote => 'Changes above are not in effect yet: model names, endpoints and protocols are startup parameters and only take effect after the process restarts — until then she keeps using the ones from startup. The save itself succeeded; the fields show what is on disk.';
+  String get settingsModelRestartNote =>
+      'Changes above are not in effect yet: model names, endpoints and protocols are startup parameters and only take effect after the process restarts — until then she keeps using the ones from startup. The save itself succeeded; the fields show what is on disk.';
   @override
   String settingsModelRunningNow(String lane, String model, String baseUrl) =>
       'Running now: $lane=$model @ $baseUrl';
   @override
-  String get settingsKeysNote => 'Keys are write-only: this page always shows a mask, and the full value is read once when the connection is established. Saving writes config.json and data/.keys.json and takes effect after the process restarts (environment variables win over files).';
+  String get settingsKeysNote =>
+      'Keys are write-only: this page always shows a mask, and the full value is read once when the connection is established. Saving writes config.json and data/.keys.json and takes effect after the process restarts (environment variables win over files).';
   @override
-  String get settingsKeyConfiguredHint => 'Configured; paste a new key to replace it';
+  String get settingsKeyConfiguredHint =>
+      'Configured; paste a new key to replace it';
   @override
   String get settingsKeySampleHint => 'sk-…';
   @override
@@ -9032,13 +9679,17 @@ class EnStrings extends AppStrings {
   @override
   String get settingsModelProtocol => 'Protocol';
   @override
-  String get settingsModelProtocolAuto => 'Try Responses first; switch only when the endpoint proves unsupported (recommended)';
+  String get settingsModelProtocolAuto =>
+      'Try Responses first; switch only when the endpoint proves unsupported (recommended)';
   @override
-  String get settingsModelProtocolChat => 'Force Chat (no "must echo reasoning" requirement, so far fewer 400s — but reasoning is shown less)';
+  String get settingsModelProtocolChat =>
+      'Force Chat (no "must echo reasoning" requirement, so far fewer 400s — but reasoning is shown less)';
   @override
-  String get settingsModelProtocolResponses => 'Force Responses (fails outright if the endpoint does not support it; no automatic fallback)';
+  String get settingsModelProtocolResponses =>
+      'Force Responses (fails outright if the endpoint does not support it; no automatic fallback)';
   @override
-  String settingsKeyEnvNote(String envName) => 'The environment variable $envName wins; if it has no value the value here is used (written to data/.keys.json, write-only).';
+  String settingsKeyEnvNote(String envName) =>
+      'The environment variable $envName wins; if it has no value the value here is used (written to data/.keys.json, write-only).';
   @override
   String get settingsClearKey => 'Clear key';
   @override
@@ -9048,45 +9699,58 @@ class EnStrings extends AppStrings {
   @override
   String get settingsNotConfigured => 'Not configured';
   @override
-  String get settingsSpeakNote => 'The rhythm she speaks in: one piece at a time, with a gap between pieces. It only affects how delivery feels, not what she says.';
+  String get settingsSpeakNote =>
+      'The rhythm she speaks in: one piece at a time, with a gap between pieces. It only affects how delivery feels, not what she says.';
   @override
   String get settingsSpeakTyping => 'Typing rhythm';
   @override
-  String get settingsSpeakTypingNote => 'On: messages are sent piece by piece according to how long the text would take to type, like a person typing (and the other side can cut in at any moment). Off: the whole message is sent at once and arrives as fast as possible.';
+  String get settingsSpeakTypingNote =>
+      'On: messages are sent piece by piece according to how long the text would take to type, like a person typing (and the other side can cut in at any moment). Off: the whole message is sent at once and arrives as fast as possible.';
   @override
   String get settingsSpeakSpeed => 'Typing speed';
   @override
   String get settingsSpeakSpeedUnit => 'chars/min';
   @override
-  String get settingsSpeakSpeedNote => 'Default 90 (a common speed for Chinese mobile typing). Larger means faster speech and shorter waits; range 30–600.';
+  String get settingsSpeakSpeedNote =>
+      'Default 90 (a common speed for Chinese mobile typing). Larger means faster speech and shorter waits; range 30–600.';
   @override
   String get settingsCurrentlyActive => 'Currently in effect';
   @override
-  String settingsSpeakTypingOn(String saved) => '$saved chars/min · sent piece by piece';
+  String settingsSpeakTypingOn(String saved) =>
+      '$saved chars/min · sent piece by piece';
   @override
-  String settingsSpeakTypingOff(String saved) => '$saved chars/min · sent all at once';
+  String settingsSpeakTypingOff(String saved) =>
+      '$saved chars/min · sent all at once';
   @override
-  String get settingsSpeakTypingEnabled => 'Typing rhythm enabled (takes effect after restart)';
+  String get settingsSpeakTypingEnabled =>
+      'Typing rhythm enabled (takes effect after restart)';
   @override
-  String get settingsSpeakTypingDisabled => 'Typing rhythm disabled (takes effect after restart)';
+  String get settingsSpeakTypingDisabled =>
+      'Typing rhythm disabled (takes effect after restart)';
   @override
-  String get settingsSpeakSpeedRange => 'Typing speed must be between 30 and 600';
+  String get settingsSpeakSpeedRange =>
+      'Typing speed must be between 30 and 600';
   @override
   String get settingsSavedRestartNote => 'Saved (takes effect after restart)';
   @override
-  String get settingsSavedLive => 'Saved; effective immediately (no restart needed)';
+  String get settingsSavedLive =>
+      'Saved; effective immediately (no restart needed)';
   @override
   String get settingsSavedRestart => 'Saved; takes effect after restart';
   @override
   String get settingsDepsAllReady => 'All ready';
   @override
-  String get settingsDepsNote => 'External dependencies we recommend; the framework can install them in one step.';
+  String get settingsDepsNote =>
+      'External dependencies we recommend; the framework can install them in one step.';
   @override
-  String settingsDepsReadFailedHint(String depsError) => 'Could not read the dependency report ($depsError). If you can neither install nor see the status, first check on the command line that the main process is running.';
+  String settingsDepsReadFailedHint(String depsError) =>
+      'Could not read the dependency report ($depsError). If you can neither install nor see the status, first check on the command line that the main process is running.';
   @override
-  String get settingsDepsProbing => 'Probing this machine for pwsh / ripgrep / es.exe / python …';
+  String get settingsDepsProbing =>
+      'Probing this machine for pwsh / ripgrep / es.exe / python …';
   @override
-  String get settingsDepsInstallLocation => 'Install location: <data dir>/tools/<name>/. It takes effect right after installing — the probe result is re-checked and refreshed after installation, so the next tool call uses the new engine.';
+  String get settingsDepsInstallLocation =>
+      'Install location: <data dir>/tools/<name>/. It takes effect right after installing — the probe result is re-checked and refreshed after installation, so the next tool call uses the new engine.';
   @override
   String get settingsDepReadyManaged => 'ready · managed';
   @override
@@ -9108,7 +9772,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsDownloadAndInstall => 'Download and install';
   @override
-  String settingsInstallRequestFailed(String err) => 'Install request failed: $err';
+  String settingsInstallRequestFailed(String err) =>
+      'Install request failed: $err';
   @override
   String get settingsStepDownloadFailed => 'download failed';
   @override
@@ -9118,7 +9783,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsStepInstallFailed => 'install failed';
   @override
-  String settingsOpenedUrl(String url) => 'Opened with the default program: $url';
+  String settingsOpenedUrl(String url) =>
+      'Opened with the default program: $url';
   @override
   String get settingsUnknown => 'unknown';
   @override
@@ -9126,21 +9792,27 @@ class EnStrings extends AppStrings {
   @override
   String get settingsProtocolTitle => 'Protocol side (optional)';
   @override
-  String get settingsProtocolNote => 'Optional: an OneBot protocol side launched by the framework, backed by a real QQ account. It is an independent inbound channel from the official bot; enabling one does not affect the other.';
+  String get settingsProtocolNote =>
+      'Optional: an OneBot protocol side launched by the framework, backed by a real QQ account. It is an independent inbound channel from the official bot; enabling one does not affect the other.';
   @override
-  String settingsProtocolError(String protocolError) => 'Could not read the protocol-side state: $protocolError';
+  String settingsProtocolError(String protocolError) =>
+      'Could not read the protocol-side state: $protocolError';
   @override
-  String get settingsProtocolErrorHint => 'This card failing does not affect the other settings. First check that the main process is running, then retry. Until the state can be read, no switch, directory, or one-click install is offered here — that would mean writing a value you cannot see.';
+  String get settingsProtocolErrorHint =>
+      'This card failing does not affect the other settings. First check that the main process is running, then retry. Until the state can be read, no switch, directory, or one-click install is offered here — that would mean writing a value you cannot see.';
   @override
   String get settingsProtocolLoading => 'Reading the protocol-side state…';
   @override
-  String get settingsProtocolEmpty => 'The built-in protocol side is not configured yet.';
+  String get settingsProtocolEmpty =>
+      'The built-in protocol side is not configured yet.';
   @override
-  String get settingsProtocolEmptyHint => 'Not enabling it changes nothing: the official bot channel is unaffected. To use this route, press "one-click install" below to install and configure it in one go.';
+  String get settingsProtocolEmptyHint =>
+      'Not enabling it changes nothing: the official bot channel is unaffected. To use this route, press "one-click install" below to install and configure it in one go.';
   @override
   String get settingsProtocolEnabled => 'Enable the built-in protocol side';
   @override
-  String get settingsProtocolEnabledNote => 'The framework connects automatically at startup; when off you can fill in and configure both sides manually.';
+  String get settingsProtocolEnabledNote =>
+      'The framework connects automatically at startup; when off you can fill in and configure both sides manually.';
   @override
   String get settingsInstallDir => 'Install directory';
   @override
@@ -9148,25 +9820,33 @@ class EnStrings extends AppStrings {
   @override
   String get settingsSaveDir => 'Save directory';
   @override
-  String get settingsInstallDirNote => 'Protocol-side install directory (absolute path). After unpacking the Lite package, the entry index.mjs sits at this level, with no dist/ subdirectory; "one-click install" fills it in automatically.';
+  String get settingsInstallDirNote =>
+      'Protocol-side install directory (absolute path). After unpacking the Lite package, the entry index.mjs sits at this level, with no dist/ subdirectory; "one-click install" fills it in automatically.';
   @override
   String get settingsOneClickInstall => 'One-click install';
   @override
-  String get settingsOneClickInstallNote => 'Downloads the Lite package from the official SnowLuma Release; if the automatic download fails, download it yourself and fill in the install directory. This package is not distributed with the framework and must not be used commercially.';
+  String get settingsOneClickInstallNote =>
+      'Downloads the Lite package from the official SnowLuma Release; if the automatic download fails, download it yourself and fill in the install directory. This package is not distributed with the framework and must not be used commercially.';
   @override
-  String get settingsOneClickPrerequisite => 'Prerequisite: a QQ client is signed in on this machine (the bot account).';
+  String get settingsOneClickPrerequisite =>
+      'Prerequisite: a QQ client is signed in on this machine (the bot account).';
   @override
-  String get settingsInstallRunningNote => 'Downloading from the official Releases and unpacking. It is 4.6 MB and may take a minute or two depending on your connection — please wait, and do not press it again. The step-by-step log (which step, how much downloaded) is listed all at once when this step finishes: this endpoint is a synchronous request, not a stream, so progress lines cannot be interleaved.';
+  String get settingsInstallRunningNote =>
+      'Downloading from the official Releases and unpacking. It is 4.6 MB and may take a minute or two depending on your connection — please wait, and do not press it again. The step-by-step log (which step, how much downloaded) is listed all at once when this step finishes: this endpoint is a synchronous request, not a stream, so progress lines cannot be interleaved.';
   @override
-  String settingsInstallManualRoute(String protocolDownloadUrl) => 'You can also do it yourself: download the release package from $protocolDownloadUrl, unpack it, and fill that directory in above. This route is for when one-click install fails or you want to control the version yourself; the framework also downloads from the same address and does not distribute the package with itself (the licence is "source-visible, non-commercial", fine for personal use).';
+  String settingsInstallManualRoute(String protocolDownloadUrl) =>
+      'You can also do it yourself: download the release package from $protocolDownloadUrl, unpack it, and fill that directory in above. This route is for when one-click install fails or you want to control the version yourself; the framework also downloads from the same address and does not distribute the package with itself (the licence is "source-visible, non-commercial", fine for personal use).';
   @override
-  String get settingsInstallLogEmpty => 'Install log: (none this time — the failure happened before anything ran)';
+  String get settingsInstallLogEmpty =>
+      'Install log: (none this time — the failure happened before anything ran)';
   @override
   String get settingsInstallLog => 'Install log:';
   @override
-  String get settingsInstalledNextTitle => 'Installed. Next: restart the service, then scan the QR code.';
+  String get settingsInstalledNextTitle =>
+      'Installed. Next: restart the service, then scan the QR code.';
   @override
-  String get settingsInstalledNextBody => '① Restart the service: the running protocol-side instance was built from the config at startup, so only after a restart will it be launched with the config just written (the framework does not restart it for you — a failed self-restart leaves nothing behind).\n② Then scan the QR code: after the restart an "open panel" button appears on this card; open it, read and accept the terms of service and privacy policy there (that consent is legal in nature and you have to press it yourself), then connect QQ and scan the code. The first login needs the initial credentials it printed at startup — that line is already shown below the button (password masked), with "copy credential" next to it. Scanning connects your local QQ client; the framework does not manage the login state.';
+  String get settingsInstalledNextBody =>
+      '① Restart the service: the running protocol-side instance was built from the config at startup, so only after a restart will it be launched with the config just written (the framework does not restart it for you — a failed self-restart leaves nothing behind).\n② Then scan the QR code: after the restart an "open panel" button appears on this card; open it, read and accept the terms of service and privacy policy there (that consent is legal in nature and you have to press it yourself), then connect QQ and scan the code. The first login needs the initial credentials it printed at startup — that line is already shown below the button (password masked), with "copy credential" next to it. Scanning connects your local QQ client; the framework does not manage the login state.';
   @override
   String get settingsInstallDirEmpty => '(no install directory yet)';
   @override
@@ -9174,7 +9854,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsEntryMissing => 'no executable entry in the directory';
   @override
-  String get settingsEntryPendingRestart => 'entry will be checked after a restart';
+  String get settingsEntryPendingRestart =>
+      'entry will be checked after a restart';
   @override
   String settingsEndpointPoint(String wsUrl) => 'Endpoint: $wsUrl';
   @override
@@ -9184,13 +9865,15 @@ class EnStrings extends AppStrings {
   @override
   String get settingsOpenPanel => 'Open panel';
   @override
-  String get settingsProtocolNotAttachedNote => 'This config was not read when the current process started: the framework does not hold an instance for it now, and "start/stop" only works after the process is restarted.';
+  String get settingsProtocolNotAttachedNote =>
+      'This config was not read when the current process started: the framework does not hold an instance for it now, and "start/stop" only works after the process is restarted.';
   @override
   String get settingsChainProcess => '① Process';
   @override
   String get settingsChainUnobserved => 'not observed';
   @override
-  String get settingsChainNoInstance => 'This process has no instance; nobody is watching this level';
+  String get settingsChainNoInstance =>
+      'This process has no instance; nobody is watching this level';
   @override
   String get settingsChainNotRunning => 'not running';
   @override
@@ -9220,7 +9903,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsChainMissing => 'missing';
   @override
-  String get settingsChainMissingDetail => 'QQ not signed in: this file is only generated after login';
+  String get settingsChainMissingDetail =>
+      'QQ not signed in: this file is only generated after login';
   @override
   String get settingsChainAdapter => '③ Adapter';
   @override
@@ -9235,25 +9919,32 @@ class EnStrings extends AppStrings {
   @override
   String get settingsChainNoEndpoint => 'no endpoint to connect';
   @override
-  String get settingsChainNoEndpointDetail => 'The OneBot config of the protocol side has not appeared yet, and no address was filled in manually';
+  String get settingsChainNoEndpointDetail =>
+      'The OneBot config of the protocol side has not appeared yet, and no address was filled in manually';
   @override
   String get settingsChainDisabled => 'disabled';
   @override
   String get settingsChainNotAssembled => 'not assembled';
   @override
-  String get settingsChainNotAssembledDetail => 'This process has no OneBot adapter';
+  String get settingsChainNotAssembledDetail =>
+      'This process has no OneBot adapter';
   @override
   String get settingsChainNoData => 'No data for this level';
   @override
-  String settingsCredentialCaptured(String user, String masked) => 'Initial credential (captured from its output during this startup; user $user / password $masked)';
+  String settingsCredentialCaptured(String user, String masked) =>
+      'Initial credential (captured from its output during this startup; user $user / password $masked)';
   @override
-  String settingsCredentialFromLog(String user, String masked) => 'Initial credential (recovered from the framework\'s own startup trace: user $user / password $masked; if it has restarted since, this one is no longer valid)';
+  String settingsCredentialFromLog(String user, String masked) =>
+      'Initial credential (recovered from the framework\'s own startup trace: user $user / password $masked; if it has restarted since, this one is no longer valid)';
   @override
-  String get settingsCredentialLost => 'The initial credential cannot be recovered: it prints it to its own output only once at startup (it is gone when the program closes). To get a usable one, let the framework restart it once (that run\'s output will be captured and shown here).';
+  String get settingsCredentialLost =>
+      'The initial credential cannot be recovered: it prints it to its own output only once at startup (it is gone when the program closes). To get a usable one, let the framework restart it once (that run\'s output will be captured and shown here).';
   @override
-  String get settingsConsentPending => 'The terms and privacy policy have not been accepted yet — until the panel is unlocked, the entry to QQ is locked.';
+  String get settingsConsentPending =>
+      'The terms and privacy policy have not been accepted yet — until the panel is unlocked, the entry to QQ is locked.';
   @override
-  String get settingsPasswordUnchanged => 'The initial password has not been changed: the first of the two gates is the password change, and the panel keeps asking you to do it first.';
+  String get settingsPasswordUnchanged =>
+      'The initial password has not been changed: the first of the two gates is the password change, and the panel keeps asking you to do it first.';
   @override
   String settingsQrLoginAt(String webuiUrl) =>
       'Scan the QR code in $webuiUrl to sign in (the framework does not manage the QQ login state).';
@@ -9262,9 +9953,11 @@ class EnStrings extends AppStrings {
   @override
   String get settingsCopyCredential => 'Copy credential';
   @override
-  String settingsManualDownloadGuide(String protocolDownloadUrl) => 'You can also do it yourself: download the release package from $protocolDownloadUrl, unpack it, and fill that directory in above. This route is for when one-click install fails or you want to control the version yourself; the framework also downloads from the same address and does not distribute the package with itself (the licence is "source-visible, non-commercial", fine for personal use).';
+  String settingsManualDownloadGuide(String protocolDownloadUrl) =>
+      'You can also do it yourself: download the release package from $protocolDownloadUrl, unpack it, and fill that directory in above. This route is for when one-click install fails or you want to control the version yourself; the framework also downloads from the same address and does not distribute the package with itself (the licence is "source-visible, non-commercial", fine for personal use).';
   @override
-  String get settingsProtocolThirdPartyTitle => 'Third-party component: SnowLuma';
+  String get settingsProtocolThirdPartyTitle =>
+      'Third-party component: SnowLuma';
   @override
   String get settingsProtocolThirdPartyNote =>
       'SnowLuma is an independent third-party project, developed and maintained by SnowLumaDevs: '
@@ -9278,7 +9971,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsProtocolLicenseRow => 'License (EULA / LICENSE)';
   @override
-  String get settingsProtocolRestartNote => 'The change is written to config.json, but it takes effect only after the process restarts: the running protocol-side instance was built from the config at startup. Until the restart, the state shown here is still the one from this startup.';
+  String get settingsProtocolRestartNote =>
+      'The change is written to config.json, but it takes effect only after the process restarts: the running protocol-side instance was built from the config at startup. Until the restart, the state shown here is still the one from this startup.';
   @override
   String get settingsInstallDirRequired => 'Install directory cannot be empty';
   @override
@@ -9286,27 +9980,35 @@ class EnStrings extends AppStrings {
   @override
   String get settingsStopRequested => 'Stop requested';
   @override
-  String settingsInstallRequestFailedHint(String err) => 'Install request failed: $err (the request never reached the install step; first check that the main process is running)';
+  String settingsInstallRequestFailedHint(String err) =>
+      'Install request failed: $err (the request never reached the install step; first check that the main process is running)';
   @override
-  String get settingsOneClickFailed => 'One-click install failed: see the card for the reason';
+  String get settingsOneClickFailed =>
+      'One-click install failed: see the card for the reason';
   @override
-  String get settingsInstallNoReason => 'Install failed and the server gave no reason (no detail in the response)';
+  String get settingsInstallNoReason =>
+      'Install failed and the server gave no reason (no detail in the response)';
   @override
   String get settingsInstalledOk => 'Installed';
   @override
-  String get settingsInstalledConfigured => 'Installed and configured with it; restart and it is ready';
+  String get settingsInstalledConfigured =>
+      'Installed and configured with it; restart and it is ready';
   @override
-  String get settingsInstalledNotConfigured => 'Installed, but the automatic configuration did not go through: see the note on the card';
+  String get settingsInstalledNotConfigured =>
+      'Installed, but the automatic configuration did not go through: see the note on the card';
   @override
-  String get settingsRestartSuffixParen => '(takes effect after the process restarts)';
+  String get settingsRestartSuffixParen =>
+      '(takes effect after the process restarts)';
   @override
   String get settingsGenerated => 'generated';
   @override
   String get settingsNotGenerated => 'not generated yet';
   @override
-  String get settingsWebhookNote => 'Dedicated credential for external systems delivering to this instance (POST /webhook/*).';
+  String get settingsWebhookNote =>
+      'Dedicated credential for external systems delivering to this instance (POST /webhook/*).';
   @override
-  String settingsWebhookErrorHint(String webhookError) => 'Could not read the credential state ($webhookError). While the state is unreadable, do not press "regenerate" yet: rotation is irreversible (the old one becomes invalid immediately) and you do not know whether anyone is using it right now.';
+  String settingsWebhookErrorHint(String webhookError) =>
+      'Could not read the credential state ($webhookError). While the state is unreadable, do not press "regenerate" yet: rotation is irreversible (the old one becomes invalid immediately) and you do not know whether anyone is using it right now.';
   @override
   String get settingsWebhookLoading => 'Reading the webhook credential state…';
   @override
@@ -9315,7 +10017,8 @@ class EnStrings extends AppStrings {
   String settingsWebhookCurrentValue(String secretId, String createdAt) =>
       'Credential $secretId · generated at $createdAt';
   @override
-  String get settingsWebhookNotConfiguredNote => 'This channel currently returns 401 for everything (nobody can deliver without a credential). Press the button below to generate one.';
+  String get settingsWebhookNotConfiguredNote =>
+      'This channel currently returns 401 for everything (nobody can deliver without a credential). Press the button below to generate one.';
   @override
   String get settingsWebhookRotated => 'Last rotated';
   @override
@@ -9327,77 +10030,105 @@ class EnStrings extends AppStrings {
   @override
   String get settingsGenerateWebhook => 'Generate webhook credential';
   @override
-  String get settingsWebhookCredentialNote => '/webhook/* does not accept UI credentials (nor the transitional data/.ui-token): this channel accepts only the dedicated credential above. It is for external systems — they can deliver, but they cannot read anything under /api/*.';
+  String get settingsWebhookCredentialNote =>
+      '/webhook/* does not accept UI credentials (nor the transitional data/.ui-token): this channel accepts only the dedicated credential above. It is for external systems — they can deliver, but they cannot read anything under /api/*.';
   @override
   String get settingsRegenerateTitle => 'Regenerate the webhook credential';
   @override
-  String get settingsRegenerateBody => 'The previous one becomes invalid immediately: external scripts already using it will start getting 401 — remember to switch the new credential over as well. The new credential is shown only once.';
+  String get settingsRegenerateBody =>
+      'The previous one becomes invalid immediately: external scripts already using it will start getting 401 — remember to switch the new credential over as well. The new credential is shown only once.';
   @override
-  String get settingsNoTokenReturned => 'The server did not return the credential text; please press again. If this keeps happening, check the main process log';
+  String get settingsNoTokenReturned =>
+      'The server did not return the credential text; please press again. If this keeps happening, check the main process log';
   @override
-  String get settingsWebhookRotatedNote => 'The previous one is now invalid (external scripts still using it will start getting 401).';
+  String get settingsWebhookRotatedNote =>
+      'The previous one is now invalid (external scripts still using it will start getting 401).';
   @override
   String settingsGenerateFailed(String err) => 'Generation failed: $err';
   @override
-  String get settingsMemoryNote => 'Who maintains the long-term memory (MEMORIES/ and diary/): the framework for you, or she reads, writes, and organizes it herself.';
+  String get settingsMemoryNote =>
+      'Who maintains the long-term memory (MEMORIES/ and diary/): the framework for you, or she reads, writes, and organizes it herself.';
   @override
   String get settingsNotInEffect => 'not in effect yet';
   @override
-  String get settingsMemoryEnableLabel => 'Let the framework manage memory automatically (off = she only knows these files exist; reading, writing, and organizing are all hers)';
+  String get settingsMemoryEnableLabel =>
+      'Let the framework manage memory automatically (off = she only knows these files exist; reading, writing, and organizing are all hers)';
   @override
-  String get settingsMemoryEnableNote => 'On: the framework creates and maintains MEMORIES/INDEX.md, injects the index into a fixed block every turn, and organizes once a day.';
+  String get settingsMemoryEnableNote =>
+      'On: the framework creates and maintains MEMORIES/INDEX.md, injects the index into a fixed block every turn, and organizes once a day.';
   @override
-  String get settingsMemoryOn => 'framework-managed memory (index injected every turn, organized daily)';
+  String get settingsMemoryOn =>
+      'framework-managed memory (index injected every turn, organized daily)';
   @override
-  String get settingsMemoryOff => 'she manages it herself (the framework does not generate, inject, or organize)';
+  String get settingsMemoryOff =>
+      'she manages it herself (the framework does not generate, inject, or organize)';
   @override
-  String get settingsMemoryUnaffectedNote => 'Two paths are not affected by this switch: MEMORIES/aliases.md takes part in "who is talking / watch list", which belongs to the channel side; STATE.md (her current state) is a separate layer.';
+  String get settingsMemoryUnaffectedNote =>
+      'Two paths are not affected by this switch: MEMORIES/aliases.md takes part in "who is talking / watch list", which belongs to the channel side; STATE.md (her current state) is a separate layer.';
   @override
-  String get settingsMemoryRestartNote => 'This setting is read when the process starts: saving writes config.json and takes effect after a restart. Turning it off deletes no files.';
+  String get settingsMemoryRestartNote =>
+      'This setting is read when the process starts: saving writes config.json and takes effect after a restart. Turning it off deletes no files.';
   @override
-  String get settingsMemoryDetail => 'With it off the framework does not generate, inject, or organize, but she can still read and write those files herself. Why keep this switch: to give people who want the agent to manage its own memory a clean path. The daily tidy-up time is set by wake.memoryMaintainCron (once a day by default): stale running notes are merged into facts.md and a diary/ entry is written. The !pinned section and item TTL of facts.md are also maintained by the framework.';
+  String get settingsMemoryDetail =>
+      'With it off the framework does not generate, inject, or organize, but she can still read and write those files herself. Why keep this switch: to give people who want the agent to manage its own memory a clean path. The daily tidy-up time is set by wake.memoryMaintainCron (once a day by default): stale running notes are merged into facts.md and a diary/ entry is written. The !pinned section and item TTL of facts.md are also maintained by the framework.';
   @override
-  String get settingsMemoryCost => 'The cost: she may forget to tidy up, facts.md keeps growing, and the index stops updating — all of that becomes hers.';
+  String get settingsMemoryCost =>
+      'The cost: she may forget to tidy up, facts.md keeps growing, and the index stops updating — all of that becomes hers.';
   @override
-  String get settingsMemoryOnSaved => 'Changed to framework-managed memory (takes effect after restart)';
+  String get settingsMemoryOnSaved =>
+      'Changed to framework-managed memory (takes effect after restart)';
   @override
-  String get settingsMemoryOffSaved => 'Changed to self-managed memory (takes effect after restart)';
+  String get settingsMemoryOffSaved =>
+      'Changed to self-managed memory (takes effect after restart)';
   @override
-  String get settingsTrustNote => 'Her working boundary: the whole computer, or a single workspace directory. Crossing it is a refusal, not a reminder.';
+  String get settingsTrustNote =>
+      'Her working boundary: the whole computer, or a single workspace directory. Crossing it is a refusal, not a reminder.';
   @override
   String get settingsTrustReachLabel => 'How far she can reach';
   @override
-  String get settingsTrustReachNote => 'What each level governs is written in the option itself; changing to a level applies that level\'s consequences.';
+  String get settingsTrustReachNote =>
+      'What each level governs is written in the option itself; changing to a level applies that level\'s consequences.';
   @override
-  String get settingsTrustWorkspaceUnknownPath => 'Workspace only (path not read)';
+  String get settingsTrustWorkspaceUnknownPath =>
+      'Workspace only (path not read)';
   @override
   String settingsTrustWorkspaceValue(String root) => 'Workspace only · $root';
   @override
   String get settingsTrustFullValue => 'Full trust (the whole computer)';
   @override
-  String get settingsTrustPendingNote => 'The level chosen above is not in effect yet: it is written on disk, but the running process still uses the one read at startup — it takes effect after a restart. Until then she keeps working under the level currently in effect.';
+  String get settingsTrustPendingNote =>
+      'The level chosen above is not in effect yet: it is written on disk, but the running process still uses the one read at startup — it takes effect after a restart. Until then she keeps working under the level currently in effect.';
   @override
-  String get settingsTrustRootNote => 'The workspace is computed by the server (default <config dir>/workspace) and is not filled in on this page: writing the same boundary in two places is how you end up with "the config says A but it actually blocks at B".';
+  String get settingsTrustRootNote =>
+      'The workspace is computed by the server (default <config dir>/workspace) and is not filled in on this page: writing the same boundary in two places is how you end up with "the config says A but it actually blocks at B".';
   @override
-  String get settingsTrustBoundaryNote => 'It is a boundary, not a reminder: reads, writes, and commands outside it are refused.';
+  String get settingsTrustBoundaryNote =>
+      'It is a boundary, not a reminder: reads, writes, and commands outside it are refused.';
   @override
-  String get settingsTrustRulesDetail => 'It governs the fs tool family (safe_read / safe_write / safe_edit / rg_search etc.) and pwsh: the former is judged through the same path, and the latter\'s workdir is governed together with paths in the command line. It is one of three independent gates along with the destructive switch and the pwsh command blacklist — this one governs scope and does not replace the other two.\nWhy full trust is the default: she is an unattended resident agent, and "being able to go find, fix, and install things herself" is how she exists; shutting her into an empty directory by default would leave most of her abilities unusable out of the box.';
+  String get settingsTrustRulesDetail =>
+      'It governs the fs tool family (safe_read / safe_write / safe_edit / rg_search etc.) and pwsh: the former is judged through the same path, and the latter\'s workdir is governed together with paths in the command line. It is one of three independent gates along with the destructive switch and the pwsh command blacklist — this one governs scope and does not replace the other two.\nWhy full trust is the default: she is an unattended resident agent, and "being able to go find, fix, and install things herself" is how she exists; shutting her into an empty directory by default would leave most of her abilities unusable out of the box.';
   @override
   String get settingsTrustFullTitle => 'Switch to full trust';
   @override
-  String get settingsTrustFullConfirmTail => 'This is a boundary; removing it means she can really do all of the above. Are you sure?';
+  String get settingsTrustFullConfirmTail =>
+      'This is a boundary; removing it means she can really do all of the above. Are you sure?';
   @override
-  String get settingsTrustWorkspaceSaved => 'Changed to workspace only; reads, writes, and commands outside it will be refused (takes effect after the process restarts)';
+  String get settingsTrustWorkspaceSaved =>
+      'Changed to workspace only; reads, writes, and commands outside it will be refused (takes effect after the process restarts)';
   @override
-  String get settingsTrustFullSaved => 'Changed to full trust (takes effect after the process restarts)';
+  String get settingsTrustFullSaved =>
+      'Changed to full trust (takes effect after the process restarts)';
   @override
-  String get settingsSystemNote => 'The listen address, time zone, six budgets and heartbeat are all startup parameters of this process: change them here, save to config.json, and they take effect after a restart. The compaction line is the exception — it takes effect as soon as it is written (the server also updates the in-memory copy in the same critical section).';
+  String get settingsSystemNote =>
+      'The listen address, time zone, six budgets and heartbeat are all startup parameters of this process: change them here, save to config.json, and they take effect after a restart. The compaction line is the exception — it takes effect as soon as it is written (the server also updates the in-memory copy in the same critical section).';
   @override
   String get settingsDataDir => 'Data directory';
   @override
-  String get settingsDataDirNote => 'The path fixed at startup: the event log, persona assets, and keys all live under it, and changing it means the next process starts from an empty directory.';
+  String get settingsDataDirNote =>
+      'The path fixed at startup: the event log, persona assets, and keys all live under it, and changing it means the next process starts from an empty directory.';
   @override
-  String get settingsSystemFootnote => 'The data directory cannot be changed here (it decides where everything she owns lives, and it is fixed at process startup); the other fields take effect after the process restarts — except the compaction line, which takes over immediately after saving.';
+  String get settingsSystemFootnote =>
+      'The data directory cannot be changed here (it decides where everything she owns lives, and it is fixed at process startup); the other fields take effect after the process restarts — except the compaction line, which takes over immediately after saving.';
   @override
   String get settingsLiveNow => 'effective immediately';
   @override
@@ -9412,9 +10143,11 @@ class EnStrings extends AppStrings {
   @override
   String get settingsAccountInstance => 'Current instance';
   @override
-  String get settingsAccountInstanceNote => 'Credentials are stored per instance in separate files (%APPDATA%\\Irmia\\sessions): opening a second instance on the same machine will not replace this one.';
+  String get settingsAccountInstanceNote =>
+      'Credentials are stored per instance in separate files (%APPDATA%\\Irmia\\sessions): opening a second instance on the same machine will not replace this one.';
   @override
-  String get settingsAccountLegacyNote => 'This one uses the legacy shared token (this instance has never had a password), and the server does not accept the "session" it produces: neither changing the password nor signing out can work (ending the instance is unaffected). Set a password first, then sign in and out by session.';
+  String get settingsAccountLegacyNote =>
+      'This one uses the legacy shared token (this instance has never had a password), and the server does not accept the "session" it produces: neither changing the password nor signing out can work (ending the instance is unaffected). Set a password first, then sign in and out by session.';
   @override
   String get settingsChangePassword => 'Change password';
   @override
@@ -9422,45 +10155,53 @@ class EnStrings extends AppStrings {
   @override
   String get settingsSetPasswordFirst => 'Set a password first';
   @override
-  String get settingsPasswordChanged => 'Password changed; this UI is now using the new credential';
+  String get settingsPasswordChanged =>
+      'Password changed; this UI is now using the new credential';
   @override
   String get settingsLogoutBody =>
-        'Sign out: clear the credential saved on this machine, stop its backend process, then return to the '
-        'instance picker — you will have to log in again with your password. To only stop the instance and '
-        'keep your sign-in, use "End instance".';
+      'Sign out: clear the credential saved on this machine, stop its backend process, then return to the '
+      'instance picker — you will have to log in again with your password. To only stop the instance and '
+      'keep your sign-in, use "End instance".';
   @override
   String get settingsCloseInstance => 'End instance';
   @override
-  String get settingsCloseInstanceBody => 'End instance: stop its backend process (no more heartbeat, no more '
+  String get settingsCloseInstanceBody =>
+      'End instance: stop its backend process (no more heartbeat, no more '
       'incoming messages) and return to the instance picker. Your sign-in is kept — pick "Open" there and you '
       'are straight back in, no password needed.';
   @override
-  String get gateHintSessionExpired => 'Your session credential is no longer valid. Please log in again.';
+  String get gateHintSessionExpired =>
+      'Your session credential is no longer valid. Please log in again.';
   @override
-  String get gateHintSetupNeeded => 'This instance has no password yet. Set one first.';
+  String get gateHintSetupNeeded =>
+      'This instance has no password yet. Set one first.';
   @override
-  String get gateHintAlreadyInitialized => 'This instance already has a password. Please log in with it.';
+  String get gateHintAlreadyInitialized =>
+      'This instance already has a password. Please log in with it.';
   @override
-  String gateWaitingBackend(int port) => 'backend is not up yet (waiting on :$port)';
+  String gateWaitingBackend(int port) =>
+      'backend is not up yet (waiting on :$port)';
   @override
-  String gateBackendDown(String address) => 'The backend is not up yet ($address). Retrying…';
+  String gateBackendDown(String address) =>
+      'The backend is not up yet ($address). Retrying…';
   @override
   String gateBackendStarting(String phase) => phase.trim().isEmpty
       ? 'The backend is still starting. Retrying…'
       : 'The backend is still starting (phase: ${phase.trim()}). Retrying…';
   @override
   String backendPhaseLabel(String phase) => switch (phase.trim()) {
-        'events' => 'replaying events',
-        'mcp' => 'external tools',
-        'channels' => 'message channels',
-        'ready' => 'ready',
-        final other => other,
-      };
+    'events' => 'replaying events',
+    'mcp' => 'external tools',
+    'channels' => 'message channels',
+    'ready' => 'ready',
+    final other => other,
+  };
   @override
   String gateBackendProgress(int seconds, int retries) =>
       '${seconds}s elapsed · $retries retries so far';
   @override
-  String get gateBackendLogHint => 'The backend never became ready: see %LOCALAPPDATA%\\Irmia\\gui.log';
+  String get gateBackendLogHint =>
+      'The backend never became ready: see %LOCALAPPDATA%\\Irmia\\gui.log';
   // ── Instance picker (2026-10) ──
   @override
   String get pickerTitle => 'Choose an instance';
@@ -9469,7 +10210,8 @@ class EnStrings extends AppStrings {
   @override
   String get pickerLoading => 'Reading the instance list…';
   @override
-  String get pickerEmpty => 'No instances registered yet. Create one to get started.';
+  String get pickerEmpty =>
+      'No instances registered yet. Create one to get started.';
   @override
   String get pickerUnreadable =>
       'The instance list could not be read (missing or corrupt): you can still create a new one — other instances are unaffected.';
@@ -9494,7 +10236,8 @@ class EnStrings extends AppStrings {
   @override
   String get pickerForget => 'Forget credential';
   @override
-  String get pickerSessionExpired => 'Sign-in has expired. Please sign in again.';
+  String get pickerSessionExpired =>
+      'Sign-in has expired. Please sign in again.';
   @override
   String get pickerNew => 'New instance';
   @override
@@ -9512,7 +10255,8 @@ class EnStrings extends AppStrings {
   @override
   String pickerDeleteBody(String name) => 'Delete "$name"?';
   @override
-  String pickerForgetBody(String name) => 'Forget the credential for "$name"? This only clears the sign-in '
+  String pickerForgetBody(String name) =>
+      'Forget the credential for "$name"? This only clears the sign-in '
       'credential stored on this machine: the instance keeps running and its registry entry stays. '
       'You will need the password next time.';
   @override
@@ -9540,9 +10284,11 @@ class EnStrings extends AppStrings {
       'The instance list has no usable launch path (node and entry script): the backend cannot be started — '
       'start that instance once and it will write its paths into the list itself.';
   @override
-  String get pickerProblemLaunchFailed => 'The backend did not start (check the node and entry script paths).';
+  String get pickerProblemLaunchFailed =>
+      'The backend did not start (check the node and entry script paths).';
   @override
-  String get pickerProblemPortUnavailable => 'No free port from 7788 upwards: stop another instance first.';
+  String get pickerProblemPortUnavailable =>
+      'No free port from 7788 upwards: stop another instance first.';
   @override
   String get pickerProblemRemoveFailed =>
       'Could not delete: the instance list file is not writable (it may be locked). Try again.';
@@ -9559,7 +10305,8 @@ class EnStrings extends AppStrings {
       '${phase.trim().isEmpty ? '' : ' (phase: ${phase.trim()})'}: stopped waiting'
       ' (port :$port) — check its log.';
   @override
-  String pickerWaitingReady(int seconds, String phase) => 'Waited $seconds s and it is still starting'
+  String pickerWaitingReady(int seconds, String phase) =>
+      'Waited $seconds s and it is still starting'
       '${phase.trim().isEmpty ? '' : ' (phase: ${phase.trim()})'}';
   @override
   String get pickerStopWaiting => 'Stop waiting';
@@ -9573,7 +10320,8 @@ class EnStrings extends AppStrings {
   String pickerProblemCannotDeleteDefault(String name) =>
       '"$name" is the default instance and cannot be deleted (its data folder is in use).';
   @override
-  String pickerStartingNamed(String name) => 'Starting "$name"… (the first start takes a while)';
+  String pickerStartingNamed(String name) =>
+      'Starting "$name"… (the first start takes a while)';
   @override
   String pickerNewPort(String port) => 'Will use port :$port';
   @override
@@ -9592,9 +10340,11 @@ class EnStrings extends AppStrings {
   String settingsProjectionReadFailedHint(String projError) =>
       'Could not read the runtime data ($projError); days guarded and the event watermark are unavailable.';
   @override
-  String get settingsProjectionFootnote => 'Days guarded and the event watermark come from the runtime projection (GET /api/projection) and are measured values.';
+  String get settingsProjectionFootnote =>
+      'Days guarded and the event watermark come from the runtime projection (GET /api/projection) and are measured values.';
   @override
-  String settingsDaysCount(String days) => '$days ${days == '1' ? 'day' : 'days'}';
+  String settingsDaysCount(String days) =>
+      '$days ${days == '1' ? 'day' : 'days'}';
   @override
   String settingsDaysSince(String days, String stamp) =>
       '$days ${days == '1' ? 'day' : 'days'} (since $stamp)';
@@ -9605,19 +10355,23 @@ class EnStrings extends AppStrings {
   @override
   String get settingsPolicyNoneOption => 'All off (she cannot see any of them)';
   @override
-  String get settingsPolicyAllOption => 'All on (everything in the list is granted)';
+  String get settingsPolicyAllOption =>
+      'All on (everything in the list is granted)';
   @override
   String get settingsPolicyListOption => 'By list (only the ones you check)';
   @override
   String get settingsPolicyListTitle => 'Allow by list';
   @override
-  String get settingsPolicyNoTools => 'Could not get the tool list (the registry may not be up yet) — check "Extensions · Tools" first and come back.';
+  String get settingsPolicyNoTools =>
+      'Could not get the tool list (the registry may not be up yet) — check "Extensions · Tools" first and come back.';
   @override
   String get settingsDestructiveTitle => 'Change the destructive tool policy';
   @override
-  String get settingsDestructiveRelaxedBody => 'This lets her see and call tools that change this machine (writing files, running commands, etc.). Are you sure?';
+  String get settingsDestructiveRelaxedBody =>
+      'This lets her see and call tools that change this machine (writing files, running commands, etc.). Are you sure?';
   @override
-  String get settingsDestructiveRestrictedBody => 'Back to the restricted level: she will not see the destructive tools (safer). Are you sure?';
+  String get settingsDestructiveRestrictedBody =>
+      'Back to the restricted level: she will not see the destructive tools (safer). Are you sure?';
   @override
   String get settingsPolicyAll => 'all on';
   @override
@@ -9628,7 +10382,8 @@ class EnStrings extends AppStrings {
   @override
   String get settingsListAnd => ' and ';
   @override
-  String settingsSaved(String written, String restart) => 'Saved $written$restart';
+  String settingsSaved(String written, String restart) =>
+      'Saved $written$restart';
   @override
   String settingsClearKeyTitle(String laneLabel) => 'Clear key · $laneLabel';
   @override
@@ -9642,16 +10397,19 @@ class EnStrings extends AppStrings {
       'immediately. Once installed the agent can use it (rg_search / es_search get registered with '
       'it; for Python it also guides pip so she can pip install extra capabilities herself).';
   @override
-  String settingsDepReadyToast(String label, String version) => '$label is ready ($version)';
+  String settingsDepReadyToast(String label, String version) =>
+      '$label is ready ($version)';
   @override
   String settingsStepErrorToast(String step, String error) => '$step: $error';
   @override
-  String settingsNoDownloadPage(String hint) => 'No download page for this one; install it like this: $hint';
+  String settingsNoDownloadPage(String hint) =>
+      'No download page for this one; install it like this: $hint';
   @override
   String settingsOpenUrlFailed(String url, String? hint) =>
       'Could not open a browser; the address is $url${hint == null ? '' : ' ($hint)'}';
   @override
-  String settingsInstalledVersion(String? version) => 'Installed${version == null ? '' : ' $version'}';
+  String settingsInstalledVersion(String? version) =>
+      'Installed${version == null ? '' : ' $version'}';
   @override
   String settingsWriteErrorNote(String writeError) =>
       'The automatic configuration was not written: $writeError. The installed directory has already '
@@ -9677,7 +10435,8 @@ class EnStrings extends AppStrings {
       'Credential file: $file (only its sha256 is on disk: the plaintext appeared on screen only '
       'when you pressed the button, and nobody can read it back afterwards).';
   @override
-  String settingsTrustFullBody(String consequence) => 'After switching to full trust: $consequence';
+  String settingsTrustFullBody(String consequence) =>
+      'After switching to full trust: $consequence';
   @override
   String settingsPolicyListCount(int count) => 'By list ($count items)';
   @override
@@ -9689,11 +10448,14 @@ class EnStrings extends AppStrings {
   @override
   String get settingsWebhookCurlSampleText => 'Disk is almost full';
   @override
-  String settingsDepsSuggested(int count) => '$count recommended installation(s)';
+  String settingsDepsSuggested(int count) =>
+      '$count recommended installation(s)';
   @override
-  String settingsDepPipReady(String version) => 'pip $version (she can pip install extra capabilities herself)';
+  String settingsDepPipReady(String version) =>
+      'pip $version (she can pip install extra capabilities herself)';
   @override
-  String settingsDepPurposeImpact(String purpose, String impact) => '$purpose. $impact';
+  String settingsDepPurposeImpact(String purpose, String impact) =>
+      '$purpose. $impact';
   @override
   String settingsInstallTitle(String label) => 'Install $label';
   @override
@@ -9715,25 +10477,30 @@ class EnStrings extends AppStrings {
   @override
   String get chanQqAppSecretHint => 'The secret exchanged for an access_token.';
   @override
-  String get chanOneBotTokenHint => 'Required when the protocol side enables auth.';
+  String get chanOneBotTokenHint =>
+      'Required when the protocol side enables auth.';
   @override
   String get chanQqApiBaseLabel => 'API base URL';
   @override
-  String get chanQqUrlHint => 'Leave empty to use the official URL; http(s) only.';
+  String get chanQqUrlHint =>
+      'Leave empty to use the official URL; http(s) only.';
   @override
   String get chanQqTokenUrlLabel => 'Token URL';
   @override
   String get chanQqGatewayUrlLabel => 'Gateway override URL';
   @override
-  String get chanQqGatewayHint => 'Leave empty to fetch it from the token endpoint; ws(s) only.';
+  String get chanQqGatewayHint =>
+      'Leave empty to fetch it from the token endpoint; ws(s) only.';
   @override
   String get chanOneBotWsLabel => 'Protocol-side ws URL';
   @override
-  String get chanOneBotWsHint => 'Forward WebSocket port of the protocol side; must be ws:// or wss://.';
+  String get chanOneBotWsHint =>
+      'Forward WebSocket port of the protocol side; must be ws:// or wss://.';
   @override
   String get chanAlertWebhookLabel => 'Alert exit webhook';
   @override
-  String get chanAlertWebhookHint => 'Leave empty and alerts only reach the log — nothing is sent out.';
+  String get chanAlertWebhookHint =>
+      'Leave empty and alerts only reach the log — nothing is sent out.';
   @override
   String get chanAlertRateLabel => 'Repeat-alert rate-limit window';
   @override
@@ -9745,30 +10512,79 @@ class EnStrings extends AppStrings {
   @override
   String get chanQqTitle => 'QQ Official Bot API';
   @override
-  String get chanQqHint => "Fill in AppID and AppSecret below — they go into this machine's data/.keys.json, not config.json; "
+  String get chanQqHint =>
+      "Fill in AppID and AppSecret below — they go into this machine's data/.keys.json, not config.json; "
       'both are needed before it connects.';
   @override
-  String get chanOneBotHint => 'Forward WebSocket of the protocol side (NapCat / go-cqhttp); fill in access_token below.';
+  String get chanOneBotHint =>
+      'Forward WebSocket of the protocol side (NapCat / go-cqhttp); fill in access_token below.';
   @override
   String get chanOneBotBlurb => 'Protocol-side forward WebSocket';
   @override
-  String get chanHookTitle => 'Webhook and file watch';
+  String get chanHookTitle => 'Events & alerts';
   @override
-  String get chanHookHint => 'With no exit URL, alerts are written to the log only.';
+  String get chanHookConfigTitle => 'Alert exit & listener';
   @override
-  String get chanHookBlurb => 'Alert exit · inbound listen';
+  String get chanHookHint =>
+      'With no exit URL, alerts are written to the log only.';
+  @override
+  String get chanHookBlurb => 'Alert exit · file wake · event sources';
+  @override
+  String get ingressTitle => 'Event ingress';
+  @override
+  String get ingressCreate => 'New source';
+  @override
+  String get ingressIntro => 'External monitors post events to /webhook/* with their own token and wake policy; only a sha256 is stored locally.';
+  @override
+  String get ingressEmpty => 'No event sources yet.';
+  @override
+  String get ingressLegacyNote => 'The legacy global webhook token still works; source tokens are independent.';
+  @override
+  String get ingressRotate => 'Rotate token';
+  @override
+  String get ingressDelete => 'Delete source';
+  @override
+  String get ingressCreateTitle => 'New event source';
+  @override
+  String get ingressNameLabel => 'Source name';
+  @override
+  String get ingressNameHint => 'e.g. backup-job / home-assistant';
+  @override
+  String get ingressWakeLabel => 'Wake policy';
+  @override
+  String get ingressWakeAlways => 'Wake on every event';
+  @override
+  String get ingressWakeCritical => 'Wake on critical only';
+  @override
+  String get ingressWakeNever => 'Store only, never wake';
+  @override
+  String get ingressCancel => 'Cancel';
+  @override
+  String get ingressCreateAction => 'Create';
+  @override
+  String get ingressDeleteTitle => 'Delete event source';
+  @override
+  String ingressDeleteBody(String name) => 'After deleting "$name", its token becomes invalid immediately.';
+  @override
+  String get ingressDeleteAction => 'Delete';
+  @override
+  String get ingressTokenTitle => 'Source token';
+  @override
+  String get ingressTokenIntro => 'This token is shown only once; copy it to the caller now:';
+  @override
+  String get ingressTokenClose => 'Close';
+  @override
+  String ingressOperationFailed(String reason) => 'Operation failed: $reason';
   @override
   String get chanConfigReadFailed => 'Could not read the config';
   @override
   String get chanKeysReadFailed => 'Could not read the key status';
   @override
-  String chanClearSecretTitle(String label) =>
-      'Clear key · $label';
+  String chanClearSecretTitle(String label) => 'Clear key · $label';
   @override
   String get chanClearSecretBody => 'You will need to fill it in again.';
   @override
-  String chanClearFailed(String reason) =>
-      'Could not clear it: $reason';
+  String chanClearFailed(String reason) => 'Could not clear it: $reason';
   @override
   String chanNotANumber(String field) =>
       '$field must be a number — nothing was saved';
@@ -9785,8 +10601,7 @@ class EnStrings extends AppStrings {
   @override
   String get chanSavedLiveSuffix => ', takes effect on the next connection';
   @override
-  String chanSaved(String parts, String suffix) =>
-      'Saved $parts$suffix';
+  String chanSaved(String parts, String suffix) => 'Saved $parts$suffix';
   @override
   String get chanReloaded => 'Reloaded from the active config';
   @override
@@ -9796,16 +10611,17 @@ class EnStrings extends AppStrings {
   String chanTestNotDelivered(String reason) =>
       "Not delivered${reason.isEmpty ? ': the exit did not answer' : ': $reason'}";
   @override
-  String chanTestFailed(String reason) =>
-      'The test failed: $reason';
+  String chanTestFailed(String reason) => 'The test failed: $reason';
   @override
   String get chanStatusUnknown => 'Status unknown';
   @override
-  String get chanStatusUnknownNote => 'The active config has not been read yet, so the channel status is unknown.';
+  String get chanStatusUnknownNote =>
+      'The active config has not been read yet, so the channel status is unknown.';
   @override
   String get chanStatusOff => 'Disabled';
   @override
-  String get chanStatusOffNote => 'Switched off in the config, so the adapter never connects.';
+  String get chanStatusOffNote =>
+      'Switched off in the config, so the adapter never connects.';
   @override
   String get chanStatusOn => 'Enabled';
   @override
@@ -9816,11 +10632,13 @@ class EnStrings extends AppStrings {
   @override
   String get chanStatusNoExit => 'No exit configured';
   @override
-  String get chanStatusNoExitNote => 'The exit URL is empty, so alerts only go to the log and are never sent out.';
+  String get chanStatusNoExitNote =>
+      'The exit URL is empty, so alerts only go to the log and are never sent out.';
   @override
   String get chanStatusExitOn => 'Exit configured';
   @override
-  String get chanStatusExitOnNote => 'Nothing triggered yet: no inbound wake and no file event.';
+  String get chanStatusExitOnNote =>
+      'Nothing triggered yet: no inbound wake and no file event.';
   @override
   String chanStatusHookRunningNote(String tag, String at) =>
       'Latest event: $tag at $at.';
@@ -9840,7 +10658,8 @@ class EnStrings extends AppStrings {
   @override
   String get chanGuideAction => 'Set up QQ Official';
   @override
-  String get chanGuideHint => 'Switches and endpoint settings live in the "channel config" card on this page: they are written to '
+  String get chanGuideHint =>
+      'Switches and endpoint settings live in the "channel config" card on this page: they are written to '
       'config.json and taken over after a restart.';
   @override
   String get chanListHeader => 'Channels';
@@ -9851,7 +10670,8 @@ class EnStrings extends AppStrings {
   @override
   String get chanConfigUnavailable => 'Config unavailable';
   @override
-  String get chanConfigUnavailableHint => 'The local service /api/config returned no config.';
+  String get chanConfigUnavailableHint =>
+      'The local service /api/config returned no config.';
   @override
   String get chanBackToList => 'Channel list';
   @override
@@ -9859,49 +10679,54 @@ class EnStrings extends AppStrings {
   @override
   String get chanMentionTitle => 'What she is called';
   @override
-  String get chanMentionNote => 'When someone skips the @ and just says one of these words in a group, the framework treats it as '
+  String get chanMentionNote =>
+      'When someone skips the @ and just says one of these words in a group, the framework treats it as '
       'calling her and brings it to her just like an @.';
   @override
-  String get chanMentionEmpty => 'Only the platform @ counts right now: in groups, people who say her name without an @ are not heard.';
+  String get chanMentionEmpty =>
+      'Only the platform @ counts right now: in groups, people who say her name without an @ are not heard.';
   @override
-  String get chanMentionHint => 'Takes effect immediately (the next message is judged by the new list); no restart needed.';
+  String get chanMentionHint =>
+      'Takes effect immediately (the next message is judged by the new list); no restart needed.';
   @override
   String chanMentionSaveFailed(String problem) =>
       'Could not write it: $problem';
   @override
   String get chanMentionCleared => 'Set to "only an @ counts"';
   @override
-  String chanMentionSaved(String words) =>
-      'Noted: $words';
+  String chanMentionSaved(String words) => 'Noted: $words';
   @override
   String get chanContactsTitle => 'Conversation contacts';
   @override
-  String get chanContactsNote => 'QQ gives no nicknames; tell her who is who here.';
+  String get chanContactsNote =>
+      'QQ gives no nicknames; tell her who is who here.';
   @override
   String get chanDetailsLabel => 'Details';
   @override
-  String get chanContactsDetail => 'In a group chat only an @ or her name reaches the conversation; whether anything else arrives '
+  String get chanContactsDetail =>
+      'In a group chat only an @ or her name reaches the conversation; whether anything else arrives '
       'depends on the official Bot message permission—whatever the platform pushes to us still lands in '
       'the inbox. Anyone who @-ed her in a group is registered under that group automatically (so she sees '
       'more than an openid) — expand to rename. The note she keeps (the part in brackets after the name) is '
       'shown here only: it is not the name and cannot be edited —that field saves the name; the note stays '
       'in her own memory.';
   @override
-  String get chanContactsEmpty => 'No conversation has talked to her yet. Once someone says something, that conversation shows up here.';
+  String get chanContactsEmpty =>
+      'No conversation has talked to her yet. Once someone says something, that conversation shows up here.';
   @override
   String get chanGroupSceneLabel => 'Group chats';
   @override
   String get chanGroupSceneHard => 'Hard refusal: no local tools';
   @override
-  String get chanGroupSceneSoft => 'Soft warning: spell out the risk, she decides';
+  String get chanGroupSceneSoft =>
+      'Soft warning: spell out the risk, she decides';
   @override
-  String get chanContactsRestartNote => 'Takes effect only after the main process restarts (the contact table is not hot-reloaded).';
+  String get chanContactsRestartNote =>
+      'Takes effect only after the main process restarts (the contact table is not hot-reloaded).';
   @override
-  String chanContactLine(String chat, String when) =>
-      '$chat · last seen $when';
+  String chanContactLine(String chat, String when) => '$chat · last seen $when';
   @override
-  String chanContactNote(String note) =>
-      'Note: $note';
+  String chanContactNote(String note) => 'Note: $note';
   @override
   String get chanContactHint => 'Who is this (leave empty to keep it unnamed)';
   @override
@@ -9909,8 +10734,7 @@ class EnStrings extends AppStrings {
   @override
   String get chanMembersCollapse => 'Hide group members';
   @override
-  String chanMembersExpand(int count) =>
-      'Show group members ($count)';
+  String chanMembersExpand(int count) => 'Show group members ($count)';
   @override
   String get chanWarnExempt => 'Framework warning: exempt';
   @override
@@ -9918,23 +10742,27 @@ class EnStrings extends AppStrings {
   @override
   String get chanMemberSaveTooltip => 'Save this name (active next turn)';
   @override
-  String chanMemberNameTooltip(String who) =>
-      'Give $who a name';
+  String chanMemberNameTooltip(String who) => 'Give $who a name';
   @override
-  String get chanExemptSessionOn => 'Framework warnings exempted for this direct chat';
+  String get chanExemptSessionOn =>
+      'Framework warnings exempted for this direct chat';
   @override
-  String get chanExemptSessionOff => 'Framework warnings restored for this direct chat';
+  String get chanExemptSessionOff =>
+      'Framework warnings restored for this direct chat';
   @override
-  String get chanExemptMemberOn => 'Framework warnings exempted for this person';
+  String get chanExemptMemberOn =>
+      'Framework warnings exempted for this person';
   @override
-  String get chanExemptMemberOff => 'Framework warnings restored for this person';
+  String get chanExemptMemberOff =>
+      'Framework warnings restored for this person';
   @override
-  String get chanGroupSceneHardToast => 'Group chats switched to hard refusal: she cannot touch this machine from a group';
+  String get chanGroupSceneHardToast =>
+      'Group chats switched to hard refusal: she cannot touch this machine from a group';
   @override
-  String get chanGroupSceneSoftToast => 'Group chats switched back to soft warning: the framework warns her and she decides';
+  String get chanGroupSceneSoftToast =>
+      'Group chats switched back to soft warning: the framework warns her and she decides';
   @override
-  String chanToggleFailed(String err) =>
-      'Could not switch it: $err';
+  String chanToggleFailed(String err) => 'Could not switch it: $err';
   @override
   String get chanNameRequired => 'The name cannot be empty';
   @override
@@ -9950,9 +10778,11 @@ class EnStrings extends AppStrings {
   @override
   String get chanNeedsRestart => 'Needs restart';
   @override
-  String get chanConfigNote => 'Written to config.json and taken over after a restart; clearing a field means back to the default.';
+  String get chanConfigNote =>
+      'Written to config.json and taken over after a restart; clearing a field means back to the default.';
   @override
-  String get chanConfigDetail => 'Secret fields take the value directly: it lives in the local key file, not in '
+  String get chanConfigDetail =>
+      'Secret fields take the value directly: it lives in the local key file, not in '
       'config.json. Environment variables take precedence over these files.';
   @override
   String get chanTestAlert => 'Test the alert exit';
@@ -9962,28 +10792,28 @@ class EnStrings extends AppStrings {
   @override
   String get chanEnableLabel => 'Enable this channel';
   @override
-  String get chanEnableNoteOn => 'Connects and starts receiving messages after a restart.';
+  String get chanEnableNoteOn =>
+      'Connects and starts receiving messages after a restart.';
   @override
   String get chanEnableNoteOff => 'Off: the adapter does not connect.';
   @override
-  String get chanSecretHintConfigured => 'Already set — paste a new value to replace it';
+  String get chanSecretHintConfigured =>
+      'Already set — paste a new value to replace it';
   @override
-  String chanSecretHintPaste(String label) =>
-      'Paste $label';
+  String chanSecretHintPaste(String label) => 'Paste $label';
   @override
-  String chanSecretConfigured(String mask) =>
-      'Set $mask';
+  String chanSecretConfigured(String mask) => 'Set $mask';
   @override
   String get chanNumberHint => 'Number';
   @override
   String get chanNotSetHint => 'Not set';
   @override
-  String chanReadonlyFold(int count) =>
-      'Read-only ($count)';
+  String chanReadonlyFold(int count) => 'Read-only ($count)';
   @override
   String get chanChannelIdLabel => 'Channel id';
   @override
-  String get chanFeedEmpty => 'No channel activity yet — records appear once a message, wake or delivery comes in.';
+  String get chanFeedEmpty =>
+      'No channel activity yet — records appear once a message, wake or delivery comes in.';
   @override
   String get chanSourceExternal => 'External';
   @override
@@ -10009,11 +10839,9 @@ class EnStrings extends AppStrings {
   String schedCancelFailed(String timerId, String err) =>
       'Could not cancel $timerId: $err';
   @override
-  String schedCancelFailedShort(String err) =>
-      'Could not cancel it: $err';
+  String schedCancelFailedShort(String err) => 'Could not cancel it: $err';
   @override
-  String schedBuilt(String when, String note) =>
-      'Scheduled: $when · $note';
+  String schedBuilt(String when, String note) => 'Scheduled: $when · $note';
   @override
   String get schedBuiltToast => 'Plan created';
   @override
@@ -10030,7 +10858,8 @@ class EnStrings extends AppStrings {
   @override
   String get schedPageTitle => 'Upcoming plans';
   @override
-  String get schedPageSubtitle => 'Schedules, reminders and her own plans in one place.';
+  String get schedPageSubtitle =>
+      'Schedules, reminders and her own plans in one place.';
   @override
   String get schedBackToThisWeek => 'This week';
   @override
@@ -10038,10 +10867,10 @@ class EnStrings extends AppStrings {
   @override
   String get schedLoading => 'Reading the plans she has queued…';
   @override
-  String schedLoadFailed(String error) =>
-      'Could not read the schedule: $error';
+  String schedLoadFailed(String error) => 'Could not read the schedule: $error';
   @override
-  String get schedLoadHint => 'This page reads the timers in the /api/projection payload: try refreshing; if it never loads, the '
+  String get schedLoadHint =>
+      'This page reads the timers in the /api/projection payload: try refreshing; if it never loads, the '
       'main process has a problem.';
   @override
   String get schedStatThisWeek => 'This week';
@@ -10075,8 +10904,7 @@ class EnStrings extends AppStrings {
   String schedTimeRecurring(String hour, String minute) =>
       '$hour:$minute · recurring';
   @override
-  String schedMonthDay(int month, int day) =>
-      '$month/$day';
+  String schedMonthDay(int month, int day) => '$month/$day';
   @override
   String get schedRecurringPill => 'Recurring';
   @override
@@ -10087,26 +10915,25 @@ class EnStrings extends AppStrings {
   @override
   String get schedListTitle => 'Plan list';
   @override
-  String schedFilterDay(String day) =>
-      'Only $day';
+  String schedFilterDay(String day) => 'Only $day';
   @override
-  String schedFilterQuery(String query) =>
-      'Matching "$query"';
+  String schedFilterQuery(String query) => 'Matching "$query"';
   @override
-  String schedFilterCount(int count) =>
-      '$count entries';
+  String schedFilterCount(int count) => '$count entries';
   @override
   String get schedShowAll => 'Show all';
   @override
   String get schedClearSearch => 'Clear search';
   @override
-  String get schedActionGoneHint => 'It may have fired or been cancelled already; refresh to see the latest list.';
+  String get schedActionGoneHint =>
+      'It may have fired or been cancelled already; refresh to see the latest list.';
   @override
   String get schedListNoMatch => 'No plans match this.';
   @override
   String get schedListEmpty => 'Nothing is scheduled yet.';
   @override
-  String get schedListEmptyHint => 'A plan is only a chance — when the time comes she first checks whether it is still worth doing, and '
+  String get schedListEmptyHint =>
+      'A plan is only a chance — when the time comes she first checks whether it is still worth doing, and '
       'skips it if not.';
   @override
   String get schedDetailPlaceholder => 'Pick a plan';
@@ -10116,8 +10943,7 @@ class EnStrings extends AppStrings {
   String schedDetailRecurring(String label) =>
       'Recurring $label (the server reschedules the next one)';
   @override
-  String schedDetailTimeSuffix(String label) =>
-      ' · recurring $label';
+  String schedDetailTimeSuffix(String label) => ' · recurring $label';
   @override
   String get schedFieldWhy => 'Why it was planned';
   @override
@@ -10127,8 +10953,7 @@ class EnStrings extends AppStrings {
   @override
   String get schedFieldDuration => 'Duration';
   @override
-  String schedMinutes(Object? dur) =>
-      '$dur min';
+  String schedMinutes(Object? dur) => '$dur min';
   @override
   String schedMinutesDefault(Object? dur) =>
       '$dur min (default: this entry has no dur)';
@@ -10137,8 +10962,7 @@ class EnStrings extends AppStrings {
   @override
   String get schedUnwritten => 'Not set';
   @override
-  String schedWakeReceipt(String text) =>
-      'Said one line to her: "$text"';
+  String schedWakeReceipt(String text) => 'Said one line to her: "$text"';
   @override
   String get schedSeeChat => 'See her reaction in chat';
   @override
@@ -10163,37 +10987,39 @@ class EnStrings extends AppStrings {
   @override
   String get schedStatusWaiting => 'Waiting';
   @override
-  String get schedWakeDeduped => 'Exactly the same as what she just got, so it was treated as a duplicate and ignored — try again in '
+  String get schedWakeDeduped =>
+      'Exactly the same as what she just got, so it was treated as a duplicate and ignored — try again in '
       'a few seconds';
   @override
   String get schedViewWeek => 'Week';
   @override
   String get schedViewList => 'List';
   @override
-  String schedRecurringLine(String label) =>
-      'Recurring · $label';
+  String schedRecurringLine(String label) => 'Recurring · $label';
   @override
   String get schedChorePill => 'her chores';
   @override
-  String schedWillSay(String label) =>
-      'will speak in $label';
+  String schedWillSay(String label) => 'will speak in $label';
   @override
-  String get schedErrDate => '"Date" not understood: write today / tomorrow / 2026-10-20.';
+  String get schedErrDate =>
+      '"Date" not understood: write today / tomorrow / 2026-10-20.';
   @override
   String get schedErrClock => '"Time" must look like 20:00 (24-hour clock).';
   @override
-  String get schedErrWhat => '"What to do" is required: it is the line she sees at that time.';
+  String get schedErrWhat =>
+      '"What to do" is required: it is the line she sees at that time.';
   @override
-  String get schedErrDuration => '"Roughly how long" takes a number of minutes (leave it empty and it is taken as half an hour).';
+  String get schedErrDuration =>
+      '"Roughly how long" takes a number of minutes (leave it empty and it is taken as half an hour).';
   @override
   String get schedRepeatDaily => 'Every day';
   @override
   String get schedRepeatWeekly => 'Every week';
   @override
-  String get schedErrBrief => 'Write one line for her to schedule (it is exactly what she will read).';
+  String get schedErrBrief =>
+      'Write one line for her to schedule (it is exactly what she will read).';
   @override
-  String schedWakePrefix(String text) =>
-      'Please schedule a plan for me: $text';
+  String schedWakePrefix(String text) => 'Please schedule a plan for me: $text';
   @override
   String schedWakeFailed(String err) =>
       'Could not deliver that line to her: $err';
@@ -10201,7 +11027,8 @@ class EnStrings extends AppStrings {
   String schedCreateFailed(String err) =>
       'That plan could not be created: $err';
   @override
-  String get schedCardLead => 'It is usually better to let her create it: she writes the "why" herself and re-checks at the time '
+  String get schedCardLead =>
+      'It is usually better to let her create it: she writes the "why" herself and re-checks at the time '
       'whether it is still worth doing. Creating it yourself is for when you are in a hurry.';
   @override
   String get schedPathHer => 'Let her create it';
@@ -10218,9 +11045,11 @@ class EnStrings extends AppStrings {
   @override
   String get schedFieldBrief => 'One line for her';
   @override
-  String get schedBriefHint => 'Next Monday at nine, remind me to look at the weekly plan';
+  String get schedBriefHint =>
+      'Next Monday at nine, remind me to look at the weekly plan';
   @override
-  String get schedBriefNote => 'This line goes straight to her and she schedules it.';
+  String get schedBriefNote =>
+      'This line goes straight to her and she schedules it.';
   @override
   String get schedFieldDay => 'Which day';
   @override
@@ -10242,11 +11071,13 @@ class EnStrings extends AppStrings {
   @override
   String get schedFieldTitle => 'Title';
   @override
-  String get schedTitleHint => 'Leave it empty and the "what to do" line is used';
+  String get schedTitleHint =>
+      'Leave it empty and the "what to do" line is used';
   @override
   String get schedFieldWhyInput => 'Why schedule it';
   @override
-  String get schedWhyHint => 'It is due on Wednesday and I am afraid I will forget';
+  String get schedWhyHint =>
+      'It is due on Wednesday and I am afraid I will forget';
   @override
   String get schedFieldDurationInput => 'Roughly how long (minutes)';
   @override
@@ -10258,15 +11089,15 @@ class EnStrings extends AppStrings {
   @override
   String get schedNoSid => 'Tell nobody';
   @override
-  String get schedPastWarning => 'That moment has already passed: if you save it she is woken once right away.';
+  String get schedPastWarning =>
+      'That moment has already passed: if you save it she is woken once right away.';
   @override
-  String get schedCreateNote => 'Once created it is a real plan: at that time she sees the line you wrote.';
+  String get schedCreateNote =>
+      'Once created it is a real plan: at that time she sees the line you wrote.';
   @override
-  String schedSidWithName(String name, String short) =>
-      '$name ($short)';
+  String schedSidWithName(String name, String short) => '$name ($short)';
   @override
-  String schedMonthDayRaw(Object month, Object day) =>
-      '$month/$day';
+  String schedMonthDayRaw(Object month, Object day) => '$month/$day';
   @override
   String schedWhenStamp(int month, int day, String time) =>
       '$month/$day · $time';
@@ -10285,11 +11116,9 @@ class EnStrings extends AppStrings {
   @override
   String get schedWeekdaySun => 'Sun';
   @override
-  String schedCronDaily(String time) =>
-      'Every day at $time';
+  String schedCronDaily(String time) => 'Every day at $time';
   @override
-  String schedCronRange(String from, String to) =>
-      '$from to $to';
+  String schedCronRange(String from, String to) => '$from to $to';
   @override
   String schedCronWeekly(String weekdays, String time) =>
       'Every $weekdays at $time';
@@ -10310,20 +11139,25 @@ class EnStrings extends AppStrings {
   @override
   String get extSectionSkills => 'Skills';
   @override
-  String get extSectionSkillsBlurb => 'Task knowledge packs: a SKILL.md says when to use it and how';
+  String get extSectionSkillsBlurb =>
+      'Task knowledge packs: a SKILL.md says when to use it and how';
   @override
-  String get extSectionMcpBlurb => 'External tool servers: an executable is started on demand, and its tools are reached through the '
+  String get extSectionMcpBlurb =>
+      'External tool servers: an executable is started on demand, and its tools are reached through the '
       'built-in mcp tool';
   @override
   String get extSectionTools => 'Built-in tools';
   @override
-  String get extSectionToolsBlurb => 'Tools that ship with the app: switch them by group; off means gone from her list';
+  String get extSectionToolsBlurb =>
+      'Tools that ship with the app: switch them by group; off means gone from her list';
   @override
-  String get extSectionHooksBlurb => 'Execution hooks: an external command can be plugged in at PreToolUse / PostToolUse / Wake';
+  String get extSectionHooksBlurb =>
+      'Execution hooks: an external command can be plugged in at PreToolUse / PostToolUse / Wake';
   @override
   String get extSectionPlugins => 'Plugins';
   @override
-  String get extSectionPluginsBlurb => 'Review Skills, Hooks and MCP contributions by package hash; manual lifecycle changes take effect after restart';
+  String get extSectionPluginsBlurb =>
+      'Review contributions, code permissions and network allowlists by package hash; code plugins apply immediately, declarative packages after restart';
   @override
   String get extPluginInstall => 'Install plugin';
   @override
@@ -10331,33 +11165,37 @@ class EnStrings extends AppStrings {
   @override
   String get extPluginSourceDir => 'Plugin directory (absolute path)';
   @override
-  String get extPluginSourceHint => r'For example C:\packages\demo or /home/me/demo';
+  String get extPluginSourceHint =>
+      r'For example C:\packages\demo or /home/me/demo';
   @override
   String get extPluginAbsoluteRequired => 'Enter an absolute local directory';
   @override
   String get extPluginEmpty => 'No plugins installed';
   @override
-  String get extPluginEmptyHint => 'Install a local directory, then review its package hash and permissions. Installing neither trusts nor enables it.';
+  String get extPluginEmptyHint =>
+      'Install a local directory, then review its package hash and permissions. Installing neither trusts nor enables it.';
   @override
   String extPluginSummary(int count) => '$count plugin packages';
   @override
   String extPluginStat(int count) => '$count plugin packages';
   @override
   String extPluginState(String state) => switch (state) {
-        'untrusted' => 'Review required',
-        'disabled' => 'Disabled',
-        'enabled' => 'Enabled',
-        'invalid' => 'Invalid',
-        'quarantined' => 'Quarantined',
-        'probing' => 'Probing',
-        _ => state,
-      };
+    'untrusted' => 'Review required',
+    'disabled' => 'Disabled',
+    'enabled' => 'Enabled',
+    'invalid' => 'Invalid',
+    'quarantined' => 'Quarantined',
+    'probing' => 'Probing',
+    _ => state,
+  };
   @override
   String get extPluginRestartRequired => 'Takes effect after restart';
   @override
-  String extPluginContributions(int skills, int hooks, int mcp) => 'Skills $skills · Hooks $hooks · MCP $mcp';
+  String extPluginContributions(int skills, int hooks, int mcp) =>
+      'Skills $skills · Hooks $hooks · MCP $mcp';
   @override
-  String extPluginVersionHash(String version, String hash) => 'Version $version · Hash $hash';
+  String extPluginVersionHash(String version, String hash) =>
+      'Version $version · Hash $hash';
   @override
   String get extPluginPermissionsLabel => 'Permissions';
   @override
@@ -10368,27 +11206,42 @@ class EnStrings extends AppStrings {
   String extPluginReviewTitle(String id) => 'Review plugin $id';
   @override
   String extPluginReviewBody(String id, String hash) =>
-      'Check the package hash $hash, contributions and permissions for $id. Plugin contributions are trusted code, not a security sandbox; confirmation binds only this hash.';
+      'Check the package hash $hash, contributions, permissions, named hooks, net.allow and runtime for $id. Plugins are trusted code after confirmation, not a security sandbox; confirmation binds only this hash.';
   @override
   String get extPluginEnable => 'Enable';
   @override
   String get extPluginDisable => 'Disable';
   @override
+  String get extPluginUninstall => 'Uninstall';
+  @override
   String extPluginEnableTitle(String id) => 'Enable plugin $id?';
   @override
   String extPluginDisableTitle(String id) => 'Disable plugin $id?';
   @override
-  String get extPluginRestartBody => 'Manual lifecycle changes update the next effective state only. Restart the main process to apply them; current contributions do not change immediately.';
+  String extPluginUninstallTitle(String id) => 'Uninstall plugin $id?';
   @override
-  String get extPluginInstalledToast => 'Installed and awaiting review; it is not trusted or enabled yet';
+  String get extPluginUninstallBody =>
+      'Stop the process, then delete this package hash. Plugin data, state and configuration are retained.';
   @override
-  String extPluginConfirmedToast(String id) => 'Confirmed the current hash of $id; enable it separately';
+  String get extPluginRestartBody =>
+      'Code plugins start or stop immediately. Declarative packages update the next effective state and require a main-process restart.';
   @override
-  String extPluginRestartToast(String action, String id) => '$id $action; takes effect after restart';
+  String get extPluginInstalledToast =>
+      'Installed and awaiting review; it is not trusted or enabled yet';
+  @override
+  String extPluginConfirmedToast(String id) =>
+      'Confirmed the current hash of $id; enable it separately';
+  @override
+  String extPluginUninstalledToast(String id) =>
+      'Uninstalled the current package of $id; its data, state and configuration were retained';
+  @override
+  String extPluginRestartToast(String action, String id) =>
+      '$id: $action submitted; code plugins apply immediately, declarative packages after restart';
   @override
   String extPluginFailed(String reason) => 'Plugin operation failed: $reason';
   @override
-  String extPluginCircuit(String contribution, int count) => 'Failed contribution $contribution · $count consecutive failures';
+  String extPluginCircuit(String contribution, int count) =>
+      'Failed contribution $contribution · $count consecutive failures';
   @override
   String extPluginCircuitReason(String reason) => 'Failure reason: $reason';
   @override
@@ -10396,7 +11249,8 @@ class EnStrings extends AppStrings {
   @override
   String get extBadResponse => 'The response shape is not recognized';
   @override
-  String get extPageSubtitle => 'Skills, local plugins, MCP servers, built-in tools and hooks';
+  String get extPageSubtitle =>
+      'Skills, local plugins, MCP servers, built-in tools and hooks';
   @override
   String get extListHeader => 'Extensions';
   @override
@@ -10416,36 +11270,43 @@ class EnStrings extends AppStrings {
   @override
   String get extNoSkills => 'No skill installed yet.';
   @override
-  String get extNoSkillsHint => 'A skill is a folder: skills/<name>/SKILL.md. After it is found it still has to pass the trust gate '
+  String get extNoSkillsHint =>
+      'A skill is a folder: skills/<name>/SKILL.md. After it is found it still has to pass the trust gate '
       '(you confirm here) before it enters the catalog.';
   @override
   String get extPendingTitle => 'Pending';
   @override
-  String get extPendingHint => 'Nothing enters the catalog unconfirmed — however good the description is, she cannot see it yet.';
+  String get extPendingHint =>
+      'Nothing enters the catalog unconfirmed — however good the description is, she cannot see it yet.';
   @override
   String get extActiveTitle => 'Active';
   @override
-  String get extActiveHint => 'In the catalog: she sees these names and descriptions every turn.';
+  String get extActiveHint =>
+      'In the catalog: she sees these names and descriptions every turn.';
   @override
-  String get extActiveEmpty => 'No confirmed skill yet — the pending ones show up here once confirmed.';
+  String get extActiveEmpty =>
+      'No confirmed skill yet — the pending ones show up here once confirmed.';
   @override
   String get extIgnoredTitle => 'Ignored';
   @override
-  String get extIgnoredHint => 'Local note only (stored in data/skills-ignored.json): no event is written and it never enters the '
+  String get extIgnoredHint =>
+      'Local note only (stored in data/skills-ignored.json): no event is written and it never enters the '
       'catalog; it will not follow you to another machine.';
   @override
   String get extRejectedTitle => 'Rejected folders';
   @override
-  String get extRejectedHint => 'Invalid frontmatter or a duplicate name: she cannot read these folders. Fix the SKILL.md and scan '
+  String get extRejectedHint =>
+      'Invalid frontmatter or a duplicate name: she cannot read these folders. Fix the SKILL.md and scan '
       'again.';
   @override
-  String extRejectedLine(Object? dir, Object? reason) =>
-      '$dir: $reason';
+  String extRejectedLine(Object? dir, Object? reason) => '$dir: $reason';
   @override
-  String get extGuideSkillPath => 'The skill lives at <project root>/skills/<name>/SKILL.md: the folder name is the skill name '
+  String get extGuideSkillPath =>
+      'The skill lives at <project root>/skills/<name>/SKILL.md: the folder name is the skill name '
       '(lowercase letters, digits, hyphens).';
   @override
-  String get extGuideSkillTrust => 'After scanning it still has to pass the trust gate — only when you press "confirm" and '
+  String get extGuideSkillTrust =>
+      'After scanning it still has to pass the trust gate — only when you press "confirm" and '
       'skill/installed is written does it enter the catalog.';
   @override
   String get extInCatalogBadge => 'In catalog';
@@ -10456,48 +11317,47 @@ class EnStrings extends AppStrings {
   @override
   String get extFieldSizeHash => 'Size and hash';
   @override
-  String extSizeHash(int bytes, String short) =>
-      '$bytes bytes · $short';
+  String extSizeHash(int bytes, String short) => '$bytes bytes · $short';
   @override
   String get extFieldTrustDetail => 'Trust details';
   @override
   String get extActionRestore => 'Restore: put it back under pending';
   @override
-  String get extActionRetire => 'Disable: pull it out of the catalog (files untouched, restorable any time)';
+  String get extActionRetire =>
+      'Disable: pull it out of the catalog (files untouched, restorable any time)';
   @override
-  String get extActionDelete => 'Delete: move the whole skill folder to the trash (restorable, not rm -rf)';
+  String get extActionDelete =>
+      'Delete: move the whole skill folder to the trash (restorable, not rm -rf)';
   @override
-  String get extActionConfirm => 'Confirm: write skill/installed and the skill enters the catalog';
+  String get extActionConfirm =>
+      'Confirm: write skill/installed and the skill enters the catalog';
   @override
-  String get extActionIgnore => 'Ignore: put it under "ignored" — no event, no catalog';
+  String get extActionIgnore =>
+      'Ignore: put it under "ignored" — no event, no catalog';
   @override
   String extConfirmedToast(String name) =>
       'Confirmed: $name is now in the catalog';
   @override
-  String extConfirmFailed(String reason) =>
-      'Could not confirm: $reason';
+  String extConfirmFailed(String reason) => 'Could not confirm: $reason';
   @override
-  String extIgnoredToast(String name) =>
-      'Ignored: $name (local note only)';
+  String extIgnoredToast(String name) => 'Ignored: $name (local note only)';
   @override
-  String extRestoredToast(String name) =>
-      'Back under pending: $name';
+  String extRestoredToast(String name) => 'Back under pending: $name';
   @override
-  String extOpFailed(String reason) =>
-      'That did not work: $reason';
+  String extOpFailed(String reason) => 'That did not work: $reason';
   @override
-  String extRetireTitle(String name) =>
-      'Disable skill · $name';
+  String extRetireTitle(String name) => 'Disable skill · $name';
   @override
-  String get extRetireBody => 'Disable means pulling it into "ignored": she will not see it from the next turn on (it is out of '
+  String get extRetireBody =>
+      'Disable means pulling it into "ignored": she will not see it from the next turn on (it is out of '
       'the catalog). Not one byte of the skill file changes; press "restore" to put it back.';
   @override
   String get extDisable => 'Disable';
   @override
-  String extDeleteSkillTitle(String name) =>
-      'Delete skill · $name';
+  String extDeleteSkillTitle(String name) => 'Delete skill · $name';
   @override
-  String get extDeleteBody => 'The whole folder is moved to the trash (<dataDir>/trash/), which is "not rm -rf": the contents are '
+  String get extDeleteBody =>
+      'The whole folder is moved to the trash (<dataDir>/trash/), which is "not rm -rf": the contents are '
       'untouched, so moving that copy back restores it. After deleting she will not see it from the next '
       'turn on — if you only want it out of sight for now, use "disable".';
   @override
@@ -10506,10 +11366,10 @@ class EnStrings extends AppStrings {
   String extDeletedToast(String name) =>
       'Deleted: $name is in the trash (contents untouched, move it back to restore)';
   @override
-  String extDeleteFailed(String reason) =>
-      'Could not delete it: $reason';
+  String extDeleteFailed(String reason) => 'Could not delete it: $reason';
   @override
-  String get extCreateHint => 'A spec-compliant skeleton is generated at skills/<name>/SKILL.md and then stops at pending —she '
+  String get extCreateHint =>
+      'A spec-compliant skeleton is generated at skills/<name>/SKILL.md and then stops at pending —she '
       'cannot see it before you confirm. The name may only use lowercase letters, digits and hyphens (the '
       'folder name is the skill name).';
   @override
@@ -10517,52 +11377,63 @@ class EnStrings extends AppStrings {
   @override
   String get extSkillNameHint => 'e.g. morning-review';
   @override
-  String get extSkillNameInvalid => 'Lowercase letters, digits and hyphens only';
+  String get extSkillNameInvalid =>
+      'Lowercase letters, digits and hyphens only';
   @override
   String get extFieldOneLineDesc => 'One-line description';
   @override
-  String get extOneLineDescHint => 'Say what it does and when to use it — this is the only trigger she can see';
+  String get extOneLineDescHint =>
+      'Say what it does and when to use it — this is the only trigger she can see';
   @override
   String extSkillCreatedToast(String path) =>
       '''Created ${path.isEmpty ? 'SKILL.md' : path}; it waits for your confirmation under "pending"''';
   @override
-  String extCreateSkillFailed(String reason) =>
-      'Could not create it: $reason';
+  String extCreateSkillFailed(String reason) => 'Could not create it: $reason';
   @override
   String get extAddServer => 'Add server';
   @override
-  String extMcpSummary(int servers, int running, int tools, String pendingPart) =>
+  String extMcpSummary(
+    int servers,
+    int running,
+    int tools,
+    String pendingPart,
+  ) =>
       "$servers server${servers == 1 ? '' : 's'} · $running running · $tools "
       "tool${tools == 1 ? '' : 's'}$pendingPart";
   @override
   String extPendingGrants(int count) =>
       'Waiting for you: requests she filed ($count)';
   @override
-  String extUnpreparedGrants(int count) =>
-      'Not picked up yet ($count)';
+  String extUnpreparedGrants(int count) => 'Not picked up yet ($count)';
   @override
   String get extUnpreparedTitle => 'These requests have not been picked up yet';
   @override
-  String get extUnpreparedHint => 'The framework scans the request folder once per tick. Ones just written wait for the next tick; '
+  String get extUnpreparedHint =>
+      'The framework scans the request folder once per tick. Ones just written wait for the next tick; '
       'ones that stay here have probably failed validation— that tick records an outcome (the rejection '
       'reason is under "answered"), and the file itself is never deleted.';
   @override
   String get extConfigProblems => 'Config problems';
   @override
-  String get extConfigProblemsHint => 'Declared but unreadable: fix mcp.servers in config.json and reload.';
+  String get extConfigProblemsHint =>
+      'Declared but unreadable: fix mcp.servers in config.json and reload.';
   @override
   String get extAnsweredTitle => 'Answered requests';
   @override
-  String get extAnsweredHint => 'The requests she filed and how they ended. Once approved the framework writes config.json;"approved '
+  String get extAnsweredHint =>
+      'The requests she filed and how they ended. Once approved the framework writes config.json;"approved '
       'but not installed" is written here as it is (that is not the same as "rejected").';
   @override
-  String get extGuideMcp1 => 'An MCP server is just an executable: the main process starts it on demand and reclaims it after 5 '
+  String get extGuideMcp1 =>
+      'An MCP server is just an executable: the main process starts it on demand and reclaims it after 5 '
       'idle minutes, so "not running" is the normal state.';
   @override
-  String get extGuideMcp2 => 'Its tools are untrusted by default (sideEffect = destructive): declare it explicitly in config.json '
+  String get extGuideMcp2 =>
+      'Its tools are untrusted by default (sideEffect = destructive): declare it explicitly in config.json '
       'to downgrade that, and a restart of the main process is needed for the change to take over.';
   @override
-  String get extGuideMcp3 => 'She can add and remove them herself (by filing a request, see "waiting for you" above) — you just '
+  String get extGuideMcp3 =>
+      'She can add and remove them herself (by filing a request, see "waiting for you" above) — you just '
       'approve or reject it here.';
   @override
   String extGrantRejectedToast(String suffix) =>
@@ -10583,7 +11454,8 @@ class EnStrings extends AppStrings {
   String get extGrantAfterSkillRemove =>
       'Once approved the whole directory moves to the trash (data/trash/); it can be moved back.';
   @override
-  String get extGrantExecOkSkillInstall => 'The framework installed it into the skill root';
+  String get extGrantExecOkSkillInstall =>
+      'The framework installed it into the skill root';
   @override
   String get extGrantExecOkSkillRemove => 'Moved to the trash';
   @override
@@ -10591,7 +11463,8 @@ class EnStrings extends AppStrings {
   @override
   String grantInboxActionMcpAdd(String name) => 'Add an MCP server: $name';
   @override
-  String grantInboxActionMcpRemove(String name) => 'Remove the MCP server: $name';
+  String grantInboxActionMcpRemove(String name) =>
+      'Remove the MCP server: $name';
   @override
   String grantInboxActionSkillInstall(String name) => 'Install a skill: $name';
   @override
@@ -10616,7 +11489,8 @@ class EnStrings extends AppStrings {
   String get grantInboxRiskMcpRemove =>
       'Removes this entry from the config (mcp.servers[] in config.json).';
   @override
-  String get grantInboxRiskUnknown => 'Only the details say what this request does.';
+  String get grantInboxRiskUnknown =>
+      'Only the details say what this request does.';
   @override
   String get grantInboxSource => 'She wrote this request herself';
   @override
@@ -10632,9 +11506,11 @@ class EnStrings extends AppStrings {
   @override
   String get grantInboxWorking => 'Working…';
   @override
-  String get grantInboxCollapseTooltip => 'Collapse (it is still waiting; click to expand)';
+  String get grantInboxCollapseTooltip =>
+      'Collapse (it is still waiting; click to expand)';
   @override
-  String get grantInboxExpandTooltip => 'Expand the pending cards (approve and reject live there)';
+  String get grantInboxExpandTooltip =>
+      'Expand the pending cards (approve and reject live there)';
   @override
   String get grantInboxOpenExtensions => 'Open Extensions';
   @override
@@ -10646,7 +11522,8 @@ class EnStrings extends AppStrings {
   @override
   String grantInboxCollapsed(int count) => '$count waiting for you';
   @override
-  String grantInboxFailed(String reason) => 'Could not record that decision: $reason';
+  String grantInboxFailed(String reason) =>
+      'Could not record that decision: $reason';
   @override
   String get grantUnreadableTitle => 'One request cannot be read';
   @override
@@ -10656,40 +11533,41 @@ class EnStrings extends AppStrings {
   @override
   String trayPendingItem(int count) => '$count waiting for approval';
   @override
-  String trayPendingTooltip(String name, int count) => '$name · $count waiting for approval';
+  String trayPendingTooltip(String name, int count) =>
+      '$name · $count waiting for approval';
   @override
-  String get extNoServers => 'No MCP server configured yet. Press the button in the page header to add one, and give it a launch '
+  String get extNoServers =>
+      'No MCP server configured yet. Press the button in the page header to add one, and give it a launch '
       'command.';
   @override
-  String get extNoServersHint1 => 'A server is just an executable: the main process starts it on demand and reclaims it after 5 idle '
+  String get extNoServersHint1 =>
+      'A server is just an executable: the main process starts it on demand and reclaims it after 5 idle '
       'minutes, so "not running" is the normal state.';
   @override
-  String get extNoServersHint2 => 'Its tools are treated as destructive by default; declare it explicitly in config.json to downgrade '
+  String get extNoServersHint2 =>
+      'Its tools are treated as destructive by default; declare it explicitly in config.json to downgrade '
       'that, and a restart of the main process is needed for the change to take over.';
   @override
   String get extDisabledBadge => 'Disabled';
   @override
-  String extToolCountBadge(int count) =>
-      '$count tools';
+  String extToolCountBadge(int count) => '$count tools';
   @override
   String get extCollapseServer => 'Collapse this server';
   @override
   String get extExpandServer => 'Expand this server';
   @override
-  String get extNoDesc => '(nothing says what it does — she only sees this name in the index)';
+  String get extNoDesc =>
+      '(nothing says what it does — she only sees this name in the index)';
   @override
-  String extSelfReportedDesc(String desc) =>
-      '$desc (self-reported)';
+  String extSelfReportedDesc(String desc) => '$desc (self-reported)';
   @override
   String get extFieldCommand => 'Launch command';
   @override
   String get extFieldEnv => 'Environment variables';
   @override
-  String extLastRun(String at, String suffix) =>
-      'Last run: $at$suffix';
+  String extLastRun(String at, String suffix) => 'Last run: $at$suffix';
   @override
-  String extPidLine(Object? pid) =>
-      'pid in the log: $pid';
+  String extPidLine(Object? pid) => 'pid in the log: $pid';
   @override
   String get extStartingProcess => 'Starting the process…';
   @override
@@ -10704,70 +11582,79 @@ class EnStrings extends AppStrings {
   String extToolsAllListed(int count) =>
       'The list is complete: all $count are here.';
   @override
-  String get extNoChange => 'The config already looked like this — nothing changed';
+  String get extNoChange =>
+      'The config already looked like this — nothing changed';
   @override
   String get extTakeEffectNow => 'Live already, no restart needed';
   @override
-  String get extNeedsRestart => 'A main-process restart is needed for this to take over';
+  String get extNeedsRestart =>
+      'A main-process restart is needed for this to take over';
   @override
   String extMcpToggledToast(String name, String action, String outcome) =>
       '$name is now $action: $outcome';
   @override
-  String extToggleFailed(String reason) =>
-      'Could not switch it: $reason';
+  String extToggleFailed(String reason) => 'Could not switch it: $reason';
   @override
   String get extEditMcpTitle => 'Edit MCP server';
   @override
   String get extAddMcpTitle => 'Add MCP server';
   @override
-  String get extMcpFormLead => 'A server = one launch command. Saving writes it into mcp.servers[] of config.json and takes effect '
+  String get extMcpFormLead =>
+      'A server = one launch command. Saving writes it into mcp.servers[] of config.json and takes effect '
       'immediately:Calls go through the built-in mcp tool (which starts the server on demand and reclaims '
       'it after 5 idle minutes by default).';
   @override
   String get extFieldServerName => 'Server name';
   @override
-  String get extServerNameHint => 'The name you give this server; used when calling it (letters, digits, - and _ only, e.g. filesystem)';
+  String get extServerNameHint =>
+      'The name you give this server; used when calling it (letters, digits, - and _ only, e.g. filesystem)';
   @override
-  String get extCommandHint => 'The program to launch: uvx … or node D:\\…\\cli.js (an absolute .exe path works too). The launcher '
+  String get extCommandHint =>
+      'The program to launch: uvx … or node D:\\…\\cli.js (an absolute .exe path works too). The launcher '
       'must be on the whitelist (node, uvx, python); inline execution is not allowed, and npx does not '
       'start on Windows';
   @override
   String get extFieldDesc => 'desc (what it does)';
   @override
-  String get extDescHint => "One line: what this server does and what you plan to use it for (e.g. read this machine's browser "
+  String get extDescHint =>
+      "One line: what this server does and what you plan to use it for (e.g. read this machine's browser "
       'history and open tabs)';
   @override
-  String get extDescNote => 'This line enters her standing index (one line per server). Saving works without it too — then she '
+  String get extDescNote =>
+      'This line enters her standing index (one line per server). Saving works without it too — then she '
       'only sees the name in the index.';
   @override
   String get extFieldArgs => 'args (one per line)';
   @override
-  String get extArgsHint => 'One argument per line: -y on one line, the package name on the next';
+  String get extArgsHint =>
+      'One argument per line: -y on one line, the package name on the next';
   @override
   String get extFieldEnvForm => 'env (one KEY=VALUE per line)';
   @override
-  String get extEnvHint => 'Optional: beyond these lines it also inherits the environment variables of the main process';
+  String get extEnvHint =>
+      'Optional: beyond these lines it also inherits the environment variables of the main process';
   @override
   String get extFieldTestTimeout => 'Test-connection timeout (ms)';
   @override
-  String get extTestTimeoutHint => 'The first package pull can take 30s or more; it only affects "test connection" in this dialog '
+  String get extTestTimeoutHint =>
+      'The first package pull can take 30s or more; it only affects "test connection" in this dialog '
       '(500–60000) and is not written to the config';
   @override
-  String get extEnableSwitchLabel => 'Enable this server (off = the config stays but no process is started and calls do not start it '
+  String get extEnableSwitchLabel =>
+      'Enable this server (off = the config stays but no process is started and calls do not start it '
       'either)';
   @override
-  String get extNameAndCommandRequired => 'Both the server name and command are required';
+  String get extNameAndCommandRequired =>
+      'Both the server name and command are required';
   @override
-  String extSaveFailed(String reason) =>
-      'Could not save: $reason';
+  String extSaveFailed(String reason) => 'Could not save: $reason';
   @override
   String extMcpSavedToast(String saved, String outcome, String note) =>
       '$saved: $outcome$note';
   @override
   String get extFillCommandFirst => 'Fill in command before testing';
   @override
-  String extTestFailed(String reason) =>
-      'The test failed: $reason';
+  String extTestFailed(String reason) => 'The test failed: $reason';
   @override
   String get extConnectOk => 'Connected';
   @override
@@ -10776,7 +11663,8 @@ class EnStrings extends AppStrings {
   String extProbeOk(Object? name, Object? ms) =>
       '$name started, the handshake passed and the tool list came back ($ms ms).';
   @override
-  String get extProbeNoTools => 'It declares the tools capability but the list is empty: this server currently offers no tools.';
+  String get extProbeNoTools =>
+      'It declares the tools capability but the list is empty: this server currently offers no tools.';
   @override
   String extProtocolLine(String version, String peer) =>
       'Protocol version $version$peer';
@@ -10786,15 +11674,14 @@ class EnStrings extends AppStrings {
   @override
   String get extUnknownReason => 'unknown reason';
   @override
-  String extStderrTail(Object? tail) =>
-      'stderr tail: $tail';
+  String extStderrTail(Object? tail) => 'stderr tail: $tail';
   @override
   String get extGotIt => 'Got it';
   @override
-  String extDeleteServerTitle(String name) =>
-      'Delete MCP server · $name';
+  String extDeleteServerTitle(String name) => 'Delete MCP server · $name';
   @override
-  String get extDeleteServerBody => 'Remove this entry from mcp.servers[] in config.json. Her mcp tool will no longer have this '
+  String get extDeleteServerBody =>
+      'Remove this entry from mcp.servers[] in config.json. Her mcp tool will no longer have this '
       'server.The program itself is not uninstalled.';
   @override
   String extServerDeletedToast(String name, String outcome) =>
@@ -10802,7 +11689,8 @@ class EnStrings extends AppStrings {
   @override
   String get extNoToolRegistry => 'No tool registry yet.';
   @override
-  String get extNoToolRegistryHint => 'The registry is assembled at runtime; when this process reads an empty list there are no entries. '
+  String get extNoToolRegistryHint =>
+      'The registry is assembled at runtime; when this process reads an empty list there are no entries. '
       'Tools of MCP servers are not in this list: look them up on demand through the built-in mcp tool.';
   @override
   String get extRefresh => 'Refresh';
@@ -10810,10 +11698,12 @@ class EnStrings extends AppStrings {
   String extToolsSummary(Object? enabled, int total, Object? policy) =>
       '$enabled enabled / $total total · destructive: $policy';
   @override
-  String get extToolsHint1 => 'Turning one tool off does not change the capability boundary, it only takes the name out of her '
+  String get extToolsHint1 =>
+      'Turning one tool off does not change the capability boundary, it only takes the name out of her '
       'list — she will not see it from the next turn on.';
   @override
-  String get extToolsHint2 => 'destructive tools have a separate switch of their own (tools.destructiveEnabled); this one here '
+  String get extToolsHint2 =>
+      'destructive tools have a separate switch of their own (tools.destructiveEnabled); this one here '
       'cannot turn that off.';
   @override
   String extGroupSummary(int on, int total, String note) =>
@@ -10833,17 +11723,14 @@ class EnStrings extends AppStrings {
   @override
   String get extToggleOnMessage => 'On: put it back in her tool list';
   @override
-  String extToolFailureLine(String name, String reason) =>
-      '$name: $reason';
+  String extToolFailureLine(String name, String reason) => '$name: $reason';
   @override
-  String extAllToggledToast(String state, int count) =>
-      'All $state ($count)';
+  String extAllToggledToast(String state, int count) => 'All $state ($count)';
   @override
   String extSomeFailedToast(int count, String first) =>
       '$count did not change: $first';
   @override
-  String extRequiredParam(Object? name) =>
-      '$name (required)';
+  String extRequiredParam(Object? name) => '$name (required)';
   @override
   String get extAddHook => 'Add hook';
   @override
@@ -10857,28 +11744,34 @@ class EnStrings extends AppStrings {
   @override
   String get extHooksTitle => 'Hook entries';
   @override
-  String get extHooksHint => 'Run in file order; the timeout of one hook does not block the main flow (killed on timeout, output '
+  String get extHooksHint =>
+      'Run in file order; the timeout of one hook does not block the main flow (killed on timeout, output '
       'dropped).';
   @override
-  String get extHooksEmpty => 'No hook configured yet. Press the button in the page header to add one: a hook can refuse a tool '
+  String get extHooksEmpty =>
+      'No hook configured yet. Press the button in the page header to add one: a hook can refuse a tool '
       'call, and it can rewrite arguments.';
   @override
   String get extInvalidEntries => 'Invalid entries';
   @override
-  String get extInvalidEntriesHint => 'Invalid entries do not stop the rest of the config from taking effect, but they have to be fixed — '
+  String get extInvalidEntriesHint =>
+      'Invalid entries do not stop the rest of the config from taking effect, but they have to be fixed — '
       'right now not one of them runs.';
   @override
-  String get extHookBoundary1 => 'This line is drawn at "who can change me": hooks can refuse tool calls and rewrite arguments, so '
+  String get extHookBoundary1 =>
+      'This line is drawn at "who can change me": hooks can refuse tool calls and rewrite arguments, so '
       'the agent can never change this file.';
   @override
-  String get extHookBoundary2 => 'Writing it from the UI requires a confirmation phrase (X-Confirm: hook-save / hook-remove), and a '
+  String get extHookBoundary2 =>
+      'Writing it from the UI requires a confirmation phrase (X-Confirm: hook-save / hook-remove), and a '
       'main-process restart is needed for it to be assembled.';
   @override
   String get extFieldEvent => 'Event';
   @override
   String get extFieldCondition => 'Trigger condition';
   @override
-  String get extHookToggleOffMessage => 'Disable: keep the command line, but do not assemble it';
+  String get extHookToggleOffMessage =>
+      'Disable: keep the command line, but do not assemble it';
   @override
   String get extHookToggleOnMessage => 'Enable: assemble it after a restart';
   @override
@@ -10891,7 +11784,8 @@ class EnStrings extends AppStrings {
   @override
   String get extEditHookTitle => 'Edit hook';
   @override
-  String get extHookDialogNote => 'A hook runs an external command at an execution point: stdin receives a JSON context, exit code 2 = '
+  String get extHookDialogNote =>
+      'A hook runs an external command at an execution point: stdin receives a JSON context, exit code 2 = '
       'refuse (the only enforcing channel),other non-zero codes do not block the main flow. This config is '
       'read-only for the agent.';
   @override
@@ -10899,9 +11793,11 @@ class EnStrings extends AppStrings {
   @override
   String get extFieldMatcher => 'matcher (regex)';
   @override
-  String get extWakeMatcherHint => 'Matches the wake source: timer|file|webhook|manual|heartbeat';
+  String get extWakeMatcherHint =>
+      'Matches the wake source: timer|file|webhook|manual|heartbeat';
   @override
-  String get extToolMatcherHint => 'Matches the tool name: safe_edit|safe_write';
+  String get extToolMatcherHint =>
+      'Matches the tool name: safe_edit|safe_write';
   @override
   String get extFieldShellCommand => 'command (handed to the system shell)';
   @override
@@ -10909,23 +11805,29 @@ class EnStrings extends AppStrings {
   @override
   String get extFieldConditionOptional => 'Trigger condition (optional)';
   @override
-  String get extConditionHint => 'e.g. pwsh(rm *); no match means no process is started';
+  String get extConditionHint =>
+      'e.g. pwsh(rm *); no match means no process is started';
   @override
   String get extFieldTimeoutMs => 'Timeout (ms)';
   @override
-  String get extTimeoutHint => 'Killed on timeout, output dropped, the main flow is not blocked';
+  String get extTimeoutHint =>
+      'Killed on timeout, output dropped, the main flow is not blocked';
   @override
-  String get extEnableHookSwitch => 'Enable (off = it stays in the file but is not assembled)';
+  String get extEnableHookSwitch =>
+      'Enable (off = it stays in the file but is not assembled)';
   @override
-  String get extMatcherAndCommandRequired => 'Both matcher and command are required';
+  String get extMatcherAndCommandRequired =>
+      'Both matcher and command are required';
   @override
-  String get extHookSavedToast => 'Written to data/hooks.json — assembled after the main process restarts';
+  String get extHookSavedToast =>
+      'Written to data/hooks.json — assembled after the main process restarts';
   @override
   String extDeleteHookBody(int index) =>
       'Remove entry $index from data/hooks.json. Once it is gone it takes part in no execution point —to '
       'put it away for a while use "disable" instead of deleting.';
   @override
-  String get extHookDeletedToast => 'Deleted — takes effect after the main process restarts';
+  String get extHookDeletedToast =>
+      'Deleted — takes effect after the main process restarts';
   @override
   String get extStatusUnknown => 'Status unknown';
   @override
@@ -10937,14 +11839,11 @@ class EnStrings extends AppStrings {
   String extStatMcp(int servers, int running) =>
       '$servers servers · $running running';
   @override
-  String extStatTools(int on, int total) =>
-      '$on of $total enabled';
+  String extStatTools(int on, int total) => '$on of $total enabled';
   @override
-  String extStatHooks(int total, String suffix) =>
-      '$total hooks$suffix';
+  String extStatHooks(int total, String suffix) => '$total hooks$suffix';
   @override
-  String extPendingPart(int count) =>
-      ' · waiting: $count';
+  String extPendingPart(int count) => ' · waiting: $count';
   @override
   String get extNoReasonGiven => ' (no reason given)';
   @override
@@ -10952,19 +11851,15 @@ class EnStrings extends AppStrings {
   @override
   String get extServerNoReason => '(the server gave no reason)';
   @override
-  String extReasonParen(String reason) =>
-      ' ($reason)';
+  String extReasonParen(String reason) => ' ($reason)';
   @override
   String get extEnabledWord => 'enabled';
   @override
-  String extSavedWho(String who) =>
-      'Saved $who';
+  String extSavedWho(String who) => 'Saved $who';
   @override
-  String extSavedWhoDisabled(String who) =>
-      'Saved $who (disabled state)';
+  String extSavedWhoDisabled(String who) => 'Saved $who (disabled state)';
   @override
-  String extIndentedNote(String descNote) =>
-      '　$descNote';
+  String extIndentedNote(String descNote) => '　$descNote';
   @override
   String extPeerVersion(Object? name, Object? version) =>
       ' · peer says $name $version';
@@ -10973,8 +11868,7 @@ class EnStrings extends AppStrings {
   @override
   String get extAllOffWord => 'off';
   @override
-  String extEnabledPart(int on) =>
-      ' · $on enabled';
+  String extEnabledPart(int on) => ' · $on enabled';
   @override
   String get extDisabledWord => 'disabled';
 
@@ -11003,7 +11897,8 @@ class EnStrings extends AppStrings {
   @override
   String get updateUpToDate => 'Up to date';
   @override
-  String get updateDisabled => 'Update checks are disabled in config (update.enabled = false)';
+  String get updateDisabled =>
+      'Update checks are disabled in config (update.enabled = false)';
   @override
   String get updateNeverChecked => 'Never checked';
   @override
@@ -11029,32 +11924,35 @@ class EnStrings extends AppStrings {
   String updateCheckFailed(String reason) => 'Update check failed: $reason';
   @override
   String updateReasonText(String reason) => switch (reason) {
-        'up-to-date' => 'already up to date',
-        'older-than-current' => 'the site version is older than this build',
-        'channel-mismatch' => 'channel mismatch',
-        'prerelease' => 'the stable channel does not treat prereleases as updates',
-        'pending' => 'the release is not finished yet (_pending)',
-        'newer' => 'a newer version exists',
-        'below-minimum' => 'below the minimum supported version',
-        'network' => 'network unreachable',
-        'timeout' => 'timed out',
-        'bad-json' => 'the response is not valid JSON',
-        'bad-shape' => 'the response does not match the contract',
-        'too-large' => 'the response is too large',
-        'bad-endpoint' => 'the endpoint address is unusable',
-        'bad-current-version' => 'the current version string cannot be parsed',
-        'never-checked' => 'never checked',
-        _ when reason.startsWith('http-') => 'HTTP ${reason.substring(5)}',
-        _ => reason.isEmpty ? 'unknown reason' : reason,
-      };
+    'up-to-date' => 'already up to date',
+    'older-than-current' => 'the site version is older than this build',
+    'channel-mismatch' => 'channel mismatch',
+    'prerelease' => 'the stable channel does not treat prereleases as updates',
+    'pending' => 'the release is not finished yet (_pending)',
+    'newer' => 'a newer version exists',
+    'below-minimum' => 'below the minimum supported version',
+    'network' => 'network unreachable',
+    'timeout' => 'timed out',
+    'bad-json' => 'the response is not valid JSON',
+    'bad-shape' => 'the response does not match the contract',
+    'too-large' => 'the response is too large',
+    'bad-endpoint' => 'the endpoint address is unusable',
+    'bad-current-version' => 'the current version string cannot be parsed',
+    'never-checked' => 'never checked',
+    _ when reason.startsWith('http-') => 'HTTP ${reason.substring(5)}',
+    _ => reason.isEmpty ? 'unknown reason' : reason,
+  };
   @override
   String trayUpdateItem(String latest) => 'Update v$latest available · View';
   @override
-  String trayUpdateRequiredItem(String latest) => 'Update v$latest · Please upgrade';
+  String trayUpdateRequiredItem(String latest) =>
+      'Update v$latest · Please upgrade';
   @override
-  String trayUpdateTooltip(String name, String latest) => '$name · update v$latest available';
+  String trayUpdateTooltip(String name, String latest) =>
+      '$name · update v$latest available';
   @override
-  String trayUpdateRequiredTooltip(String name, String latest) => '$name · upgrade to v$latest required';
+  String trayUpdateRequiredTooltip(String name, String latest) =>
+      '$name · upgrade to v$latest required';
 
   // ── 更新检查：三处共用的那几句 ──
 
@@ -11062,13 +11960,16 @@ class EnStrings extends AppStrings {
   String updateNewVersionTitle(String latest, String current) =>
       'Update v$latest available (current v$current)';
   @override
-  String get updateRequiredNotice => 'Below the minimum supported version, please upgrade first';
+  String get updateRequiredNotice =>
+      'Below the minimum supported version, please upgrade first';
   @override
-  String get updateChannelMismatchText => 'No release on this channel (channel mismatch)';
+  String get updateChannelMismatchText =>
+      'No release on this channel (channel mismatch)';
   @override
   String get updateDownloadTitle => 'Download';
   @override
-  String get updateDownloadNote => 'Opens links only; never downloads or installs silently.';
+  String get updateDownloadNote =>
+      'Opens links only; never downloads or installs silently.';
   @override
   String get updateGitHubDownload => 'Download from GitHub';
   @override
@@ -11090,51 +11991,59 @@ class EnStrings extends AppStrings {
   @override
   String get updateReleasePage => 'Release page';
   @override
-  String updatePlatformLine(String os, String arch, String kind) => '$os $arch · ${updateKindLabel(kind)}';
+  String updatePlatformLine(String os, String arch, String kind) =>
+      '$os $arch · ${updateKindLabel(kind)}';
   @override
   String updateKindLabel(String kind) => switch (kind) {
-        'installer' => 'installer',
-        'portable' => 'portable',
-        'update' => 'update package',
-        _ => kind,
-      };
+    'installer' => 'installer',
+    'portable' => 'portable',
+    'update' => 'update package',
+    _ => kind,
+  };
   @override
   String get updateChannelSwitchNote =>
       'Switching clears the 12/24-hour throttle and checks immediately.';
   @override
-  String updateSwitched(String channel) => 'Switched to the $channel channel and checked immediately';
+  String updateSwitched(String channel) =>
+      'Switched to the $channel channel and checked immediately';
   @override
-  String updateSwitchFailed(String reason) => 'Could not switch channel: $reason';
+  String updateSwitchFailed(String reason) =>
+      'Could not switch channel: $reason';
 
   @override
   String get affectTitle => 'Affect';
   @override
   String get affectSystem => 'Affect system';
   @override
-  String get affectInvalidData => 'The server returned no usable affect data. Try again.';
+  String get affectInvalidData =>
+      'The server returned no usable affect data. Try again.';
   @override
-  String get affectPending => 'Config and the active value differ: this can come from an environment override, or from a change that has not taken effect yet. If it persists, restart the backend and check again.';
+  String get affectPending =>
+      'Config and the active value differ: this can come from an environment override, or from a change that has not taken effect yet. If it persists, restart the backend and check again.';
   @override
   String stickersLoadFailed(String error) => 'Could not load stickers: $error';
   @override
   String affectSaved(bool enabled, bool applied) => applied
-      ? (enabled ? 'Affect enabled; applies from the next turn' : 'Affect disabled; applies from the next turn')
+      ? (enabled
+            ? 'Affect enabled; applies from the next turn'
+            : 'Affect disabled; applies from the next turn')
       : 'Configuration saved; waiting for it to apply';
   @override
-  String affectSaveFailed(String reason) => 'Could not save the affect setting: $reason';
+  String affectSaveFailed(String reason) =>
+      'Could not save the affect setting: $reason';
   @override
   String affectLoadFailed(String reason) => 'Could not read affect: $reason';
   @override
   String affectReason(String code) => switch (code) {
-        'owner_setback' => 'The owner is having difficulty',
-        'owner_success' => 'The owner made progress',
-        'friendly_contact' => 'Recent friendly contact',
-        'unfriendly_contact' => 'Observed unfriendly contact',
-        'task_success' => 'A recently completed task',
-        'task_failure' => 'A recent execution setback',
-        'new_discovery' => 'New information',
-        _ => 'Recent experience',
-      };
+    'owner_setback' => 'The owner is having difficulty',
+    'owner_success' => 'The owner made progress',
+    'friendly_contact' => 'Recent friendly contact',
+    'unfriendly_contact' => 'Observed unfriendly contact',
+    'task_success' => 'A recently completed task',
+    'task_failure' => 'A recent execution setback',
+    'new_discovery' => 'New information',
+    _ => 'Recent experience',
+  };
 
   // ── 情绪页（设计稿 2026-10-31）──────────────────────────────────────
   @override
@@ -11155,32 +12064,36 @@ class EnStrings extends AppStrings {
   String moodUpdatedMinutesAgo(int minutes) => '$minutes min ago';
   @override
   String moodState(String key) => switch (key) {
-        'positive' => 'Bright and light',
-        'low' => 'Settling down',
-        'quiet' => 'Calm',
-        'off' => 'Affect system is off',
-        _ => 'Steady',
-      };
+    'positive' => 'Bright and light',
+    'low' => 'Settling down',
+    'quiet' => 'Calm',
+    'off' => 'Affect system is off',
+    _ => 'Steady',
+  };
   @override
   String moodHeadline(String key) => switch (key) {
-        'joy' => 'In a good mood, glad to talk.',
-        'warmth' => 'Gentle, and leaning a little closer.',
-        'concern' => 'Calm, with a touch of concern.',
-        'shyness' => 'A little shy, keeping some words to herself.',
-        'distress' => 'A little low, and slowly recovering.',
-        'irritation' => 'A little annoyed, and calming down.',
-        'off' => 'The affect system is currently off.',
-        'empty' => 'No new emotional change yet.',
-        _ => 'Calm, without much of a swing.',
-      };
+    'joy' => 'In a good mood, glad to talk.',
+    'warmth' => 'Gentle, and leaning a little closer.',
+    'concern' => 'Calm, with a touch of concern.',
+    'shyness' => 'A little shy, keeping some words to herself.',
+    'distress' => 'A little low, and slowly recovering.',
+    'irritation' => 'A little annoyed, and calming down.',
+    'off' => 'The affect system is currently off.',
+    'empty' => 'No new emotional change yet.',
+    _ => 'Calm, without much of a swing.',
+  };
   @override
   String moodDescription(String key) => switch (key) {
-        'positive' => 'Her mood leans positive. She is more willing to respond and to share what she is thinking.',
-        'low' => 'Her mood is on the low side. She is settling down; normal tasks still run as usual.',
-        'off' => 'Turn it on to give her a current affect layer that shapes tone and stickers.',
-        'empty' => 'Her mood will appear here after the next appraisal.',
-        _ => 'Her mood leans gentle. She is still following the recent conversation, in no hurry to interrupt.',
-      };
+    'positive' =>
+      'Her mood leans positive. She is more willing to respond and to share what she is thinking.',
+    'low' =>
+      'Her mood is on the low side. She is settling down; normal tasks still run as usual.',
+    'off' =>
+      'Turn it on to give her a current affect layer that shapes tone and stickers.',
+    'empty' => 'Her mood will appear here after the next appraisal.',
+    _ =>
+      'Her mood leans gentle. She is still following the recent conversation, in no hurry to interrupt.',
+  };
   @override
   String get moodNoNewAppraisalTitle => 'No new appraisal yet.';
   @override
@@ -11205,16 +12118,16 @@ class EnStrings extends AppStrings {
   String get moodArousalLabel => 'Activation';
   @override
   String moodValenceWord(String key) => switch (key) {
-        'high' => 'positive',
-        'low' => 'low',
-        _ => 'mild',
-      };
+    'high' => 'positive',
+    'low' => 'low',
+    _ => 'mild',
+  };
   @override
   String moodArousalWord(String key) => switch (key) {
-        'high' => 'active',
-        'low' => 'quiet',
-        _ => 'moderate',
-      };
+    'high' => 'active',
+    'low' => 'quiet',
+    _ => 'moderate',
+  };
   @override
   String moodArousalValue(int percent) => '$percent%';
   @override
@@ -11228,14 +12141,14 @@ class EnStrings extends AppStrings {
   String get moodEmotionsEmpty => 'No emotion dimensions to show yet.';
   @override
   String moodEmotion(String key) => switch (key) {
-        'joy' => 'Joy',
-        'distress' => 'Distress',
-        'concern' => 'Concern',
-        'irritation' => 'Irritation',
-        'warmth' => 'Warmth',
-        'shyness' => 'Shyness',
-        _ => key,
-      };
+    'joy' => 'Joy',
+    'distress' => 'Distress',
+    'concern' => 'Concern',
+    'irritation' => 'Irritation',
+    'warmth' => 'Warmth',
+    'shyness' => 'Shyness',
+    _ => key,
+  };
   @override
   String get moodTimelineTitle => 'Mood trend';
   @override
@@ -11262,19 +12175,21 @@ class EnStrings extends AppStrings {
   String get moodFactorsEmpty => 'No recent emotional influence yet.';
   @override
   String moodSource(String code) => switch (code) {
-        'task' => 'Task',
-        'discovery' => 'Exploration',
-        'chat' => 'Conversation',
-        _ => 'Other',
-      };
+    'task' => 'Task',
+    'discovery' => 'Exploration',
+    'chat' => 'Conversation',
+    _ => 'Other',
+  };
   @override
   String moodFactorMeta(String time, String source) => '$time · $source';
   @override
-  String moodFactorEffect(String emotion, String strength) => '$emotion $strength';
+  String moodFactorEffect(String emotion, String strength) =>
+      '$emotion $strength';
   @override
   String get moodSheetTitle => 'State details';
   @override
-  String get moodSheetBlurb => 'These numbers are just another way of showing how she feels right now.';
+  String get moodSheetBlurb =>
+      'These numbers are just another way of showing how she feels right now.';
   @override
   String get moodSheetMoodLabel => 'Mood';
   @override
@@ -11298,7 +12213,8 @@ class EnStrings extends AppStrings {
   @override
   String get moodSheetRenderLine => 'Affect line in the request';
   @override
-  String get moodSheetRenderLineMissing => 'Not injected (off, or the evaluator is off)';
+  String get moodSheetRenderLineMissing =>
+      'Not injected (off, or the evaluator is off)';
   @override
   String get moodSheetStateTime => 'State timestamp';
   @override
@@ -11327,9 +12243,11 @@ class EnStrings extends AppStrings {
   @override
   String get intimacyDetailTooltip => 'View intimacy details';
   @override
-  String get intimacyOffHint => 'Turn it on to record intimacy readings; nothing is shown while it is off.';
+  String get intimacyOffHint =>
+      'Turn it on to record intimacy readings; nothing is shown while it is off.';
   @override
-  String get intimacyPending => 'Saved config differs from the effective value — an env override, or a change not applied yet.';
+  String get intimacyPending =>
+      'Saved config differs from the effective value — an env override, or a change not applied yet.';
   @override
   String get intimacyReadingsTitle => 'Readings';
   @override
@@ -11347,24 +12265,25 @@ class EnStrings extends AppStrings {
   @override
   String get intimacyLevelLabel => 'Upper limit';
   @override
-  String get intimacyLevelNote => 'The upper limit caps how openly she shows it (default: obvious).';
+  String get intimacyLevelNote =>
+      'The upper limit caps how openly she shows it (default: obvious).';
   @override
   String get intimacyNoData => 'No readings yet';
   @override
   String intimacyMetric(String key) => switch (key) {
-        'intimacy' => 'Intimacy',
-        'desire' => 'Desire',
-        'satisfaction' => 'Satisfaction',
-        'restraint' => 'Restraint',
-        _ => key,
-      };
+    'intimacy' => 'Intimacy',
+    'desire' => 'Desire',
+    'satisfaction' => 'Satisfaction',
+    'restraint' => 'Restraint',
+    _ => key,
+  };
   @override
   String intimacyLevel(String key) => switch (key) {
-        'subtle' => 'Subtle',
-        'obvious' => 'Obvious',
-        'strong' => 'Strong',
-        _ => key,
-      };
+    'subtle' => 'Subtle',
+    'obvious' => 'Obvious',
+    'strong' => 'Strong',
+    _ => key,
+  };
   @override
   String intimacyLevelValue(String level) => 'Level: ${intimacyLevel(level)}';
   @override
@@ -11374,11 +12293,13 @@ class EnStrings extends AppStrings {
   @override
   String get intimacyCausesEmpty => 'No changes yet.';
   @override
-  String intimacyCauseLabel(String label) => label.trim().isEmpty ? 'Recent event' : label;
+  String intimacyCauseLabel(String label) =>
+      label.trim().isEmpty ? 'Recent event' : label;
   @override
   String get intimacyHistoryTitle => 'Recent trend';
   @override
-  String get intimacyHistoryEmpty => 'Needs at least two points to draw a trend.';
+  String get intimacyHistoryEmpty =>
+      'Needs at least two points to draw a trend.';
   @override
   String get intimacyJustNow => 'just now';
   @override
@@ -11403,22 +12324,28 @@ class EnStrings extends AppStrings {
   @override
   String get intimacyRenderLineLabel => 'Intimacy line in the request';
   @override
-  String get intimacyRenderLineMissing => 'Not injected (off, or not a private chat)';
+  String get intimacyRenderLineMissing =>
+      'Not injected (off, or not a private chat)';
   @override
   String get intimacyLineEmpty => 'No raw line yet';
   @override
-  String get intimacyInvalidData => 'The API returned no displayable intimacy data. Try again.';
+  String get intimacyInvalidData =>
+      'The API returned no displayable intimacy data. Try again.';
   @override
-  String intimacyLoadFailed(String reason) => 'Could not read intimacy state: $reason';
+  String intimacyLoadFailed(String reason) =>
+      'Could not read intimacy state: $reason';
   @override
   String intimacySaved(bool enabled, bool applied) => applied
-      ? (enabled ? 'Intimacy turned on; applies from the next round' : 'Intimacy turned off; applies from the next round')
+      ? (enabled
+            ? 'Intimacy turned on; applies from the next round'
+            : 'Intimacy turned off; applies from the next round')
       : 'Saved; waiting to take effect';
   @override
   String intimacyLevelSaved(String level, bool applied) =>
       applied ? 'Upper limit set to $level' : 'Saved; waiting to take effect';
   @override
-  String intimacySaveFailed(String reason) => 'Could not save intimacy settings: $reason';
+  String intimacySaveFailed(String reason) =>
+      'Could not save intimacy settings: $reason';
 
   // ── 亲密面板（2026-11-04 设计稿重做）────────────────────────────────
   @override
@@ -11579,47 +12506,54 @@ class EnStrings extends AppStrings {
   @override
   String get logsTypeStickerReviewed => 'Sticker reviewed';
   @override
-  String logsAffectSummary(String reason, String emotion, String strength) => '$reason · $emotion $strength';
+  String logsAffectSummary(String reason, String emotion, String strength) =>
+      '$reason · $emotion $strength';
   @override
-  String logsStickerSentSummary(String source, String tag, String position, int candidates) =>
+  String logsStickerSentSummary(
+    String source,
+    String tag,
+    String position,
+    int candidates,
+  ) =>
       '$source · ${tag.isEmpty ? 'no tag' : tag} · $position · $candidates candidates';
   @override
   String logsStickerTaggedSummary(List<String> tags, String confidence) =>
       '${tags.isEmpty ? 'no tags' : tags.join(', ')} · confidence $confidence';
   @override
   String logsStickerSource(String source) => switch (source) {
-        'active' => 'active',
-        'passive' => 'passive',
-        _ => source,
-      };
+    'active' => 'active',
+    'passive' => 'passive',
+    _ => source,
+  };
   @override
   String logsStickerPosition(String position) => switch (position) {
-        'after' => 'after text',
-        'before' => 'before text',
-        'only' => 'standalone',
-        _ => position,
-      };
+    'after' => 'after text',
+    'before' => 'before text',
+    'only' => 'standalone',
+    _ => position,
+  };
   @override
   String logsStickerHarvestResult(String result) => switch (result) {
-        'auto-approved' => 'auto-approved',
-        'pending' => 'pending review',
-        'rejected' => 'rejected',
-        _ => result,
-      };
+    'auto-approved' => 'auto-approved',
+    'pending' => 'pending review',
+    'rejected' => 'rejected',
+    _ => result,
+  };
   @override
   String logsStickerReviewAction(String action) => switch (action) {
-        'approve' => 'approve',
-        'reject' => 'reject',
-        'restore' => 'restore',
-        'delete' => 'delete',
-        'block' => 'disable',
-        _ => action,
-      };
+    'approve' => 'approve',
+    'reject' => 'reject',
+    'restore' => 'restore',
+    'delete' => 'delete',
+    'block' => 'disable',
+    _ => action,
+  };
 
   @override
   String get stickerTitle => 'Stickers';
   @override
-  String get stickerBlurb => 'Let her express herself with images, with provenance and review for every one.';
+  String get stickerBlurb =>
+      'Let her express herself with images, with provenance and review for every one.';
   @override
   String get stickerTabLibrary => 'Library';
   @override
@@ -11635,7 +12569,8 @@ class EnStrings extends AppStrings {
   @override
   String get stickerUpload => 'Upload sticker';
   @override
-  String get stickerUploadHint => 'PNG, JPEG, GIF or WebP, up to 8MB each. Tagging and preview come before approval.';
+  String get stickerUploadHint =>
+      'PNG, JPEG, GIF or WebP, up to 8MB each. Tagging and preview come before approval.';
   @override
   String get stickerEnabled => 'Enable stickers';
   @override
@@ -11647,27 +12582,36 @@ class EnStrings extends AppStrings {
   @override
   String get stickerActiveProbability => 'Allowed send frequency';
   @override
-  String get stickerActiveProbabilityHint => 'Chance that a sticker is allowed when a speak turn includes one; 0 = never, 1 = always try.';
+  String get stickerActiveProbabilityHint =>
+      'Chance that a sticker is allowed when a speak turn includes one; 0 = never, 1 = always try.';
   @override
   String get stickerCooldownSeconds => 'Cooldown interval (seconds)';
   @override
-  String get stickerCooldownSecondsHint => 'After a successful sticker send, further sends are blocked for N seconds; 0 = off.';
+  String get stickerCooldownSecondsHint =>
+      'After a successful sticker send, further sends are blocked for N seconds; 0 = off.';
   @override
-  String get stickerSettingsHint => 'Saved settings apply on the next tick or turn. Group chats still follow their channel switches.';
+  String get stickerSettingsHint =>
+      'Saved settings apply on the next tick or turn. Group chats still follow their channel switches.';
   @override
-  String get stickerLibraryHint => 'Grouped by tag. Approved images can be retagged, disabled without deletion, or moved to rejected.';
+  String get stickerLibraryHint =>
+      'Grouped by tag. Approved images can be retagged, disabled without deletion, or moved to rejected.';
   @override
-  String get stickerTaggingHint => 'Each image keeps 1–2 tags, plus intensity, source and use count. Select Tags to edit.';
+  String get stickerTaggingHint =>
+      'Each image keeps 1–2 tags, plus intensity, source and use count. Select Tags to edit.';
   @override
-  String get stickerReviewHint => 'Pending images need approval before use. Restore rejected images or permanently delete them after confirmation.';
+  String get stickerReviewHint =>
+      'Pending images need approval before use. Restore rejected images or permanently delete them after confirmation.';
   @override
-  String get stickerEventsHint => 'Sent, skipped, tagged, collected and reviewed records are all here for auditing.';
+  String get stickerEventsHint =>
+      'Sent, skipped, tagged, collected and reviewed records are all here for auditing.';
   @override
   String get stickerEmpty => 'No stickers yet';
   @override
-  String get stickerEmptyHint => 'Upload an image first. With auto-collect enabled, eligible images may quietly enter review.';
+  String get stickerEmptyHint =>
+      'Upload an image first. With auto-collect enabled, eligible images may quietly enter review.';
   @override
-  String get stickerInvalidData => 'The sticker index could not be read or the response was malformed. Try again.';
+  String get stickerInvalidData =>
+      'The sticker index could not be read or the response was malformed. Try again.';
   @override
   String get stickerApprove => 'Approve';
   @override
@@ -11689,13 +12633,16 @@ class EnStrings extends AppStrings {
   @override
   String get stickerConfirmDeleteTitle => 'Delete this sticker?';
   @override
-  String get stickerConfirmDeleteBody => 'The image moves to rejected and can be restored later.';
+  String get stickerConfirmDeleteBody =>
+      'The image moves to rejected and can be restored later.';
   @override
-  String get stickerConfirmPurgeBody => 'This cannot be undone. Only this rejected image is affected.';
+  String get stickerConfirmPurgeBody =>
+      'This cannot be undone. Only this rejected image is affected.';
   @override
   String get stickerSettingsSaved => 'Settings saved';
   @override
-  String get stickerUploadDone => 'Tagging is ready for your preview and confirmation.';
+  String get stickerUploadDone =>
+      'Tagging is ready for your preview and confirmation.';
   @override
   String get stickerNoEvents => 'No sticker events yet';
   @override
@@ -11709,28 +12656,29 @@ class EnStrings extends AppStrings {
   @override
   String get stickerConfidence => 'Tag confidence';
   @override
-  String stickerStats(int approved, int pending, int sent) => '$approved approved · $pending pending · $sent sent today';
+  String stickerStats(int approved, int pending, int sent) =>
+      '$approved approved · $pending pending · $sent sent today';
   @override
   String stickerSource(String source) => switch (source) {
-        'owner' => 'Owner',
-        'collected' => 'Collected',
-        'plugin' => 'Plugin',
-        _ => source,
-      };
+    'owner' => 'Owner',
+    'collected' => 'Collected',
+    'plugin' => 'Plugin',
+    _ => source,
+  };
   @override
   String stickerIntensity(String intensity) => switch (intensity) {
-        'strong' => 'Strong',
-        'mild' => 'Mild',
-        _ => 'Obvious',
-      };
+    'strong' => 'Strong',
+    'mild' => 'Mild',
+    _ => 'Obvious',
+  };
   @override
   String stickerStatus(String status) => switch (status) {
-        'pending' => 'Pending',
-        'approved' => 'Approved',
-        'rejected' => 'Rejected',
-        'blocked' => 'Disabled',
-        _ => status,
-      };
+    'pending' => 'Pending',
+    'approved' => 'Approved',
+    'rejected' => 'Rejected',
+    'blocked' => 'Disabled',
+    _ => status,
+  };
   @override
   String stickerUseCount(int count) => '$count uses';
   @override
@@ -11943,9 +12891,9 @@ class EnStrings extends AppStrings {
 
 /// 按具体语言取文案表。[AppLanguage.system] 必须先经 [AppLanguage.resolve]。
 AppStrings stringsFor(AppLanguage language) => switch (language) {
-      AppLanguage.en => const EnStrings(),
-      AppLanguage.system || AppLanguage.zh => const ZhStrings(),
-    };
+  AppLanguage.en => const EnStrings(),
+  AppLanguage.system || AppLanguage.zh => const ZhStrings(),
+};
 
 /// 系统 locale → 具体语言（只有**入口**调它一次，见 `main.dart`）
 AppLanguage resolveSystemLanguage(Locale systemLocale) =>
@@ -12019,7 +12967,14 @@ const List<String> kScheduleWeekdayShort = ['日', '一', '二', '三', '四', '
 const String kExtDescNoteMarker = '只会有这个名字';
 
 /// 模型与审核共用的九标签；它们是数据键，不随界面语言翻译。
-const List<String> kStickerTags = ['开心', '难过', '担心', '生气', '亲近', '好奇', '无语', '得意', '害羞'];
-
-
-
+const List<String> kStickerTags = [
+  '开心',
+  '难过',
+  '担心',
+  '生气',
+  '亲近',
+  '好奇',
+  '无语',
+  '得意',
+  '害羞',
+];

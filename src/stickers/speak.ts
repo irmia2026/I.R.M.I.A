@@ -1,4 +1,4 @@
-import { argsRecord, okResult, type ToolDefinition, type ToolHandlerResult } from '../tools/types.ts';
+import { argsRecord, errorResult, okResult, TOOL_ERROR_CODES, type ToolDefinition, type ToolHandlerResult } from '../tools/types.ts';
 import { parseReplyUrlAny, replyUrlForWake } from '../tools/admin.ts';
 import type { ReplyTarget } from '../tools/admin.js';
 import type { WakeChannel } from '../log/types.js';
@@ -40,17 +40,21 @@ export function withStickerSpeak(
           description: 'after 默认（先话后图）| before（先图后话）| only（只发图）',
         },
       },
-      required: [],
+      // 纯贴纸可省略 text，但任何 speak 形态都必须显式给目标。
+      required: ['to'],
     },
     handler: async (rawArgs, ctx): Promise<ToolHandlerResult> => {
       const args = argsRecord(rawArgs, 'speak');
+      const rawTo = typeof args['to'] === 'string' ? args['to'].trim() : '';
+      if (rawTo === '') {
+        return errorResult('缺少必填参数 to：请填目标会话的 sid。', TOOL_ERROR_CODES.invalidArgs);
+      }
       const rawSticker = args['sticker'];
       if (rawSticker === undefined) {
         runtime.noteSpeakWithoutSticker();
         return await base.handler(rawArgs, ctx);
       }
       const text = typeof args['text'] === 'string' ? args['text'] : '';
-      const rawTo = typeof args['to'] === 'string' ? args['to'].trim() : '';
       const resolved = targetOf(rawTo, currentWakeChannel(), ctx.turn);
       const selection = runtime.active(
         ctx.turn,
@@ -73,10 +77,9 @@ export function withStickerSpeak(
         });
       };
 
-      // 纯表情：发送与否都不进回执；发送失败只留内部 sticker/skipped 事件。
       if (text.trim() === '') {
-        await send();
-        return okResult('');
+        const delivered = await send();
+        return okResult(delivered ? '已投递' : '未投递');
       }
 
       // 带文字：文字是唯一回执；表情成功/失败/跳过都不追加任何说明。

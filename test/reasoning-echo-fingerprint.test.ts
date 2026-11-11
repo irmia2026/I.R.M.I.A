@@ -439,7 +439,9 @@ test('★ ②b 400 自救：先回 400（reasoning_text）再回 200 ⇒ 第二�
   const mock = await startMock400Then200(t);
   const client = new DsClientImpl({ baseUrl: mock.url, apiKey: 'sk-test', timeoutMs: 5_000 });
 
-  const reason = await runTurn(harness.depsOf(client), [wake]);
+  const reason = await runTurn(harness.depsOf(client, {
+    reasoningEcho: { maxTotalChars: 300_000 },
+  }), [wake]);
 
   // ① 自救成功 ⇒ 这一拍照常收（不是 error）
   assert.deepEqual(reason, { kind: 'completed' });

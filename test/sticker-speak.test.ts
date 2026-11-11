@@ -64,17 +64,32 @@ function initialAffectForTest() {
   };
 }
 
-test('speak schema：九标签与两个可选参数齐全，text 不再强制', (t) => {
+test('speak schema：纯贴纸可省 text，但 to 始终必填', (t) => {
   const { tool } = rig(t);
-  assert.deepEqual(tool.parameters.required, []);
+  assert.deepEqual(tool.parameters.required, ['to']);
   assert.deepEqual(tool.parameters.properties['sticker']?.['enum'], STICKER_TAGS);
   assert.deepEqual(tool.parameters.properties['stickerPos']?.['enum'], ['after', 'before', 'only']);
   assert.match(tool.description, /sticker/u);
 });
 
+test('speak 贴纸分支缺 to：文字与图都不发', async (t) => {
+  const { tool, calls, posts } = rig(t);
+  for (const args of [
+    { text: '在呢', sticker: '开心' },
+    { sticker: '开心', stickerPos: 'only' },
+    { text: '在呢', sticker: '开心', to: '  ' },
+  ]) {
+    const result = await tool.handler(args, { turn: 1 });
+    assert.equal(result.isError, true, result.content);
+    assert.match(result.content, /to/u);
+  }
+  assert.deepEqual(calls, []);
+  assert.deepEqual(posts, []);
+});
+
 test('speak after：先发文字再发图', async (t) => {
   const { tool, calls, posts, events, id } = rig(t);
-  await tool.handler({ text: '在呢', sticker: '开心' }, { turn: 1 });
+  await tool.handler({ to: 'onebot:c2c:owner', text: '在呢', sticker: '开心' }, { turn: 1 });
   assert.deepEqual(calls, ['在呢']);
   assert.equal(posts.length, 1);
   assert.equal(posts[0]?.media.fileType, 1);
@@ -84,23 +99,23 @@ test('speak after：先发文字再发图', async (t) => {
 
 test('speak before：先发图再发文字', async (t) => {
   const { tool, calls, posts } = rig(t);
-  await tool.handler({ text: '在呢', sticker: '开心', stickerPos: 'before' }, { turn: 1 });
+  await tool.handler({ to: 'onebot:c2c:owner', text: '在呢', sticker: '开心', stickerPos: 'before' }, { turn: 1 });
   assert.equal(posts.length, 1);
   assert.deepEqual(calls, ['在呢']);
 });
 
-test('speak only / 空文本：只发图，回执为空成功', async (t) => {
+test('speak only / 空文本：只发图，成功回执为已投递', async (t) => {
   const { tool, calls, posts } = rig(t);
-  const result = await tool.handler({ text: '', sticker: '开心', stickerPos: 'only' }, { turn: 1 });
+  const result = await tool.handler({ to: 'onebot:c2c:owner', text: '', sticker: '开心', stickerPos: 'only' }, { turn: 1 });
   assert.equal(calls.length, 0);
   assert.equal(posts.length, 1);
-  assert.equal(result.content, '');
+  assert.equal(result.content, '已投递');
   assert.notEqual(result.isError, true);
 });
 
 test('speak 未知标签：文字照发、图跳过并留 unknown-tag，回执不提图', async (t) => {
   const { tool, calls, posts, events } = rig(t);
-  const result = await tool.handler({ text: '在呢', sticker: '期待' }, { turn: 1 });
+  const result = await tool.handler({ to: 'onebot:c2c:owner', text: '在呢', sticker: '期待' }, { turn: 1 });
   assert.deepEqual(calls, ['在呢']);
   assert.equal(posts.length, 0);
   assert.ok(events.some((event) => event.type === 'sticker/unknown-tag' && (event.data as { tag: string }).tag === '期待'));
@@ -108,7 +123,7 @@ test('speak 未知标签：文字照发、图跳过并留 unknown-tag，回执�
   assert.equal(result.content.includes('表情包'), false);
 });
 
-test('speak 群聊 disabled + 只发图：空成功，不设 isError', async (t) => {
+test('speak 群聊 disabled + 只发图：未投递，不设 isError', async (t) => {
   const { tool, calls, posts } = rig(t);
   const result = await tool.handler({
     sticker: '开心', stickerPos: 'only', to: 'qq:group:123',
@@ -116,7 +131,7 @@ test('speak 群聊 disabled + 只发图：空成功，不设 isError', async (t)
   assert.equal(calls.length, 0);
   assert.equal(posts.length, 0);
   assert.notEqual(result.isError, true);
-  assert.equal(result.content, '');
+  assert.equal(result.content, '未投递');
 });
 
 test('speak 群聊 disabled + 带文字：只返回文字结果', async (t) => {
@@ -131,18 +146,18 @@ test('speak 群聊 disabled + 带文字：只返回文字结果', async (t) => {
   assert.equal(result.content.includes('表情包'), false);
 });
 
-test('speak 媒体投递失败 + 只发图：空成功', async (t) => {
+test('speak 媒体投递失败 + 只发图：未投递', async (t) => {
   const { tool, posts, events } = rig(t, { mediaFail: true });
-  const result = await tool.handler({ sticker: '开心', stickerPos: 'only' }, { turn: 1 });
+  const result = await tool.handler({ to: 'onebot:c2c:owner', sticker: '开心', stickerPos: 'only' }, { turn: 1 });
   assert.equal(posts.length, 1, '媒体投递确实尝试过');
   assert.notEqual(result.isError, true);
-  assert.equal(result.content, '');
+  assert.equal(result.content, '未投递');
   assert.ok(events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'media-failed'));
 });
 
 test('speak 媒体投递失败 + 带文字：只返回文字结果', async (t) => {
   const { tool, calls, posts } = rig(t, { mediaFail: true });
-  const result = await tool.handler({ text: '在呢', sticker: '开心' }, { turn: 1 });
+  const result = await tool.handler({ to: 'onebot:c2c:owner', text: '在呢', sticker: '开心' }, { turn: 1 });
   assert.deepEqual(calls, ['在呢']);
   assert.equal(posts.length, 1);
   assert.notEqual(result.isError, true);
@@ -150,17 +165,17 @@ test('speak 媒体投递失败 + 带文字：只返回文字结果', async (t) =
   assert.equal(result.content.includes('表情包'), false);
 });
 
-test('speak 标签没有候选：只发图时仍空成功', async (t) => {
+test('speak 标签没有候选：只发图时仍未投递', async (t) => {
   const { tool, posts } = rig(t);
-  const result = await tool.handler({ sticker: '难过', stickerPos: 'only' }, { turn: 1 });
+  const result = await tool.handler({ to: 'onebot:c2c:owner', sticker: '难过', stickerPos: 'only' }, { turn: 1 });
   assert.equal(posts.length, 0);
-  assert.equal(result.content, '');
+  assert.equal(result.content, '未投递');
 });
 
 test('speak 连续 5 次不带 sticker：下一次被动强制补一张', async (t) => {
   const { tool, runtime, posts } = rig(t);
   for (let i = 0; i < 5; i += 1) {
-    await tool.handler({ text: `第 ${i + 1} 句` }, { turn: 1 });
+    await tool.handler({ to: 'onebot:c2c:owner', text: `第 ${i + 1} 句` }, { turn: 1 });
   }
   const sent = await runtime.passive({
     turn: 2,
@@ -175,8 +190,8 @@ test('speak 连续 5 次不带 sticker：下一次被动强制补一张', async 
 
 test('speak 同一轮第二次不再发图，文字回执不提图', async (t) => {
   const { tool, calls, posts } = rig(t);
-  await tool.handler({ text: '第一句', sticker: '开心' }, { turn: 1 });
-  const second = await tool.handler({ text: '第二句', sticker: '开心' }, { turn: 1 });
+  await tool.handler({ to: 'onebot:c2c:owner', text: '第一句', sticker: '开心' }, { turn: 1 });
+  const second = await tool.handler({ to: 'onebot:c2c:owner', text: '第二句', sticker: '开心' }, { turn: 1 });
   assert.deepEqual(calls, ['第一句', '第二句']);
   assert.equal(posts.length, 1);
   assert.equal(second.content, 'text-sent');

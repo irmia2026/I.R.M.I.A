@@ -28,7 +28,8 @@ import {
 } from '../src/channel/input-notify.ts';
 import { ONEBOT_CHANNEL_NAME } from '../src/channel/onebot.ts';
 import type { ChannelAdapter } from '../src/channel/qq-official.js';
-import { createAdminTools, setSleepForTest, type InputNotifyPostResult } from '../src/tools/admin.ts';
+import type { WakeChannel } from '../src/log/types.js';
+import { createAdminTools, parseReplyUrlAny, setSleepForTest, type InputNotifyPostResult } from '../src/tools/admin.ts';
 import type { ToolContext } from '../src/tools/types.ts';
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
@@ -270,6 +271,23 @@ function speakToolkit(input: {
     },
     personaRoot: join(input.dir, 'persona'),
     ...(input.target === null ? {} : { replyTargetOf: () => input.target as NonNullable<typeof input.target> }),
+    ...(input.target === null ? {} : {
+      currentWakeChannel: (): WakeChannel['data'] | null => {
+        const target = input.target;
+        if (target === null) return null;
+        const parsed = parseReplyUrlAny(target.url);
+        if (!parsed.ok) return null;
+        return {
+          channel: parsed.channel,
+          chatType: parsed.chatType as WakeChannel['data']['chatType'],
+          chatId: parsed.chatId,
+          person: 'OWNER',
+          text: '',
+          messageId: target.msgId ?? '',
+          msgSeq: 1,
+        };
+      },
+    }),
     replyPoster: {
       async post(_target, text) {
         input.timeline.push(`im:${text}`);
@@ -296,7 +314,7 @@ test('speak①：单聊 ⇒ 发一次「正在输入」，且在**第一个字**
   setSleepForTest(async (ms) => { timeline.push(`sleep:${ms}`); });
   t.after(() => { setSleepForTest(null); });
 
-  const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
+  const result = await toolkit.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
 
   assert.equal(result.isError, undefined, result.content);
   assert.deepEqual(timeline, [
@@ -319,7 +337,7 @@ test('speak②：群聊 ⇒ 一次都不发（通道那条路不接，speak 照�
   setSleepForTest(async () => {});
   t.after(() => { setSleepForTest(null); });
 
-  const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
+  const result = await toolkit.byName('speak').handler({ to: 'qq:group:GROUP-1', text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
 
   assert.equal(result.isError, undefined, result.content);
   // 群里那一条话照旧发全（跳过"正在输入"不许影响发言）
@@ -341,7 +359,7 @@ test('speak③：关掉开关（不装口子）⇒ 一个请求都不发，speak
   setSleepForTest(async () => {});
   t.after(() => { setSleepForTest(null); });
 
-  const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
+  const result = await toolkit.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
 
   assert.equal(result.isError, undefined, result.content);
   assert.deepEqual(timeline, ['log:甲乙丙丁戊', 'im:甲乙丙丁戊', 'log:己庚辛壬癸子', 'im:己庚辛壬癸子'],
@@ -361,12 +379,12 @@ test('speak④：发送失败 ⇒ speak 照旧成功，回执里**一个字都�
   setSleepForTest(async () => {});
   t.after(() => { setSleepForTest(null); });
 
-  const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
+  const result = await toolkit.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '甲乙丙丁戊，己庚辛壬癸子' }, rig.ctx);
 
   assert.equal(result.isError, undefined, result.content);
   assert.deepEqual(timeline.filter(line => line.startsWith('im:')), ['im:甲乙丙丁戊', 'im:己庚辛壬癸子'],
     '正在输入失败了，话照样全部发出去');
-  assert.match(result.content, /发送成功/, '回执照旧是"送到了"（v74 三态）');
+  assert.match(result.content, /已投递/, '正在输入失败不改变正文已投递的结论');
   assert.doesNotMatch(result.content, /正在输入/, '这一下不是她的动作，回执里不许提它');
   // 留痕在**通道侧**（admin 只丢结果、不起新事件类型）：失败那一行由通道的 log.warn 扛，
   // 这里断言"它确实没往回执里漏一个字"就够了——错误码的取证在通道层那两个用例里。
@@ -384,9 +402,9 @@ test('speak④b：notify 抛异常 / 永不 resolve ⇒ speak 都不受影响', 
     timeline: [],
     notify: async () => { throw new Error('boom'); },
   });
-  const thrown = await throwing.byName('speak').handler({ text: '就这一句' }, rig.ctx);
+  const thrown = await throwing.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '就这一句' }, rig.ctx);
   assert.equal(thrown.isError, undefined, thrown.content);
-  assert.match(thrown.content, /发送成功/);
+  assert.match(thrown.content, /已投递/);
 
   // 永不 resolve 的实现**不许把 speak 卡在开口之前**（admin 侧的硬预算）
   const hanging = speakToolkit({
@@ -396,20 +414,20 @@ test('speak④b：notify 抛异常 / 永不 resolve ⇒ speak 都不受影响', 
     notify: () => new Promise<InputNotifyPostResult>(() => {}),
   });
   const started = Date.now();
-  const stalled = await hanging.byName('speak').handler({ text: '就这一句' }, rig.ctx);
+  const stalled = await hanging.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '就这一句' }, rig.ctx);
   const elapsedMs = Date.now() - started;
   assert.equal(stalled.isError, undefined, stalled.content);
-  assert.match(stalled.content, /发送成功/, '卡住的"正在输入"不许让它说不了话');
+  assert.match(stalled.content, /已投递/, '卡住的"正在输入"不许让它说不了话');
   assert.ok(elapsedMs < 60_000, `不许等到 speak 自己的 120s 超时（实耗 ${elapsedMs}ms）`);
 });
 
-test('speak：没有目标（本轮无回投地址）⇒ 不发；硬门退回的那次也不发', async (t) => {
+test('speak：缺 to 或撞硬门 ⇒ 都不发「正在输入」', async (t) => {
   const rig = makeRig('none');
   t.after(() => { rmSync(rig.dir, { recursive: true, force: true }); });
   const asked: string[] = [];
   const toolkit = speakToolkit({
     dir: rig.dir,
-    target: null,   // 没有会话可显示状态
+    target: null,
     timeline: [],
     notify: async () => { asked.push('asked'); return { status: 'sent', channel: QQ_CHANNEL_NAME }; },
   });
@@ -417,11 +435,11 @@ test('speak：没有目标（本轮无回投地址）⇒ 不发；硬门退回�
   t.after(() => { setSleepForTest(null); });
 
   const result = await toolkit.byName('speak').handler({ text: '就这一句' }, rig.ctx);
-  assert.equal(result.isError, undefined, result.content);
-  assert.deepEqual(asked, [], '没有目标就没有会话可以显示"正在输入"');
+  assert.equal(result.isError, true, result.content);
+  assert.match(result.content, /缺少必填参数 to/u);
+  assert.deepEqual(asked, []);
 
-  // 硬门：一个字都不发的那次，也不该先亮一个"正在输入"再什么都不说
-  const over = await toolkit.byName('speak').handler({ text: '字'.repeat(41) }, rig.ctx);
+  const over = await toolkit.byName('speak').handler({ to: 'qq:c2c:USER-9', text: '字'.repeat(41) }, rig.ctx);
   assert.equal(over.isError, true);
   assert.deepEqual(asked, [], '被硬门退回时一个字都不发，更不该先亮状态');
 });

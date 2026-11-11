@@ -47,6 +47,10 @@ import {
   ONEBOT_CHANNEL_NAME, ONEBOT_REPLY_SCHEME, isOneBotFamilyChannel,
   parseReplyUrl as parseOneBotReplyUrl, replyUrlOf as oneBotReplyUrlOf,
 } from '../channel/onebot.ts';
+import {
+  GREYHARBOR_CHANNEL_NAME, GREYHARBOR_REPLY_SCHEME,
+  greyHarborReplyUrlOf, parseGreyHarborReplyUrl,
+} from '../channel/greyharbor.ts';
 import { CHAT_TYPE_LABELS, channelForNamespace, normalizeSid, parseSid, sessionLabelOf, type SessionEntry } from '../channel/sessions.ts';
 // 群里动静（notice）的形状与**逐字行文**都只有一处实现（`noticeLineText`）：这里只负责
 // "给它一个查得到名字的口"，不另写一份渲染（两处各写一遍迟早给出两种说法）
@@ -498,6 +502,7 @@ export function replyUrlForWake(
   wake: Pick<WakeChannel['data'], 'channel' | 'chatType' | 'chatId'>,
 ): string {
   if (isOneBotFamilyChannel(wake.channel)) return oneBotReplyUrlOf(wake);
+  if (wake.channel === GREYHARBOR_CHANNEL_NAME) return greyHarborReplyUrlOf(wake);
   return qqReplyUrlOf(wake);
 }
 
@@ -511,6 +516,12 @@ export function parseReplyUrlAny(url: string): ReplyUrlAnyParse {
     const parsed = parseOneBotReplyUrl(url);
     return parsed.ok
       ? { ok: true, channel: ONEBOT_CHANNEL_NAME, chatType: parsed.chatType, chatId: parsed.chatId }
+      : parsed;
+  }
+  if (url.startsWith(GREYHARBOR_REPLY_SCHEME)) {
+    const parsed = parseGreyHarborReplyUrl(url);
+    return parsed.ok
+      ? { ok: true, channel: GREYHARBOR_CHANNEL_NAME, chatType: parsed.chatType, chatId: parsed.chatId }
       : parsed;
   }
   const parsed = parseQqReplyUrl(url);
@@ -688,6 +699,24 @@ export interface MediaPoster {
   post(target: ReplyTarget, media: MediaRequest): Promise<ReplyOutcome>;
 }
 
+/** 外部附件地址解析结果：成功只给临时 URL，不在这一层下载字节 */
+export type AttachmentResolverResult =
+  | { ok: true; url: string; name?: string }
+  | { ok: false; reason: string };
+
+/**
+ * 宿主注入的附件解析口：把平台消息/文件标识换成临时下载地址。
+ *
+ * 只负责“查地址”，不负责下载；落盘仍由 agent 调 `http_download`，这样 SSRF、
+ * 大小、路径和“是否真的要看”都留在同一道工具门里。
+ */
+export type AttachmentResolver = (input: {
+  messageId?: string;
+  fileId?: string;
+  index?: number;
+  channel?: string;
+}) => Promise<AttachmentResolverResult>;
+
 // ──────────────────────────────── 选项 ────────────────────────────────
 
 export interface AdminToolsOptions {
@@ -818,6 +847,8 @@ export interface AdminToolsOptions {
   mentionMessage?: () => { sid: string; messageId: string } | null;
   /** 媒体投递口（`send_media` 用）：宿主注入，缺省时那个工具如实报"没有接线" */
   mediaPoster?: MediaPoster;
+  /** 外部附件地址解析口（`resolve_attachment` 用）；缺省时该工具如实报"没有接线" */
+  attachmentResolver?: AttachmentResolver;
   /**
    * 单个媒体的大小上限（`send_media` 的"读之前先 `stat`"那道闸）：缺省 {@link MEDIA_MAX_BYTES}。
    *
@@ -870,6 +901,7 @@ export const ADMIN_TOOL_NAMES = [
   'timer',
   'speak',
   'report',
+  'resolve_attachment',
   'todo',
   'read_channel',
   // send_media 从 2026-10-03 起就在这个包里注册，但一直没进这份名单——
@@ -1076,7 +1108,7 @@ export interface ChannelMessageView {  sid: string;
    */
   seq?: number;
   ts: string;
-  attachments?: Array<{ type: string; url?: string; name?: string }>;
+  attachments?: Array<{ type: string; url?: string; name?: string; fileId?: string }>;
   /**
    * 这一条消息里**图片**逐张的去向（宿主算好的事实，见 `real-loop` 的
    * `prepareAimedContextImages`）。
@@ -1416,7 +1448,7 @@ export const SENT_CREDENTIAL_NOTE =
   + '（`read_channel` 里那一行行首是 `（我）`）——它是"已经发出去了"的证据，不是"我想发"。';
 
 /**
- * `speak` 失败回执的那一句（v74，用户 2026-10-20 的**最终口径**：`失败，<原因>`）。
+ * 投递失败原因的短句；speak 以 `未投递，` 前缀使用，report 保持 `失败，`。
  *
  * **原因必须是中文、能让她判断下一步**，不许印内部栈或英文原文（用户口径）。判据是错误性质，
  * 与 `deliveryAdvice` / `deliveryFailureLines` **同一套正则**——两处各写一份，"权限类不必重试"
@@ -1580,31 +1612,6 @@ export function deliveryFailureLines(input: {
       + `${localCopyClause}。${input.reason}`
     : `${input.where}失败：这一条没有送达（${localCopyClause}）。${input.reason}`;
   return [head, deliveryAdvice(input.reason, input.sent)];
-}
-
-/**
- * 本轮**没有 IM 会话可发**时的回执 —— `speak` 与 `report` 共用这一句。
- *
- * **2026-10-30 用户拍板：改成与正常投递同一句「发送成功」。**
- * 旧措辞（"只落在本机、不等于他收到了、要发就带 to 再发"）会让她把已经说过的话再往
- * 私聊发一遍——她读到的是"没送到"，而事实是她在对话流里已经说完了。
- *
- * 它不是失败，也**不是成功投递**：本机对话流那一份永远落下了，而 IM 那一跳根本没发生。
- * 所以这一段里**不许出现**"不必重复发送"（那会让她以为外面收到了），但必须给出去路：
- * 要它真的到那边，带 `to` 再发一次——**那不是重发，是第一次发到会话**。
- *
- * 2026-10-20（用户实测：「**这种不能继续缩吗。**」）：原来是三段同义话（跳过+原因 / 只在本机 /
- * 要发就带 `to`），后面还挂着一句"这一轮没写凭据、下一轮翻那个会话看不到"。三段说的是同一层
- * 事实，而它**每次**"没有会话可发"都出现 ⇒ 每轮请求都在为同一句话付一次费。压成一行，
- * 三个信息点一个不少：
- *   ① 跳过 + 原因（没有 IM 会话可发）；
- *   ② **只**落在本机对话流、**不等于他收到了**（"人在界面能看见"是同一件事的另一面：界面就是
- *      这条流；"下一轮翻那个会话看不到"是它的直接推论——没到那边，自然读不回来，不必另说）；
- *   ③ 要发到那边就带 `to` 再发一次。
- * 实测（`estimateTokens`，仓库同一把尺；单条）：104 → 57 字、65 → 34 token。
- */
-export function localOnlyNote(): string {
-  return '发送成功';
 }
 
 /**
@@ -2087,20 +2094,13 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     }
   };
 
-  /**
-   * 解析发言目标（speak / report **共用一份**）。
-   *
-   * 两条路：不带 `to` → 回本轮叫醒她的那个会话；带 `to` → 发到指定会话。
-   * sid 与回投地址**同形同源**（`replyUrlForWake` 造的也是 `qq:c2c:<chatId>`），
-   * 所以这里只做合法性检查与显示名解析，真正的路由交给通道侧——一份标识两处用，
-   * 不能出现"她以为发给了这个人、实际发到了另一个人"这种最难查的错。
-   */
+  /** 解析显式发言目标；空目标不在这里回退成隐式回投。 */
   const resolveTarget = (
     requestedTo: string,
     ctx: ToolContext,
-  ): { target: ReplyTarget | null; label: string; /** v76：显式 `to` 指向的就是**本轮会话**（见下） */ atCurrent?: boolean; error?: string } => {
+  ): { target: ReplyTarget | null; label: string; atCurrent?: boolean; error?: string } => {
     if (requestedTo === '') {
-      return { target: replyTargetOf(ctx) ?? null, label: '', atCurrent: true };
+      return { target: null, label: '', error: 'to 必填：请填目标会话的 sid。' };
     }
     const parsed = parseSid(requestedTo);
     if (parsed === null) {
@@ -2662,7 +2662,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     name: 'speak',
     description:
       '跟人说话用这个：整段交给它，自动断句发出去。'
-      + 'text 必填；要发给别的会话就带 to（sid 见外部会话清单）。例：{text:"在呢"}',
+      + 'text、to 必填；to 填目标会话 sid（见外部会话清单）。例：{text:"在呢",to:"qq:c2c:OWNER"}',
     // 描述不许写长：它进 tools 那一段（请求的缓存前缀），且 `tool-catalog` 有一条
     // **<60 token** 的硬线（本轮口径，与另外六件一起算）。所以分段的细则
     // （顿号不断、成对符号里不断、不足 12 字整段一条）**只写在 `chat-split.ts` 里**，
@@ -2687,17 +2687,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         },
         to: {
           type: 'string',
-          // **这里只说"发给谁"**：平台侧的主动/被动、权限、配额那一类机制**不进描述**
-          // （2026-10-07 用户的口径：那是过时知识，"本来就不需要知道"）。理由有两层：
-          //   ① 它是**通道专属**的，而这里的话对每条通道一起说——OneBot 上"要权限、有配额"
-          //      这句是假的（那边发一条就是一条普通消息），她照它行事会少说该说的话；
-          //   ② 发不出去时**回执本来就会如实说清原因**，不需要她在动手之前先背一套平台政策。
-          // 改这里要连带看 `send_media` 的描述与 self-brief 第 ④ 段（同一件事的三处落点）。
-          //
-          // v74（R5）：删掉"发不出去时回执会说清原因"那半句——它是**回执的承诺**，不是这个
-          // 参数的用法；参数格只回答"填什么"。`to` 本身**绝不能删**（发到指定会话必须有它）。
-          description:
-            '发给哪个会话（sid 见外部会话清单）；省略 = 回到本轮叫你说话的那个会话。',
+          // 参数格只回答"填什么"：平台权限、配额与回执承诺不放在这里。
+          description: '必填：发给哪个会话（sid 见外部会话清单）；回本轮会话也要显式填它的 sid。',
         },
         level: {
           type: 'string',
@@ -2705,7 +2696,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           description: '推送级别，默认 info',
         },
       },
-      required: ['text'],
+      required: ['text', 'to'],
       additionalProperties: false,
     },
     executionMode: 'exclusive',
@@ -2744,28 +2735,22 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             TOOL_ERROR_CODES.invalidArgs,
           );
         }
-        // v74（用户 2026-10-20 的最终口径）：越线不再单独追一句"提醒"——回执的两种成功态里
-        // 已经写着 `成功，但超25字限制（N 字）`，再追一段解释就是**同一件事说两遍**（而这条
-        // 回执是最高频、会被后续 160 多个请求反复读回的一行）。"写短"的指导搬进了
-        // `SELF_BRIEF` §2.1 与工具描述（她发之前就能看到），不再靠事后叨叨。
+        // 25 字只是写作建议；投递回执不再按正文长度附加软提醒。
         const level = readNotifyLevel(args);
         const chars = text.length;
         const lines: string[] = [];
 
-        // 目标先解析：它决定这个循环里除了落日志之外还要不要发 IM。
-        //   • 不带 `to`：回**本轮叫醒她的那个会话**（有就发，没有就如实说跳过）
-        //   • 带 `to`：发到指定会话。指向本轮之外时，通道侧自然走主动消息（QQ 有配额）
-        //
-        // 解析放在最前面而不是投递前：非法 sid 是明确的参数错误，当场报错、一个字不发
-        // （旧代码先花完几十秒打字节奏、把话落进对话流，最后才报"sid 非法"——
-        //  那既浪费，又会把本想发给别人的私话留在本机对话流里）。
-        const requestedTo = typeof args['to'] === 'string' ? args['to'].trim() : '';
+        // `speak` 必须显式给目标；`resolveTarget` 的缺省回投仍留给 send_media。
+        // 非法或空白 sid 在任何发言、打字等待与网络投递之前退回。
+        const requestedTo = requiredString(args, 'to', { maxLength: 512 }).trim();
+        if (requestedTo === '') {
+          return errorResult('to 不得只包含空白字符：请填目标会话的 sid。', TOOL_ERROR_CODES.invalidArgs);
+        }
         const resolved = resolveTarget(requestedTo, ctx);
         if (resolved.error !== undefined) {
           return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
         }
         const target = resolved.target;
-        const targetLabel = resolved.label;
 
         // 第一路 + 第三路：**同一个循环、同一个节奏**。
         //
@@ -2942,32 +2927,22 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         // ⚠ 别顺手把「投递成功（不必重复发送）」当同类删掉：那一句是 2026-10-08 用户
         // 逐字点名要的判据（`SENT_CREDENTIAL_NOTE`），属 R1，要删得用户改口径。
 
-        // 第二路：主动推送。**合并成一条**——告警出口逐条推会刷屏。
-        //
-        // v74（用户 2026-10-20 的最终口径）：**成功回执只留"发出去了"这件事本身**——
-        // 出口没配时**一个字都不印**（"推送：跳过"也不印：成功的那一行只该回答"到没到"）；
-        // 出口配了且送达也不印（成功是常态）；只有**推送失败**才多一行（失败是最需要信息的时候）。
+        // 主动推送合并成一条；出口未配置或投递成功时不额外占一行。
         if (notifier !== undefined) {
           const outcome = await notifier.send({ level, title: 'Irmia 发言', body: text });
           if (outcome.ok) {
             emit('speak/sent', { channel: 'notify', chars } satisfies SpeakSentPayload);
           } else {
-            lines.push(`推送失败：${outcome.reason}`);
+            lines.push(`未投递（推送出口）：${outcome.reason}`);
           }
         }
 
         if (imFailure !== null) {
-          // 失败：**一条信息一行**（用户 2026-10-20 的口径）。这里只留**最关键那一条**：
-          // 失败 + 已经出去几条（收不回来的数）+ 平台原话 + 下一步该不该再试。
-          // 不再复述"第 N 条起未发出（共 M 条）"那套流程，也不再单起一行说"本机那份只是记录"
-          // ——"失败：…"本身就把"外面没到"说死了（代价：那句旧警告不在回执里了，
-          // 但它从来不是判据，判据是"失败 / 不必重试"）。
-          lines.push(`失败，${speakFailureReason(imFailure, sent, segments.length)}`);
+          // 保留已送出的段数与中文原因，便于判断能否重试。
+          lines.push(`未投递，${speakFailureReason(imFailure, sent, segments.length)}`);
         } else if (target === null) {
-          // 说清"跳过的只是 IM 那一跳"：话已经落在对话流里，别让她读成"整条发言失败了"——
-          // 实测她读到旧措辞（"本轮无回投地址，跳过"）后以为他收不到，把同一句再说四遍。
-          // 与 `report` **同一句**（`localOnlyNote` 里记着为什么这一段不许写"不必重复发送"）。
-          lines.push(localOnlyNote());
+          // 显式 to 正常不会走到这里；兜底也不把本机记录说成已投递。
+          lines.push('未投递，没有可投递的目标会话');
         } else if (sent === segments.length) {
           // 三路都发完，逐段落的都是"本机对话流"那份回执；这一条是**IM 那一路走通了**的凭据
           // ——补上整篇文本与段数，`read_channel` 才能把"她在这个会话里说过什么"读回来
@@ -2988,26 +2963,12 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             ...deliveredIdKey(),
             ...spokenKey,
           }) satisfies SpeakSentPayload);
-          // v74（用户 2026-10-20 的**最终口径**）：成功回执按**她发出去的正文长度**分两态，
-          // 除此之外**一个多余字都不印**：
-          //   · 正文 ≤25 字 ⇒ `发送成功`（就这四个字）；
-          //   · 正文 >25 字 ⇒ `成功，但超25字限制（N 字）`——**不是失败**，只是告知；
-          //   · 不印坐标、不回显正文、不印"不必重复发送"、成功时不印"主动推送：跳过"。
-          // "25 字"这条写进了 `SELF_BRIEF` §2.1 与 `speak.description`（她**发之前**就知道该写短）
-          // ——回执是最高频、且会被后续 160 多个请求反复读回的一行，规矩写在前两处只付一次。
-          // 字数按 **runes**（Unicode 字符）数：中文一个字算 1，emoji 也算 1，不是字节、不是 token。
-          const bodyChars = [...text].length;
-          lines.push(bodyChars <= SPEAK_TEXT_SUGGESTED_MAX
-            ? '发送成功'
-            : `成功，但超${SPEAK_TEXT_SUGGESTED_MAX}字限制（${bodyChars} 字）`);
+          // 成功只回投递结论；正文长短不再改变回执。
+          lines.push('已投递');
         }
-        // 降级提醒单独一行，且**排在投递结论之后**：先答"发没发出去"，再答"发成什么样"。
-        // 它只在通道明确带回降级事实时出现（例如 markdown 被拒、按纯文本发的）——
-        // 没发生就一个字都不写，免得每一条发言都缀一句"形态正常"的噪音。
+        // 降级事实（例如按纯文本重发）与投递结论分开保留。
         if (imNote !== null) lines.push(imNote);
-        // 抬头「发言已处理：」已删（R4）：它对每条回执都一样，是标签不是判据——
-        // 成功那一行以「发送成功 / 成功，但超…」开头、失败那一行以「失败，」开头、
-        // 被打断那支早就没有抬头，三种情形本来就能一眼分开。
+        // 三种结局分别由「已投递」「未投递」「发言被打断」开头。
         return okResult(lines.map((line) => `- ${line}`).join('\n'));
       } catch (err) {
         return errorResultFromThrown(err, TOOL_ERROR_CODES.notConfigured);
@@ -3025,16 +2986,14 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
      */
     description:
       '发正式内容用这个：Markdown 原样保留、不切分、不限长。'
-      + 'text 必填；要发给别的会话就带 to（sid 见外部会话清单）。例：{text:"**进度**：42 个文件"}',
+      + 'text、to 必填；to 填目标会话 sid（见外部会话清单）。例：{text:"**进度**：42 个文件",to:"qq:group:G1"}',
     parameters: {
       type: 'object',
       properties: {
         text: { type: 'string', description: '要发的内容（Markdown 原样保留，可长）' },
         to: {
           type: 'string',
-          description:
-            '发给哪个会话（sid 见上下文的外部会话清单）；省略 = 本机对话流 + 本轮叫你说话的那个会话。'
-            + '发不出去时回执会说清原因。',
+          description: '必填：发往哪个会话（sid 见外部会话清单）；回本轮会话也要显式填它的 sid。',
         },
         level: {
           type: 'string',
@@ -3042,7 +3001,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           description: '推送级别（与 speak 同一套），默认 info',
         },
       },
-      required: ['text'],
+      required: ['text', 'to'],
       additionalProperties: false,
     },
     executionMode: 'exclusive',
@@ -3052,19 +3011,25 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       try {
         const args = argsRecord(rawArgs, 'report');
         const text = requiredString(args, 'text', { maxLength: REPORT_TEXT_MAX });
+        const requestedTo = requiredString(args, 'to', { maxLength: 512 }).trim();
+        if (requestedTo === '') {
+          return errorResult('to 不得只包含空白字符：请填目标会话的 sid。', TOOL_ERROR_CODES.invalidArgs);
+        }
+        const resolved = resolveTarget(requestedTo, ctx);
+        if (resolved.error !== undefined) {
+          return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
+        }
+        const target = resolved.target;
+        if (target === null) {
+          return errorResult('report 需要显式填写有效的目标会话 to。', TOOL_ERROR_CODES.invalidArgs);
+        }
+
         const level = readNotifyLevel(args);
         const chars = text.length;
         const lines: string[] = [];
-        // 整段发：不切分、不加工格式。可见性显式给（与 speak 那条同一条理由，见上）
+        // 参数与目标全部有效之后才留下本地记录或发起投递。
         emit('message/assistant', { text, toolCalls: [] }, defaultVisibility('message/assistant'));
         emit('speak/sent', { channel: 'log', chars } satisfies SpeakSentPayload);
-        // 2026-10-20（R4）：这里原来还有一行 `日志/前端：已记录 N 字（整段）`，已删——
-        // 「整段、不切分」已经写在工具描述与 `parts: 1` 的凭据里，字数在锚点那句「全文 N 字」
-        // 里（同一把中文计字尺）。删它一条判据都没少。
-        //
-        // v74：第二路（主动推送）与 `speak` 同一口径——出口没配/成功都**不印**（成功是常态、
-        // "跳过"不是她要判断的事），只有推送失败才多一行。`report` 是低频工具，但回执同样会被
-        // 后续每一轮读回，所以这一格与 `speak` 保持一致。
         if (notifier !== undefined) {
           const outcome = await notifier.send({ level, title: 'Irmia 报告', body: text });
           if (outcome.ok) {
@@ -3073,66 +3038,86 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             lines.push(`推送失败，${speakFailureReason(outcome.reason, 0, 1)}`);
           }
         }
-        const resolved = resolveTarget(
-          typeof args['to'] === 'string' ? args['to'].trim() : '',
-          ctx,
-        );
-        if (resolved.error !== undefined) {
-          return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
-        }
-        const target = resolved.target;
-        // 正文原样出站（与 speak 同一条判据）：报告里写 `[@1 号]` 也好、写官方那一串
-        // `<qqbot-at-user id="…" />` 也好，都只是正文的一部分——框架不改写、也不拒发。
-        if (target === null) {
-          // 与 `speak` 同一句（`localOnlyNote`）：本机那一份到了、IM 那一跳根本没发生，
-          // 所以这里**不许**出现"不必重复发送"——要它到那边就带 `to` 再发一次。
-          lines.push(localOnlyNote());
+
+        // 正文不切分、不改写；成功凭据带完整文本和通道给的平台消息 id。
+        const outcome = await replyPoster.post(target, text);
+        if (outcome.ok) {
+          emit('speak/sent', deliverToSession({
+            sid: target.url,
+            text,
+            parts: 1,
+            chars,
+            callId: ctx.callId,
+            turn: ctx.turn,
+            ...(outcome.messageId === undefined ? {} : { messageId: outcome.messageId }),
+          }) satisfies SpeakSentPayload);
+          lines.push('发送成功');
+          const note = degradeLineOf(outcome.note);
+          if (note !== null) lines.push(note);
         } else {
-          const outcome = await replyPoster.post(target, text);
-          if (outcome.ok) {
-            // **出站成功的凭据**，与 speak 同一个函数、同一种形状（`deliverToSession` 的注释里
-            // 记着判据为什么必须收成一处）。这一条同时解决两件事：
-            //   ① 它进 `read_channel` 的"我自己的发言"那一折 ⇒ 她下一次翻这个会话，能读到
-            //      **自己刚报告过的那一篇**（行首 `（我）`），不必靠记忆；
-            //   ② 它是"发出去了"的**凭据**，不是"我想发"的意图——所以只在 `outcome.ok` 里写。
-            //
-            // 文本给 `text` 原文（不是任何切分结果）：report 这条路**不切分**，进请求体的就是
-            // 这一整串（`test/admin-pwsh.test.ts` 里那条"逐字节进请求体"钉着）；
-            // `parts: 1` 说的正是"这一步只有一条"。
-            emit('speak/sent', deliverToSession({
-              sid: target.url,
-              text,
-              parts: 1,
-              chars,
-              callId: ctx.callId,
-              turn: ctx.turn,
-              // 与 `send_media` 同一条（2026-10-18，review P1-12 顺手那一格）：`outcome.messageId`
-              // 是平台回的这条消息 id，过去这里没接 ⇒ `read_channel` 的（我）行同样少了 `·m<id>`。
-              // 给不出时这一格缺席（`deliverToSession` 兜空串，理由见它那段注释）。
-              ...(outcome.messageId === undefined ? {} : { messageId: outcome.messageId }),
-            }) satisfies SpeakSentPayload);
-            // v74 那句「`report` 照 `speak` 一样」指的是**回执格式与 `speak` 同口径**——短、
-            // 不印坐标、不回显正文、不印"不必重复发送"——**不是数值也一样**。
-            // `report` **没有 25 字这条建议线**：25 字（`SPEAK_TEXT_SUGGESTED_MAX`）是 `speak` 的
-            // **聊天风格目标**（一次说话该多短，像打字聊天），只属于 `speak`；`report` 是发长文的
-            // 那一件（`REPORT_TEXT_MAX` 六万四、描述写着"不限长"），对它判长度没有意义。
-            // 所以成功回执**固定就是 `发送成功`**：不判长度、不数字数。
-            // ⚠ 这里曾经照搬 `speak` 的两态（>25 字 ⇒ `成功，但超25字限制（N 字）`），那是**假话**：
-            // 用户截图实证一篇 1293 字的报告被回执判成"超限"，而回执会被后续每个请求读回
-            // ⇒ 等于每轮都告诉她"你的报告超限了"。降级 note 仍单独一行（它说的是形态，不是长短）。
-            lines.push('发送成功');
-            const note = degradeLineOf(outcome.note);
-            if (note !== null) lines.push(note);
-          } else {
-            // 失败/被拒：**不写凭据**（"没发出去"不算"她报告过"）。v74：与 `speak` 同一句
-            // `失败，<原因>`——原因中文、能判断下一步，不印英文原文/栈。
-            lines.push(`失败，${speakFailureReason(outcome.reason, 0, 1)}`);
-          }
+          lines.push(`失败，${speakFailureReason(outcome.reason, 0, 1)}`);
         }
-        // 抬头「报告已处理：」已删（R4；与 speak 同一条理由：标签不是判据）。
         return okResult(lines.map((line) => `- ${line}`).join('\n'));
       } catch (err) {
         return errorResultFromThrown(err, TOOL_ERROR_CODES.notConfigured);
+      }
+    },
+  };
+
+  // ── resolve_attachment ──
+  //
+  // 文件附件不自动落盘：入站事件只给 name/url 或 file_id。agent 真要看内容时，
+  // 先用这个工具把 file_id / message_id 换成临时 URL，再走 http_download 的
+  // SSRF、大小、路径和超时门。没有接线就如实报，不猜地址。
+  const resolveAttachment: ToolDefinition = {
+    name: 'resolve_attachment',
+    description:
+      '解析外部附件的临时下载地址。优先填 message_id（read_channel 行尾 ·m<id>）与 index；'
+      + '事件只给 file_id 时填 file_id。只返回地址，不下载；拿到后立即用 http_download 存到 workspace/downloads/。',
+    parameters: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: '平台消息 id（read_channel 行尾 ·m<id> 里那一串）' },
+        file_id: { type: 'string', description: '平台文件 id（事件只给 file_id 时用）' },
+        index: { type: 'integer', description: 'attachments 数组下标，默认 0' },
+        channel: { type: 'string', description: '通道名（如 qq-official / onebot）；省略由宿主选择' },
+      },
+      additionalProperties: false,
+    },
+    executionMode: 'parallel',
+    sideEffect: 'none',
+    timeoutMs: 20_000,
+    handler: async (rawArgs): Promise<ToolHandlerResult> => {
+      try {
+        const args = argsRecord(rawArgs, 'resolve_attachment');
+        const messageId = optionalString(args, 'message_id')?.trim() ?? '';
+        const fileId = optionalString(args, 'file_id')?.trim() ?? '';
+        const channel = optionalString(args, 'channel')?.trim();
+        const rawIndex = args['index'];
+        const index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0
+          ? rawIndex
+          : 0;
+        if (messageId === '' && fileId === '') {
+          return errorResult('要给 message_id 或 file_id 才能解析附件地址。', TOOL_ERROR_CODES.invalidArgs);
+        }
+        if (messageId === '' && index !== 0) {
+          return errorResult('只给 file_id 时 index 无意义；请留空。', TOOL_ERROR_CODES.invalidArgs);
+        }
+        const resolver = options.attachmentResolver;
+        if (resolver === undefined) {
+          return errorResult('当前宿主没有接上附件地址解析能力。', TOOL_ERROR_CODES.notConfigured);
+        }
+        const result = await resolver({
+          ...(messageId === '' ? {} : { messageId }),
+          ...(fileId === '' ? {} : { fileId }),
+          ...(channel === undefined || channel === '' ? {} : { channel }),
+          index,
+        });
+        if (!result.ok) return errorResult(result.reason, TOOL_ERROR_CODES.notConfigured);
+        return okResult(`[附件地址] ${result.url}${result.name === undefined ? '' : `\n[文件名] ${result.name}`}`
+          + '\n它可能很快过期；要看内容就立即用 http_download 存到 workspace/downloads/ 再读。');
+      } catch (err) {
+        return errorResultFromThrown(err, TOOL_ERROR_CODES.invalidArgs);
       }
     },
   };
@@ -3359,27 +3344,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     }
   };
   /**
-   * 同一轮里同一个会话被读了几次：`${turn}\u0000${sid}` → 次数。
-   *
-   * 为什么需要它（2026-10-02 用户报的实测）：她在一轮里把同一个信箱连读了**五遍**
-   * （`upToSeq` 死死停在 8505，一个字没多），白花四个 step——她自己回头也认了"我犯蠢"。
-   * 计数只用来把话说得更直白（"这一轮第 N 次了"），**不拦她**：想说话随时能说，
-   * 想看更早的把 limit 调大就有。
-   */
-  const readRepeats = new Map<string, number>();
-  let readRepeatsTurn = -1;
-  const bumpReadRepeat = (turn: number, sid: string): number => {
-    if (turn !== readRepeatsTurn) {
-      readRepeats.clear();
-      readRepeatsTurn = turn;
-    }
-    const key = `${turn}\u0000${sid}`;
-    const next = (readRepeats.get(key) ?? 0) + 1;
-    readRepeats.set(key, next);
-    return next;
-  };
-
-  /**
    * 读回来的一批消息 → 一段**精简**的文本（2026-10-02 用户："read_channel 给她的信息太杂了，
    * 这么长？精简，不可能塞那么多信息进去的"）。
    *
@@ -3589,7 +3553,16 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       let imageAt = 0;
       const attach = (item.attachments ?? [])
         .map((a) => {
-          if (!isImageAttachment(a)) return `［文件${a.name === undefined ? '' : ` ${a.name}］`}`;
+          if (!isImageAttachment(a)) {
+            const url = typeof a.url === 'string' ? a.url.trim() : '';
+            const fileId = typeof a.fileId === 'string' ? a.fileId.trim() : '';
+            const where = url !== ''
+              ? ` ${url}（临时地址；要内容就立即用 http_download 存到 workspace/downloads/ 再读）`
+              : fileId === ''
+                ? ''
+                : `（file_id: ${fileId}；用 resolve_attachment 取地址）`;
+            return `［文件${a.name === undefined ? '' : ` ${a.name}`}${where}］`;
+          }
           const fact = facts?.[imageAt];
           imageAt += 1;
           if (fact === undefined) {
@@ -4060,15 +4033,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           ? (pool.length === 0 ? 0 : eventSeqOf(pool[0]!))
           : windowItems.reduce((min, item) => Math.min(min, eventSeqOf(item)), Number.POSITIVE_INFINITY);
         /**
-         * 这一批里**最新**的那一条的 seq（含她自己发出去的凭据）——"她是不是已经读到最新了"的判据。
-         *
-         * 为什么不能用 `fetchFloor` 判这件事（写下这条注释时刚踩到）：取数窗口由 `limit` 决定，
-         * 而 `limit` 比整个待读区间窄是常态（默认 20）。这一屏只覆盖"最近 20 条"时，下界**必然**
-         * 低于已读位——拿它去比，会把"窗口之外还有没读的旧话"误判成"她没有新消息"
-         * （她会得到一句"没有新消息"，而这句话是假的）。
-         */
-        const newestSeq = pool.reduce((max, item) => Math.max(max, eventSeqOf(item)), 0);
-        /**
          * 这一屏的候选：**她上次查看之后的东西**（v67 起这就是"默认那一屏"的全部候选）。
          *
          * 判据两条，都是刻意的：
@@ -4084,7 +4048,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
          */
         const unread = firstSight ? pool : pool.filter((item) => eventSeqOf(item) > prevSeq);
         /**
-         * 往回翻的落点（＝页脚或"没有新消息"那句话里让她填进 `before` 的那个数）。
+         * 往回翻的落点（＝页脚让她填进 `before` 的那个数）。
          *
          * 规则一句话：**"还没给她看过的那一段"从哪里开始**——取"取数下界"与"最旧那条没给她的"
          * 里更早的那个。两者都要，因为两种错都很贵：
@@ -4114,47 +4078,11 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         const moreBelow = pool.length >= limit;
         const caller = mentionMessage?.() ?? null;
         const calledThisTurn = caller !== null && caller.sid === sid;
-        // ② 真的没有新东西 ⇒ 一句话打发，不把同一段再摆一遍（2026-10-02 用户报的实测：她在一轮里
-        //    把同一个信箱连读了五遍、白花四个 step）。**但必须给她出路**（2026-10-08）：
-        //    "没有新消息"若不带指路，她会读成"这里什么都没有"，而她要的旧话其实翻得到。
-        //
-        //    判据是 `unread`（＝"比已读位更新的那些"），**不是** `fetchFloor`：两者在窗口比待读区间
-        //    窄时会分道扬镳，而那时"没有新消息"是假的（她会以为外面没人说话）。只有真的
-        //    "这一批里最新那条也在已读位之内"才算读到最新——`newestSeq` 就是判它的那个数。
+        // 默认增量屏没有新内容时只回一句；本轮被 @ 的会话例外仍保留。
+        // 确认过没有新内容也照常推进已有算法的已读位，不改变账本语义。
         if (unread.length === 0 && !calledThisTurn) {
-          const times = bumpReadRepeat(ctx?.turn ?? 0, sid);
-          // 措辞里点明"你自己发出去的那些不算新消息"：她刚 report/说过话、回头核对时，最怕把
-          // 「没有新消息」读成"我那一篇不在里面"——那正是"重复发"的触发条件（`SENT_CREDENTIAL_NOTE`）。
-          //
-          // 2026-10-08 用户的口径：「**read_channel，如果没有消息就直接回执没有新消息**」
-          // ——回执的**第一句就是这四个字**（`没有新消息`），句号之前不许再堆任何东西：
-          // 她要的是一眼可判的结论，而"这个位置含…"/"另有 N 条…"这类话都会让她怀疑自己漏了什么。
-          // 只有**确实还有没给她看的未读**时才允许提数量，而这一支里一条都没有（见下面
-          // `display.length === 0` 那一支：那里带 N，这里不带）——两种情形因此措辞可分。
-          const mine = spoken.length === 0
-            ? ''
-            : '；你自己发出去的那些（行首 `（我）`）不算新消息';
-          const way = moreBelow
-            ? `要看更早的（连没点你的那些）就翻页：带上 ${cursorText(pageBelow)} 重读一次`
-              + `（每页 ${READ_CHANNEL_PAGE_SIZE} 条，翻页不改已读）。`
-            : '想看更早的没有了——这个会话能看到的就这些。';
-          const head = times <= 1
-            ? `没有新消息：${sid} 你已经读到最新了（停在 seq=${newestSeq}${mine}）。`
-              + `不必再翻一遍——${way}想接着说就直接 speak，回不回、说什么都由你。`
-            : `没有新消息：${sid} 这一轮你已经读过它 ${times} 次，再读返回的还是同一段`
-              + `（停在 seq=${newestSeq}${mine}）。${way}想说话直接 speak 就行。`;
-          // **她刚刚确认过"这儿没有新东西"——这条确认本身就是已读**（2026-10-24 修的 bug：
-          // 用户原话「一旦 read_channel 过对应的群聊之后，就不把未读标签取消掉了。直到再次有
-          // 未读消息」）。原实现只有"摆出了东西"才写已读位，于是这里的一句话回执什么也不留：
-          // 界面那一栏算的是 `msgSeq > readUpToSeq` 的条数，已读位不动它就永远停在旧水位上
-          // ——实测用户截图上 418 / 1151 / 510 / 392 那几个群全是这个形状。
-          //
-          // 推到哪：**这一屏取数窗口里最新那条消息的平台序号**（`readMarkOf(pool)`；窗口就是
-          // "最近 limit 条"，所以它就是此刻这个会话的最新）。为什么是安全的：走到这里说明
-          // `unread` 一条都没有（＝没有任何东西比她的水位更新），窗口里那些她要么已经看过、
-          // 要么本来就压在已读位之内，推到一个她够得着的位置不会把任何一条没给她的话标成已读。
           advanceReadUpTo(readMarkOf(pool));
-          return okResult(head);
+          return okResult('你已读过此会话，截至现在没有新消息');
         }
         /**
          * 这一屏给她什么，**两个分支，判据都写在这里**（她与事后读日志的人都按这几条核对）：
@@ -4232,7 +4160,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           // 与判"新不新"的 `seq` 是两件事，所以分开记、只增不减地往前推。
           pageBelow,
         });
-        bumpReadRepeat(ctx?.turn ?? 0, sid);
 
         if (display.length === 0) {
           // **兜底**（v67 起这一支理论上到不了）：默认那一屏要么给出"上次查看之后"的至少一条，
@@ -4373,7 +4300,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
   const sendMedia: ToolDefinition = {
     name: 'send_media',
     description:
-      '把一个媒体（图片/语音/视频/文件）发给某个会话：本机文件用 path、网上的用 url。'
+      '把一个媒体（图片/语音/视频/文件）发给某个会话：to 必填；本机文件用 path、网上的用 url。'
       + '一次一个文件；要配说明文字就另外调一次 speak。'
       // **"哪条通道发得了媒体"不进描述**（2026-10-07 用户的口径）：那是通道专属的机制，
       // 而这里的话对每条通道一起说。**做不到时不假装**——发不出去就由回执如实说清是哪条通道、
@@ -4395,9 +4322,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
           enum: ['image', 'video', 'voice', 'file'],
           description: '媒体类型，默认 image',
         },
-        to: { type: 'string', description: '会话 sid（缺省 = 本轮叫你的那个会话）' },
+        to: { type: 'string', description: '必填：目标会话 sid（见外部会话清单）；回本轮会话也要显式填写' },
       },
-      required: [],
+      required: ['to'],
       additionalProperties: false,
     },
     executionMode: 'exclusive',
@@ -4405,6 +4332,23 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     timeoutMs: 90_000,
     handler: async (rawArgs, ctx) => {
       const args = argsRecord(rawArgs, 'send_media');
+      const rawTo = args['to'];
+      if (rawTo === undefined || rawTo === null || typeof rawTo !== 'string') {
+        return errorResult('缺少必填参数 to：请填目标会话的 sid。', TOOL_ERROR_CODES.invalidArgs);
+      }
+      const requestedTo = rawTo.trim();
+      if (requestedTo === '') {
+        return errorResult('to 不得只包含空白字符：请填目标会话的 sid。', TOOL_ERROR_CODES.invalidArgs);
+      }
+      const resolved = resolveTarget(requestedTo, ctx);
+      if (resolved.error !== undefined) {
+        return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
+      }
+      const target = resolved.target;
+      if (target === null) {
+        return errorResult('send_media 需要显式填写有效的目标会话 to。', TOOL_ERROR_CODES.invalidArgs);
+      }
+      // 目标有效之前不检查通道、不读文件，也不发起上传。
       if (mediaPoster === null) {
         return errorResult(
           '这台机器没有装配媒体投递口（没有可发消息的通道），发不出去。',
@@ -4416,11 +4360,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       if ((rawPath === '') === (rawUrl === '')) {
         return errorResult('path 与 url 必须给且只给一个。', TOOL_ERROR_CODES.invalidArgs);
       }
-      // **网络地址那一支也过同一道门**（2026-10-18，review P1-11）：url 只收 http(s)。
-      // 理由不是洁癖：`file:` / 盘符 / UNC 形态的"url"到了通道层就是一条**本机路径**
-      // （OneBot 的消息段把 `file` 原样交给协议端，协议端会在本机读盘），等于绕开凭据门
-      // 把本机文件递出去；而 `path` 那条路有信任边界、也有凭据门（`refuseProtected`）。
-      // 所以本机文件一律走 `path`，这条判据同时封掉"用 url 形状夹带本机文件"的写法。
+      // 网络地址也只收 http(s)，避免借 url 夹带本机路径绕过文件边界。
       if (rawUrl !== '') {
         let protocol = '';
         try {
@@ -4439,17 +4379,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       const kind = optionalString(args, 'kind') ?? 'image';
       const fileType: MediaFileType =
         kind === 'image' ? 1 : kind === 'video' ? 2 : kind === 'voice' ? 3 : 4;
-      const resolved = resolveTarget(optionalString(args, 'to') ?? '', ctx);
-      if (resolved.error !== undefined) {
-        return errorResult(resolved.error, TOOL_ERROR_CODES.invalidArgs);
-      }
-      const target = resolved.target;
-      if (target === null) {
-        return errorResult(
-          '这一轮没有可发消息的会话（本轮不是 IM 唤醒，也没给 to）——媒体没发出去。',
-          TOOL_ERROR_CODES.invalidArgs,
-        );
-      }
       // v64：本机文件先过**与 fs 族同一张别名表**（`MEMORIES/`、`diary/` 落记忆目录）再交给投递口。
       // 判据（用户 2026-10-13）：**具名根在所有工具里语义必须一致（含 send_media）**，而且
       // **回执里印出来的路径形态要能直接喂回任何接受路径的工具**。
@@ -4593,7 +4522,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
        * **红检**（防"她以为没发出去 ⇒ 重复发图"复发）：`test/send-media.test.ts` 断言成功回执
        * **必须**出现"已发出 N 条"这层意思 + `投递成功`，且样板**只**在 `SELF_BRIEF` 里出现。
        *
-       * 目标：**指向本轮会话**（没给 `to`，或 `to` 就是本轮那个会话）⇒ 印 `本会话`（不占 38 字符的
+       * 目标：`to` 就是本轮那个会话 ⇒ 印 `本会话`（不占 38 字符的
        * sid）；发给**别的**会话才印 `已发往 <sid>`——那一格是"我以为发给了这个人、其实发到了别人"
        * 的唯一防线，只有跨会话那一路才需要它。
        */
@@ -4607,6 +4536,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     timer,
     speak,
     report,
+    resolveAttachment,
     todo,
     readChannel,
     sendMedia,

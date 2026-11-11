@@ -2035,6 +2035,28 @@ describe('铁律 5 · 外部输入边界', () => {
     assert.ok(!m.content.includes('临时地址'), '没有地址就不该出现下载提示');
   });
 
+  test('文件附件只有 file_id 时给出解析入口，而不是假地址', () => {
+    resetFactory();
+    const r = renderOnce({
+      events: [evt<WakeChannel>('wake/channel', {
+        channel: 'onebot',
+        chatType: 'c2c',
+        person: 'U1',
+        chatId: 'U1',
+        text: '看这个',
+        messageId: 'm-file-id',
+        msgSeq: 1,
+        dedupeKey: 'm-file-id',
+        attachments: [{ type: 'file', name: 'report.pdf', fileId: 'file-123' }],
+      })],
+    });
+    const m = asMessage(eventItems(r)[0], '事件流第 1 条');
+    assert.match(m.content, /\[file: report\.pdf\]/);
+    assert.match(m.content, /file_id: file-123/);
+    assert.match(m.content, /resolve_attachment/);
+    assert.ok(!m.content.includes('临时地址'), '没有 URL 时不许伪造临时地址');
+  });
+
   // ── v32：外部内容的边界与名字（一条消息一个包裹、有上限、名字带上） ──
 
   test('v32：一条消息一个包裹——两条外部消息绝不混进一个块', () => {
@@ -2670,7 +2692,7 @@ describe('铁律 6 · 组装顺序', () => {
       },
     }));
     assert.ok(st.includes('告警出口：已配置。'));
-    assert.ok(st.includes('本轮可回投：QQ 官方 Bot API · 单聊——speak 会把话发回这个会话。'));
+    assert.ok(st.includes('本轮可回投：QQ 官方 Bot API · 单聊——speak / report / send_media 的 to 填这个会话的 sid 就能发回这里。'));
     assert.ok(!st.includes('这轮没人从外面叫你'));
   });
 

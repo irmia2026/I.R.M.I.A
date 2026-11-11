@@ -36,6 +36,7 @@ import {
   type ContextImageChosen,
   type ContextImageSkipReason,
 } from '../log/types.ts';
+import { ensureGifMatrix, gifMatrixPath, isGifFile } from './gif-matrix.ts';
 
 /** 附件目录名（在 `<dataDir>/blobs/` 之下，与 tools/fs 的 blob 外置同域） */
 export const ATTACHMENT_DIR_NAME = 'images';
@@ -317,6 +318,10 @@ export interface EnsureAttachmentOptions {
   quality?: number;
   /** 压缩超时（毫秒） */
   compressTimeoutMs?: number;
+  /** 多帧 GIF → 矩阵图超时（毫秒） */
+  gifMatrixTimeoutMs?: number;
+  /** 矩阵图最多帧数（默认 24） */
+  gifMatrixMaxFrames?: number;
 }
 
 export type EnsureAttachmentOutcome = 'cached' | 'fetched' | 'skipped' | 'failed';
@@ -335,6 +340,10 @@ export interface EnsureAttachmentResult {
    * 拿它落一条 `image/trace`，于是"压了但没成"在日志上查得到，而不是只能从"0 个 `.ctx.jpg`"反推。
    */
   compressFailure?: string;
+  /** 已生成多帧 GIF 的帧序列矩阵图；上下文改用矩阵而不是原 GIF */
+  gifMatrix?: boolean;
+  /** 矩阵生成失败原因（不影响原图回退） */
+  gifMatrixFailure?: string;
 }
 
 /**
@@ -362,18 +371,34 @@ export async function ensureAttachment(
   }
   if (downloaded.outcome === 'failed' || downloaded.outcome === 'skipped') return downloaded;
 
+  const result: EnsureAttachmentResult = { ...downloaded };
+  // 多帧 GIF 先转矩阵：矩阵图是上下文真正要用的那份；原 GIF 仍留作回退/审计。
+  if (isGifFile(target)) {
+    const matrix = await ensureGifMatrix(target, gifMatrixPath(dataDir, key), {
+      ...(options.gifMatrixTimeoutMs === undefined ? {} : { timeoutMs: options.gifMatrixTimeoutMs }),
+      ...(options.gifMatrixMaxFrames === undefined ? {} : { maxFrames: options.gifMatrixMaxFrames }),
+    });
+    if (matrix.ok) {
+      result.gifMatrix = true;
+      return result;
+    }
+    // 单帧 GIF 不是失败；其余失败要留下原因，但不改变“原件仍可用”的结局。
+    if (matrix.reason !== undefined && matrix.reason !== '单帧 GIF，无需转换' && matrix.reason !== '不是 GIF') {
+      result.gifMatrixFailure = matrix.reason;
+    }
+  }
+
   // 大图先压再算：压缩失败不算错——原件还在，进不进上下文由 readAttachmentImage 那一刻的字节头判断
   const size = downloaded.bytes ?? 0;
   if (size > CONTEXT_IMAGE_COMPRESS_ABOVE_BYTES) {
     const compressed = await ensureCompressed(dataDir, key, options);
-    const result: EnsureAttachmentResult = { ...downloaded, compressed: compressed.ok };
+    result.compressed = compressed.ok;
     // 不写空理由：`reason: undefined` 在 exactOptionalPropertyTypes 下不合法，也没信息量
     if (!compressed.ok && compressed.reason !== undefined && compressed.reason !== '') {
       result.compressFailure = compressed.reason;
     }
-    return result;
   }
-  return downloaded;
+  return result;
 }
 
 /** 下载那一半：把 URL 的字节落到 `target` */
@@ -478,6 +503,17 @@ export function readAttachmentImage(
       compressed: false,
       image: { mediaType: parsed.mediaType, dataUrl: `data:${parsed.mediaType};base64,${parsed.bytes.toString('base64')}` },
     };
+  }
+  // 多帧 GIF 的矩阵图优先于原 GIF/压缩图：它才是预取阶段专门为上下文准备的那一份。
+  const matrix = gifMatrixPath(dataDir, ref.key);
+  try {
+    if (existsSync(matrix) && statSync(matrix).size > 0) {
+      const read = readFileImage(matrix, 'image/jpeg', hardBytes);
+      if (read.ok) return { ...read, compressed: true };
+      rmSync(matrix, { force: true });
+    }
+  } catch {
+    // 矩阵读不到就按原图/压缩图走，不影响消息
   }
   // 压缩产物是我们自己用 JPEG 编出来的：它一定在白名单里，不必再嗅一遍
   const small = compressedPath(dataDir, ref.key);

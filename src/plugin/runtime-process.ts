@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { killProcessTree } from '../process/kill-tree.ts';
 import { utf8ConsoleEnv } from '../util/bytes-text.ts';
 import {
-  PLUGIN_HOST_METHODS, PLUGIN_NOTIFICATIONS, PLUGIN_RPC_ERRORS, PluginRpcError,
+  PLUGIN_HOST_METHODS, PLUGIN_NOTIFICATIONS, PLUGIN_PROTOCOL_VERSION, PLUGIN_RPC_ERRORS, PluginRpcError,
   RpcLineDecoder, encodeRpcError, encodeRpcNotification, encodeRpcRequest, encodeRpcResult,
   type RpcMessage,
 } from './protocol.ts';
@@ -391,7 +391,20 @@ export class PluginProcess {
     const frame = message as unknown as Record<string, unknown>;
     if (typeof frame['method'] === 'string' && frame['id'] === undefined) {
       if (frame['method'] === PLUGIN_NOTIFICATIONS.ready) {
-        this.ready?.resolve();
+        const params = frame['params'];
+        const protocol = params !== null && typeof params === 'object' && !Array.isArray(params)
+          ? (params as Record<string, unknown>)['protocol']
+          : undefined;
+        if (protocol !== PLUGIN_PROTOCOL_VERSION) {
+          this.ready?.reject(new PluginRpcError(
+            PLUGIN_RPC_ERRORS.unsupported,
+            `插件协议不兼容：宿主支持 protocol=${PLUGIN_PROTOCOL_VERSION}，运行器报告 ${JSON.stringify(protocol)}`,
+            'unsupported',
+            { supported: PLUGIN_PROTOCOL_VERSION, reported: protocol ?? null },
+          ));
+        } else {
+          this.ready?.resolve();
+        }
         return;
       }
       // 插件发来的通知（目前是 log.write）：照请求处理，只是没有回帧。

@@ -141,7 +141,7 @@ String frameworkNoticeLabel(String via, {AppStrings strings = const ZhStrings()}
   }
 }
 
-enum _ItemKind { text, tool, channel, mention, boundary, injection }
+enum _ItemKind { text, tool, channel, mention, boundary, injection, webhook }
 
 /// 会话流里的一条：文本气泡、**一次工具调用**、**一条从消息适配器进来的消息**，
 /// 或**一处上下文分界**（人工 reset / 系统压缩）。
@@ -231,6 +231,24 @@ class _BubbleItem {
         mentionsMe = false,
         mentionSid = null,
         side = 'boundary',
+        channel = null,
+        chatType = null,
+        chatId = null,
+        callId = null,
+        toolName = null,
+        toolArgs = null;
+
+  /// Ingress webhook：一条由外部系统投递进来的事件。
+  ///
+  /// 它不是聊天消息（没有会话、没有发送者），所以不摆成 `them` 气泡；复用
+  /// 右侧的提醒卡，只把徽章换成“外部事件”。入站原文仍留在事件日志里，
+  /// 这里只展示给人看的 title / message。
+  _BubbleItem.webhook({required this.text, this.detail, this.ts})
+      : kind = _ItemKind.webhook,
+        quotes = const [],
+        mentionsMe = false,
+        mentionSid = null,
+        side = 'webhook',
         channel = null,
         chatType = null,
         chatId = null,
@@ -972,6 +990,19 @@ class ChatPageState extends State<ChatPage> {
         // 只跟**这次要落的那一份**比：往上翻历史时拿屏上的气泡去比，会把一句老话误删。
         if (_sink.any((e) => e.side == 'me' && e.text == mine.text)) return false;
         _sink.add(mine);
+        return true;
+      }
+      case 'wake/webhook': {
+        // 外部 Ingress 投递：没有会话与发送者，不能伪装成 user 气泡。
+        // 有 title 就做卡头，message 做正文；旧脚本只有 kind 时至少把 kind 露出来。
+        final title = (data['title']?.toString() ?? '').trim();
+        final message = (data['message']?.toString() ?? '').trim();
+        final kind = (data['kind']?.toString() ?? '').trim();
+        final headline = title.isNotEmpty
+            ? title
+            : (message.isNotEmpty ? message : (kind.isNotEmpty ? kind : s.tagWebhook));
+        final detail = title.isNotEmpty && message.isNotEmpty ? message : null;
+        _sink.add(_BubbleItem.webhook(text: headline, detail: detail, ts: ts));
         return true;
       }
       case 'wake/channel': {
@@ -2384,6 +2415,18 @@ class _BubbleRow extends StatelessWidget {
             sender: sender,
             topic: topic,
           ),
+        ),
+      );
+    }
+
+    // 外部 Ingress webhook：靠右的外部事件卡。它不是聊天消息，不能被误读成
+    // “谁说了一句话”；但人类需要在聊天窗口里看到投递原文。
+    if (item.kind == _ItemKind.webhook) {
+      return Padding(
+        padding: EdgeInsets.only(top: continues ? 6 : 14, bottom: 2),
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: _NoticeCard(item: item, tag: s.tagWebhook, cardKey: 'webhook-card'),
         ),
       );
     }

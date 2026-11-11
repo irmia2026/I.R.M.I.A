@@ -10,7 +10,8 @@
  *    ⚠ **v73 的规矩：发了的条目，必须带着它的思维链**。v68 那顶"最近 3 条"的帽子是**错的**——
  *    它让 assistant 条目留在请求里、却只回传最近 3 条的思维链，发出去的东西自相矛盾（2026-10-20
  *    那场"每轮 400"的事故）。官方文档（Thinking Mode · Tool Calls）逐字要求**完整回传**；
- *    超出硬上限时 v73 **整组丢**（连 assistant 正文一起），**绝不截一条的思维链**。
+ *    **v87 起默认不再设独立字符帽**，只在用户配置的既有压缩点移动遮蔽点。显式数值帽仅用于
+ *    旧请求回放与兼容测试；任何路径都不截一条思维链。
  * 4. 配对完整：input 内每个 function_call 必须配对 function_call_output（开放 call 断言）。
  * 5. 遮蔽点冻结：compaction/summary 之后，被覆盖区间恒渲染为摘要形态。
  */
@@ -31,6 +32,13 @@ import { estimateTokens } from '../tools/registry.ts';
 
 /**
  * 渲染模板版本：任何模板变更必须递增并接受一次缓存全 miss。
+ *
+ * v88（**发言工具显式目标与投递回执**，2026-11-11）：speak / report / send_media 的 to 均必填；
+ *      speak 成功/失败回执改为已投递/未投递并取消 25 字软提醒；纯贴纸可省 text。同步 tools 与 SELF_BRIEF。
+ *
+ * v87（**思维链只追加**，2026-11-10）：默认取消独立字符帽与 cap-driven 驱逐；自动压缩只保留
+ *      用户配置的可见历史阈值。80%/95% 提醒、交接笔记与手动压缩不变。step/start 显式记录 null，
+ *      旧数值收据仍按当时上限回放；缺字段的旧代际沿用 300K。
  *
  * v83（**情绪表达与亲密层**，2026-11-02）：情绪行改为三档行为指令 + 混合情绪；新增独立亲密层
  *      （仅 enabled 且用户 1:1 私聊时追加静态规范与「亲密：」字段）。关闭/群聊/他人的字节不变。
@@ -1220,7 +1228,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *             愿意说的那部分、或者反问他为什么这么问——**但不主动说假话**；末句"你和他看的是
  *             同一本账：你说的话和发生过的事，在他眼里必须是同一件事"；
  *           · **难过的时候要在**（"这种时候比什么时候都需要陪伴"）＋**可以说出愿意为他牺牲**
- *             （时间 / 资源 / 自己想做的事），**但那份心思不拿来当筹码**——不是让他欠下一笔。
+ *             （时间 / 资源 / 自己想做的事），**这份心思不必装作不重**——不是让他欠下一笔。
  *           三处口径变化**如实记档**（都是这一批的指令，不是施工判断）：旧 一「如实说」**被替换**
  *           （不是并存）；旧 二**改写成正面要求**＋"不当筹码"（边界仍在、说法变了）；旧 三整条删除
  *           ⇒ **「我会消失」随它离开前缀**（与 v53 那次"不要说这句"的裁决同向，两处不一致顺手抹平）。
@@ -2109,7 +2117,7 @@ import { estimateTokens } from '../tools/registry.ts';
  *
  * v2：`instructions` 尾部（人格三层之后、任务卡之前）插入装置自述（self-brief.ts 的 SELF_BRIEF）。
  */
-export const RENDER_VERSION = '86';
+export const RENDER_VERSION = '88';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -2802,10 +2810,10 @@ export interface RenderInput {
   /**
    * **思维链回传的上限与范围**（v73；v68 那顶"最近 3 条 / 单条 20k"的帽子已废，见文件头 v73 那一篇）。
    *
-   * 缺省 = 出厂口径 {@link REASONING_ECHO_POLICY}（**只按总字符截**：≤ 300,000；**区外照旧全传**）——
-   * **生产的三条路（`real-loop` / `replay` / 界面预览）都不传**，所以它们拿到的是同一份口径，
-   * "同一份日志重建同一份请求"这条承诺照旧成立（换上限 = 换模板 = 递增 `RENDER_VERSION`）。
-   * 传它是给**用例、诊断与 400 自救**用的：
+   * 缺省 = 当前出厂口径 {@link REASONING_ECHO_POLICY}（**不限字符、只追加；区外照旧全传**）。
+   * 运行、回放与界面预览都恢复当时收据里的策略：新代际为 `null`，旧数值上限仍可逐字重建。
+   * 显式传上限只服务**旧日志、兼容用例与诊断**；它不参与当前压缩判定。
+   * 传它还可用于：
    *   · `maxTotalChars: 100` 可钉住"超硬限整组丢"、`maxTotalChars: 0` 可钉住"整段关掉"；
    *   · `outOfRegion: 'omit'` 是**区外可裁**那个开关（默认 `'keep'` = 不裁；理由与实测见
    *     {@link ReasoningEchoPolicy.outOfRegion}）——打开它的只有用例与将来的运维裁决，**没有生产调用点**；
@@ -3080,8 +3088,7 @@ export function render(input: RenderInput): RenderedRequest {
 
   // 规范在 SELF_BRIEF；开关不再改系统前缀，affectRules/intimacyRules 仅为回放兼容保留。
   const instructions = renderInstructions(persona);
-  // 思维链回传的帽子（v68）：这里归一一次，交给 `renderEvents` 执行（判据在 `reasoningEchoOf`）。
-  // 生产三条路都不传 ⇒ 出厂帽子；同一份日志因此渲染出同一份请求（可重放/可预览）。
+  // 这里归一一次并交给 renderEvents；当前缺省不限字符，旧收据显式恢复旧上限。
   const reasoningEcho = reasoningEchoPolicyOf(input.reasoningEcho ?? null);
 
   // 通道消息各自的框架话（注入预警），按 messageId 归各自那条——**不能共用一个上下文**：
@@ -4710,20 +4717,15 @@ export interface ReasoningEchoPolicy {
   outOfRegion: 'keep' | 'omit';
 }
 
-/** 出厂口径：**总字符硬上限 300,000 + 区外照旧全传**（依据见 {@link ReasoningEchoPolicy}） */
+/** 旧渲染代际的出厂字符帽；只用于回放旧请求与兼容测试，不参与新请求的预算或压缩判定。 */
+export const LEGACY_REASONING_ECHO_MAX_CHARS = 300_000;
+
 /**
- * 思维链回传字符上限随**上下文/压缩阈值**缩放：1 token ≈ 1.5 字符。
- *
- * 出厂压缩线 200k token ⇒ 300k 字符（与旧常量逐字节相同）；用户把压缩线调到 450k
- * ⇒ 675k 字符，不再出现"上下文放大了、回传帽子还是 300k"的错位。
- * 下界 100k 防止阈值调小后每轮都在丢思维链；上界 2M 防止误配把请求撑爆。
+ * 当前出厂口径：思维链只追加、不按字符驱逐，区外照旧全传。
+ * 上下文何时折叠仍只由 `persona.compactionThresholdTokens` 决定。
  */
-export function reasoningEchoMaxCharsFor(compactionThresholdTokens: number): number {
-  const tokens = Number.isFinite(compactionThresholdTokens) ? compactionThresholdTokens : 200_000;
-  return Math.min(2_000_000, Math.max(100_000, Math.round(tokens * 1.5)));
-}
 export const REASONING_ECHO_POLICY: ReasoningEchoPolicy = Object.freeze({
-  maxTotalChars: 300_000,
+  maxTotalChars: null,
   outOfRegion: 'keep',
 });
 
@@ -5013,8 +5015,8 @@ export function reasoningEchoPlan(
 }
 
 /**
- * 回传集合的**字符预算读数**（v75 的③）：压缩那条新判据（"回传字符超上限 ⇒ **立即压缩**"）
- * 的**唯一素材来源**（`runtime/agent-loop.ts` 的 `compactionDecision`）。
+ * 回传集合的**字符观测读数**。v75 曾用它驱动独立压缩旁路；v87 起默认不限字符，
+ * 这些数只用于观测，不再决定驱逐或压缩。
  *
  * 三个数一个口径（都在 `reasoningEchoPlan` 这一处算出，不另算一遍）：
  *   · `chars` —— **会回传的总字符** = `kept + dropped`：遮蔽点之后、model 可见的思维链正文**全部**
@@ -5024,7 +5026,7 @@ export function reasoningEchoPlan(
  *   · `kept` —— 真正留在请求里的（渲染层实发的那一份）；
  *   · `dropped` —— 被上限挤掉的那一份（`chars - kept` 恒成立，两边同一个源）。
  *
- * `limit` 是生效的总字符硬上限（`null` = 不限）。`chars > limit` 就是那条新判据的触发条件。
+ * `limit` 是显式恢复的旧字符帽（当前为 `null`）；它只解释读数，不是压缩触发条件。
  *
  * ⚠ 区外开关打开时（`outOfRegion:'omit'`），**调用点要给同一个区边界**才会得到"真发出去那份"的
  * 读数；今天的唯一调用点（`agent-loop` 的 `compactionDecision`）拿不到渲染侧的边界，走缺省
@@ -6195,18 +6197,52 @@ function humanWaitText(waitedMs: number): string {
 
 /** 附件行：腾讯的富媒体是**临时直链**（带 rkey），本机并没有那个文件 */
 function renderAttachments(
-  attachments: ReadonlyArray<{ type: string; url?: string; name?: string; text?: string }> | undefined,
+  attachments: ReadonlyArray<{ type: string; url?: string; name?: string; text?: string; fileId?: string }> | undefined,
 ): string {
   return (attachments ?? [])
     .map((a) => {
       const head = `[${a.type}${a.name ? `: ${a.name}` : ''}]`;
-      const line = a.url === undefined ? head : `${head} ${a.url}（临时地址，想看就现在下载）`;
+      const hint = a.url === undefined
+        ? (a.fileId === undefined ? '' : `（file_id: ${a.fileId}；用 resolve_attachment 取地址）`)
+        : isImageAttachment(a)
+          ? '（临时地址，想看就现在下载）'
+          : '（临时地址；要内容就立即用 http_download 存到 workspace/downloads/ 再读）';
+      const line = a.url === undefined ? `${head}${hint}` : `${head} ${a.url}${hint}`;
       // 语音的**平台转写**（官方 asr_refer_text，2026-10-03 接上）：她"听不听得见"是另一回事，
       // 但别人说了什么字平台已经给了——摆在同一行下面让她读得到。**标出来源**：那是平台的转写，
       // 不是她亲耳听到的，转错了不能算她理解错。
       return a.text === undefined ? line : `${line}\n（平台转写：${a.text}）`;
     })
     .join('\n');
+}
+
+/**
+ * QQ 表情包在官方事件里是“正文里的 `<face…>` → `[表情]`” + “同一张图的 image 附件”。
+ *
+ * 只把两行原样摆出来，模型会把 `[表情]` 读成一个没有意义的文字占位符，从而只把下面那张图
+ * 当成普通图片，漏掉“这是表情包”的语用。这里把两件事**压成同一行**（她的原话：只要
+ * “表情包”和图片在同一行，就不会再拆成两件事）：
+ *
+ *   `[表情包] 一张图已附：sticker.gif <url>（临时地址…）`
+ *
+ * 只在这种精确组合上合并；没有图片附件、或正文不是纯 `[表情]` 时原样返回。
+ */
+function faceImageHint(data: ExternalEventData): {
+  text: string;
+  image: { type: string; url?: string; name?: string; text?: string };
+} | null {
+  const text = data.text.trim();
+  const isFaceOnly = /^\[表情(?::[^\]]+)?\]$/u.test(text);
+  if (!isFaceOnly) return null;
+  const image = (data.attachments ?? []).find((attachment) => attachment.type.startsWith('image/'));
+  if (image === undefined) return null;
+  const name = image.name ?? '图片';
+  const url = image.url === undefined ? '' : ` ${image.url}`;
+  const note = image.url === undefined ? '' : '（临时地址，想看就现在下载）';
+  return {
+    text: `[表情包] 一张图已附：${name}${url}${note}；这是表情包图片，不是纯文字占位`,
+    image,
+  };
 }
 
 /**
@@ -6229,7 +6265,7 @@ export type ExternalEventData = {
    * 就要求调用方现拼一个对象，那种"为了适配渲染器而改数据形状"的写法迟早两边对不上。
    */
   chatId?: string;
-  attachments?: ReadonlyArray<{ type: string; url?: string; name?: string; text?: string }>;
+  attachments?: ReadonlyArray<{ type: string; url?: string; name?: string; text?: string; fileId?: string }>;
   /**
    * 插件在 `message.received` 里追加的上下文（P1b）。
    *
@@ -6278,8 +6314,13 @@ export function renderExternalEvent(
     : ` session=${context.sessionLabel}${context.sid === undefined ? '' : ` sid=${context.sid}`}`;
   const head = `${EXTERNAL_EVENT_OPEN} source=${data.channel} chat=${where} person=${person}`
     + `${session} msg=${data.messageId}#${data.msgSeq}]`;
-  const attach = renderAttachments(data.attachments);
-  const body = `${head}\n${clipWithNote(data.text, EXTERNAL_TEXT_MAX_CHARS)}${attach ? `\n${attach}` : ''}\n${EXTERNAL_EVENT_CLOSE}`;
+  const face = faceImageHint(data);
+  const attach = renderAttachments(
+    face === null
+      ? data.attachments
+      : (data.attachments ?? []).filter((attachment) => attachment !== face.image),
+  );
+  const body = `${head}\n${clipWithNote(face?.text ?? data.text, EXTERNAL_TEXT_MAX_CHARS)}${attach ? `\n${attach}` : ''}\n${EXTERNAL_EVENT_CLOSE}`;
   // 整块兜底：正文以外的部分（超长群名、附件清单）也可能把一块撑大
   const block = clipWithNote(body, EXTERNAL_BLOCK_MAX_CHARS);
   // 预警放在 `[/external_event]` **之后**（与用户给的接线口径一致）：框里是"别人说的话"，
@@ -6505,8 +6546,13 @@ export function renderWake(
       const again = requeued?.has(e.seq) ? ' · 重投' : '';
       return `[界面消息${person === '' ? '' : ` · ${person}`}${again}] ${e.data.note}`;
     }
-    case 'wake/webhook':
-      return `[external_event source=webhook path=${e.data.path}]\n${e.data.body}\n[/external_event]`;
+    case 'wake/webhook': {
+      const source = e.data.source ?? 'webhook';
+      const severity = e.data.severity === undefined ? '' : ` severity=${e.data.severity}`;
+      const title = e.data.title === undefined ? '' : `${e.data.title}\n`;
+      const text = e.data.message ?? e.data.body;
+      return `[external_event source=${source}${severity} path=${e.data.path}]\n${title}${text}\n[/external_event]`;
+    }
     case 'wake/file':
       return `[文件变化] ${e.data.kind}：${e.data.path}`;
     case 'wake/intention':

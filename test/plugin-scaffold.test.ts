@@ -66,7 +66,11 @@ describe('create-plugin · 生成的包', () => {
       assert.ok(readme.trim().length > 0);
       assert.ok(readme.includes(`demo-${lang}`));
       assert.ok(readme.includes('plugin-install'), 'README 要写清怎么装');
-      if (lang === 'py') assert.match(readme, /requirements/, 'Python 样板要说明 requirements');
+      if (lang === 'py') {
+        assert.match(readme, /requirements/, 'Python 样板要说明 requirements');
+        assert.ok(readme.includes('网络模块一律拒收'), '不能把 net 权限写成允许直接 import 网络模块');
+        assert.ok(readme.includes('联网只能走 `ctx.net.fetch`'));
+      }
 
       // 不写本机绝对路径、不生成 node_modules
       for (const text of [manifestText, entry, readme]) {

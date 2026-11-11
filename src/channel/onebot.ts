@@ -46,6 +46,7 @@ import { isFetchableAttachmentUrl, type WakeChannel } from '../log/types.ts';
 import { type ChannelNoticeData } from './self-identity.ts';
 import {
   reconnectDelayMs,
+  type AttachmentResolution,
   type ChannelAdapter,
   type QqChatType,
   type SendOutcome,
@@ -287,7 +288,7 @@ const ATTACHMENT_SEGMENTS: readonly string[] = ['image', 'file', 'video', 'recor
  * 它只认形态、不认来源，两条通道因此走同一个判据。
  */
 function attachmentsOf(segments: readonly OneBotSegment[]): WakeChannel['data']['attachments'] {
-  const out: Array<{ type: string; url?: string; name?: string; text?: string }> = [];
+  const out: Array<{ type: string; url?: string; name?: string; text?: string; fileId?: string }> = [];
   for (const segment of segments) {
     if (!ATTACHMENT_SEGMENTS.includes(segment.type)) continue;
     const rawUrl = segment.data['url'] ?? '';
@@ -301,11 +302,13 @@ function attachmentsOf(segments: readonly OneBotSegment[]): WakeChannel['data'][
     // **未核实**：SnowLuma / NapCat 是否真的下发这个字段（本机没有任何语音事件样本）；
     // 有就带上，没有这条线是空的、不会伪造。
     const transcript = segment.data['text'] ?? '';
+    const fileId = segment.data['file_id'] ?? segment.data['fileId'] ?? '';
     out.push({
       type: segment.type,
       ...(url === '' ? {} : { url }),
       ...(name === '' ? {} : { name }),
       ...(transcript === '' ? {} : { text: transcript }),
+      ...(fileId === '' ? {} : { fileId }),
     });
   }
   return out.length === 0 ? undefined : out;
@@ -1611,6 +1614,69 @@ export class OneBotChannel implements ChannelAdapter {
     // 媒体也记：`send_media` 发出去的那条同样可能被人回复，判据与文本那条同源
     this.rememberSentMessage(messageId);
     return { ok: true, messageId, passive: false, msgSeq: 0 };
+  }
+
+  /**
+   * 用消息 id 反查附件地址。OneBot 的 `get_msg` 会返回原始消息段；文件段的 `url`
+   * 有时只在 `get_msg` 里才有（入站事件只给了 file_id/name），所以这条口子必须在通道侧。
+   *
+   * **不是自动下载**：这里只返回临时地址，真正落盘仍由 agent 调 `http_download`。
+   */
+  async resolveAttachment(messageId: string, index: number): Promise<AttachmentResolution> {
+    const id = messageId.trim();
+    if (id === '') return { ok: false, reason: 'message_id 为空' };
+    const result = await this.client.call('get_msg', { message_id: id }, 10_000);
+    if (!result.ok) return { ok: false, reason: `OneBot get_msg 失败：${result.reason}` };
+    const data = asRecord(result.data);
+    const rawMessage = data?.['message'];
+    const segments: OneBotSegment[] = [];
+    if (Array.isArray(rawMessage)) {
+      for (const item of rawMessage) {
+        const record = asRecord(item);
+        if (record === null) continue;
+        const type = readString(record, 'type');
+        if (type === '') continue;
+        segments.push({ type, data: readStringMap(record['data']) });
+      }
+    }
+    const chosen = attachmentsOf(segments)?.[index];
+    if (chosen === undefined) {
+      return { ok: false, reason: `这条消息没有第 ${index} 个附件（attachments=${attachmentsOf(segments)?.length ?? 0}）` };
+    }
+    if (typeof chosen.url === 'string' && chosen.url.trim() !== '') {
+      return { ok: true, url: chosen.url.trim(), ...(chosen.name === undefined ? {} : { name: chosen.name }) };
+    }
+    // 有的协议端只给 file_id；再走一次平台文件地址接口。官方 OneBot 两种动作名并存，
+    // 按消息类型选群/私聊；拿不到就如实报，不拼一个假地址。
+    if (typeof chosen.fileId === 'string' && chosen.fileId.trim() !== '') {
+      const messageType = readString(data, 'message_type');
+      const groupId = readScalar(data, 'group_id');
+      const userId = readScalar(data, 'user_id');
+      const groupAction = messageType === 'group' || groupId !== '';
+      const action = groupAction ? 'get_group_file_url' : 'get_private_file_url';
+      const params: Record<string, unknown> = groupAction
+        ? { group_id: oneBotIdOf(groupId), file_id: chosen.fileId.trim() }
+        : { user_id: oneBotIdOf(userId), file_id: chosen.fileId.trim() };
+      const file = await this.client.call(action, params, 10_000);
+      if (!file.ok) return { ok: false, reason: `OneBot ${action} 失败：${file.reason}` };
+      const url = readString(asRecord(file.data), 'url') || readString(asRecord(file.data), 'file_url');
+      if (url !== '') return { ok: true, url, ...(chosen.name === undefined ? {} : { name: chosen.name }) };
+      return { ok: false, reason: `OneBot ${action} 没有返回 url` };
+    }
+    return { ok: false, reason: '这条附件既没有 url，也没有可用的 file_id' };
+  }
+
+  /** 只有 file_id 时走协议端的私聊文件地址动作；拿不到就如实报。 */
+  async resolveFileUrl(fileId: string): Promise<AttachmentResolution> {
+    const id = fileId.trim();
+    if (id === '') return { ok: false, reason: 'file_id 为空' };
+    const result = await this.client.call('get_private_file_url', { file_id: id }, 10_000);
+    if (!result.ok) return { ok: false, reason: `OneBot get_private_file_url 失败：${result.reason}` };
+    const data = asRecord(result.data);
+    const url = readString(data, 'url') || readString(data, 'file_url');
+    return url === ''
+      ? { ok: false, reason: 'OneBot get_private_file_url 没有返回 url' }
+      : { ok: true, url };
   }
 
   /** 状态快照（CLI/测试观测；token 值本身从不外露） */

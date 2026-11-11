@@ -230,6 +230,7 @@ async function speakWhileOwnerInterrupts(
     personaRoot: join(rig.dataDir, 'persona'),
     speakTyping: { typingEffect: true, charsPerMinute: 90 },
     userSpoke: () => ({ text: '和我的私聊是私有的，没关系', wakeSeq: opts.wakeSeq ?? 0 }),
+    replyPoster: { post: async () => ({ ok: true, status: 200 }) },
   });
 
   const ctx: ToolContext = {
@@ -265,7 +266,7 @@ async function speakWhileOwnerInterrupts(
     await new Promise<void>((resolve) => { setImmediate(resolve); });
   });
   try {
-    const result = await tools.byName('speak').handler({ text: HER_SPEECH }, ctx);
+    const result = await tools.byName('speak').handler({ to: 'qq:c2c:OWNER', text: HER_SPEECH }, ctx);
     await waitForLanded();
     if (bubblesWhenOwnerSpoke < 0) bubblesWhenOwnerSpoke = bubbles.length;
     return { content: result.content, bubbles, bubblesWhenOwnerSpoke, wake: wkRef.value };
@@ -330,10 +331,8 @@ test('回归哨兵：摘掉通报口就是事故当时的样子——人插话�
   );
   assert.deepEqual(out.bubbles, HER_SPEECH.split('，'), '而且逐段就是那句原话（标点摘掉）');
   assert.ok(!out.content.includes('被打断'), `回执也不该说被打断：${out.content}`);
-  // 2026-10-20（R4）：抬头 `发言已处理：` 已删（每条回执都一样，是标签不是判据）。
-  // 这条哨兵要守的是"照旧是处理完的正常回执"——判据换成正常回执才有的那一行：
-  // 这套夹具没有回投地址 ⇒ 正常回执里必然有"没有 IM 会话可发"那句（被打断那份不会有）。
-  assert.match(out.content, /发送成功/u, '照旧是"处理完了"的正常回执');
+  // 通报口被摘掉时仍应正常说完，回执是 `已投递` 而不是打断说明。
+  assert.match(out.content, /已投递/u);
 });
 
 test('非人开口的事件不推计数：/dream 之外的计时器、意图、后台任务都不算插话', async (t) => {

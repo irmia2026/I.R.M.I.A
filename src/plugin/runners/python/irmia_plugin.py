@@ -60,6 +60,8 @@ class _Tools:
                handler: Optional[Callable[[Any], Any]] = None, **kwargs: Any) -> None:
         """注册一件工具。`handler(args)` 返回字符串或 `{"content": ...}`。"""
         definition = kwargs.get("definition")
+        missing = object()
+        side_effect = kwargs.get("sideEffect", missing)
         if isinstance(name, dict) and definition is None:
             definition = name
             name = ""
@@ -68,6 +70,7 @@ class _Tools:
             description = str(definition.get("description", ""))
             schema = definition.get("schema", definition.get("parameters"))
             handler = definition.get("handler", handler)
+            side_effect = definition.get("sideEffect", side_effect)
         if not name:
             raise ValueError("ctx.tools.define 缺少 name")
         if handler is None or not callable(handler):
@@ -76,7 +79,7 @@ class _Tools:
             "name": name,
             "description": description,
             "parameters": schema if schema is not None else {"type": "object", "properties": {}},
-            **({"sideEffect": kwargs["sideEffect"]} if "sideEffect" in kwargs else {}),
+            **({} if side_effect is missing else {"sideEffect": side_effect}),
         })
         TOOL_HANDLERS[name] = handler
 

@@ -1,6 +1,9 @@
 /**
  * Irmia Agent — **思维链回传压力的前兆告警**（`回传字符 / 上限 ≥ 90%`）的判据与全部文案
  *
+ * v87：当前出厂策略已取消独立字符帽，正常实例在本判据得到 `no-cap`，不再发压力维护唤醒。
+ * 本模块保留给旧显式上限的复算、旧日志与兼容测试；不要把旧 300K 默认接回生产。
+ *
  * ───────────────── 用户原话（这一批的根据，2026-10-21） ─────────────────
  *
  * 「我注意到**缓存未命中在暴涨**。并且**框架没有任何警告**」
@@ -123,8 +126,8 @@ export interface EchoPressureVerdict {
  *   · **遮蔽点**：取所有 `compaction/summary.coveredUpToSeq` 的**最大值**——与 `render()`
  *     （`model/render.ts` 的 `render` 开头那一段）逐字同一条判据；压在遮蔽点之前的思维链
  *     本来就不回传，算进来会让压力虚高；
- *   · **策略**：出厂 `REASONING_ECHO_POLICY`（`agent-loop` 只有在 400 自救那一次才换成
- *     "连上限都不设"，那是**一次性**的，不是常态，不该进这条判据）；
+ *   · **策略**：当前出厂 `REASONING_ECHO_POLICY` 已不设字符帽，因此正常实例返回 `no-cap`；
+ *     需要复算旧驱逐机制时由调用方显式传入旧策略；
  *   · **"本轮"**：日志里最后一条 `turn/end` 的轮号。用它数 `reasoning_echo_prune` 而不用进程
  *     内存——重启之后"这一轮驱逐过没有"照样读得出来（与 `real-loop.warnedSinceLastCompaction`
  *     同一条纪律）。
@@ -132,8 +135,11 @@ export interface EchoPressureVerdict {
  * ⚠ 入参 `events` 必须是**渲染看见的那一份**（`real-loop.ts` 的 `contextEventFilter` 之后）：
  * 子代理链的事件不在父请求里，混进来会把字符数算大。
  */
-export function readEchoPressure(events: readonly AppEvent[]): EchoPressureSignals {
-  const cap = REASONING_ECHO_POLICY.maxTotalChars;
+export function readEchoPressure(
+  events: readonly AppEvent[],
+  policy: typeof REASONING_ECHO_POLICY = REASONING_ECHO_POLICY,
+): EchoPressureSignals {
+  const cap = policy.maxTotalChars;
   // 遮蔽点：与 `render()` 同一条判据（取最大值）
   let coveredUpToSeq = 0;
   for (const event of events) {
@@ -142,7 +148,7 @@ export function readEchoPressure(events: readonly AppEvent[]): EchoPressureSigna
     }
   }
   // 这一个纯函数就是渲染层自己用的那一个（`reasoningEchoOf` 是它的便捷入口）
-  const plan = reasoningEchoPlan(events, coveredUpToSeq, REASONING_ECHO_POLICY);
+  const plan = reasoningEchoPlan(events, coveredUpToSeq, policy);
   const droppedChars = plan.dropped.reduce((sum, entry) => sum + entry.chars, 0);
 
   // **本轮**号：日志里最后一条 turn/end（"本轮最后一步"取那之后最大的 step/start）

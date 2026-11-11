@@ -108,6 +108,16 @@ test('工具清单：speak 与 report 必须注册成功', async () => {
   assert.ok(registry.has('report'), `report 没注册：${problems.join('；')}`);
 });
 
+test('工具清单：speak / report / send_media 都强制显式 to', async () => {
+  const { registry } = await catalog();
+  assert.deepEqual(registry.get('speak')?.parameters['required'], ['text', 'to']);
+  assert.deepEqual(registry.get('report')?.parameters['required'], ['text', 'to']);
+  assert.deepEqual(registry.get('send_media')?.parameters['required'], ['to']);
+  assert.match(String(registry.get('speak')?.description), /text、to 必填/u);
+  assert.match(String(registry.get('report')?.description), /text、to 必填/u);
+  assert.match(String(registry.get('send_media')?.description), /to 必填/u);
+});
+
 test('工具清单：说话的两件工具必须在模型视线内（关不掉的是能力，不是提示词）', async () => {
   const { registry } = await catalog();
   const names = registry.listForModel({ includeDestructive: true }).map((tool) => tool.name);
@@ -277,6 +287,7 @@ test('工具清单：贴纸接入后 speak 仍小于 60，完整工具 schema �
   assert.deepEqual(problems, []);
   const speak = registry.get('speak');
   assert.ok(speak !== null);
+  assert.deepEqual(speak.parameters['required'], ['to'], '贴纸只豁免 text，不许豁免 to');
   assert.ok(estimateTokens(speak.description) < 60, `speak 描述 ${estimateTokens(speak.description)} token`);
   const total = registry.catalogTokens({ includeDestructive: true });
   assert.ok(total < 5500, `工具 schema ${total} token`);

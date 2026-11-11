@@ -205,11 +205,10 @@ import { estimateTokens } from '../src/tools/registry.ts';
  */
 const INSTRUCTIONS_TOKEN_CEILING = 8800;
 /**
- * 门：② 确定性分量（四条规则行 + 自述段）的 token 上界。依据见文件头。
- * v72：`6200 → 6300`——与 ① 同步 +100，保住"② 比 ① 宽 78"那条刻意关系；
- * **"余量 ≥ 500"那条判据一个字没动**（现在 6300 − 5751 = 549 ≥ 500）。
+ * 门：② 确定性分量（四条规则行 + 自述段）的 token 上界。
+ * v88：`7300 → 8400`——`to` 必填与 speak 节奏说明加入后，当前代 7994，保留余量。
  */
-const INSTRUCTIONS_HEADER_TOKEN_CEILING = 7300;
+const INSTRUCTIONS_HEADER_TOKEN_CEILING = 8400;
 /** 与 `tools` 同形的"当前值 vs 上界"读数常量：`tool-catalog.test.ts` 的上界是 5500 */
 const TOOLS_TOKEN_CEILING = 5500;
 
@@ -222,15 +221,12 @@ const TOOLS_TOKEN_CEILING = 5500;
 /** v76 · ② 四条分割线常量按 `\n\n` 相连（不依赖 `data/`）——v78 没碰它，未复量 */
 const HEADER_RULES = { tokens: 44, bytes: 378, hash: 'bbe1674eb8a77743' } as const;
 /**
- * v78 · ② 自述那一段（不依赖 `data/`）：v72 整段置换之后是 5712 / 25684 / `b051f01fa99ec325`；
- * v76 加了一段回执说明 ⇒ 5840 / 26254 / `ff003fd6807f4047`。
- * **v78 没碰 `SELF_BRIEF`**（首版补的那一句"正文要你自己 safe_read"已撤回——它也是"给指令"）
- * ⇒ 读数就是 v76 那一组，未复量、也不许改。
+ * v88 · ② 自述那一段（不依赖 `data/`）：当前代 7960 / 35684 / `3d61b47a9d8ea842`。
+ * 由 `tools/measure/instructions-truth.mts` 复量；改 `SELF_BRIEF` 必须同批更新。
  */
-// v82：speak 贴纸三句静态规则 +50 token；用 tools/measure/instructions-truth.mts 复量，精确比对不变。
-const HEADER_BRIEF = { tokens: 7043, bytes: 31740, hash: 'f3abb1c10597a95f' } as const;
-/** v82 · ② 确定性分量合计（四条规则行 + 自述）：5924 */
-const HEADER_TOTAL_TOKENS = 7077;
+const HEADER_BRIEF = { tokens: 7960, bytes: 35684, hash: '3d61b47a9d8ea842' } as const;
+/** v88 · ② 确定性分量合计（四条规则行 + 自述）：7994 */
+const HEADER_TOTAL_TOKENS = 7994;
 /**
  * v76 · ① `renderInstructions` 整段（含**本机**人格三层）。
  * ⚠ 线上此刻（未部署 v78）跑的是旧一代，别抄线上那个 hash（见文件头）。
@@ -331,7 +327,8 @@ test('instructions 预算：工具的当前值与上界在同一份报告里可�
   assert.equal(toolCount, 22, `代码口径件数变了（v65：22 件 = 运行期 23 件 − mcp）：${toolCount}`);
   assert.equal(INSTRUCTIONS_TOKEN_CEILING, 8800,
     'v86：SELF_BRIEF 新增 speak 准则与情欲方向后两条上界同步 +500（8300/6800 → 8800/7300）');
-  assert.equal(INSTRUCTIONS_HEADER_TOKEN_CEILING, 7300);
+  assert.equal(INSTRUCTIONS_HEADER_TOKEN_CEILING, 8400,
+    'v88：to 必填与 speak 节奏说明加入后，确定性分量复量为 7994，给余量 406');
 });
 
 // ──────────────────────────────── ② 基线：确定性分量与当前代逐字一致 ────────────────────────────────

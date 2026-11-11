@@ -280,7 +280,7 @@ test('③ speak 说过的话在下一拍的请求体里（她认"我刚才说了
   const rig = await makeRig(t);
   const said = '在的，我先看一眼日志。';
 
-  const result = await rig.call('speak', { text: said });
+  const result = await rig.call('speak', { text: said, to: 'qq:c2c:OWNER' });
   assert.equal(result.isError, undefined, `speak 不该报错：${result.content}`);
 
   const bubbles = rig.ofType('message/assistant');

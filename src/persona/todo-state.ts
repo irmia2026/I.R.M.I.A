@@ -153,6 +153,16 @@ export function openTodoItems(stateText: string): string[] {
 }
 
 /**
+ * 任务卡标题：只取她自己写在 STATE.md 的第一项未完成任务。
+ *
+ * 这不是“谁叫醒了她”——唤醒正文已经在本轮输入里；把群消息复制成任务标题，
+ * 会让她把别人随口一句话当成被派下来的活。没有清单时给一句明确的空态，不借唤醒消息填。
+ */
+export function currentTaskTitle(stateText: string): string {
+  return openTodoItems(stateText)[0] ?? '（STATE.md 未写当前任务）';
+}
+
+/**
  * 一个条目 → 一行的 markdown（`[ ]` / `[~]` / `[x]`）。
  *
  * 为什么是这个记号：`tools/admin.ts` 回执里那行就是这个形态（`describeTodo`），

@@ -422,7 +422,7 @@ export class QqAccessToken {
 function readAttachments(source: Record<string, unknown>): WakeChannel['data']['attachments'] {
   const raw = source['attachments'];
   if (!Array.isArray(raw)) return undefined;
-  const out: Array<{ type: string; url?: string; name?: string; text?: string }> = [];
+  const out: Array<{ type: string; url?: string; name?: string; text?: string; fileId?: string }> = [];
   for (const item of raw) {
     const record = asRecord(item);
     if (record === null) continue;
@@ -435,11 +435,13 @@ function readAttachments(source: Record<string, unknown>): WakeChannel['data']['
     const url = type === 'voice' && wav !== '' ? wav : raw;
     const name = readString(record, 'filename') || readString(record, 'name');
     const transcript = readString(record, 'asr_refer_text');
+    const fileId = readString(record, 'file_id') || readString(record, 'fileId');
     out.push({
       type,
       ...(url === '' ? {} : { url }),
       ...(name === '' ? {} : { name }),
       ...(transcript === '' ? {} : { text: transcript }),
+      ...(fileId === '' ? {} : { fileId }),
     });
   }
   return out.length === 0 ? undefined : out;
@@ -2091,12 +2093,26 @@ export class QqMessageSender {
  * 输入侧的纪律与文件看门目录一致：`onMessage` 回调返回时，事件必须已经落进日志——
  * 否则上层的 dedupe/认领会在事件还不在盘上时就看到它（wake/channel 是承诺类事件）。
  */
+export type AttachmentResolution =
+  | { ok: true; url: string; name?: string }
+  | { ok: false; reason: string };
+
 export interface ChannelAdapter {
   readonly name: string;
   start(): void;
   stop(): void;
   /** 收到一条通道消息（已转成 wake/channel 的 data 形状） */
   onMessage?: (event: WakeChannel['data']) => void;
+  /**
+   * 用平台消息 id 反查一个附件的临时下载地址。
+   *
+   * 入站事件没有给 `url` 时（QQ 文件常见），宿主不能凭文件名猜地址；有这条能力的
+   * 适配器负责向平台查一次。`index` 是 attachments 数组下标。没有这条能力就是 undefined，
+   * 调用方如实说“这条通道不支持解析”，不伪造地址。
+   */
+  resolveAttachment?(messageId: string, index: number): Promise<AttachmentResolution>;
+  /** 只有 file_id、没有消息 id 时的解析口（OneBot 的文件地址动作） */
+  resolveFileUrl?(fileId: string): Promise<AttachmentResolution>;
   /**
    * 链路就绪（P1b）：首次连上 + 每次断线重连后触发。宿主用它给插件发 `channel.ready`。
    * 可选：没有这个能力的适配器（或还没装配）就是不发，宿主不做第二份判断。

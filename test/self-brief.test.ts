@@ -349,10 +349,10 @@ describe('联络方式 · 此刻的能力', () => {
 
   test('有回投：说清发回哪个通道的哪类会话', () => {
     const st = note({ qqOfficial: true, wakeChannel: { channel: 'qq-official', chatType: 'c2c' } });
-    assert.ok(st.includes('本轮可回投：QQ 官方 Bot API · 单聊——speak 会把话发回这个会话。'));
+    assert.ok(st.includes('本轮可回投：QQ 官方 Bot API · 单聊——speak / report / send_media 的 to 填这个会话的 sid 就能发回这里。'));
 
     const group = note({ onebot: true, wakeChannel: { channel: 'onebot', chatType: 'group-at' } });
-    assert.ok(group.includes('本轮可回投：OneBot 11 · 群聊@——speak 会把话发回这个会话。'));
+    assert.ok(group.includes('本轮可回投：OneBot 11 · 群聊@——speak / report / send_media 的 to 填这个会话的 sid 就能发回这里。'));
   });
 
   test('无回投：直说送不出去，并给一条能落地的替代动作', () => {
@@ -370,7 +370,7 @@ describe('联络方式 · 此刻的能力', () => {
 
   test('认不出的通道与会话类型原样显示，不出现 undefined', () => {
     const st = note({ wakeChannel: { channel: 'weird-channel', chatType: 'guild' } });
-    assert.ok(st.includes('本轮可回投：weird-channel · 频道——speak 会把话发回这个会话。'));
+    assert.ok(st.includes('本轮可回投：weird-channel · 频道——speak / report / send_media 的 to 填这个会话的 sid 就能发回这里。'));
     assert.ok(!st.includes('undefined'));
   });
 

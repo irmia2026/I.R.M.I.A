@@ -2228,6 +2228,70 @@ test('webhook：只认专用凭据、落 wake/webhook、内容哈希幂等键、
   assert.equal(get.status, 405);
 });
 
+test('webhook：结构化事件附带到 wake/webhook，旧 raw body 形状不变', async (t) => {
+  const fx = await setup(t);
+  const body = JSON.stringify({
+    source: 'backup-job',
+    kind: 'job-failed',
+    severity: 'critical',
+    title: '备份失败',
+    message: 'rsync 返回 23，目标磁盘剩余 1.2GB',
+    observedAt: '2026-11-10T23:01:00+08:00',
+    dedupeKey: 'backup:nightly:2026-11-10',
+  });
+  const res = await call(fx, '/webhook/backup', {
+    method: 'POST', rawBody: body, token: fx.hookToken,
+  });
+  assert.equal(res.status, 200);
+  const events = await fx.readAll();
+  assert.equal(events.length, 1);
+  const data = events[0]!.data as {
+    source?: string; kind?: string; severity?: string; title?: string;
+    message?: string; observedAt?: string; body: string; path: string;
+  };
+  assert.equal(data.source, 'backup-job');
+  assert.equal(data.kind, 'job-failed');
+  assert.equal(data.severity, 'critical');
+  assert.equal(data.title, '备份失败');
+  assert.equal(data.message, 'rsync 返回 23，目标磁盘剩余 1.2GB');
+  assert.equal(data.observedAt, '2026-11-10T23:01:00+08:00');
+  assert.equal(data.path, '/webhook/backup');
+  assert.equal(data.body, body, '原始 body 仍保留，便于审计');
+});
+
+test('webhook：按来源 token 鉴权、critical 唤醒、warn 只落库', async (t) => {
+  const fx = await setup(t);
+  const created = await call(fx, '/api/commands/ingress-source-create', {
+    method: 'POST',
+    body: { name: 'backup-job', wake: 'critical' },
+    headers: { 'x-confirm': 'ingress-source-create' },
+  });
+  assert.equal(created.status, 200);
+  const token = (created.body as { token: string }).token;
+  assert.match(token, /^ing_/u);
+  const sourceId = (created.body as { source: { id: string } }).source.id;
+
+  const warnBody = JSON.stringify({ severity: 'warn', title: '备份警告', message: '慢' });
+  const warn = await call(fx, '/webhook/backup', {
+    method: 'POST', rawBody: warnBody, token,
+  });
+  assert.equal(warn.status, 200);
+  assert.equal((warn.body as { woken: boolean }).woken, false);
+  assert.equal(fx.projection.pending.length, 0, 'warn 不进入 pending');
+
+  const critBody = JSON.stringify({ severity: 'critical', title: '备份失败', message: '失败' });
+  const crit = await call(fx, '/webhook/backup', {
+    method: 'POST', rawBody: critBody, token,
+  });
+  assert.equal(crit.status, 200);
+  assert.equal((crit.body as { woken: boolean }).woken, true);
+  assert.equal(fx.projection.pending.length, 1, 'critical 进入 pending');
+  const event = (await fx.readAll()).at(-1)!;
+  assert.equal(event.type, 'wake/webhook');
+  assert.equal((event.data as { source?: string }).source, sourceId);
+  assert.equal(event.visibility, 'model');
+});
+
 test('webhook：body 超过 64KB 返回 413', async (t) => {
   const fx = await setup(t);
   const huge = 'x'.repeat(70 * 1024);

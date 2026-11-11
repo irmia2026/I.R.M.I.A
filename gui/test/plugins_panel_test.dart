@@ -41,6 +41,9 @@ Map<String, dynamic> plugin(
   String hash = 'abc123def456',
   bool requiresRestart = false,
   List<String> permissions = const ['filesystem.read'],
+  List<String> net = const [],
+  List<Object> namedHooks = const [],
+  Map<String, dynamic>? runtime,
   List<String> problems = const [],
   Map<String, dynamic>? circuit,
 }) =>
@@ -56,9 +59,12 @@ Map<String, dynamic> plugin(
             'mcp': 'mcp.json',
           },
           'permissions': permissions,
+          if (namedHooks.isNotEmpty) 'hooks': namedHooks,
         },
       },
       'state': state,
+      'net': net,
+      if (runtime != null) 'runtime': runtime,
       'problems': problems,
       'requiresRestart': requiresRestart,
       if (circuit != null) 'circuit': circuit,
@@ -178,6 +184,26 @@ void main() {
     expect(api.posts.single.confirm, 'plugin-confirm');
   });
 
+  testWidgets('review exposes network, named hooks and runtime before trust', (tester) async {
+    final api = await pumpPanel(tester, plugins: {
+      'items': [plugin(
+        'untrusted',
+        permissions: ['net'],
+        net: ['api.example.com'],
+        namedHooks: [{'point': 'model.request'}],
+        runtime: {'type': 'node', 'state': 'running', 'pid': 123},
+      )],
+    });
+    expect(find.textContaining('api.example.com'), findsOneWidget);
+    expect(find.textContaining('node · running · pid 123'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('plugin-review-demo')));
+    await tester.pump();
+    expect(find.textContaining('net.allow: api.example.com'), findsWidgets);
+    expect(find.textContaining('hooks: model.request'), findsWidgets);
+    expect(find.textContaining('runtime: node · running · pid 123'), findsWidgets);
+    expect(api.posts, isEmpty);
+  });
+
   testWidgets('invalid shows problems and offers no trust or lifecycle action', (tester) async {
     await pumpPanel(tester, plugins: {
       'items': [plugin('invalid', problems: ['content hash mismatch', 'manifest changed'])],
@@ -250,6 +276,28 @@ void main() {
     expect(find.textContaining('2026-10-24T12:30:00.000Z'), findsOneWidget);
     expect(find.textContaining('hooks/before-tool'), findsOneWidget);
     expect(find.textContaining('4'), findsWidgets);
+  });
+
+  testWidgets('code plugin lifecycle explains immediate start and stop', (tester) async {
+    await pumpPanel(tester, plugins: {
+      'items': [plugin('disabled', runtime: {'type': 'node', 'state': 'stopped'})],
+    });
+    await tester.tap(find.byKey(const ValueKey('plugin-enable-demo')));
+    await tester.pump();
+    expect(find.textContaining('代码插件会即时启动或停止'), findsOneWidget);
+  });
+
+  testWidgets('uninstall is available for invalid packages and uses its own confirmation', (tester) async {
+    final api = await pumpPanel(tester, plugins: {'items': [plugin('invalid')]});
+    await tester.tap(find.byKey(const ValueKey('plugin-uninstall-demo')));
+    await tester.pump();
+    expect(find.textContaining('数据、状态与配置会保留'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('plugin-action-confirm')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(api.posts.single.path, '/api/commands/plugin-uninstall');
+    expect(api.posts.single.body, {'id': 'demo', 'contentHash': 'abc123def456'});
+    expect(api.posts.single.confirm, 'plugin-uninstall');
   });
 
   testWidgets('pending plugin action disables actions and prevents duplicate writes', (tester) async {

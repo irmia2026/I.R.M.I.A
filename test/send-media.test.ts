@@ -75,7 +75,6 @@ function toolkit(
     mediaMaxBytes?: number;
     messageId?: string;
     failReason?: string;
-    implicitTarget?: string;
     /** 本轮叫她的那个会话（显式 `to` 指向它时回执写「本会话」） */
     currentWake?: { chatType: 'c2c' | 'group'; chatId: string };
   } = {},
@@ -84,10 +83,6 @@ function toolkit(
   const tk = createAdminTools({
     timers: new TimerStore(null),
     emit: () => {},
-    // 不给 `to` 的那一支：`send_media` 发往"本轮叫她的那个会话"（v76 的回执写「本会话」）
-    ...(options.implicitTarget === undefined
-      ? {}
-      : { replyTargetOf: () => ({ url: options.implicitTarget!, idempotencyKey: 'turn-7' }) }),
     ...(options.currentWake === undefined
       ? {}
       : {
@@ -166,12 +161,17 @@ test('★ v76 红检：成功回执必须说"已发出 N 条"+`投递成功`；�
   assert.ok(SELF_BRIEF.includes('·m<id>'), '`·m<id>` 是什么，要在提示词里说清（回执只留那串 id）');
   assert.ok(SELF_BRIEF.includes('撤回'), '拿 id 干什么（撤回/核对），要在提示词里');
 
-  // ④ 没给 to（= 本轮会话）⇒ 用"本会话"，不印一串 38 字符的 sid
-  const implicit = toolkit(() => {}, { messageId: 'PLAT-2', implicitTarget: 'qq:c2c:USER-1' });
-  const out = await implicit.tool.handler({ path: fileName, kind: 'image' }, OPEN_CTX);
-  assert.equal(out.isError, undefined, String(out.content));
-  assert.match(String(out.content), /^已发出 1 条 · 投递成功 · 本会话 · id=·mPLAT-2$/u,
-    String(out.content));
+  // ④ 没给 to 或只给空白 ⇒ 参数错误，且一份媒体都不发
+  const implicit = toolkit(() => {}, { messageId: 'PLAT-2' });
+  for (const args of [
+    { path: fileName, kind: 'image' },
+    { path: fileName, kind: 'image', to: '  ' },
+  ]) {
+    const out = await implicit.tool.handler(args, OPEN_CTX);
+    assert.equal(out.isError, true, String(out.content));
+    assert.match(String(out.content), /to/u);
+  }
+  assert.equal(implicit.seen.length, 0);
 
   // ⑤ **显式给 to、但指的就是本轮会话** ⇒ 同样是「本会话」（不印 sid；她是回复不是主动消息）
   const atCurrent = toolkit(() => {}, {

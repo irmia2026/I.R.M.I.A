@@ -77,32 +77,22 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-06-18', '20
 /** clientInfo（握手时上报；server 侧日志靠它辨认调用方）。version 与 main.ts 的 AGENT_VERSION 同步 */
 export const DEFAULT_CLIENT_INFO: { readonly name: string; readonly version: string } = {
   name: 'irmia-agent',
-  version: '0.1.0-beta.15',
+  version: '0.1.0-beta.16',
 };
 
-/** 每请求软超时：progress 通知可重置这个时钟 */
-export const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/** 每请求软超时：progress 通知可重置这个时钟；默认 3 分钟 */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 /** 每请求硬上限：progress 再多也不能把请求续到天荒地老 */
 export const DEFAULT_PROGRESS_HARD_CAP_MS = 600_000;
 /**
  * 单件 MCP 工具交给执行器的 `timeoutMs`（执行器级超时先到，得到 status `'timeout'`）。
  *
- * **值 = 池自己的每请求软超时**（2026-10-09 对齐，评审缺陷 ⑦）。为什么是**这个数**：
- * 两个时钟管的是同一件事的两半——执行器那条门量的是"这次工具调用整体等多久"
- * （`mcp-entry.ts` 把 `timeoutMs` 交给执行器，`executor.ts` 到点就杀并把调用记成超时），
- * 池那条软超时量的是"这条 JSON-RPC 请求等多久"（progress 通知可续，硬上限 600s）。
- * 两者**必须同源**，否则短的那个说了算：
- *   · 执行器 60s < 池 120s 时，一个需要 70 秒的正常 MCP 操作（跑测试、装东西、查一个大仓库）
- *     **永远做不完**——每次都在 60 秒被砍、`notifications/cancelled` 发出去、500ms 宽限内
- *     server 不收敛就按关机序列**杀掉整个进程**，下次重头再来；
- *   · 而"60 秒"这个数字在文档里找不到出处（`render.ts` 那条注释说的是别的门，与超时无关）。
- * **为什么不反过来把池的软超时降到 60s**：池那条路本来就把 120s 当作"一次请求的正常上限"
- * （progress 还能把它续到 600s），把 60s 那道执行器级门调到与它齐平才是**放宽回正常语义**；
- * 降池那条会同时砍掉 `list` 那一屏的冷启动余量（起进程 + 握手 + 分页拉清单都在这条时钟里）。
- * 逐 server 要更短/更长仍然可配：`McpServerEntry.tools[].timeoutMs` / `toolDefaults.timeoutMs`
- * 优先于这个缺省（`resolveToolAttributes`）。
+ * 默认 **3 分钟**（2026-11-09 用户拍板）：MCP 工具常见跑测试、装依赖、查大仓库，
+ * 两分钟会在正常操作上误杀。连接自己的每请求软超时仍是 120s（progress 可续，
+ * 硬上限 600s），工具调用时把 180s 显式传给该次请求，因此两者不会互相抢短。
+ * 逐 server / 逐工具仍可用 `timeoutMs` 覆盖。
  */
-export const DEFAULT_MCP_TOOL_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
+export const DEFAULT_MCP_TOOL_TIMEOUT_MS = 180_000;
 /** 空闲回收窗口（design §4.19 纪律 2：5 分钟） */
 export const DEFAULT_IDLE_RECLAIM_MS = 5 * 60 * 1000;
 
@@ -2434,12 +2424,14 @@ export class McpClientPool implements McpConnectionHost {
     }
 
     const timeoutMs = options.timeoutMs ?? conn.effectiveRequestTimeoutMs(this.defaultRequestTimeoutMs);
+    const requestTimeoutMs = conn.effectiveRequestTimeoutMs(this.defaultRequestTimeoutMs);
+    const effectiveTimeoutMs = Math.min(timeoutMs, requestTimeoutMs);
     const argumentsValue = typeof args === 'object' && args !== null && !Array.isArray(args)
       ? (args as Record<string, unknown>)
       : {};
     try {
       const result = await conn.callToolInternal(toolName, argumentsValue, {
-        timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       const rendered = await this.renderToolResult(conn, toolName, result);
@@ -2447,7 +2439,7 @@ export class McpClientPool implements McpConnectionHost {
       this.requestSuccess(serverName);
       return rendered;
     } catch (err) {
-      return this.mapCallError(conn, toolName, err, timeoutMs);
+      return this.mapCallError(conn, toolName, err, effectiveTimeoutMs);
     }
   }
 

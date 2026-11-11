@@ -1,6 +1,6 @@
 import { affectRulesForReplay, tryAffectLineForReplay } from '../affect/render.ts';
 import { intimacyRulesForReplay, tryIntimacyLineForReplay } from '../intimacy/render.ts';
-import type { ReasoningEchoPolicy } from '../model/render.ts';
+import { LEGACY_REASONING_ECHO_MAX_CHARS, type ReasoningEchoPolicy } from '../model/render.ts';
 /**
  * Irmia Agent — 请求重放（M6-5、docs/operations.md §6 的 `replay <turn> <step>` 行）
  *
@@ -50,7 +50,7 @@ import { loadPersona } from '../persona/loader.ts';
 import { readMemoryIndexTextReadOnly } from '../persona/memory-injection.ts';
 import { relationshipForWake } from '../persona/relationship.ts';
 // 待办清单的唯一载体是 STATE 的两节：运行期、CLI 重放、界面预览三处都从这里读
-import { openTodoItems } from '../persona/todo-state.ts';
+import { currentTaskTitle, openTodoItems } from '../persona/todo-state.ts';
 // 技能索引（P1-16）：重建与预览都问**运行期同一个类**，不另写一份拼装
 import { SkillManager } from '../skill/skills.ts';
 import { catalogToolSpecs } from '../tools/catalog.ts';
@@ -912,7 +912,11 @@ export function rebuildRenderedRequest(
     //
     // 与人格资产同一条限制（报告里那句"人格层按当前内容重建"覆盖了它）：日志里没有逐轮的
     // STATE 快照，所以读的是**现在这份**里的那两节——漂移范围就是那两节。
-    taskCard: { ...position.taskCard, todoOpen: openTodoItems(options.persona.state ?? '') },
+    taskCard: {
+      ...position.taskCard,
+      title: clipTaskTitle(currentTaskTitle(options.persona.state ?? '')),
+      todoOpen: openTodoItems(options.persona.state ?? ''),
+    },
     now: nowOverride ?? options.now ?? position.stepStart.ts,
     model: position.stepStart.data.model,
     // **本轮固定块**（v29/B2）：与运行期同一形状、与界面预览**同一份装配**
@@ -1472,8 +1476,12 @@ function short(value: string | null): string {
   return value === null ? '（无记录）' : value.slice(0, 16);
 }
 
-/** 回放：新收据读当时的上限；老日志没有就交回出厂默认（300k）。 */
-function reasoningEchoPolicyForReplay(stepStart: {data: {reasoningEchoMaxChars?: number}}): Partial<ReasoningEchoPolicy> | null {
+/** 回放：数值收据还原旧上限；null / 新代际只追加；更老且无收据的日志沿用旧 300K 默认。 */
+export function reasoningEchoPolicyForReplay(stepStart: {
+  data: {reasoningEchoMaxChars?: number | null; renderVersion?: string};
+}): Partial<ReasoningEchoPolicy> {
   const value = stepStart.data.reasoningEchoMaxChars;
-  return typeof value === 'number' && Number.isFinite(value) ? {maxTotalChars: value} : null;
+  if (typeof value === 'number' && Number.isFinite(value)) return {maxTotalChars: value};
+  if (value === null || Number(stepStart.data.renderVersion) >= 87) return {maxTotalChars: null};
+  return {maxTotalChars: LEGACY_REASONING_ECHO_MAX_CHARS};
 }

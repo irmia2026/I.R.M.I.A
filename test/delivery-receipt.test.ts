@@ -171,108 +171,94 @@ function useNoSleep(t: TestContext): void {
   t.after(() => { setSleepForTest(null); });
 }
 
-// ──────────────────────────────── ① speak：成功 ────────────────────────────────
+// ──────────────────────────────── ① speak：目标与成功回执 ────────────────────────────────
 
-test('speak 成功（正文 ≤25 字）：回执就四个字 `发送成功`，别的一概不印', async (t) => {
+test('speak 成功：逐字 `已投递`，正文与投递凭据仍完整', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  // 会话里先得有过话，`read_channel` 才不会先撞"这个会话里没有取到消息"那条早退
   rig.write('channel/message', {
     channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'G1',
     text: '结果出来了吗', messageId: 'm1', msgSeq: 1,
   });
   const said = '长任务跑完了，共 42 个文件';
-  assert.ok([...said].length <= SPEAK_TEXT_SUGGESTED_MAX, '夹具前提：正文 ≤25 字');
-  const out = await rig.speak({ text: said });
+  const out = await rig.speak({ to: SID, text: said });
   assert.equal(out.isError, undefined, out.content);
+  assert.deepEqual(out.content.split('\n').filter(line => line !== ''), ['- 已投递'], out.content);
 
-  /**
-   * v74（用户 2026-10-20 的**最终口径**）：成功回执按**她发出去的正文长度**分两态，
-   * 除此之外**一个多余字都不印**——不印坐标、不回显正文、不印"不必重复发送"、
-   * 成功时不印"主动推送：跳过"。这里钉的是"≤25 字"那一态：逐字 `发送成功`。
-   */
-  const lines = out.content.split('\n').filter(line => line !== '');
-  assert.deepEqual(lines, ['- 发送成功'], `成功回执逐字就是这一行：\n${out.content}`);
-  assert.ok([...out.content.trim()].length <= 25, `整条回执 ≤25 字符（runes）：${[...out.content].length}`);
-  // ③ 送出的是哪一句：锚点引的是**实际出站的字节**（切分之后的那些段拼起来）
   assert.equal(rig.posted.length, 2, '这一段被切成两条气泡发出去（逗号处断开）');
   const outbound = rig.posted.join('');
-  assert.equal(outbound, '长任务跑完了共 42 个文件', '出站字节 = 逗号摘掉后的两段拼起来');
-
-  // 凭据是真的：真日志里有一条带 sid + text 的 speak/sent，且 read_channel 里读得到同一份字节
+  assert.equal(outbound, '长任务跑完了共 42 个文件');
   const credentials = await rig.credentials();
-  assert.equal(credentials.length, 1, '成功投递 ⇒ 恰好一条带会话坐标的凭据');
+  assert.equal(credentials.length, 1);
   assert.equal(credentials[0]?.['sid'], SID);
-  assert.equal(credentials[0]?.['text'], outbound, '凭据里的正文与出站字节逐字相同');
+  assert.equal(credentials[0]?.['text'], outbound);
   const view = await rig.read(SID, 10);
   const mineRow = view.content.split('\n').find((line) => line.includes('（我）'));
-  assert.ok(mineRow !== undefined && mineRow.includes(outbound),
-    `原话在 read_channel 里读得回来（回执不再回显，但事实有去处）：\n${view.content}`);
+  assert.ok(mineRow !== undefined && mineRow.includes(outbound), view.content);
 });
 
-test('speak 成功但正文 >25 字：`成功，但超25字限制（N 字）`（不是失败）；边界 25/26 分得开', async (t) => {
+test('speak 的 25/26 字边界不再产生软提醒：两侧都只回 `已投递`', async (t) => {
   useNoSleep(t);
-  // 正好 25 字 ⇒ 仍是 `发送成功`
-  const rig25 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const exact = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX);
-  assert.equal([...exact].length, 25);
-  const out25 = await rig25.speak({ text: exact });
-  assert.deepEqual(out25.content.split('\n').filter(line => line !== ''), ['- 发送成功'], out25.content);
-
-  // 26 字 ⇒ 超限提示（正文两个字：中文一个字算 1，不是字节）
-  const rig26 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const over = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX + 1);
-  const out26 = await rig26.speak({ text: over });
-  assert.deepEqual(out26.content.split('\n').filter(line => line !== ''),
-    ['- 成功，但超25字限制（26 字）'], out26.content);
-  assert.equal(out26.content.includes('失败'), false, '超限不是失败');
-  assert.equal(out26.content.includes('不必重复发送'), false, '成功那格不印判据（搬进描述）');
+  for (const length of [SPEAK_TEXT_SUGGESTED_MAX, SPEAK_TEXT_SUGGESTED_MAX + 1]) {
+    const rig = await makeRig(t, { outcome: { ok: true, status: 200 } });
+    const out = await rig.speak({ to: SID, text: '啊'.repeat(length) });
+    assert.equal(out.isError, undefined, out.content);
+    assert.deepEqual(out.content.split('\n').filter(line => line !== ''), ['- 已投递'], out.content);
+    assert.doesNotMatch(out.content, /成功|失败|超25字|字限制/u);
+  }
 });
 
-// ──────────────────────────────── ② speak：失败 ────────────────────────────────
+test('speak 缺少或留空 to：参数错误，且不写发言、不发网络、不落投递凭据', async (t) => {
+  useNoSleep(t);
+  const rig = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  for (const args of [{ text: '在的' }, { text: '在的', to: '' }, { text: '在的', to: '  ' }]) {
+    const out = await rig.speak(args);
+    assert.equal(out.isError, true, out.content);
+    assert.match(out.content, /to/u);
+  }
+  assert.deepEqual(rig.posted, []);
+  assert.deepEqual(await rig.credentials(), []);
+  const events = [];
+  for await (const event of rig.log.readAll()) events.push(event);
+  assert.equal(events.some(event => event.type === 'message/assistant' || event.type === 'speak/sent'), false);
+});
 
-test('speak 失败（权限类）：逐字 `失败，没有权限（平台拒绝），不必重试`——不印英文原文/栈', async (t) => {
+// ──────────────────────────────── ② speak：未投递 ────────────────────────────────
+
+test('speak 未投递（权限类）：`未投递，没有权限（平台拒绝），不必重试`', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: false, reason: 'HTTP 400 code=40034105 主动消息失败, 无权限' } });
-  const out = await rig.speak({ text: '在的' });
-  assert.equal(out.isError, undefined, `失败是投递事实，不是参数错：${out.content}`);
-
+  const out = await rig.speak({ to: SID, text: '在的' });
+  assert.equal(out.isError, undefined, out.content);
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
-    ['- 失败，没有权限（平台拒绝），不必重试'], out.content);
-  assert.equal(out.content.includes('不必重复发送'), false, '失败不许出现成功判据');
-  assert.equal(out.content.includes('HTTP'), false, '不许印英文原文/内部细节');
-  assert.equal(out.content.includes('40034105'), false, '不许印平台错误码');
-  assert.deepEqual(await rig.credentials(), [], '失败 ⇒ 一条带会话坐标的凭据都不许落');
+    ['- 未投递，没有权限（平台拒绝），不必重试'], out.content);
+  assert.doesNotMatch(out.content, /HTTP|40034105|不必重复发送/u);
+  assert.deepEqual(await rig.credentials(), []);
 });
 
-test('speak 失败（网络类）：`失败，网络或对端问题，可稍后再试`——与权限类分得开', async (t) => {
+test('speak 未投递（网络类）：`未投递，网络或对端问题，可稍后再试`', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: false, reason: 'ETIMEDOUT' } });
-  const out = await rig.speak({ text: '在的' });
+  const out = await rig.speak({ to: SID, text: '在的' });
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
-    ['- 失败，网络或对端问题，可稍后再试'], out.content);
-  assert.equal(out.content.includes('不必重试'), false, '这一侧不许说成"不必重试"（那是另一种判断）');
-  assert.equal(out.content.includes('不必重复发送'), false, out.content);
+    ['- 未投递，网络或对端问题，可稍后再试'], out.content);
+  assert.doesNotMatch(out.content, /不必重试|不必重复发送/u);
 });
 
-test('speak 半路失败：`失败，已发出 1/2 条；<原因>`（一条信息一行，不复述流程）', async (t) => {
+test('speak 半路未投递：保留已发出的段数与中文原因', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, {
     outcome: { ok: true, status: 200 },
-    // 两段：第一段真发出去，第二段被拒 ⇒ 半路失败（sent=1 / total=2）
     outcomes: [
       { ok: true, status: 200 },
       { ok: false, reason: 'HTTP 400 code=40034105 主动消息失败, 无权限' },
     ],
   });
-  const out = await rig.speak({ text: '长任务跑完了，共 42 个文件' });
+  const out = await rig.speak({ to: SID, text: '长任务跑完了，共 42 个文件' });
   assert.equal(out.isError, undefined, out.content);
-
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
-    ['- 失败，已发出 1/2 条；没有权限（平台拒绝），不必重试'], out.content);
-  assert.equal(out.content.includes('不必重复发送'), false, '半路失败也不许出现成功判据');
-  assert.equal(out.content.includes('第 2 条起'), false, '不再复述流程账（v74 口径）');
-  assert.equal(rig.posted.length, 2, '两段都试过（第一段成、第二段被拒）');
+    ['- 未投递，已发出 1/2 条；没有权限（平台拒绝），不必重试'], out.content);
+  assert.equal(rig.posted.length, 2);
 });
 
 // ──────────────────────────────── ③ report：成功 / 失败（同款） ────────────────────────────────
@@ -330,70 +316,48 @@ test('report 成功：回执**固定** `发送成功`——report 没有 25 字�
     `她 report 的那一篇要读得回来：\n${view.content}`);
 });
 
-test('speak 的超 25 字线**没有被顺手改坏**：40 字（能成功的最长一句）仍是 `成功，但超25字限制（40 字）`', async (t) => {
+test('speak 40 字仍只回 `已投递`；250 字照旧撞硬门且一字不发', async (t) => {
   useNoSleep(t);
-  // 25/26 的边界由上面那条 `speak >25 字` 用例钉着；这里补 40（`SPEAK_TEXT_MAX` 硬门）这一侧。
-  /**
-   * 40 字 ⇒ 仍旧是这条超限提示（不是失败、不是 `发送成功`）。
-   *
-   * ⚠ 验收里"speak 250 字 ⇒ 仍是 `成功，但超25字限制（250 字）`"在现口径下**不可能**：
-   * speak 头上有 40 字**硬门**（2026-10-05 用户定的"超过直接拒绝、一个字不发"），
-   * 250 字根本到不了成功那一支（下面第二段钉着它被拒的原话）。所以这条超 25 字线的
-   * **成功区间只有 26–40 字**——要让它出现在 250 字上，得先动那道硬门，那是另一条口径。
-   */
   const rig40 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const forty = '啊'.repeat(40);
-  const out40 = await rig40.speak({ text: forty });
-  assert.deepEqual(out40.content.split('\n').filter(line => line !== ''),
-    ['- 成功，但超25字限制（40 字）'], out40.content);
-  assert.equal(out40.content.includes('失败'), false, '超限不是失败');
+  const out40 = await rig40.speak({ to: SID, text: '啊'.repeat(40) });
+  assert.deepEqual(out40.content.split('\n').filter(line => line !== ''), ['- 已投递'], out40.content);
+  assert.doesNotMatch(out40.content, /成功|失败|字限制/u);
 
-  // 250 字：先被 40 字硬门退回（一个字不发），回执里**不出现**那条超限提示
   const rig250 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const out250 = await rig250.speak({ text: '啊'.repeat(250) });
-  assert.equal(out250.isError, true, `250 字必须走硬门（不是成功回执）：${out250.content}`);
-  assert.match(out250.content, /超过 speak 的上限（一次至多 40 字）/u, out250.content);
-  assert.equal(out250.content.includes('成功，但超'), false, '没发出去就不许有"成功"字样');
-  assert.equal(rig250.posted.length, 0, '硬门在进 speak 之前，一段都不发');
+  const out250 = await rig250.speak({ to: SID, text: '啊'.repeat(250) });
+  assert.equal(out250.isError, true, out250.content);
+  assert.match(out250.content, /超过 speak 的上限（一次至多 40 字）/u);
+  assert.doesNotMatch(out250.content, /成功，但超/u);
+  assert.deepEqual(rig250.posted, []);
 });
 
-test('report 失败：与 speak 同一句 `失败，<原因>`（中文、能判断下一步）', async (t) => {
+test('report 失败保持 `失败，<原因>`：中文、能判断下一步', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: false, reason: '回投被拒：HTTP 403 主动消息无权限' } });
   const out = await rig.report({ text: '这一篇发不出去', to: SID });
   assert.equal(out.isError, undefined, out.content);
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
     ['- 失败，没有权限（平台拒绝），不必重试'], out.content);
-  assert.equal(out.content.includes('不必重复发送'), false, out.content);
-  assert.equal(out.content.includes('这一篇发不出去'), false, '失败不回显正文（回执进历史，逐轮重发）');
-  assert.equal(out.content.includes('403'), false, '不印英文原文/内部码');
-  assert.equal(/[0-9]/u.test(out.content), false, '失败那一行不数字数（长度不是 report 的判据）');
-  assert.deepEqual(await rig.credentials(), [], '失败 ⇒ 不落凭据');
+  assert.equal(out.content.includes('不必重复发送'), false);
+  assert.equal(out.content.includes('这一篇发不出去'), false);
+  assert.equal(out.content.includes('403'), false);
+  assert.equal(/[0-9]/u.test(out.content), false);
+  assert.deepEqual(await rig.credentials(), []);
 });
 
-// ──────────────────────────────── ④ 没有可发的会话：不许含糊成"成功了" ────────────────────────────────
+// ──────────────────────────────── ④ report 同样强制目标 ────────────────────────────────
 
-test('没有 IM 会话可发（speak 与 report 同一句）：只到了本机，且**不许**出现"不必重复发送"', async (t) => {
+test('report 缺少或留空 to：参数错误，不写发言、不投递、不落凭据', async (t) => {
   useNoSleep(t);
   const rig = await makeRig(t, { outcome: { ok: true, status: 200 }, session: null });
-  const speakOut = await rig.speak({ text: '在的' });
-  const reportOut = await rig.report({ text: '只在对话流里' });
-  for (const [name, out] of [['speak', speakOut], ['report', reportOut]] as const) {
-    assert.equal(out.isError, undefined, out.content);
-    // 2026-10-20（用户实测「这种不能继续缩吗」）：这一句从三段压成**一行**——
-    // **三个信息点一个不少**，判据就是下面三处子串：
-    //   ① 跳过 + 原因（本轮没有 IM 会话可发）
-    //   ② 只在本机对话流、≠他收到（他那边一个字都没有）
-    //   ③ 要发到那边就带 `to`
-    assert.match(out.content, /发送成功/u, `① 跳过与原因 —— ${name}：${out.content}`);
-          assert.match(out.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
-    // 压掉的两句是 ② 的另一面（"人在界面能看见" = 界面就是这条流；"下一轮看不到这一篇" =
-    // 没到那边自然读不回来）：同一层意思不再说两遍——用户问的就是这个。
-    assert.equal(out.content.includes('人在界面能看见'), false, `${name}：同一件事只留一句：\n${out.content}`);
-    assert.equal(out.content.includes('不会看到这一篇'), false, `${name}：同一件事只留一句：\n${out.content}`);
-    assert.equal(out.content.includes('不必重复发送'), false,
-      `${name}：本机那一份不是"投递成功到会话"，不许给她不必再发的判据：\n${out.content}`);
+  for (const args of [{ text: '只在对话流里' }, { text: '只在对话流里', to: '' }, { text: '只在对话流里', to: '  ' }]) {
+    const out = await rig.report(args);
+    assert.equal(out.isError, true, out.content);
+    assert.match(out.content, /to/u);
   }
-  assert.deepEqual(rig.posted, [], '没有会话坐标 ⇒ 一次回投都不该发生');
-  assert.deepEqual(await rig.credentials(), [], '没有坐标就没有凭据（本机那条不代表到了那边）');
+  assert.deepEqual(rig.posted, []);
+  assert.deepEqual(await rig.credentials(), []);
+  const events = [];
+  for await (const event of rig.log.readAll()) events.push(event);
+  assert.equal(events.some(event => event.type === 'message/assistant' || event.type === 'speak/sent'), false);
 });

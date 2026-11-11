@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { defaultConfig } from '../src/config/config.ts';
+import { AGENT_VERSION } from '../src/main.ts';
 import { EventLog } from '../src/log/event-log.ts';
 import { defaultVisibility, emptyProjection, type AppEvent } from '../src/log/types.ts';
 import { PluginManager } from '../src/plugin/manager.ts';
@@ -534,7 +535,7 @@ test('GET /api/plugins/market/<id>：engine 不兼容时逐版本说明，仍返
   assert.equal(response.body.compatibleVersion, null);
   assert.equal(response.body.versions[0].compatible, false);
   assert.match(response.body.versions[0].compatibility, />=9\.0\.0/u);
-  assert.match(response.body.versions[0].compatibility, /0\.1\.0-beta\.13/u);
+  assert.ok(response.body.versions[0].compatibility.includes(AGENT_VERSION));
   assert.equal(response.body.selection.code, 'market-engine-incompatible');
 });
 

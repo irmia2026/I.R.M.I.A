@@ -145,6 +145,28 @@ test('同 id 已有另一个 hash 启用时拒绝再次启用，停用旧的才�
   assert.deepEqual(manager.active().map((pkg) => pkg.contentHash), [second.contentHash]);
 });
 
+test('卸载是重放墓碑：同字节包重新出现也必须重新确认和启用', () => {
+  const { manager, emitted } = harness();
+  const sourceDir = source();
+  const installed = manager.install(sourceDir);
+  manager.confirm(installed.manifest.id, installed.contentHash);
+  manager.setEnabled(installed.manifest.id, installed.contentHash, true);
+  manager.uninstall(installed.manifest.id, installed.contentHash);
+
+  manager.install(sourceDir);
+  manager.setEvents(emitted);
+  assert.equal(manager.list()[0]?.state, 'untrusted');
+  assert.equal(manager.list()[0]?.requiresRestart, false);
+  assert.equal(manager.active().length, 0);
+  assert.throws(() => manager.setEnabled(installed.manifest.id, installed.contentHash, true), /confirmed|trust/i);
+
+  manager.confirm(installed.manifest.id, installed.contentHash);
+  manager.setEnabled(installed.manifest.id, installed.contentHash, true);
+  manager.setEvents(emitted);
+  assert.equal(manager.list()[0]?.state, 'enabled');
+  assert.equal(manager.active().length, 1);
+});
+
 test('历史日志里同 id 多版本同时启用时 active 只收一个，并在 problems 里报裁剪原因', () => {
   const { manager, dataDir } = harness();
   const newer = installPluginPackage(source('2.0.0'), dataDir);

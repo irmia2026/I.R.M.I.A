@@ -412,7 +412,7 @@ test('③ wait 的 {kind, note, sid} 语义一个字不变（含它的去重判�
   }, 'wait 仍然写 kind / note / sid 三格（`set` 那三格与它**不是同一个形状**，也没有合并）');
   // 去重判据照旧：同会话 + 同理由不叠第二条
   const again = await rig.call('wait', { minutes: 10, payload: '看看邮件回来没有' });
-  assert.match(again.content, /已经有一个到点唤醒了/u, again.content);
+  assert.match(again.content, /已有同类唤醒/u, again.content);
   assert.equal(rig.timers.list().length, 1, '去重仍然生效（这一版没碰它）');
   // 而 `set` 排的条目**不会**被 wait 的去重认成"同一条"（kind 不同 ⇒ timerWaitPayloadOf 返回 null）
   await rig.call('set', {

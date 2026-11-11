@@ -743,7 +743,7 @@ describe('speak：告警出口与三路投递', () => {
   // 的用例随之删除，但它锁的**两条纪律**不能在删工具时一起丢掉，所以在这里以 speak 为载体钉住：
   //   ① 渠道失败要把原因回给模型，不许假装成功；
   //   ② 未注入出口时如实说"跳过"，而不是静默。
-  test('speak 第二路：渠道失败如实回报，未配置出口时如实说跳过（原 notify 的两条纪律）', async () => {
+  test('speak 第二路：推送出口未投递如实回报，未配置出口不多加一行', async () => {
     const ws = await workspace('speak-notify-path');
     const personaRoot = join(ws, 'persona');
     const ctx = makeCtx(ws);
@@ -753,16 +753,21 @@ describe('speak：告警出口与三路投递', () => {
       emit: makeRecorder().emit,
       personaRoot,
       notifier: { send: async () => ({ ok: false, reason: '通道 503' }) },
+      replyPoster: { post: async () => ({ ok: true, status: 200 }) },
     });
-    const failed = await failing.byName('speak').handler({ text: '跑完了' }, ctx);
+    const failed = await failing.byName('speak').handler({ to: 'qq:group:G1', text: '跑完了' }, ctx);
     assert.equal(failed.isError, undefined, failed.content);
-    assert.match(failed.content, /推送失败[：，]/u, '失败原因必须回给模型（v74：中文一格，不印英文原文）');
+    assert.match(failed.content, /未投递（推送出口）：通道 503/u);
 
-    const bare = createAdminTools({ timers: new TimerStore(null), emit: makeRecorder().emit, personaRoot });
-    const skipped = await bare.byName('speak').handler({ text: '跑完了' }, ctx);
-    // v74：出口没配时**一个字都不印**（成功回执只回答"发出去了"这件事）
-    assert.match(skipped.content, /发送成功/u, skipped.content);
-    assert.doesNotMatch(skipped.content, /推送/u, '成功时不印"主动推送：跳过"');
+    const bare = createAdminTools({
+      timers: new TimerStore(null),
+      emit: makeRecorder().emit,
+      personaRoot,
+      replyPoster: { post: async () => ({ ok: true, status: 200 }) },
+    });
+    const skipped = await bare.byName('speak').handler({ to: 'qq:group:G1', text: '跑完了' }, ctx);
+    assert.match(skipped.content, /已投递/u, skipped.content);
+    assert.doesNotMatch(skipped.content, /推送/u);
   });
 
   test('speak 三路投递：日志 + 推送 + 回投，逐路写 speak/sent', async (t) => {
@@ -793,11 +798,10 @@ describe('speak：告警出口与三路投递', () => {
     // 分段是门内的投递形态：这条夹具 15 字，稳在硬门（`SPEAK_TEXT_MAX`）以内、也切成两条。
     // 门的两侧（40 通过 / 41 被拒）在「硬门」那条用例里钉着，分段本身在「分段回来了」那条里钉着。
     const spoken = '长任务跑完了，共 42 个文件';
-    const result = await toolkit.byName('speak').handler({ text: spoken }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: spoken }, ctx);
     assert.equal(result.isError, undefined, result.content);
-    // v74（用户最终口径）：回执只留三态——这条正文 15 字（≤25）⇒ 逐字 `发送成功`。
-    // "切成两条"这件事不再进回执（它是投递形态，不是她要的判断）；凭据本身仍在事件里（下面几行钉着）。
-    assert.deepEqual(result.content.split('\n').filter(line => line !== ''), ['- 发送成功'], result.content);
+    // 分段不进回执；投递结论逐字为 `已投递`，凭据仍落在事件里。
+    assert.deepEqual(result.content.split('\n').filter(line => line !== ''), ['- 已投递'], result.content);
 
     // 内容本体逐段落在 message/assistant（schema §4：发言记录与内容分离）
     const spokenSegments = recorder.events
@@ -836,7 +840,7 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     // 两段：『甲乙丙丁戊』(5 字) 与 『己庚辛壬癸子』(6 字)。**第一段也要等**——她按下的不是
     // "发送"，是"开始打字"；默认速度 90 字/分钟 → 每字 60000/90 ≈ 666.7ms，
@@ -858,7 +862,7 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(waits, [], '关掉打字效果就是"内容尽快到手"，等待应当一次都没有');
     // 2026-10-20（R4）：这条以前还断言回执里有 `/间隔共等 0\.0s/`（那一行已删，是机械复述）。
@@ -880,7 +884,7 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
     // 300 字/分钟 = 每字 200ms：5 字 → 1000、6 字 → 1200
     assert.deepEqual(waits, [1000, 1200]);
   });
@@ -909,7 +913,7 @@ describe('speak：告警出口与三路投递', () => {
       setSleepForTest(null);
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(timeline, [
       'sleep:3333', 'log:甲乙丙丁戊', 'im:甲乙丙丁戊',
@@ -943,7 +947,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.match(result.content, /发言被打断/);
@@ -969,6 +973,7 @@ describe('speak：告警出口与三路投递', () => {
       emit: recorder.emit,
       personaRoot: join(ws, 'persona'),
       userSpoke: () => ({ text: '等等', wakeSeq: 77 }),
+      replyPoster: { post: async () => ({ ok: true, status: 200 }) },
     });
     // 只有**第一次**等待期间人开口；之后的等待里计数不再变
     setSleepForTest(async () => {
@@ -986,14 +991,13 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const first = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const first = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
     assert.match(first.content, /发言被打断/, '第一次确实被打断');
 
-    const second = await toolkit.byName('speak').handler({ text: '戊己庚辛壬癸，子丑寅卯辰巳' }, ctx);
+    const second = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '戊己庚辛壬癸，子丑寅卯辰巳' }, ctx);
     assert.ok(!second.content.includes('被打断'), `第二次不该再被打断：${second.content}`);
-    // 2026-10-20（R4）：抬头 `发言已处理：` 已删（它每条回执都一样）。这条用例要守的是
-    // "第二次**正常处理完**"——判据换成正常回执才有的那一行（没有回投地址 ⇒ 本机提示）。
-    assert.match(second.content, /发送成功/u);
+    // 第二次正常处理完，回执应是投递结论而不是打断说明。
+    assert.match(second.content, /已投递/u);
     assert.equal(recorder.count('message/assistant'), 2, '第二次的两段都该正常落进对话流');
     assert.deepEqual(claimed, [77], '销账只发生在那一次真被打断上，第二次说完不再销');
   });
@@ -1028,7 +1032,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(claimed, [88], '说了一半被打断也算"她看见了"：照样销账');
@@ -1073,7 +1077,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
 
     assert.equal(result.isError, undefined, result.content);
     assert.match(result.content, /发言被打断/, `等待为 0 也不能漏掉插话：${result.content}`);
@@ -1106,7 +1110,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙丁戊，己庚辛壬癸子' }, ctx);
 
     assert.ok(!result.content.includes('被打断'), `基准取的是开口那一刻：${result.content}`);
     assert.equal(recorder.count('message/assistant'), 2, '两段都该发出去');
@@ -1135,7 +1139,7 @@ describe('speak：告警出口与三路投递', () => {
       ...makeCtx(ws), interruptEpoch: () => epoch,
       claimInterruption: (wakeSeq: number) => { claimed.push(wakeSeq); },
     };
-    const result = await toolkit.byName('speak').handler({ text: '甲乙丙' }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '甲乙丙' }, ctx);
     assert.equal(result.isError, undefined, result.content);
     assert.ok(!result.content.includes('被打断'));
     assert.equal(recorder.count('message/assistant'), 1);
@@ -1170,7 +1174,7 @@ describe('speak：告警出口与三路投递', () => {
       claimInterruption: () => {},
     };
 
-    const result = await toolkit.byName('speak').handler({ text }, ctx);
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text }, ctx);
     const lines = result.content.split('\n');
     assert.equal(lines.length, 4, `回执就四行（多了就是把同一段话抄两遍）：\n${result.content}`);
     assert.match(lines[0]!, /发言被打断：他刚说「和我的私聊是私有的，没关系」。/);
@@ -1208,23 +1212,17 @@ describe('speak：告警出口与三路投递', () => {
 
     const ok = await toolkit.byName('speak').handler({ text: '在的', to: 'qq:c2c:OPENID_B' }, makeCtx(ws));
     assert.equal(ok.isError, undefined, ok.content);
-    // sid 与回投地址同形：原样交给通道，不做二次加工
     assert.equal(posted[0]?.target.url, 'qq:c2c:OPENID_B');
-    assert.match(ok.content, /发送成功/u);
-    assert.equal(
-      (recorder.last('speak/sent') as { sid?: string }).sid,
-      'qq:c2c:OPENID_B',
-      'speak/sent 带 sid：她跟谁说过话，以后能复盘',
-    );
+    assert.match(ok.content, /已投递/u);
+    assert.equal((recorder.last('speak/sent') as { sid?: string }).sid, 'qq:c2c:OPENID_B');
 
-    // 形态不对就不发，而且要说清 sid 从哪来（不弄一个“看起来发出去了”的假成功）
     const bad = await toolkit.byName('speak').handler({ text: '在的', to: '乱写' }, makeCtx(ws));
     assert.equal(bad.isError, true);
     assert.match(bad.content, /外部会话清单/);
     assert.equal(posted.length, 1, '非法 sid 不得产生任何投递');
   });
 
-  test('speak 一路失败不影响另两路（回投被拒时仍留有发言记录）', async () => {
+  test('speak 一路未投递不影响本地记录，另一个出口也如实报未投递', async () => {
     const ws = await workspace('speak-partial');
     const recorder = makeRecorder();
     const toolkit = createAdminTools({
@@ -1232,48 +1230,30 @@ describe('speak：告警出口与三路投递', () => {
       emit: recorder.emit,
       personaRoot: join(ws, 'persona'),
       notifier: { send: async () => ({ ok: false, reason: '通道不可用' }) },
-      replyTargetOf: () => ({ url: 'http://127.0.0.1:9/reply', idempotencyKey: 'turn-1' }),
       replyPoster: { post: async () => ({ ok: false, reason: 'HTTP 500' }) },
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '你好' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '你好' }, makeCtx(ws));
     assert.equal(result.isError, undefined);
-    assert.match(result.content, /推送失败[：，]/u);
-    // 回执不说"第 N 条失败"：那读起来像"再试一次也许就成了"，实测她为此在群聊那轮
-    // 换了五次措辞。**一条都没发出去时**（这里 2 字 = 一段）说清"这一条没有送达，
-    // 本机那一段不等于他收到了"，并给出"还要不要试"的判断（2026-10-08 用户的口径）。
-    assert.match(result.content, /投递失败：这一条没有送达|失败，/u);
-    assert.match(result.content, /失败，/u);
-    assert.match(result.content, /不必重试/u, `失败必须给重试判断：${result.content}`);
-    assert.doesNotMatch(result.content, /HTTP 500/u, 'v74：不印英文原文/内部码');
+    assert.match(result.content, /未投递（推送出口）：通道不可用/u);
+    assert.match(result.content, /未投递，通道拒绝了这次发送（原因不明），不必重试/u);
+    assert.doesNotMatch(result.content, /HTTP 500/u);
     assert.equal(recorder.count('speak/sent'), 1, '只有日志那一路送达');
     assert.equal((recorder.last('speak/sent') as { channel: string }).channel, 'log');
 
-    // 没有 IM 会话可发时说清"跳过的只是那一跳"，而不是静默省略；
-    // 更要紧的是别让她读成"整条发言失败了"——实测她读到旧措辞后会把同一句再说四遍
     const noReply = createAdminTools({
       timers: new TimerStore(null),
       emit: recorder.emit,
       personaRoot: join(ws, 'persona'),
     });
-    const skipped = await noReply.byName('speak').handler({ text: '你好' }, makeCtx(ws));
-    // 2026-10-20（用户实测：「这种不能继续缩吗」）：这一句从三段压成**一行**，但
-    // **三个信息点一个不少**——判据就是下面三处子串：
-    //   ① 跳过 + 原因（本轮没有 IM 会话可发）
-    //   ② 只在本机对话流、≠他收到
-    //   ③ 要发到那边就带 `to`
-    assert.match(skipped.content, /发送成功/, `① 跳过与原因：${skipped.content}`);
-          assert.match(skipped.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
-    // 压掉的两句是 ② 的另一面（"人在界面能看见" = 界面就是这条流 / "下一轮看不到这一篇" =
-    // 没到那边自然读不回来）：同一层意思不再说两遍——用户问的就是这个。
-    assert.equal(skipped.content.includes('人在界面能看见'), false, `同一件事只留一句：${skipped.content}`);
-    assert.equal(skipped.content.includes('不会看到这一篇'), false, `同一件事只留一句：${skipped.content}`);
+    const before = recorder.count('message/assistant');
+    const rejected = await noReply.byName('speak').handler({ text: '你好' }, makeCtx(ws));
+    assert.equal(rejected.isError, true);
+    assert.match(rejected.content, /缺少必填参数 to/u);
+    assert.equal(recorder.count('message/assistant'), before, '缺 to 时连本地发言都不写');
   });
 
-  test('回本轮叫你的人：带上 msg_id，这条才算被动回复而不是主动消息', async () => {
-    // 实测事故（2026-10-01 群聊）：她的每条回复都没带 msg_id，被平台判成主动消息，
-    // 撞上「主动消息失败, 无权限」（40034105）——连着试了五次。而平台规则很明确：
-    // 携带 msg_id 的才是"对用户消息的回复"，走回复窗口（群聊 5 分钟 / 5 次），不需要那个权限。
+  test('回本轮叫你的人：显式 to 同一会话仍带 msg_id，发给别人则不带', async () => {
     const ws = await workspace('speak-msgid');
     const recorder = makeRecorder();
     const seen: ReplyTarget[] = [];
@@ -1288,40 +1268,34 @@ describe('speak：告警出口与三路投递', () => {
       replyPoster: { async post(target) { seen.push(target); return { ok: true, status: 200 }; } },
     });
 
-    // ① 不指定 to：回本轮叫醒她的那个会话 —— 那就是"回复那条消息"
-    await toolkit.byName('speak').handler({ text: '在的' }, makeCtx(ws));
+    await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '在的' }, makeCtx(ws));
     assert.equal(seen[0]?.url, 'qq:group:G1');
-    assert.equal(seen[0]?.msgId, 'MSG-123', '少了 msg_id 就变成主动消息，群聊会因无权限失败');
+    assert.equal(seen[0]?.msgId, 'MSG-123');
 
-    // ② 显式 to 指着同一个会话：仍然是回复，照样带 msg_id
-    await toolkit.byName('speak').handler({ text: '在的', to: 'qq:group:G1' }, makeCtx(ws));
-    assert.equal(seen[1]?.msgId, 'MSG-123', 'to 写的是本轮的会话时，它还是回复');
+    await toolkit.byName('speak').handler({ to: 'qq:group-at:G1', text: '在的' }, makeCtx(ws));
+    assert.equal(seen[1]?.msgId, 'MSG-123', '旧 group-at 写法归一后仍是本轮会话');
 
-    // ③ 显式 to 指着别人：那是真正的主动消息，没有 msg_id 可用（要权限、有配额）
-    await toolkit.byName('speak').handler({ text: '在的', to: 'qq:c2c:OTHER' }, makeCtx(ws));
+    await toolkit.byName('speak').handler({ to: 'qq:c2c:OTHER', text: '在的' }, makeCtx(ws));
     assert.equal(seen[2]?.msgId, undefined, '发给别人是主动消息，不能假装被动');
   });
 
-  test('权限类投递失败：回执要说清"重试无用"，别让她一遍遍换措辞', async () => {
+  test('权限类未投递：回执要说清"重试无用"，别让她一遍遍换措辞', async () => {
     const ws = await workspace('speak-denied');
     const recorder = makeRecorder();
     const toolkit = createAdminTools({
       timers: new TimerStore(null),
       emit: recorder.emit,
       personaRoot: join(ws, 'persona'),
-      replyTargetOf: () => ({ url: 'qq:group:G1', idempotencyKey: 'turn-1' }),
       replyPoster: {
         post: async () => ({ ok: false, reason: 'HTTP 400 code=40034105 主动消息失败, 无权限' }),
       },
     });
 
-    const result = await toolkit.byName('speak').handler({ text: '嗨' }, makeCtx(ws));
-    assert.equal(result.isError, undefined, '投递失败不是工具错误：日志那一路照样落了盘');
-    // v74（用户最终口径）：失败回执 = `失败，<中文原因>`——原因要能判断下一步，**不印内部码/英文**。
-    // 原口径那串"向该会话发送消息时存在权限问题，不必重试"整句压成了 `没有权限（平台拒绝），不必重试`。
-    assert.match(result.content, /失败，没有权限（平台拒绝），不必重试/u, result.content);
-    assert.doesNotMatch(result.content, /40034105|HTTP 400/u, '不印内部码/英文原文');
-    assert.doesNotMatch(result.content, /report|改道|别再说一遍/, '不该给建议');
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '嗨' }, makeCtx(ws));
+    assert.equal(result.isError, undefined);
+    assert.match(result.content, /未投递，没有权限（平台拒绝），不必重试/u, result.content);
+    assert.doesNotMatch(result.content, /40034105|HTTP 400/u);
+    assert.doesNotMatch(result.content, /report|改道|别再说一遍/);
   });
 
   // ── speak 的长度口径：25 = 目标 / 40 = 硬门（拒绝）/ 分段 = 门内的投递形态 ──
@@ -1338,7 +1312,7 @@ describe('speak：告警出口与三路投递', () => {
     // **v74（用户 2026-10-20）：desc 只留"怎么调"，不留"该怎么想"**——
     // "写多长 / 最多两个逗号 / 别重复发"搬进 `SELF_BRIEF` §2.1；描述只留参数、必填、一行示例。
     // 所以这里钉的是"描述小、能调"，以及“两个数仍在判据同源处（SELF_BRIEF / 常量）”。
-    assert.match(description, /text 必填/u, description);
+    assert.match(description, /text、to 必填/u, description);
     assert.match(description, /\{text:/u, `描述要有一行示例：${description}`);
     assert.ok(estimateTokens(description) <= 60,
       `描述该是"怎么调"那一档（≤60 token，与另外几件同一道线）：${estimateTokens(description)}`);
@@ -1359,36 +1333,23 @@ describe('speak：告警出口与三路投递', () => {
     }
   });
 
-  test('25/26 字的回执两态：25 ⇒ `发送成功`；26 ⇒ `成功，但超25字限制（26 字）`（v74 取代旧"提醒"）', async () => {
+  test('25/26/35 字都只有 `已投递`，不再有长度软提醒', async () => {
     const ws = await workspace('speak-remind');
     const toolkit = createAdminTools({
       timers: new TimerStore(null),
       emit: makeRecorder().emit,
       personaRoot: join(ws, 'persona'),
-      // 关掉打字节奏：这一条锁的是回执形态，不是节奏（节奏有自己的用例）
       speakTyping: { typingEffect: false, charsPerMinute: 90 },
-      replyTargetOf: () => ({ url: 'qq:group:G1', idempotencyKey: 'turn-remind' }),
       replyPoster: { post: async () => ({ ok: true, status: 200 }) },
     });
     const tool = toolkit.byName('speak');
 
-    // ① 正好 25 字：`发送成功`（没有"提醒："那段附注——v74 起回执只报结果）
-    const onLine = await tool.handler({ text: '甲'.repeat(SPEAK_TEXT_SUGGESTED_MAX) }, makeCtx(ws));
-    assert.equal(onLine.isError, undefined, onLine.content);
-    assert.deepEqual(onLine.content.split('\n').filter(line => line !== ''), ['- 发送成功'], onLine.content);
-    assert.doesNotMatch(onLine.content, /提醒：/u, 'v74：不再追附注（超限信息在下一态那一行里）');
-
-    // ② 刚过线一个字：`成功，但超25字限制（26 字）`——**不是失败**
-    const justOver = await tool.handler({ text: '甲'.repeat(SPEAK_TEXT_SUGGESTED_MAX + 1) }, makeCtx(ws));
-    assert.equal(justOver.isError, undefined, justOver.content);
-    assert.deepEqual(justOver.content.split('\n').filter(line => line !== ''),
-      ['- 成功，但超25字限制（26 字）'], justOver.content);
-    assert.equal(justOver.content.includes('失败'), false, '超限不是失败');
-
-    // ③ 远过线：同一个形态，N 跟着变（判据只有一条线：按 runes 数正文）
-    const wayOver = await tool.handler({ text: '甲'.repeat(SPEAK_TEXT_SUGGESTED_MAX + 10) }, makeCtx(ws));
-    assert.deepEqual(wayOver.content.split('\n').filter(line => line !== ''),
-      ['- 成功，但超25字限制（35 字）'], wayOver.content);
+    for (const length of [SPEAK_TEXT_SUGGESTED_MAX, SPEAK_TEXT_SUGGESTED_MAX + 1, SPEAK_TEXT_SUGGESTED_MAX + 10]) {
+      const out = await tool.handler({ to: 'qq:group:G1', text: '甲'.repeat(length) }, makeCtx(ws));
+      assert.equal(out.isError, undefined, out.content);
+      assert.deepEqual(out.content.split('\n').filter(line => line !== ''), ['- 已投递'], out.content);
+      assert.doesNotMatch(out.content, /提醒|成功|失败|字限制/u);
+    }
   });
 
   test('硬门：41 字直接拒绝（不截断、不照发），拒绝文案给全三条出路', async () => {
@@ -1408,7 +1369,7 @@ describe('speak：告警出口与三路投递', () => {
     // ① **正好 40 字：通过**（判据是「超过」，压线不算超）。
     const onGate = '甲'.repeat(SPEAK_TEXT_MAX);
     assert.equal(onGate.length, SPEAK_TEXT_MAX, '夹具必须正好压在门上');
-    const allowed = await tool.handler({ text: onGate }, makeCtx(ws));
+    const allowed = await tool.handler({ to: 'qq:group:G1', text: onGate }, makeCtx(ws));
     assert.equal(allowed.isError, undefined, `正好 ${SPEAK_TEXT_MAX} 字必须放行：${allowed.content}`);
     assert.doesNotMatch(allowed.content, /超过 speak 的上限/u, '压线不该被拒');
     assert.equal(recorder.count('message/assistant'), 1, '放行的那条正常落库');
@@ -1417,7 +1378,7 @@ describe('speak：告警出口与三路投递', () => {
     const overGate = '甲'.repeat(SPEAK_TEXT_MAX + 1);
     const bubblesBefore = recorder.count('message/assistant');
     const sentBefore = recorder.count('speak/sent');
-    const rejected = await tool.handler({ text: overGate }, makeCtx(ws));
+    const rejected = await tool.handler({ to: 'qq:group:G1', text: overGate }, makeCtx(ws));
     assert.equal(rejected.isError, true, `超过 ${SPEAK_TEXT_MAX} 字必须被拒：${rejected.content}`);
     assert.match(rejected.content, new RegExp(`${SPEAK_TEXT_MAX} 字`, 'u'), '要说清门是多少字');
     assert.match(rejected.content, new RegExp(`这段 ${SPEAK_TEXT_MAX + 1} 字`, 'u'), '要如实报出收到了多少字');
@@ -1457,7 +1418,7 @@ describe('speak：告警出口与三路投递', () => {
       charCount(herSpeech) <= SPEAK_TEXT_MAX,
       `夹具 ${charCount(herSpeech)} 字必须落在硬门（${SPEAK_TEXT_MAX}）以内`,
     );
-    const result = await tool.handler({ text: herSpeech }, makeCtx(ws));
+    const result = await tool.handler({ to: 'qq:group:G1', text: herSpeech }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     // 2026-10-20（R4）：这条以前断言 `/按聊天节奏发成 4 条/`（那一行已删，是机械复述）。
     // "切成了四段"这件事由下面那条 deepEqual 逐段钉着——比回执里的一句复述更强：
@@ -1551,7 +1512,7 @@ describe('speak：告警出口与三路投递', () => {
     const text = `${tag} 一号在不在，收到回个话`;
     assert.ok(text.length <= 40, `夹具 ${text.length} 字必须落在 speak 的硬门（40）以内`);
     const result = await rig.toolkit(recorder.emit)
-      .byName('speak').handler({ text }, makeCtx(ws));
+      .byName('speak').handler({ to: 'qq:group:G1', text }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
 
     const sent = rig.sentBodies.map((body) => (body['markdown'] as { content: string }).content);
@@ -1580,7 +1541,7 @@ describe('speak：告警出口与三路投递', () => {
     // 但移除之后它成了 @ 的唯一路径问题：**要 @ 人的正文请走 `report`**（不切分、不限长，
     // 真 openid 的整串在下面那条用例里钉着）。要不要给 `chat-split` 加一条"标记内不许下刀"
     // 的规则，由用户定——那是分段器的口径，不是这一层的。
-    assert.match(result.content, /发送成功|成功，但超/u);
+    assert.match(result.content, /已投递/u);
   });
 
   test('`report` 里写**真实 openid** 的官方串：整段逐字节进请求体，不切分也不改写', async (t) => {
@@ -1591,6 +1552,7 @@ describe('speak：告警出口与三路投递', () => {
     const rig = qqRigWith(okHttp('M-REPORT'));
     const result = await rig.toolkit(recorder.emit).byName('report').handler({
       text: `<qqbot-at-user id="${MEMBER1_OPENID}" /> 一号，用户让我把这条报告发给你：跑完了，42 个文件。`,
+      to: 'qq:group:G1',
     }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.equal(rig.sentBodies.length, 1, '整段一条，不切分');
@@ -1618,7 +1580,7 @@ describe('speak：告警出口与三路投递', () => {
 
     const text = '[@1 号] 在不在';
     const result = await rig.toolkit(recorder.emit)
-      .byName('speak').handler({ text }, makeCtx(ws));
+      .byName('speak').handler({ to: 'qq:group:G1', text }, makeCtx(ws));
     assert.equal(result.isError, undefined, `不拒发：${result.content}`);
 
     assert.equal(rig.sentBodies.length, 1, 'HTTP 请求照发（反向断言：不拒发）');
@@ -1647,7 +1609,7 @@ describe('speak：告警出口与三路投递', () => {
     t.after(() => { setSleepForTest(null); });
 
     const result = await rig.toolkit(makeRecorder().emit)
-      .byName('speak').handler({ text: '跑完了，42 个文件' }, makeCtx(ws));
+      .byName('speak').handler({ to: 'qq:group:G1', text: '跑完了，42 个文件' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     // 与"加 @ 支持之前"逐字节一样：msg_type=2 + markdown.content + msg_seq=1（没有 msg_id 就是主动消息）。
     // 9 字不足分段下限（`SPLIT_MIN_CHARS`=12），所以整句一条发出去。
@@ -1670,7 +1632,7 @@ describe('speak：告警出口与三路投递', () => {
     setSleepForTest(async () => {});
     t.after(() => { setSleepForTest(null); });
 
-    const result = await toolkit.byName('speak').handler({ text: '[@1 号] 在不在' }, makeCtx(ws));
+    const result = await toolkit.byName('speak').handler({ to: 'qq:group:G1', text: '[@1 号] 在不在' }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     assert.deepEqual(posted, ['[@1 号] 在不在'], '所有通道一个待遇：正文原样，谁也不替谁猜协议');
   });
@@ -1694,7 +1656,7 @@ describe('speak：告警出口与三路投递', () => {
     t.after(() => { setSleepForTest(null); });
 
     const text = '在不在';
-    const result = await rig.toolkit(recorder.emit).byName('speak').handler({ text }, makeCtx(ws));
+    const result = await rig.toolkit(recorder.emit).byName('speak').handler({ to: 'qq:group:G1', text }, makeCtx(ws));
     assert.equal(result.isError, undefined, result.content);
     // 形态如实：markdown 被拒 → 纯文本，而**正文照旧是同一份字节**（降级不改话）
     assert.equal(rig.sentBodies.length, 2, '一次失败 + 一次降级重发');

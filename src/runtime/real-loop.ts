@@ -99,6 +99,7 @@ import {
   readAttachmentImage,
   readFileImage,
 } from '../channel/attachment-store.ts';
+import { gifMatrixPath, isGifFile } from '../channel/gif-matrix.ts';
 import { deliveredToSid, replyableWakeChannel, type ChannelSessionRow } from '../tools/admin.ts';
 // 频次窗口那一个数：会话清单用它数条数（渲染层），这里用它剪掉窗口外的素材（内存）——同一个常量
 import { SESSION_FREQ_WINDOW_MS, type ContactFacts } from '../model/self-brief.ts';
@@ -123,7 +124,7 @@ import {
   planEchoPressure,
   readEchoPressure,
 } from './reasoning-echo-pressure.ts';
-import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, reasoningEchoMaxCharsFor, skillIndexOf, wakeTitle } from '../model/render.ts';
+import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, skillIndexOf, wakeTitle } from '../model/render.ts';
 // 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
 // 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
 import type { ConfigReloadOutcome } from '../config/watcher.js';
@@ -918,6 +919,15 @@ function hasLocalAttachmentBytes(dataDir: string, url: string): boolean {
     if (existsSync(original) && statSync(original).size > 0) return true;
     const small = compressedPath(dataDir, url);
     return existsSync(small) && statSync(small).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** 本地已有 GIF、但矩阵还没生成：这种情况仍要进预取队列补一次转换。 */
+function needsGifMatrix(dataDir: string, url: string): boolean {
+  try {
+    return isGifFile(attachmentPath(dataDir, url)) && !existsSync(gifMatrixPath(dataDir, url));
   } catch {
     return false;
   }
@@ -1765,6 +1775,8 @@ export class RealLoop {
   private tickStartedAt = 0;
   /** 最近一次有进展的时刻：step/tool/message 等事件会刷新它 */
   private tickLastProgressAt = 0;
+  /** EventLog 全量 append 订阅：turn/tool 事件由 AgentLoop 直接写日志，必须从这里看进展 */
+  private tickProgressUnsubscribe: (() => void) | null = null;
   private readonly tickStuckMs: number;
   /** 本拍那个 promise（`stop()` 要等它收场，免得"退出时还有一个 turn 在写日志"） */
   private tickCompletion: Promise<void> | null = null;
@@ -2249,6 +2261,11 @@ export class RealLoop {
   start(): void {
     if (this.running) return;
     this.running = true;
+    // AgentLoop 直接写 turn/step/tool 事件，不经过 appendSync；只看 appendSync 会把
+    // 一整个正在推进的 turn 误判成“6 分钟无进展”。EventLog 是全部事件的唯一漏斗。
+    this.tickProgressUnsubscribe ??= this.deps.log.onAppend((event) => {
+      this.noteTickProgress(event.type);
+    });
     void this.ensureReady();
     this.timer = setInterval(() => {
       void this.tick().catch((err) => {
@@ -2717,6 +2734,8 @@ export class RealLoop {
   async stop(): Promise<void> {
     this.running = false;
     this.wakeChannelData = null;
+    this.tickProgressUnsubscribe?.();
+    this.tickProgressUnsubscribe = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.heartbeatSource.stop();
@@ -3564,9 +3583,10 @@ export class RealLoop {
   // ──────────────────── 缓存未命中率告警（2026-10-22） ────────────────────
 
   /**
-   * **成本告警的两个出口，一次判完**（2026-10-22）：
+   * **成本告警的历史两条出口**（2026-10-22）。v87 起思维链默认无独立字符帽，
+   * 前兆判据以 `no-cap` 跳过，不再发维护唤醒；实际未命中率告警照旧：
    *
-   *   ⓪ **前兆**：思维链回传字符 / 上限 ≥ 90% ⇒ `model/reasoning-echo{kind:'reasoning_echo_pressure'}`
+   *   ⓪ **前兆（仅旧显式上限策略）**：思维链回传字符 / 上限 ≥ 90% ⇒ `model/reasoning-echo{kind:'reasoning_echo_pressure'}`
    *      + 控制台一行 + 真唤醒（判据与阈值理由在 `runtime/reasoning-echo-pressure.ts`）；
    *   ① **结果**：最近 20 轮的缓存未命中率 > 25% 且比 24 小时基线高出 ≥2 倍 ⇒
    *      `budget/cache-alert` + 控制台一行 + 真唤醒（判据与五个阈值理由在 `runtime/cache-alert.ts`）。
@@ -5412,11 +5432,10 @@ export class RealLoop {
     return {
       log: d.log,
       ds: d.ds,
-      // 这三个开关与「情绪 master」无关：亲密层可以单独开启，回传上限也永远跟着上下文走。
       affectRulesEnabled: d.config.affect.enabled,
       intimacyRulesEnabled: d.config.intimacy.enabled,
-      // 上限跟上下文预算走（200k ⇒ 300k 与旧常量一致；450k ⇒ 675k）。
-      reasoningEcho: { maxTotalChars: reasoningEchoMaxCharsFor(d.config.persona.compactionThresholdTokens) },
+      // 思维链不设独立字符帽；何时压缩仍只看用户配置的可见历史线。
+      reasoningEcho: { maxTotalChars: null },
       // Master switch: absent/0 => no affect calls, no bytes, no new ledger events.
       ...(affectEnabled(d.config) ? {
       affectForStep: (now:string) => {
@@ -6002,7 +6021,13 @@ export class RealLoop {
         const outcome = await ensureAttachment(this.deps.dataDir, url, {
           timeoutMs: Math.min(DEFAULT_ATTACHMENT_TIMEOUT_MS, remaining),
           compressTimeoutMs: Math.min(DEFAULT_COMPRESS_TIMEOUT_MS, remaining),
+          gifMatrixTimeoutMs: Math.min(20_000, remaining),
         });
+        if (outcome.gifMatrix === true) {
+          this.write(`[图片] 多帧 GIF 已转帧序列矩阵：${label}`);
+        } else if (outcome.gifMatrixFailure !== undefined) {
+          this.write(`[图片] 多帧 GIF 没转成矩阵（原件回退）：${outcome.gifMatrixFailure}｜${label}`);
+        }
         if (outcome.outcome === 'failed') {
           this.write(`[图片] 附件取不回来（${outcome.reason}）：${label}`);
           // 下载失败按 `no-local-bytes` 记（理由码只有这一套；具体原因写在 line 里）
@@ -6053,7 +6078,7 @@ export class RealLoop {
    */
   private enqueuePrewarm(url: string): void {
     if (this.prewarmPendingSet.has(url)) return;
-    if (hasLocalAttachmentBytes(this.deps.dataDir, url)) return;
+    if (hasLocalAttachmentBytes(this.deps.dataDir, url) && !needsGifMatrix(this.deps.dataDir, url)) return;
     this.prewarmPending.push(url);
     this.prewarmPendingSet.add(url);
     while (this.prewarmPending.length > PREWARM_BACKLOG_MAX) {
@@ -6372,7 +6397,7 @@ export class RealLoop {
     const targets = wakeEvents
       .filter((e): e is AppEvent & { type: 'wake/channel' } => e.type === 'wake/channel')
       .filter((e) => !this.judgedMessageIds.has(e.data.messageId))
-      .filter((e) => !exempt.isExempt(e.data))
+      .filter((e) => !this.warnExemptBook().isExempt(e.data))
       .slice(0, INJECTION_JUDGE_MAX_PER_BATCH);
     if (targets.length === 0) return;
     // 去重集合的体量：给它一个上界（超出就整份丢掉重建）——它只是"最近判过哪些"，
@@ -6472,7 +6497,7 @@ export class RealLoop {
     for (const event of wakeEvents) {
       if (event.type !== 'wake/channel') continue;
       const d = event.data;
-      if (exempt.isExempt(d)) continue;
+      if (this.warnExemptBook().isExempt(d)) continue;
       if (this.notedMessageIds.has(d.messageId)) continue;
       // 判过的用它那句（含语义级），没判过的现扫字面——与渲染层同一个判据、同一段文案。
       // 素材过 `speakerWordsOf`（判据的唯一实现）：转述块里常常是她自己的发言，扫它就会被
@@ -7173,7 +7198,8 @@ export class RealLoop {
       { spokeAt: this.spokeAt.get(entry.sid), mentionedAt: this.mentionedAt.get(entry.sid) },
       nowMs,
     );
-    const wanted = this.sessionBook.filter((entry) => entry.unread >= floor && attended(entry));
+    const wanted = this.sessionBook.filter((entry) =>
+      entry.unread >= floor && attended(entry));
     // 提及那条优先（用户在叫她了）；没有提及就照旧挑未读最多的那个
     const candidate = (mentionSid === null ? undefined : wanted.find((entry) => entry.sid === mentionSid))
       ?? wanted.sort((a, b) => b.unread - a.unread)[0];

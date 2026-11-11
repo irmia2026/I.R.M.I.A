@@ -51,7 +51,7 @@ import { McpClientPool, type McpClientPoolOptions, type McpDeclarationChange, ty
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
 import type { ToolRegistry } from './tools/registry.ts';
-import type { InputNotifyPoster, MediaPoster, MediaRequest, ReplyPoster } from './tools/admin.js';
+import type { AttachmentResolver, InputNotifyPoster, MediaPoster, MediaRequest, ReplyPoster } from './tools/admin.js';
 import { SkillManager, planSkillRoots, type SkillRootRef } from './skill/skills.ts';
 import { ensureSkillsSeed, SKILLS_DIR_NAME } from './skill/seed.ts';
 // 路径比较（大小写 / 分隔符 / 尾部空格点的归一）只有一处实现：见 `tools/boundary.ts` 的文件头
@@ -60,6 +60,8 @@ import {
   HookRunner, digestProjection, hookConfigPath, loadHookConfig, protectedHookPaths,
 } from './hook/hooks.ts';
 import { RealLoop, memoryHostingEnabled } from './runtime/real-loop.ts';
+import { BudgetGuard } from './runtime/budget-guard.ts';
+import { foldTopUps } from './runtime/topup.ts';
 import { instanceIdOf, startWebServer, type WebServer } from './web/server.ts';
 // 启动期的**早绑端口**（2026-10-26）：先 listen、再干重活；就绪前 HTTP 答 starting/503
 import { StartupState, startPreflightServer, type PreflightServer } from './web/preflight.ts';
@@ -139,6 +141,10 @@ import { createInputNotifyPoster } from './channel/input-notify.ts';
 import {
   ONEBOT_REPLY_SCHEME, OneBotChannel, createOneBotReplyPoster,
 } from './channel/onebot.ts';
+import {
+  GREYHARBOR_CHANNEL_NAME, GREYHARBOR_REPLY_SCHEME, GreyHarborChannel,
+  parseGreyHarborReplyUrl,
+} from './channel/greyharbor.ts';
 import type { ChannelAdapter } from './channel/qq-official.js';
 import {
   ManualWatchSource, TimerWakeSource, WAKE_WATCH_DIR_NAME, type WakeSourceAdapter,
@@ -155,7 +161,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.15';
+export const AGENT_VERSION = '0.1.0-beta.16';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -1416,7 +1422,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 注意顺序：**先落库再动手**——"启用过"这一事实必须在任何副作用之前成立。
     pluginHostRef.host?.onLifecycleEvent(type, data as Record<string, unknown>);
   });
-  pluginManager.setEvents(await allEventsOf(log));
+  const recoveredEvents = await allEventsOf(log);
+  pluginManager.setEvents(recoveredEvents);
+  const pluginStartupBudgetGuard = new BudgetGuard(config.budget);
+  pluginStartupBudgetGuard.setTopUps(foldTopUps(recoveredEvents));
   let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
   let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
   let circuitBreaker: PluginCircuitBreaker | null = null;
@@ -1749,9 +1758,45 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     config.channels.onebot, write, config.dataDir, managedStatus?.endpoint ?? null,
     managedOnebotDir === null ? null : () => readEndpointFromConfig(managedOnebotDir),
   );
+  const greyHarborToken = (process.env[config.channels.greyharbor.tokenEnv] ?? '').trim();
+  const greyHarborChannel = config.channels.greyharbor.enabled
+    && greyHarborToken !== ''
+    && config.channels.greyharbor.characterId.trim() !== ''
+    ? new GreyHarborChannel({
+      baseUrl: config.channels.greyharbor.baseUrl,
+      token: greyHarborToken,
+      characterId: config.channels.greyharbor.characterId.trim(),
+    })
+    : null;
+  if (config.channels.greyharbor.enabled && greyHarborChannel === null) {
+    write('[灰港] enabled=true，但缺少 tokenEnv 对应的 token 或 characterId；通道未装配');
+  }
   const channels: Map<string, ChannelAdapter> = new Map();
   if (qqChannel !== null) channels.set(qqChannel.name, qqChannel);
   if (onebotChannel !== null) channels.set(onebotChannel.name, onebotChannel);
+  if (greyHarborChannel !== null) channels.set(greyHarborChannel.name, greyHarborChannel);
+
+  /**
+   * 附件地址解析口：只查临时 URL，不下载字节。
+   * 下载仍由 agent 调 http_download —— SSRF、大小、路径、超时只在一处把关。
+   */
+  const attachmentResolver: AttachmentResolver = async ({ messageId, fileId, index = 0, channel }) => {
+    const candidates = channel === undefined
+      ? [...channels.values()]
+      : [channels.get(channel)].filter((item): item is ChannelAdapter => item !== undefined);
+    if (candidates.length === 0) {
+      return { ok: false, reason: channel === undefined ? '当前没有可用的消息通道' : `没有找到通道 ${channel}` };
+    }
+    for (const adapter of candidates) {
+      if (messageId !== undefined && adapter.resolveAttachment !== undefined) {
+        return await adapter.resolveAttachment(messageId, index);
+      }
+      if (fileId !== undefined && adapter.resolveFileUrl !== undefined) {
+        return await adapter.resolveFileUrl(fileId);
+      }
+    }
+    return { ok: false, reason: '这条通道没有接上附件地址解析能力' };
+  };
 
   /**
    * **「我自己是谁」的到达点**（2026-10-11 修的一处"改了等于没改"）。
@@ -1811,6 +1856,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const selfIdentity = new SelfIdentity([
     () => qqChannel?.selfIds() ?? [],
     () => onebotChannel?.selfIds() ?? [],
+    () => greyHarborChannel?.selfIds() ?? [],
   ]);
   selfIdListeners.push((id) => { selfIdentity.add(id); });
   // 两条通道建好之后可能已经知道一点了（构造时的握手）；listen 回调会把当下那份补推一次
@@ -1822,7 +1868,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    */
   if (selfIdentity.size > 0) {
     write(`[通道] 已认出「我自己的标识」${selfIdentity.size} 个（平台推回来的自己的消息不再落库、不再注册成员、不计未读）`);
-  } else if (qqChannel !== null || onebotChannel !== null) {
+  } else if (qqChannel !== null || onebotChannel !== null || greyHarborChannel !== null) {
     write('[通道] 还不知道「我自己的标识」：平台把自己的消息推回来时可能被当成别人说的'
       + '（OneBot 侧等 get_login_info / 首条事件的 self_id；官方侧等 /users/@me 或群里 @ 我的事件）');
   }
@@ -1833,13 +1879,35 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    */
   const qqReplyPoster = qqChannel === null ? null : createChannelReplyPoster(channels);
   const onebotReplyPoster = onebotChannel === null ? null : createOneBotReplyPoster(channels);
-  const baseReplyPoster: ReplyPoster | null = qqReplyPoster === null && onebotReplyPoster === null
+  const greyHarborReplyPoster = greyHarborChannel === null
+    ? null
+    : {
+        async post(target: { url: string; idempotencyKey: string }, text: string) {
+          const parsed = parseGreyHarborReplyUrl(target.url);
+          if (!parsed.ok) return { ok: false as const, reason: parsed.error };
+          const outcome = await greyHarborChannel.sendText(parsed.chatType, parsed.chatId, text);
+          return outcome.ok
+            ? {
+                ok: true as const,
+                status: 200,
+                ...(outcome.messageId === '' ? {} : { messageId: outcome.messageId }),
+              }
+            : { ok: false as const, reason: outcome.reason };
+        },
+      };
+  const baseReplyPoster: ReplyPoster | null = qqReplyPoster === null
+    && onebotReplyPoster === null
+    && greyHarborReplyPoster === null
     ? null
     : {
         async post(target, text) {
           if (target.url.startsWith(ONEBOT_REPLY_SCHEME)) {
             if (onebotReplyPoster === null) return { ok: false, reason: 'OneBot 通道未装配，回投跳过' };
             return await onebotReplyPoster.post(target, text);
+          }
+          if (target.url.startsWith(GREYHARBOR_REPLY_SCHEME)) {
+            if (greyHarborReplyPoster === null) return { ok: false, reason: '灰港通道未装配，回投跳过' };
+            return await greyHarborReplyPoster.post(target, text);
           }
           if (qqReplyPoster === null) return { ok: false, reason: 'QQ 通道未装配，回投跳过' };
           return await qqReplyPoster.post(target, text);
@@ -1984,6 +2052,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       return await loopNow.readChannelMessages(sid, request.limit);
     },
     // 模型：同一个 DsClient、同一份当日预算。tier → lane 的映射只有这一处。
+    modelBudgetDenied: () => {
+      const guard = realLoopRef.current?.budgetGuard() ?? pluginStartupBudgetGuard;
+      const breach = guard.dailyBreach(recovery.projection);
+      return breach === null ? null : `插件模型调用已暂停：每日非缓存 token 额度已用尽（${breach.actual}/${breach.limit}）；请加注或等待跨天重置`;
+    },
     completeModel: async (_plugin, request) => {
       const client = pluginModelClientRef.current;
       if (client === null) throw new Error('模型通道尚未就绪');
@@ -2778,6 +2851,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         replyPoster,
       }),
       ...(mediaPoster === null ? {} : { mediaPoster }),
+      attachmentResolver,
       // "正在输入"：只在配置开着（且装了通道）时才有这一下——关掉时连口子都不传
       ...(inputNotifyPoster === null ? {} : { inputNotify: inputNotifyPoster }),
       onPersonaUpdated: () => {
@@ -3394,6 +3468,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     onebotChannel.onNotice = onChannelNotice;
     onebotChannel.onReady = () => { pluginHost.noteChannelReady({ channel: onebotChannel.name }); };
   }
+  if (greyHarborChannel !== null) {
+    greyHarborChannel.onMessage = onChannelMessage;
+    greyHarborChannel.onReady = () => { pluginHost.noteChannelReady({ channel: greyHarborChannel.name }); };
+  }
 
   const timerSource = new TimerWakeSource(timers, loop, now);
   const sources: WakeSourceAdapter[] = [
@@ -3402,6 +3480,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 通道是输入源（start/stop 与其它源同寿），同时也是一个输出通道
     ...(qqChannel === null ? [] : [qqChannel]),
     ...(onebotChannel === null ? [] : [onebotChannel]),
+    ...(greyHarborChannel === null ? [] : [greyHarborChannel]),
   ];
 
   // 补记恢复期被静默结算的定时器：hint 表显示它启动时已过期、恢复后又不在表里，

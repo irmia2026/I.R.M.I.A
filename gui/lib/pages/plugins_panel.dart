@@ -156,13 +156,29 @@ class PluginsPanel extends StatelessWidget {
     final s = IrmiaStrings.read(context);
     final id = _id(item);
     final hash = _hash(item);
+    final manifest = _manifest(item);
+    final permissions = _stringList(manifest['permissions']);
+    final net = _stringList(item['net']);
+    final hooks = _hookPoints(manifest['hooks']);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         constraints: const BoxConstraints(minWidth: 420, maxWidth: 560),
         title: Text(s.extPluginReviewTitle(id), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        content: Text(s.extPluginReviewBody(id, hash),
-            style: TextStyle(fontSize: 13, height: 1.7, color: Theme.of(dialogContext).colorScheme.onSurfaceVariant)),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(s.extPluginReviewBody(id, hash),
+                  style: TextStyle(fontSize: 13, height: 1.7, color: Theme.of(dialogContext).colorScheme.onSurfaceVariant)),
+              const SizedBox(height: 10),
+              SelectableText('${s.extPluginPermissionsLabel}: ${permissions.isEmpty ? '—' : permissions.join(', ')}'),
+              SelectableText('net.allow: ${net.isEmpty ? '—' : net.join(', ')}'),
+              SelectableText('hooks: ${hooks.isEmpty ? '—' : hooks.join(', ')}'),
+              SelectableText('runtime: ${_runtimeSummary(item)}'),
+            ],
+          ),
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(s.cancel)),
           FilledButton.tonal(
@@ -180,14 +196,15 @@ class PluginsPanel extends StatelessWidget {
     final s = IrmiaStrings.read(context);
     final id = _id(item);
     final enable = command == 'plugin-enable';
+    final uninstall = command == 'plugin-uninstall';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) {
         final scheme = Theme.of(dialogContext).colorScheme;
         return AlertDialog(
-          title: Text(enable ? s.extPluginEnableTitle(id) : s.extPluginDisableTitle(id),
+          title: Text(uninstall ? s.extPluginUninstallTitle(id) : enable ? s.extPluginEnableTitle(id) : s.extPluginDisableTitle(id),
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          content: Text(s.extPluginRestartBody,
+          content: Text(uninstall ? s.extPluginUninstallBody : s.extPluginRestartBody,
               style: TextStyle(fontSize: 13, height: 1.7, color: scheme.onSurfaceVariant)),
           actions: [
             TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(s.cancel)),
@@ -195,7 +212,7 @@ class PluginsPanel extends StatelessWidget {
               key: const ValueKey('plugin-action-confirm'),
               onPressed: () => Navigator.of(dialogContext).pop(true),
               style: enable ? null : FilledButton.styleFrom(backgroundColor: scheme.error, foregroundColor: scheme.onError),
-              child: Text(enable ? s.extPluginEnable : s.extPluginDisable),
+              child: Text(uninstall ? s.extPluginUninstall : enable ? s.extPluginEnable : s.extPluginDisable),
             ),
           ],
         );
@@ -226,9 +243,10 @@ class _PluginCard extends StatelessWidget {
     final skills = contributions['skills'] is List ? (contributions['skills'] as List).length : 0;
     final hooks = '${contributions['hooks'] ?? ''}'.isEmpty ? 0 : 1;
     final mcp = '${contributions['mcp'] ?? ''}'.isEmpty ? 0 : 1;
-    final permissions = [
-      for (final value in manifest['permissions'] as List? ?? const []) '$value',
-    ];
+    final permissions = _stringList(manifest['permissions']);
+    final net = _stringList(item['net']);
+    final namedHooks = _hookPoints(manifest['hooks']);
+    final runtime = _runtimeSummary(item);
     final problems = [for (final value in item['problems'] as List? ?? const []) '$value'];
     final circuit = item['circuit'] is Map ? (item['circuit'] as Map).cast<String, dynamic>() : null;
 
@@ -261,6 +279,12 @@ class _PluginCard extends StatelessWidget {
                   ],
                 ),
               ),
+              TextButton(
+                key: ValueKey('plugin-uninstall-$id'),
+                onPressed: busy ? null : () => onAction(context, item, 'plugin-uninstall'),
+                style: TextButton.styleFrom(foregroundColor: scheme.error),
+                child: Text(s.extPluginUninstall),
+              ),
               if (state == 'untrusted')
                 TextButton(
                   key: ValueKey('plugin-review-$id'),
@@ -292,6 +316,11 @@ class _PluginCard extends StatelessWidget {
           const SizedBox(height: 4),
           Text('${s.extPluginPermissionsLabel}: ${permissions.isEmpty ? '—' : permissions.join(', ')}',
               style: TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurfaceVariant)),
+          Text('net.allow: ${net.isEmpty ? '—' : net.join(', ')} · runtime: $runtime',
+              style: TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurfaceVariant)),
+          if (namedHooks.isNotEmpty)
+            Text('hooks: ${namedHooks.join(', ')}',
+                style: TextStyle(fontSize: 12, height: 1.5, color: scheme.onSurfaceVariant)),
           if (problems.isNotEmpty) ...[
             const SizedBox(height: 7),
             Text(s.extPluginProblemsLabel,
@@ -332,6 +361,34 @@ String _id(Map<String, dynamic> item) => '${_manifest(item)['id'] ?? ''}';
 String _hash(Map<String, dynamic> item) {
   if (item['package'] is! Map) return '';
   return '${(item['package'] as Map)['contentHash'] ?? ''}';
+}
+
+List<String> _stringList(Object? value) => [
+  if (value is List) for (final item in value) '$item',
+];
+
+List<String> _hookPoints(Object? value) => [
+  if (value is List)
+    for (final item in value)
+      if (item is Map && item['point'] != null) '${item['point']}' else '$item',
+];
+
+String _runtimeSummary(Map<String, dynamic> item) {
+  final manifest = _manifest(item);
+  final runtime = item['runtime'] is Map
+      ? (item['runtime'] as Map).cast<String, dynamic>()
+      : manifest['runtime'] is Map
+          ? (manifest['runtime'] as Map).cast<String, dynamic>()
+          : const <String, dynamic>{};
+  final type = '${runtime['type'] ?? ''}';
+  final state = '${runtime['state'] ?? ''}';
+  final pid = runtime['pid'];
+  final parts = [
+    if (type.isNotEmpty) type,
+    if (state.isNotEmpty) state,
+    if (pid is num && pid > 0) 'pid $pid',
+  ];
+  return parts.isEmpty ? '—' : parts.join(' · ');
 }
 
 int _int(Object? value) => value is num ? value.toInt() : int.tryParse('$value') ?? 0;

@@ -54,6 +54,9 @@ import {
   readEchoPressure,
 } from '../src/runtime/reasoning-echo-pressure.ts';
 
+const LEGACY_ECHO_POLICY = { maxTotalChars: 300_000, outOfRegion: 'keep' } as const;
+const readLegacyEchoPressure = (events: readonly AppEvent[]) => readEchoPressure(events, LEGACY_ECHO_POLICY);
+
 // ──────────────────────────────── 夹具 ────────────────────────────────
 
 /** 判据的"现在"（毫秒） */
@@ -842,7 +845,7 @@ describe('A2 · 前缀自算（estimatePrefixHitOf）的六条口径', () => {
 // ──────────────────────────────── B. 前兆判据 ────────────────────────────────
 
 describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => {
-  const CAP = REASONING_ECHO_POLICY.maxTotalChars ?? 0;
+  const CAP = LEGACY_ECHO_POLICY.maxTotalChars;
 
   /** 一段"只有思维链 + 一条 turn/end"的事件流（判据只读这两类） */
   function echoEvents(charsList: readonly number[], turn = 7): AppEvent[] {
@@ -854,10 +857,10 @@ describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => 
   }
 
   test('⑧ 回传字符 / 上限 ≥ 90% ⇒ 报；60% ⇒ 不报', () => {
-    assert.ok(CAP > 0, '出厂策略该有总字符上限');
+    assert.ok(CAP > 0, '显式旧策略提供总字符上限');
     // 95%：一条 0.95 × cap 的思维链
     const hot = echoEvents([Math.round(CAP * 0.95)]);
-    const hotSignals = readEchoPressure(hot);
+    const hotSignals = readLegacyEchoPressure(hot);
     assert.equal(hotSignals.echoChars, Math.round(CAP * 0.95));
     assert.equal(hotSignals.cap, CAP);
     const hotVerdict = planEchoPressure(hotSignals, { nowMs: NOW_MS, events: hot, respectDedupe: true });
@@ -867,18 +870,25 @@ describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => 
 
     // 60%：不报
     const cool = echoEvents([Math.round(CAP * 0.6)]);
-    const coolVerdict = planEchoPressure(readEchoPressure(cool), { nowMs: NOW_MS, events: cool, respectDedupe: true });
+    const coolVerdict = planEchoPressure(readLegacyEchoPressure(cool), { nowMs: NOW_MS, events: cool, respectDedupe: true });
     assert.equal(coolVerdict.fired, false);
     assert.equal(coolVerdict.why, 'below-line');
+
+    const current = readEchoPressure(hot);
+    assert.equal(current.cap, null);
+    assert.equal(current.echoChars, hotSignals.echoChars, '只追加时仍保留完整字符读数');
+    assert.equal(planEchoPressure(current, {
+      nowMs: NOW_MS, events: hot, respectDedupe: true,
+    }).why, 'no-cap', '当前没有独立字符帽 ⇒ 不得发压力维护告警');
   });
 
   test('⑧b 前兆比结果**早**：还没开始驱逐（dropped=0）时就可以响', () => {
     // 实测那一场：回传字符在本地 02:30 之前就到 93.9%（**还没开始挤**），
     // 而驱逐从 02:54:56 才开始、结果判据要到 03:24 才越过 20%。
     // 这一条钉住"前兆在驱逐之前就能响"——否则它就只是结果判据的复读机。
-    const cap = REASONING_ECHO_POLICY.maxTotalChars ?? 0;
+    const cap = LEGACY_ECHO_POLICY.maxTotalChars;
     const events = echoEvents([Math.round(cap * 0.939)]);
-    const signals = readEchoPressure(events);
+    const signals = readLegacyEchoPressure(events);
     assert.equal(signals.droppedGroups, 0, '还没开始驱逐');
     assert.equal(signals.evictedThisTurn, false);
     const verdict = planEchoPressure(signals, { nowMs: NOW_MS, events, respectDedupe: true });
@@ -890,7 +900,7 @@ describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => 
     // 6 条各 0.2 × cap = 1.2 × cap ⇒ 撞上限、整组丢到 ≤ cap
     const each = Math.round(CAP * 0.2);
     const events = echoEvents(Array.from({ length: 6 }, () => each));
-    const signals = readEchoPressure(events);
+    const signals = readLegacyEchoPressure(events);
     assert.ok(signals.droppedGroups >= 1, '超上限 ⇒ 一定有整组被丢');
     assert.ok(signals.keptChars <= CAP, 'kept 被压回上限以内（这正是"拿 it 当压力会变好看"的原因）');
     assert.ok(signals.echoChars > CAP, '会回传的总量已经顶穿');
@@ -904,25 +914,25 @@ describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => 
   test('⑨b 本轮驱逐过没有：从日志里的 turn 号读，不看进程内存', () => {
     const each = Math.round(CAP * 0.2);
     const events = echoEvents(Array.from({ length: 6 }, () => each), 7);
-    assert.equal(readEchoPressure(events).evictedThisTurn, false, '没有 prune 事件 ⇒ 本轮没驱逐');
+    assert.equal(readLegacyEchoPressure(events).evictedThisTurn, false, '没有 prune 事件 ⇒ 本轮没驱逐');
 
     events.push(event('model/reasoning-echo', {
       turn: 7, step: 2, kind: 'reasoning_echo_prune',
       dropped: [{ assistantSeq: 1, reasoningSeqs: [2], chars: each, items: 2, why: 'maxTotalChars' }],
     }, 'internal', at(0.5)));
-    assert.equal(readEchoPressure(events).evictedThisTurn, true, '本轮的 prune 事件 ⇒ 已在驱逐');
+    assert.equal(readLegacyEchoPressure(events).evictedThisTurn, true, '本轮的 prune 事件 ⇒ 已在驱逐');
 
     // 别的轮的 prune 不算"本轮"
     const otherTurn = [...events, event('model/reasoning-echo', {
       turn: 6, step: 2, kind: 'reasoning_echo_prune',
       dropped: [{ assistantSeq: 1, reasoningSeqs: [2], chars: each, items: 2, why: 'maxTotalChars' }],
     }, 'internal', at(0.4))];
-    assert.equal(readEchoPressure(otherTurn).evictedThisTurn, true, '本轮那条还在，当然仍是 true');
+    assert.equal(readLegacyEchoPressure(otherTurn).evictedThisTurn, true, '本轮那条还在，当然仍是 true');
   });
 
   test('⑩ 同档 24 小时去重；没有思维链 ⇒ no-sample（不是"0%"）', () => {
     const hot = echoEvents([Math.round(CAP * 0.95)]);
-    const signals = readEchoPressure(hot);
+    const signals = readLegacyEchoPressure(hot);
     const first = planEchoPressure(signals, { nowMs: NOW_MS, events: hot, respectDedupe: true });
     assert.equal(first.fired, true);
 
@@ -939,7 +949,7 @@ describe('B · 思维链回传压力告警（reasoning_echo_pressure）', () => 
 
     // 空历史：没有一条会回传的思维链 ⇒ 比例算不出来（不是 0%）
     const empty = echoEvents([]);
-    const emptySignals = readEchoPressure(empty);
+    const emptySignals = readLegacyEchoPressure(empty);
     assert.equal(emptySignals.echoChars, 0);
     const emptyVerdict = planEchoPressure(emptySignals, { nowMs: NOW_MS, events: empty, respectDedupe: true });
     assert.equal(emptyVerdict.fired, false);
@@ -989,10 +999,10 @@ describe('C · 出口同源（控制台 / doctor / cli tail）', () => {
     assert.equal(checkCacheMiss(thin, NOW_MS, '').status, 'skip');
 
     // 压力那条
-    const cap = REASONING_ECHO_POLICY.maxTotalChars ?? 0;
+    const cap = LEGACY_ECHO_POLICY.maxTotalChars;
     const hot = [reasoning(at(5), Math.round(cap * 0.95)),
       event('turn/end', { turn: 7, reason: { kind: 'completed' }, spoke: false }, 'internal', at(1))];
-    const pushWarn = checkEchoPressure(hot);
+    const pushWarn = checkEchoPressure(hot, LEGACY_ECHO_POLICY);
     assert.equal(pushWarn.id, 'OPS-echo-pressure');
     assert.equal(pushWarn.status, 'warn');
     assert.match(pushWarn.detail, /翻 3 倍以上/u, 'doctor 要写明"顶穿之后账单翻 3 倍以上"');

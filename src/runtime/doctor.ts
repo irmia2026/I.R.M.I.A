@@ -26,7 +26,7 @@ import type { AppEvent, Projection } from '../log/types.js';
 import { readEventsReadOnly, type LogScan } from '../log/read-only.ts';
 import { readCompactionWarnings } from '../model/compaction-warning.ts';
 import { costSegmentsDoctorDetail, formatStamp, readCostSegments } from '../model/cost-segments.ts';
-import { inputContentText, render } from '../model/render.ts';
+import { inputContentText, render, REASONING_ECHO_POLICY } from '../model/render.ts';
 import { sha256Hex } from '../persona/versions.ts';
 import { BLOB_ID_PATTERN, blobDirOf, blobIdOf, blobPathOf } from '../state/blob-store.ts';
 import { applyEvent, budgetTokensOf, finalizePressure, fold } from '../state/fold.ts';
@@ -1012,9 +1012,12 @@ export function checkCacheMiss(events: readonly AppEvent[], nowMs: number, clock
  * `skip` 而不是 `ok` 的两种：没有上限（判据没对象）、没有思维链（比例算不出来）——
  * 与 `ok`（真读过、在线内）分开，否则"没数据"会被读成"很健康"。
  */
-export function checkEchoPressure(events: readonly AppEvent[]): DoctorCheck {
+export function checkEchoPressure(
+  events: readonly AppEvent[],
+  policy: typeof REASONING_ECHO_POLICY = REASONING_ECHO_POLICY,
+): DoctorCheck {
   const title = '思维链回传压力（顶穿前兆）';
-  const signals = readEchoPressure(events);
+  const signals = readEchoPressure(events, policy);
   const verdict = planEchoPressure(signals, { nowMs: 0, events, respectDedupe: false });
   const detail = echoPressureDoctorDetail(signals, verdict.ratio, verdict.why);
   if (verdict.fired) return { id: 'OPS-echo-pressure', title, status: 'warn', detail };

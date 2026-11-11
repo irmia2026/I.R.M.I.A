@@ -107,6 +107,7 @@ $IncludePaths = @(
   'scripts',
   'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.test.json', 'config.example.json',
   'examples',
+  'sdk',
   # 只归档实际随包分发的公开技能，不递归复制含私有资源的 skills 根。
   'skills/irmia-framework', 'skills/office',
   'README.md', 'CHANGELOG.md', 'LICENSE', 'NOTICE', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md', 'SECURITY.md',

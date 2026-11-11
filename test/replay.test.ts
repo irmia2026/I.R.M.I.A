@@ -26,7 +26,7 @@ import { sha256Hex } from '../src/persona/versions.ts';
 import { runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import {
   buildReplayReport, contextEventsForRebuild, formatReplaySummary, isFrameworkWakeEvent,
-  jsonBytes, locateStep, rebuildRenderedRequest, type RebuildOptions, type ReplayPosition,
+  jsonBytes, locateStep, reasoningEchoPolicyForReplay, rebuildRenderedRequest, type RebuildOptions, type ReplayPosition,
 } from '../src/runtime/replay.ts';
 import { isFrameworkCommandEvent } from '../src/runtime/slash-commands.ts';
 import { SkillManager } from '../src/skill/skills.ts';
@@ -929,4 +929,19 @@ test('本轮唤醒的显示名：新日志取 step/start 里记的结论，旧�
     old.report.notes.some((note) => note.includes('旧日志回退') && note.includes('这是现在这份，不是当时那份')),
     '回退必须如实说明"这是现在这份，不是当时那份"（把重建的边界当事实更坏）',
   );
+});
+
+test('思维链回放策略：旧数值逐字恢复，旧缺省为 300K，新收据 null 只追加', () => {
+  assert.deepEqual(reasoningEchoPolicyForReplay({
+    data: { reasoningEchoMaxChars: 675_000, renderVersion: '86' },
+  }), { maxTotalChars: 675_000 });
+  assert.deepEqual(reasoningEchoPolicyForReplay({
+    data: { renderVersion: '86' },
+  }), { maxTotalChars: 300_000 });
+  assert.deepEqual(reasoningEchoPolicyForReplay({
+    data: { reasoningEchoMaxChars: null, renderVersion: '87' },
+  }), { maxTotalChars: null });
+  assert.deepEqual(reasoningEchoPolicyForReplay({
+    data: { renderVersion: '87' },
+  }), { maxTotalChars: null });
 });

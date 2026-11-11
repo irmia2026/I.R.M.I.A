@@ -813,7 +813,7 @@ test('v31 回归：todo 工具写进 STATE 的清单，在同轮后续 step 的�
   for (const n of [1, 2]) {
     assert.equal(blockCountOf(n), 0, `第 ${n + 1} 步不再发固定块（v31）`);
     const now = nowLayerOf(n);
-    assert.ok(now.includes('当前任务：核对备份'), `第 ${n + 1} 步：任务卡还在`);
+    assert.ok(now.includes('当前任务：看目录'), `第 ${n + 1} 步：任务卡读 STATE 的当前任务`);
     assert.ok(now.includes('未完成计划：'), `第 ${n + 1} 步：未完成计划还在（她动手期间看得见待办）`);
     assert.ok(now.includes('- 看目录'), `第 ${n + 1} 步：第一项在`);
     assert.ok(now.includes('- 看日志尾部'), `第 ${n + 1} 步：第二项在`);
@@ -856,7 +856,7 @@ test('M2-2 请求可重建：同一批日志事件重新派生，请求字节一
     lane: 'heavy',
     events: snapshot,
     wakeEvent: wake,
-    taskCard: { title: '看一眼日志', turn: stepStart.data.turn, step: stepStart.data.step, todoOpen: [] },
+    taskCard: { title: '（STATE.md 未写当前任务）', turn: stepStart.data.turn, step: stepStart.data.step, todoOpen: [] },
     now: stepStart.ts,
     model: stepStart.data.model,
     // v76：必填格（见 RequestDerivation.channelRender）——这条唤醒不是通道轮，走 null
@@ -879,7 +879,7 @@ test('M2-2 请求可重建：同一批日志事件重新派生，请求字节一
     lane: 'heavy',
     events: snapshot,
     wakeEvent: wake,
-    taskCard: { title: '看一眼日志', turn: stepStart.data.turn, step: stepStart.data.step, todoOpen: [] },
+    taskCard: { title: '（STATE.md 未写当前任务）', turn: stepStart.data.turn, step: stepStart.data.step, todoOpen: [] },
     now: stepStart.ts,
     model: stepStart.data.model,
     channelRender: null,
@@ -1667,7 +1667,9 @@ test('★ ⑧③ 真链路：一轮两步都在驱逐 ⇒ 一条事件（steps=2
     { text: '看完了。' },
   ]);
 
-  const reason = await runTurn(harness.depsOf(model.ds), [wake]);
+  const reason = await runTurn(harness.depsOf(model.ds, {
+    reasoningEcho: { maxTotalChars: 300_000 },
+  }), [wake]);
   assert.deepEqual(reason, { kind: 'completed' });
   assert.equal(model.requests.length, 2, '（前置）这一轮真的是两步');
 
@@ -1689,9 +1691,8 @@ test('★ ⑧③ 真链路：一轮两步都在驱逐 ⇒ 一条事件（steps=2
   assert.ok(prune.seq < decision.seq, '紧挨着 compaction/decision：先看"挤了什么"，再看"压没压"');
 });
 
-test('★ ⑧④ 真链路：回传字符顶穿上限 ⇒ 这一轮的 compaction/decision 记 `trigger=echo-chars`', async (t) => {
+test('★ ⑧④ v87 真链路：超过旧字符帽但用户线为 1M ⇒ 不驱逐、不旁路压缩', async (t) => {
   const harness = await makeHarness(t);
-  // 与 ⑧③ 同一段超限历史（400,000 字符 > 出厂 300,000），但本轮**一步就收**
   harness.append('message/user', { text: '很早的输入', source: 'human' });
   harness.append('message/assistant', { text: 'OLDEST-ANSWER', toolCalls: [] });
   harness.append('message/reasoning', { turn: 1, step: 1, text: `OLDEST ${'甲'.repeat(200_000)}` });
@@ -1699,24 +1700,25 @@ test('★ ⑧④ 真链路：回传字符顶穿上限 ⇒ 这一轮的 compactio
   harness.append('message/reasoning', { turn: 1, step: 2, text: `NEWEST ${'乙'.repeat(200_000)}` });
   const wake = wakeManual(harness, '接着干');
   const model = fakeModel([{ text: '看完了。' }]);
-  // 压缩配上线（阈值仍是出厂那个 200,000）：v75 之前只有 `historyTokens` 能把它推过门
   const reason = await runTurn(
-    harness.depsOf(model.ds, { compaction: { thresholdTokens: 200_000 } }),
+    harness.depsOf(model.ds, { compaction: { thresholdTokens: 1_000_000 } }),
     [wake],
   );
   assert.deepEqual(reason, { kind: 'completed' });
 
   const events = await harness.readAll();
   const decision = ofType<{ data: Record<string, unknown> } & AppEvent>(events, 'compaction/decision')[0]!;
-  assert.equal(decision.data.trigger, 'echo-chars',
-    '★ 账上要说得出来"是哪一条判据把它推过第一道门的"（v75 的新字段）');
-  assert.ok((decision.data.echoChars as number) > 300_000,
-    `会回传的总字符要超上限：${decision.data.echoChars} > 300,000`);
-  assert.equal(decision.data.echoCharsLimit, 300_000);
-  assert.ok((decision.data.echoCharsKept as number) <= 300_000, '留下的那一份仍在限内（判据读的是总量）');
-  assert.ok((decision.data.historyTokens as number) < 200_000,
-    `（前置）token 侧没越线——旧判据放行：${decision.data.historyTokens} < 200,000`);
-  assert.equal(decision.data.reason, 'wrote', '两条进门路都通到同一个结论');
+  assert.equal(decision.data.trigger, undefined);
+  assert.ok((decision.data.echoChars as number) > 300_000);
+  assert.equal(decision.data.echoChars, decision.data.echoCharsKept, '全部思维链仍在请求里');
+  assert.equal(decision.data.echoCharsLimit, null);
+  assert.ok((decision.data.historyTokens as number) < 1_000_000);
+  assert.equal(decision.data.reason, 'threshold');
+  assert.equal(ofType(events, 'compaction/summary').length, 0, '不得写交接摘要或移动遮蔽点');
+  assert.equal(ofType(events, 'model/reasoning-echo')
+    .filter(event => (event.data as { kind?: string }).kind === 'reasoning_echo_prune').length, 0);
+  const sent = JSON.stringify(model.requests[0]);
+  assert.ok(sent.includes('OLDEST') && sent.includes('NEWEST'), '最老与最新两组都原样回传');
 });
 
 // ──────────────── v76：channelRender 接线 + 中段改写不变量（真循环链路） ────────────────

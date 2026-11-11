@@ -194,12 +194,8 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.equal(rec.count('channel/read'), 2, '真有新消息 → 照常记一笔已读');
   });
 
-  test('单聊：真没有新消息时照旧回"没有新消息"（反向用例，别把这条闸整体放开）', async () => {
-    // 上面那条修的是"判据用错了数"，不是"取消去重"：平台序号恒 1 的会话**没有新东西**时，
-    // 第二、第三次读仍然必须是"没有新消息"——否则一次修 bug 会顺手把 2026-10-02 那个
-    // "一轮连读五遍、白花四个 step"的教训放回来。
+  test('单聊：真没有新消息时重复读只回同一句短回执', async () => {
     const rec = recorder();
-    // 会话里除了最后那条，**还有更早的 45 句**——于是"想更早的"有一条真实的路（见下面那个游标断言）
     const same = [
       ...Array.from({ length: 45 }, (_, i) =>
         message({ chatId: 'U1', chatType: 'c2c', person: '用户', text: `更早的第 ${i + 1} 句`, msgSeq: 1, seq: 100 + i })),
@@ -209,33 +205,20 @@ describe('read_channel · 她自己点开信箱', () => {
     const tool = tk.byName('read_channel');
 
     const first = await tool.handler({ sid: 'qq:c2c:U1', limit: 3 }, CTX);
-    // 第一屏走"重启后第一次"那条：取最近 limit 条（第 9、10 句与最后那条）
-    assert.ok(first.content.includes('就这一句'), `第一屏照给（宁可多给一次）：${first.content}`);
+    assert.ok(first.content.includes('就这一句'), first.content);
 
-    const same1 = await tool.handler({ sid: 'qq:c2c:U1', limit: 3 }, CTX);
-    assert.match(same1.content, /没有新消息/u, '同一批、同一条窗口 → 照旧去重');
-    const same2 = await tool.handler({ sid: 'qq:c2c:U1', limit: 3 }, CTX);
-    // 2026-10-08 起措辞的第一句固定是「没有新消息」（用户的口径：没有消息就直接这么说），
-    // "把话说得更直白"那半句跟在后面——所以这里钉的是**它跟出来了**，不是它排在最前面。
-    assert.match(same2.content, /^没有新消息/u, '第三次照样是这四个字开头');
-    assert.match(same2.content, /这一轮你已经读过它 3 次/u, '第三次把话说得更直白（读到第几次）');
+    for (const limit of [3, 3, 40]) {
+      const out = await tool.handler({ sid: 'qq:c2c:U1', limit }, CTX);
+      assert.equal(out.content, '你已读过此会话，截至现在没有新消息');
+    }
     assert.equal(rec.count('channel/read'), 1, '没有新东西就不该再记一笔已读');
 
-    // 【2026-10-08 口径收窄】"要看更早的就把 limit 调大"这条老出路**没有了**：
-    // 默认那一屏现在只给未读里点她的那些，调大 limit 不会把旧话再倒一遍（旧话早进过上下文，
-    // 再倒就是白花 token）。**但出路必须还在**，而且更要紧——它现在只有一条：
-    // `before` 游标（翻页模式）。所以这里正着断言"想更早的内容仍然拿得到"，
-    // 免得这条口径被实现成"看不到更早的了"。
-    const wider = await tool.handler({ sid: 'qq:c2c:U1', limit: 40 }, CTX);
-    assert.match(wider.content, /没有新消息/u, '调大 limit 不再等于"往前看"（旧话不重倒）');
-    assert.match(wider.content, /翻页/u, '要给一条出路（这里确实还有更早的）');
-    const cursor = /before=(\d+)/u.exec(wider.content);
-    assert.ok(cursor !== null, `去重那句话必须给出翻页的出路（不然她以为这里什么都没有）：${wider.content}`);
-    assert.ok(Number(cursor[1]) <= 300, '游标要落在"还没给过她的那一段"上');
+    // 翻页出口仍在第一屏页脚；无新消息的短回执本身不再承担指路。
+    const cursor = /before=(\d+)/u.exec(first.content);
+    assert.ok(cursor !== null, first.content);
     const paged = await tool.handler({ sid: 'qq:c2c:U1', before: Number(cursor[1]), limit: 20 }, CTX);
-    assert.match(paged.content, /更早的第 \d+ 句/u,
-      `翻页那一条路必须真能读到更早的：${paged.content}`);
-    assert.equal(rec.count('channel/read'), 1, '往回翻不改已读位置（一笔都不许多）');
+    assert.match(paged.content, /更早的第 \d+ 句/u, paged.content);
+    assert.equal(rec.count('channel/read'), 1, '往回翻不改已读位置');
   });
 
   test('limit 缺省 20、上限 100（超上限夹住而不是报错）', async () => {
@@ -254,9 +237,7 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.deepEqual(seen, [20, 100, 3], '缺省 20；超上限夹到 100（多要几条不该让调用失败）');
   });
 
-  test('没有新消息 → 直接回一句"没有新消息"，不再取一遍（也不重复记已读）', async () => {
-    // 用户 2026-10-02 报的实测：她在一轮里把同一个信箱连读了五遍（upToSeq 死死停在 8505），
-    // 白花四个 step——她自己回头也认了"我犯蠢"。
+  test('没有新消息 → 直接回指定短句，不重复消息体或已读账', async () => {
     const rec = recorder();
     let calls = 0;
     const tk = toolkitWith(async (sid) => {
@@ -266,20 +247,15 @@ describe('read_channel · 她自己点开信箱', () => {
     const tool = tk.byName('read_channel');
 
     const first = await tool.handler({ sid: 'qq:group:G1', limit: 6 }, CTX);
-    assert.ok(first.content.includes('最近 1 条'), '第一次照常返回消息');
+    assert.ok(first.content.includes('最近 1 条'));
 
-    const again = await tool.handler({ sid: 'qq:group:G1', limit: 5 }, CTX);
-    // 注：宿主那边**还是会被问一次**（"现在到第几条了"），它只读日志、不花模型钱；
-    // 真正要省的是"把同一段消息再摆一遍"和"再记一笔已读"（下面两条断言）。
-    assert.equal(calls, 2, '问一次"有没有新的"是允许的（那是判据本身），但不再要一遍消息');
-    assert.match(again.content, /没有新消息/u);
-    assert.equal(again.content.includes('[external_event'), false, '不再贴一遍消息体');
-    assert.match(again.content, /speak/u, '要给出路：想接着说就直接 speak（不拦她开口）');
+    for (let i = 0; i < 2; i += 1) {
+      const out = await tool.handler({ sid: 'qq:group:G1', limit: 5 }, CTX);
+      assert.equal(out.content, '你已读过此会话，截至现在没有新消息');
+      assert.equal(out.content.includes('[external_event'), false);
+    }
+    assert.equal(calls, 3, '每次都向宿主确认有没有新消息');
     assert.equal(rec.count('channel/read'), 1, '没有新东西就不该再记一笔已读');
-
-    const third = await tool.handler({ sid: 'qq:group:G1', limit: 5 }, CTX);
-    assert.match(third.content, /^没有新消息/u, '第三次照样是这四个字开头');
-    assert.match(third.content, /3 次/u, '数得清这是第几次（她自己看得见这个数）');
   });
 
   test('想看更早的**不再靠调大 limit**，而是靠 `before` 游标（翻页那一条路）', async () => {
@@ -419,11 +395,9 @@ describe('read_channel · 她自己点开信箱', () => {
       `她自己刚发过东西，就不许回"没有新消息"（她找的那一行就在里面）：\n${again.content}`);
     assert.ok(again.content.includes('第二份报告'), '新发的那一篇要读得到');
 
-    // 反向：她也**没**再发、外面也没有新的 → 照旧去重（这条闸没被整体放开），
-    // 而且措辞要点明"你自己发出去的那些不算新消息"，免得她把"没有新消息"读成"我那篇不在里面"
+    // 没有新发言、也没有新外部消息时只回指定短句，不再附解释。
     const repeat = await tool.handler({ sid: 'qq:group:G1', limit: 8 }, CTX);
-    assert.match(repeat.content, /没有新消息/u, `真的没有新东西时照旧去重：${repeat.content}`);
-    assert.match(repeat.content, /你自己发出去的那些/u, `去重那句话要说清她的凭据在里面：${repeat.content}`);
+    assert.equal(repeat.content, '你已读过此会话，截至现在没有新消息');
   });
 
   test('描述在单件 100 token 的硬线以内（工具清单是每轮常驻开销）', () => {
@@ -456,12 +430,12 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.ok(bodyAt < result.content.indexOf('[/external_event]'), '正文在闭标签之前');
   });
 
-  test('管理员工具清单是八件，read_channel/send_media/ask_human 按序排在最后', () => {
+  test('管理员工具清单是九件，read_channel/send_media/ask_human 按序排在最后', () => {
     const tk = toolkitWith(null, recorder());
     assert.deepEqual(
       tk.tools.map((tool) => tool.name),
       [
-        'write_persona', 'timer', 'speak', 'report', 'todo',
+        'write_persona', 'timer', 'speak', 'report', 'resolve_attachment', 'todo',
         'read_channel', 'send_media', 'ask_human',
       ],
       // ask_human 是 v27 删、design §6.5 恢复的那一件（"错在等，不在问"）：它排在最后，
@@ -472,5 +446,25 @@ describe('read_channel · 她自己点开信箱', () => {
       // 合并后仍占原来 set_timer 的位置（write_persona 之后），后面几件整体前移。
       '工具清单的顺序是 render 的输入（缓存前缀），加一件必须是有意为之',
     );
+  });
+
+  test('resolve_attachment 只把 file_id 换成地址，不下载字节', async () => {
+    let seen: { fileId?: string; messageId?: string; channel?: string } | null = null;
+    const tk = createAdminTools({
+      timers: new TimerStore(null),
+      emit: recorder().emit as never,
+      attachmentResolver: async (input) => {
+        seen = input;
+        return { ok: true, url: 'https://files.example/temp.pdf', name: 'report.pdf' };
+      },
+    });
+    const result = await tk.byName('resolve_attachment').handler({
+      file_id: 'file-123',
+      channel: 'onebot',
+    }, CTX);
+    assert.equal(result.isError, undefined, result.content);
+    assert.deepEqual(seen, { fileId: 'file-123', channel: 'onebot', index: 0 });
+    assert.match(result.content, /https:\/\/files\.example\/temp\.pdf/);
+    assert.match(result.content, /http_download/);
   });
 });

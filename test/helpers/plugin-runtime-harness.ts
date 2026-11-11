@@ -33,6 +33,7 @@ export interface HarnessOptions {
   sendChat?: PluginHostOptions['sendChat'];
   readChat?: PluginHostOptions['readChat'];
   completeModel?: PluginHostOptions['completeModel'];
+  modelBudgetDenied?: PluginHostOptions['modelBudgetDenied'];
   /** 入站消息的"发送者是不是用户"判据（message.received admin 过滤 / admin 指令） */
   isOwnerMessage?: PluginHostOptions['isOwnerMessage'];
   /** 允许 http://127.0.0.1 / localhost（给 net 用例访问本地 fixture server；生产默认关） */
@@ -115,6 +116,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     ...(options.sendChat === undefined ? {} : { sendChat: options.sendChat }),
     ...(options.readChat === undefined ? {} : { readChat: options.readChat }),
     ...(options.completeModel === undefined ? {} : { completeModel: options.completeModel }),
+    ...(options.modelBudgetDenied === undefined ? {} : { modelBudgetDenied: options.modelBudgetDenied }),
     ...(options.timeouts === undefined ? {} : { timeouts: options.timeouts }),
     ...(options.crashCooldownMs === undefined ? {} : { crashCooldownMs: options.crashCooldownMs }),
     ...(options.timeoutRestartDelayMs === undefined ? {} : { timeoutRestartDelayMs: options.timeoutRestartDelayMs }),

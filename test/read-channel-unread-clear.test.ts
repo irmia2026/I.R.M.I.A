@@ -266,7 +266,7 @@ test('ⓒ 没有新消息时读一次 → 未读 0（"她确认过没有新东�
   // ② 再读一次：这一次**确实没有新的**（水位已经越过那 2 条）——
   // 新口径：这句"没有新消息"就是一次确认，已读位必须推到"此刻最新"（第 5 句）⇒ 未读 0
   const quiet = await rig.read({ sid: SID, limit: 20 });
-  assert.match(quiet.content, /^没有新消息/u, `这一支就是那句话：\n${quiet.content}`);
+  assert.equal(quiet.content, '你已读过此会话，截至现在没有新消息');
   assert.equal(await rig.unread(), 0, '确认过没有新东西 ⇒ 未读清零（2026-10-24 的新口径）');
   assert.deepEqual(rig.readEvents().at(-1), { sid: SID, upToSeq: 5 },
     '已读位推到"这一屏取数窗口里最新那条"（第 5 句），不是凭空乱推');

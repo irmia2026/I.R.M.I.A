@@ -466,7 +466,7 @@ test('同一批第二次读：已经给过的那些不再倒一遍', async (t) =
   // 第二次读：那一屏已经**给过她了**（水位推到第 30 句）⇒ 不许把同一段再摆一遍
   const second = await rig.read({ sid: SID, limit: 8 });
   assert.equal(second.isError, undefined, second.content);
-  assert.match(second.content, /^没有新消息/u, `同一批再读一次要明说没有新的：\n${second.content}`);
+  assert.equal(second.content, '你已读过此会话，截至现在没有新消息');
   assert.equal(second.content.includes('第 30 句'), false,
     `已给过她的那条不许再倒一遍：\n${second.content}`);
 });
@@ -508,7 +508,7 @@ test('确实没有新的：一句话说完（不摆旧内容，也不提数量�
   quiet.write(1);
   await quiet.read({ sid: SID, limit: 5 });
   const nothing = await quiet.read({ sid: SID, limit: 5 });
-  assert.match(nothing.content, /^没有新消息/u, `第一句照旧是那四个字：\n${nothing.content}`);
+  assert.equal(nothing.content, '你已读过此会话，截至现在没有新消息');
   assert.equal(/另有 \d+ 条/u.test(nothing.content), false,
     `确实没有新的时**不许**提数量（那会让她以为漏了什么）：\n${nothing.content}`);
   assert.equal(nothing.content.includes('[external_event'), false,

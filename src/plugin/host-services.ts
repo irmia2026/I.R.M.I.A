@@ -242,6 +242,8 @@ export interface PluginHostOptions {
   readChat?: (plugin: PluginInstanceView, request: { limit: number }) => Promise<unknown[]>;
   /** `ctx.model.complete` 的宿主出口（main 接到 DsClient + 预算记账） */
   completeModel?: (plugin: PluginInstanceView, request: PluginModelRequest) => Promise<PluginModelReply>;
+  /** 每次真正发模型请求前现判；非空原因表示预算拒绝 */
+  modelBudgetDenied?: () => string | null;
   /** 当前会话 id（`ctx.state.session` 的作用域）；缺省 `default` */
   currentSessionId?: () => string | null;
   /**
@@ -257,6 +259,8 @@ export interface PluginHostOptions {
    * 生产不打开；测试用它访问本地 fixture server。https 不受它影响。
    */
   netAllowInsecureLoopbackHttp?: boolean;
+  /** 本地 smoke 等明确离线场景：通过权限检查后仍拒绝一切真实网络请求 */
+  netDisabled?: boolean;
   /** 配置覆盖值（默认读 `<dataDir>/plugins/config/<id>.json`） */
   readConfigOverrides?: (pluginId: string) => Record<string, unknown>;
   timeouts?: Partial<PluginTimeouts>;
@@ -686,6 +690,8 @@ export class PluginHost {
   private subscriptionSeq = 0;
   private hookSubscriptionSeq = 0;
   private commandSeq = 0;
+  /** 插件模型调用串行准入，每个请求发送前都重新检查当日预算 */
+  private modelCallChain: Promise<void> = Promise.resolve();
   /** host.ready 是"宿主生命周期内一次"：即便当时没有订阅也要先记下已经发生过 */
   private hostReadyFired = false;
 
@@ -1471,8 +1477,10 @@ export class PluginHost {
       onRequest: async (method, params) => await this.handleRequest(instance, method, params),
       onStderr: (line) => { this.options.write(`[插件 ${instance.id}] ${line}`); },
       onProtocolProblem: (message, line) => {
-        this.options.write(`[插件 ${instance.id}] 协议问题：${message}（${line.slice(0, 200)}）`);
-        this.options.bridge.recordFailure(instance.id, instance.contentHash, `协议问题：${message}`, 'protocol');
+        const reason = `协议问题：${message}`;
+        this.options.write(`[插件 ${instance.id}] ${reason}（${line.slice(0, 200)}）`);
+        this.options.bridge.recordFailure(instance.id, instance.contentHash, reason, 'protocol');
+        this.notifyPluginError(instance.id, instance.contentHash, 'protocol', reason);
       },
     };
   }
@@ -1570,6 +1578,9 @@ export class PluginHost {
    */
   private async netFetch(instance: PluginInstance, params: unknown): Promise<unknown> {
     requireNetPermission(instance.id, instance.permissions);
+    if (this.options.netDisabled === true) {
+      throw new PluginRpcError(PLUGIN_RPC_ERRORS.business, 'net.fetch 被当前离线宿主拒绝', 'business', { reason: 'offline-smoke' });
+    }
     const body = asRecord(params, 'net.fetch');
     const url = requiredText(body['url'], 'net.fetch.url', 4_096);
     const label = `${instance.id}@${instance.contentHash.slice(0, 8)}`;
@@ -1603,9 +1614,10 @@ export class PluginHost {
       throw new PluginRpcError(PLUGIN_RPC_ERRORS.invalidParams, 'tool.register.parameters: 必须是 JSON Schema 对象', 'protocol');
     }
     const sideEffectValue = body['sideEffect'];
-    const sideEffect = sideEffectValue === 'none' || sideEffectValue === 'idempotent' || sideEffectValue === 'destructive'
-      ? sideEffectValue
-      : 'idempotent';
+    if (sideEffectValue !== undefined && sideEffectValue !== 'none' && sideEffectValue !== 'idempotent' && sideEffectValue !== 'destructive') {
+      throw new PluginRpcError(PLUGIN_RPC_ERRORS.invalidParams, 'tool.register.sideEffect: 只能是 none / idempotent / destructive', 'protocol');
+    }
+    const sideEffect = sideEffectValue ?? 'idempotent';
     const existing = instance.tools.has(localName);
     instance.tools.add(localName);
     const definition: ToolDefinition = {
@@ -1897,12 +1909,21 @@ export class PluginHost {
     if (this.options.completeModel === undefined) {
       throw new PluginRpcError(PLUGIN_RPC_ERRORS.unsupported, '宿主没有接线 model.complete（没有模型通道）', 'unsupported');
     }
-    const reply = await this.options.completeModel(this.viewOf(instance), {
-      tier,
-      messages,
-      ...(maxTokensRaw === undefined ? {} : { maxTokens: maxTokensRaw }),
+    const complete = this.options.completeModel;
+    const run = this.modelCallChain.then(async () => {
+      const denied = this.options.modelBudgetDenied?.() ?? null;
+      if (denied !== null) {
+        throw new PluginRpcError(PLUGIN_RPC_ERRORS.business, `model.complete 被预算规则拒绝：${denied}`, 'business', { reason: 'daily-budget' });
+      }
+      const reply = await complete(this.viewOf(instance), {
+        tier,
+        messages,
+        ...(maxTokensRaw === undefined ? {} : { maxTokens: maxTokensRaw }),
+      });
+      return { text: reply.text, ...(reply.model === undefined ? {} : { model: reply.model }), ...(reply.usage === undefined ? {} : { usage: reply.usage }) };
     });
-    return { text: reply.text, ...(reply.model === undefined ? {} : { model: reply.model }), ...(reply.usage === undefined ? {} : { usage: reply.usage }) };
+    this.modelCallChain = run.then(() => undefined, () => undefined);
+    return await run;
   }
 
   // ── timers ──
@@ -1990,9 +2011,12 @@ export class PluginHost {
     const category: PluginFailureCategory = error instanceof PluginRpcError && error.category === 'timeout'
       ? (kind === 'hook' ? 'hook-timeout' : 'timeout')
       : (kind === 'hook' ? 'hook-error' : 'business');
+    const processExited = error instanceof PluginRpcError && error.category === 'crash';
     const message = error instanceof Error ? error.message : String(error);
+    const reason = `${contribution} 失败（${category}）：${message}`;
     this.options.write(`[插件] ${instance.id} 的贡献 ${contribution} 第 ${count} 次失败（${category}）：${message}`);
-    this.options.bridge.recordFailure(instance.id, instance.contentHash, `${contribution} 失败（${category}）：${message}`, category);
+    this.options.bridge.recordFailure(instance.id, instance.contentHash, reason, category);
+    if (!processExited) this.notifyPluginError(instance.id, instance.contentHash, category, reason);
     if (count < CONTRIBUTION_ISOLATION_THRESHOLD) return;
     instance.isolated.add(contribution);
     instance.failureCounts.delete(contribution);

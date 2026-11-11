@@ -156,3 +156,39 @@ test('plugin.error：别的插件启动失败时，带 category 与可读原因�
   assert.equal(lastError['id'], 'bad-node');
   assert.match(String(lastError['reason'] ?? ''), /boom|启动失败/);
 });
+
+test('plugin.error：工具超时也通知其他插件，category=timeout', async (t) => {
+  const harness = await createHarness({ timeouts: { toolMs: 150 }, timeoutRestartDelayMs: 60_000 });
+  t.after(async () => { await harness.dispose(); });
+  await harness.start();
+  const source = tempDirSync('irmia-plugin-timeout-observer-');
+  cpSync(join(PLUGIN_FIXTURES, 'plugin-node'), source, { recursive: true });
+  const manifestPath = join(source, 'plugin.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+  writeFileSync(manifestPath, JSON.stringify({ ...manifest, id: 'timeout-node' }));
+  const failing = installPluginPackage(source, harness.dataDir);
+  await harness.host.startPackage(failing);
+  assert.equal((await harness.callTool('timeout-node__hang', {})).isError, true);
+  await harness.waitFor(() => {
+    const error = stateOf(harness.dataDir, harness.pkg.manifest.id)['lastError'] as Record<string, unknown> | undefined;
+    return error?.['category'] === 'timeout' && error['id'] === 'timeout-node';
+  }, '工具超时送达 plugin.error');
+});
+
+test('plugin.error：协议坏帧通知其他插件，category=protocol', async (t) => {
+  const harness = await createHarness();
+  t.after(async () => { await harness.dispose(); });
+  await harness.start();
+  const source = tempDirSync('irmia-plugin-protocol-observer-');
+  writeFileSync(join(source, 'plugin.json'), JSON.stringify({
+    apiVersion: 2, id: 'protocol-node', version: '1.0.0', engine: { irmia: '>=0.1.0-beta.13' },
+    runtime: { type: 'node', entry: 'main.mjs' }, permissions: [],
+  }));
+  writeFileSync(join(source, 'main.mjs'), 'process.stdout.write("not-json\\n"); export function activate() {}\n');
+  const failing = installPluginPackage(source, harness.dataDir);
+  await harness.host.startPackage(failing);
+  await harness.waitFor(() => {
+    const error = stateOf(harness.dataDir, harness.pkg.manifest.id)['lastError'] as Record<string, unknown> | undefined;
+    return error?.['category'] === 'protocol' && error['id'] === 'protocol-node';
+  }, '协议问题送达 plugin.error');
+});

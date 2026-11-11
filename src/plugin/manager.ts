@@ -152,6 +152,11 @@ export class PluginManager {
       const hash = asString(data['contentHash']);
       if (!id || !hash) continue;
       const key = keyOf(id, hash);
+      if (event.type === 'plugin/uninstalled') {
+        this.lifecycle.delete(key);
+        this.versions.delete(key);
+        continue;
+      }
       const current = this.lifecycle.get(key) ?? { trusted: false, enabled: false };
       if (event.type === 'plugin/installed' && typeof data['version'] === 'string') {
         current.trusted = true;

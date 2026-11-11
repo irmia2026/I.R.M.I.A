@@ -243,7 +243,7 @@ test('③ 渠道唤醒端到端：她的任务卡标题是那句人话（v45 起
 
   // ③a 她那一拍的任务卡标题就是那句话（不是 `ROBOT1.0_…` 那串包裹）
   const heavy = rig.requests[1]!.request;
-  assert.equal(cardTitleOf(heavy), HUMAN_SENTENCE, '任务卡标题是那句人话——wakeTitle 那一处口径');
+  assert.equal(cardTitleOf(heavy), '（STATE.md 未写当前任务）', '任务卡不复制唤醒正文；它只读 STATE');
   assert.equal(nowLayerOf(heavy).includes('ROBOT1.0_'), false, '此刻层里不许出现消息 id');
   assert.equal(nowLayerOf(heavy).includes('本任务相关资产'), false, 'v45 起任务卡上不再有那一行');
 
@@ -256,7 +256,7 @@ test('③ 渠道唤醒端到端：她的任务卡标题是那句人话（v45 起
 
 // ──────────── ④ GUI 手动唤醒那条路：标题口径一样（v45 起不挑资产） ────────────
 
-test('④ GUI 手动唤醒（wake/manual）端到端：任务卡标题就是他打的那句话', async (t) => {
+test('④ GUI 手动唤醒（wake/manual）端到端：任务卡不复制聊天输入', async (t) => {
   const rig = await makeRealWakeRig({
     // 手动唤醒**不判注入**（judgeChannelWakes 只认 wake/channel），v45 起也不挑资产 ——
     // 所以这一拍**一次 light 都不发**：`generate` 一条脚本都不给，多调一次就抛。
@@ -271,7 +271,7 @@ test('④ GUI 手动唤醒（wake/manual）端到端：任务卡标题就是他�
 
   assert.deepEqual(rig.requests.map(item => item.lane), ['heavy'], '手动那一拍只剩她自己的主力车道（不再挑资产）');
   const heavy = rig.requests[0]!.request;
-  assert.equal(cardTitleOf(heavy), '把 GitHub 上那个仓库的数据查一下');
+  assert.equal(cardTitleOf(heavy), '（STATE.md 未写当前任务）');
   assert.equal(nowLayerOf(heavy).includes('本任务相关资产'), false, '任务卡上不再有那一行');
 });
 
@@ -283,7 +283,7 @@ test('④ 附带：手动唤醒的标题口径没变（空输入仍然是"（空
 
 // ──────────── ⑤ 界面预览与运行期同源（同一处口径 ⇒ 同一串字节） ────────────
 
-test('⑤ 界面预览的标题与运行期同一个口径：都出自 wakeTitle，不会一边人话一边包裹', async (t) => {
+test('⑤ 界面预览的标题与运行期同源：都只读 STATE，不复制唤醒正文', async (t) => {
   const rig = await makeRealWakeRig({
     // 渠道那一拍只有注入判定那一次 light（v45 起挑资产那一次没有了）
     generate: [{ outputItems: [{ type: 'message', text: NO_RISK }] }],
@@ -302,8 +302,7 @@ test('⑤ 界面预览的标题与运行期同一个口径：都出自 wakeTitle
   // 界面的预览（`buildReplay`）与 CLI 的重建都走 `deriveRequest` → `wakeTitle` 那一处口径；
   // 这里比的是**两串真实字节**——两处只要有一处另写口径，这一条就会红。
   const live = cardTitleOf(rig.requests[1]!.request);
-  assert.equal(clipTaskTitle(wakeTitle(wake)), live, '预览侧与运行期侧必须是同一串字节');
-  assert.equal(live, HUMAN_SENTENCE);
+  assert.equal(live, '（STATE.md 未写当前任务）');
   assert.equal(
     cardTitleOf(await previewRequestOf(rig, 1, 1)),
     live,
@@ -313,7 +312,7 @@ test('⑤ 界面预览的标题与运行期同一个口径：都出自 wakeTitle
 
 // ──────────── ⑥ 提及那一轮：三条渲染路径的标题逐字节相同 ────────────
 
-test('⑥ 提及那一轮：任务卡标题在运行期与界面预览里**逐字节相同**，且是那句通知（不是正文）', async (t) => {
+test('⑥ 提及那一轮：任务卡仍只读 STATE，群消息只在本轮输入里', async (t) => {
   const rig = await makeRealWakeRig({
     // 群里被 @ 的那一轮只会跑注入判定那一次 light（没有资产清单，不挑资产）
     generate: [{ outputItems: [{ type: 'message', text: NO_RISK }] }],
@@ -331,11 +330,8 @@ test('⑥ 提及那一轮：任务卡标题在运行期与界面预览里**逐�
   const heavy = rig.requests.find(item => item.lane === 'heavy');
   assert.ok(heavy !== undefined, '她那一拍该发一次请求（否则下面比的是空）');
   const live = cardTitleOf(heavy.request);
-  assert.ok(live.includes('提到了你'), `提及那一轮的标题是那句通知：${live}`);
-  assert.equal(live.includes(BODY), false, 'v28：正文不进她的上下文——标题里也不行');
-  // **盖章那两小段必须在**：它们是她真正看到的那句通知的一部分。收敛之前，运行期的任务卡标题
-  // 用的是没盖章的 contact，正好缺这两段（同一个东西两个说法）；这条断言就是钉它的。
-  assert.ok(live.includes('这一条你还没看过'), `标题取的是盖章版通知：${live}`);
+  assert.equal(live, '（STATE.md 未写当前任务）', '任务卡不复制群消息/提及通知');
+  assert.equal(live.includes(BODY), false, '任务卡里没有正文');
 
   const preview = cardTitleOf(await previewRequestOf(rig, 1, 1));
   assert.ok(preview !== '', '预览的任务卡标题必须存在（否则这条断言什么也没锁）');

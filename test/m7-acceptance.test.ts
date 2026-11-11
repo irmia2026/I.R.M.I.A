@@ -676,7 +676,7 @@ describe('M7-7 speak 三路投递', () => {
     setSleepForTest(async () => {});
     t.after(() => { setSleepForTest(null); });
 
-    const result = await admin.byName('speak').handler({ text: '用户，备份做完了，一切正常。' }, toolCtx(7));
+    const result = await admin.byName('speak').handler({ to: 'qq:c2c:OWNER', text: '用户，备份做完了，一切正常。' }, toolCtx(7));
     assert.equal(result.isError === true, false);
 
     // 第一路（逐段）：日志与前端按人打字的节奏一条条往外蹦——三条，不是一条。
@@ -693,7 +693,7 @@ describe('M7-7 speak 三路投递', () => {
 
     // 第三路（逐段）：IM 那边就该一条条收；幂等键 = turn 号
     assert.deepEqual(posted.map(p => p.text), ['用户', '备份做完了', '一切正常']);
-    assert.equal(posted[0]?.idempotencyKey, '7');
+    assert.equal(posted[0]?.idempotencyKey, 'turn-7');
 
     const channels = emitted.filter(e => e.type === 'speak/sent').map(e => (e.data as { channel: string }).channel);
     assert.deepEqual(channels.sort(), ['log', 'log', 'log', 'notify', 'reply-url']);
@@ -704,7 +704,7 @@ describe('M7-7 speak 三路投递', () => {
     assert.deepEqual(chars, [2, 4, 5, 14, 14], 'log 路按段计字数；notify 与 reply-url 按整篇计');
   });
 
-  test('没有回投地址时如实报"本轮无回投地址"，不假装成功', async (t) => {
+  test('speak 未写 to 时拒绝，且不落任何发言记录', async (t) => {
     const dataDir = tempDir(t, 'irmia-m7-speak-noreply-');
     const timers = new TimerStore(join(dataDir, 'timers.json'), { now: () => new Date(NOW_ISO) });
     const emitted: Array<{ type: string; data: unknown }> = [];
@@ -714,9 +714,9 @@ describe('M7-7 speak 三路投递', () => {
       replyTargetOf: () => null,
     });
     const result = await admin.byName('speak').handler({ text: '只有日志这一路。' }, toolCtx(3));
-    assert.ok(result.content.includes('发送成功'));
-    const channels = emitted.filter(e => e.type === 'speak/sent').map(e => (e.data as { channel: string }).channel);
-    assert.deepEqual(channels, ['log'], '没有回投就不写 reply-url 的 speak/sent');
+    assert.equal(result.isError, true);
+    assert.match(result.content, /缺少必填参数 to/u);
+    assert.deepEqual(emitted, []);
   });
 });
 

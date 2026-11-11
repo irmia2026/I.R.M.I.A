@@ -754,7 +754,7 @@ test('界面预览（buildReplay）与运行期对同一批事件给出相同字
     assert.ok(title !== '', `${label}的任务卡标题必须存在（否则这条断言什么也没锁）`);
     assert.equal(title.startsWith('{'), false, `${label}的任务卡标题不是一坨 JSON：${title}`);
     assert.equal(title.includes('"chatType"'), false, `${label}的任务卡标题里不许有事件字段名：${title}`);
-    assert.equal(title, SOLICIT_MEMORY, `${label}的任务卡标题该是那句人话本身：${title}`);
+    assert.equal(title, '（STATE.md 未写当前任务）', `${label}的任务卡只读 STATE，不复制会话消息：${title}`);
     // 机器标识一个都不许进标题（包裹标签 / 来源 / 消息 id / openid）
     for (const banned of ['[external_event', '[/external_event]', 'source=', 'msg=', 'person=', OWNER_OPENID]) {
       assert.equal(title.includes(banned), false, `${label}的任务卡标题里不许有 ${banned}：${title}`);
@@ -1299,7 +1299,7 @@ test('report 失败：不落"发出去过"的凭据，但她自己的视图里�
   rig.log.close();
 });
 
-test('report 省略 to 且这一轮没有回投会话：只落本机那条，不写带会话坐标的凭据', async (t) => {
+test('report 省略 to：直接拒绝，且不写带会话坐标的凭据', async (t) => {
   const rig = await reportRig(t, null);
   rig.write('channel/message', {
     channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'G1',
@@ -1307,15 +1307,11 @@ test('report 省略 to 且这一轮没有回投会话：只落本机那条，不
   });
 
   const out = await rig.report({ text: '只在对话流里' }, { callId: 'call_local', turn: 9 });
-  assert.equal(out.isError, undefined, out.content);
-  assert.match(out.content, /发送成功/u, out.content);
-  // 说清"凭什么没有凭据"：它只在本机，要真送到就带 `to` 再发。
-  // 2026-10-20（压成一行）：原来钉的"下一轮看不到这一篇"是"只在本机对话流"的直接推论
-  // （没到那边，自然读不回来），所以判据换成那一句本身。
-          assert.match(out.content, /发送成功/u, '没有 IM 会话时回执与正常投递同一句');
+  assert.equal(out.isError, true, out.content);
+  assert.match(out.content, /缺少必填参数 to/u);
 
   const view = await rig.read('qq:group:G1', 10);
-  assert.equal(view.content.includes('（我）'), false, '没有会话坐标就没有凭据（本机那条不代表到了那边）');
+  assert.equal(view.content.includes('（我）'), false);
   rig.log.close();
 });
 
@@ -1660,4 +1656,28 @@ test('没人理的群不跑话题：三条判据（7 天常量）逐条正反', 
     '私聊一律不掐 —— 对方就是在跟她说话，按"她多久没回"去掐恰好掐掉最该看的那一屏');
   assert.equal(isUnattendedGroup(group, { spokeAt: Number.NaN }, Number.NaN), false,
     '拿不到"现在"就不判（宁可多跑一次 light，也不因为一个坏值把群判成没人理）');
+});
+
+// ──────────────────────── ⑥ 表情包：`[表情]` 与图片附件不能被读成两件无关的东西 ────────────────────────
+test('QQ 表情包：纯 [表情] + image 附件要标成表情包图片', () => {
+  const base = {
+    channel: 'qq-official', chatType: 'c2c' as const, person: 'P', messageId: 'M', msgSeq: 1,
+    text: '[表情]',
+    attachments: [{ type: 'image/jpeg', name: 'sticker.jpg', url: 'https://example.test/sticker.jpg' }],
+  };
+  const withHint = renderExternalEvent(base);
+  assert.match(withHint, /\[表情包\] 一张图已附：sticker\.jpg/u);
+  assert.match(withHint, /不是纯文字占位/u);
+  assert.equal(withHint.includes('\n[image/jpeg: sticker.jpg]'), false,
+    '表情包与图片必须同一行，不能再拆成两件事');
+
+  // 不是“纯表情”时不改：普通文字里夹一个表情，仍按原话+附件呈现。
+  const mixed = renderExternalEvent({ ...base, text: '看图 [表情]' });
+  assert.doesNotMatch(mixed, /\[表情包\] 一张图已附/u);
+  assert.match(mixed, /看图 \[表情\]/u);
+
+  // 没有图片附件时也不改：它可能只是一个普通表情字符。
+  const faceOnly = renderExternalEvent({ ...base, attachments: undefined });
+  assert.doesNotMatch(faceOnly, /\[表情包\] 一张图已附/u);
+  assert.match(faceOnly, /\[表情\]/u);
 });

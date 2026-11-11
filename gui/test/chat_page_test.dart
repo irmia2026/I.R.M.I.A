@@ -285,6 +285,24 @@ void main() {
     expect(find.textContaining('会话来源'), findsNothing);
   });
 
+  testWidgets('Ingress webhook 以「外部事件」卡片上屏，不伪装成聊天消息', (tester) async {
+    await pumpChat(tester, history: [
+      evt(1, 'wake/webhook', {
+        'source': 'ing_EXAMPLE_SOURCE',
+        'kind': 'greyharbor.h.intimacy.passive_feedback',
+        'severity': 'info',
+        'title': '灰港 · 近况',
+        'message': '雨声贴在窗上。',
+      }),
+    ]);
+
+    final cards = find.byKey(const ValueKey('webhook-card'));
+    expect(cards, findsOneWidget, reason: '一条 ingress 事件 = 一张外部事件卡');
+    expect(find.text('外部事件'), findsOneWidget, reason: '卡头标签');
+    expect(find.text('灰港 · 近况'), findsOneWidget, reason: '卡片标题');
+    expect(find.text('雨声贴在窗上。'), findsOneWidget, reason: '投递正文');
+  });
+
   testWidgets('类别标记按 chatType 分三种；认不出的不猜，用通道名兜底', (tester) async {
     await pumpChat(tester, history: [
       channel(1, chatType: 'c2c', chatId: 'OPENID-C', text: '单聊的一句'),

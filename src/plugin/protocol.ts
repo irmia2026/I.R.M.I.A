@@ -100,6 +100,7 @@ export const PLUGIN_PLUGIN_METHODS = {
   filesWrite: 'files.write',
   filesList: 'files.list',
   chatSend: 'chat.send',
+  chatRead: 'chat.read',
   modelComplete: 'model.complete',
   timerEvery: 'timer.every',
   timerCron: 'timer.cron',

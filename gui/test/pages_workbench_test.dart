@@ -28,7 +28,12 @@ class _FakeApi extends IrmiaApi {
   }
 
   @override
-  Future<dynamic> post(String path, Map<String, dynamic> body, {String? confirm, Duration? timeout}) async {
+  Future<dynamic> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? confirm,
+    Duration? timeout,
+  }) async {
     posts.add((path: path, body: body, confirm: confirm));
     return {'ok': true};
   }
@@ -40,7 +45,8 @@ _FakeApi? _lastApi;
 void main() {
   // 本机忽略标记会落 ui_state：测试指向临时文件，别踩真实 %APPDATA% 里的状态
   setUpAll(() {
-    stateFileOverride = '${Directory.systemTemp.path}${Platform.pathSeparator}irmia-ui-state-test.json';
+    stateFileOverride =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}irmia-ui-state-test.json';
   });
 
   final config = <String, dynamic>{
@@ -53,7 +59,11 @@ void main() {
         'tokenUrl': 'https://bots.qq.com/app/getAppAccessToken',
         'gatewayUrl': '',
       },
-      'onebot': {'enabled': false, 'wsUrl': 'ws://127.0.0.1:3001', 'tokenEnv': 'ONEBOT_TOKEN'},
+      'onebot': {
+        'enabled': false,
+        'wsUrl': 'ws://127.0.0.1:3001',
+        'tokenEnv': 'ONEBOT_TOKEN',
+      },
     },
     'alerts': {'webhookUrl': 'http://127.0.0.1:9000/hook', 'rateLimitMin': 5},
     'web': {'host': '127.0.0.1', 'port': 7788},
@@ -118,7 +128,11 @@ void main() {
         'toolsCount': 1,
         'registeredTools': ['mcp__filesystem__read'],
         'toolDetails': [
-          {'name': 'read', 'fullName': 'mcp__filesystem__read', 'description': '读一个文件'},
+          {
+            'name': 'read',
+            'fullName': 'mcp__filesystem__read',
+            'description': '读一个文件',
+          },
         ],
       },
     ],
@@ -131,20 +145,40 @@ void main() {
   final tools = <String, dynamic>{
     'groups': [
       {'id': 'builtin', 'label': '内置工具', 'note': '随程序一起来的工具。'},
-      {'id': 'mcp:mcpdemo', 'label': 'mcpdemo', 'note': '来自 MCP 服务 mcpdemo 的工具。'},
+      {
+        'id': 'mcp:mcpdemo',
+        'label': 'mcpdemo',
+        'note': '来自 MCP 服务 mcpdemo 的工具。',
+      },
     ],
     'tools': [
       {
-        'name': 'safe_read', 'group': 'builtin', 'enabled': true, 'sideEffect': 'none',
-        'executionMode': 'parallel', 'description': '读文件', 'timeoutMs': 1000,
+        'name': 'safe_read',
+        'group': 'builtin',
+        'enabled': true,
+        'sideEffect': 'none',
+        'executionMode': 'parallel',
+        'description': '读文件',
+        'timeoutMs': 1000,
       },
       {
-        'name': 'pwsh', 'group': 'builtin', 'enabled': false, 'sideEffect': 'destructive',
-        'executionMode': 'exclusive', 'description': '跑命令', 'timeoutMs': 5000,
+        'name': 'pwsh',
+        'group': 'builtin',
+        'enabled': false,
+        'sideEffect': 'destructive',
+        'executionMode': 'exclusive',
+        'description': '跑命令',
+        'timeoutMs': 5000,
       },
       {
-        'name': 'mcp__mcpdemo__echo', 'group': 'mcp:mcpdemo', 'enabled': true, 'sideEffect': 'destructive',
-        'executionMode': 'exclusive', 'description': 'MCP 回显', 'timeoutMs': 5000, 'fromMcp': true,
+        'name': 'mcp__mcpdemo__echo',
+        'group': 'mcp:mcpdemo',
+        'enabled': true,
+        'sideEffect': 'destructive',
+        'executionMode': 'exclusive',
+        'description': 'MCP 回显',
+        'timeoutMs': 5000,
+        'fromMcp': true,
       },
     ],
     'destructivePolicy': false,
@@ -153,8 +187,12 @@ void main() {
   final hooks = <String, dynamic>{
     'entries': [
       {
-        'index': 0, 'hook': 'PreToolUse', 'matcher': 'pwsh', 'command': 'node check.mjs',
-        'timeoutMs': 10000, 'enabled': true,
+        'index': 0,
+        'hook': 'PreToolUse',
+        'matcher': 'pwsh',
+        'command': 'node check.mjs',
+        'timeoutMs': 10000,
+        'enabled': true,
       },
     ],
     'problems': <dynamic>[],
@@ -169,36 +207,52 @@ void main() {
   final sessions = <String, dynamic>{
     'sessions': [
       {
-        'sid': 'qq:c2c:OPENID-A', 'channel': 'qq-official', 'chatType': 'c2c', 'chatId': 'OPENID-A',
-        'person': 'OPENID-A', 'name': '用户', 'lastSeenAt': '2026-10-01T10:35:42.000Z',
-        'lastText': '在吗', 'messages': 3, 'unread': 0, 'readUpToSeq': 3,
+        'sid': 'qq:c2c:OPENID-A',
+        'channel': 'qq-official',
+        'chatType': 'c2c',
+        'chatId': 'OPENID-A',
+        'person': 'OPENID-A',
+        'name': '用户',
+        'lastSeenAt': '2026-10-01T10:35:42.000Z',
+        'lastText': '在吗',
+        'messages': 3,
+        'unread': 0,
+        'readUpToSeq': 3,
       },
       {
-        'sid': 'onebot:group-at:90001', 'channel': 'onebot', 'chatType': 'group-at', 'chatId': '90001',
-        'person': '10001', 'name': null, 'lastSeenAt': '2026-10-01T09:00:00.000Z',
-        'lastText': '早', 'messages': 2, 'unread': 0, 'readUpToSeq': 2,
+        'sid': 'onebot:group-at:90001',
+        'channel': 'onebot',
+        'chatType': 'group-at',
+        'chatId': '90001',
+        'person': '10001',
+        'name': null,
+        'lastSeenAt': '2026-10-01T09:00:00.000Z',
+        'lastText': '早',
+        'messages': 2,
+        'unread': 0,
+        'readUpToSeq': 2,
       },
     ],
   };
 
   /// 渠道页与扩展页都只读 API：这份路由表覆盖它们会请求的端点
   Map<String, dynamic> routes() => {
-        '/api/config': config,
-        '/api/events': events,
-        '/api/sessions': sessions,
-        '/api/keys': {
-          'qqAppId': {'configured': false, 'mask': null},
-          'qqClientSecret': {'configured': true, 'mask': 'DG5g…7x9Q'},
-          'onebotToken': {'configured': false, 'mask': null},
-        },
-        '/api/skills': skills,
-        '/api/mcp': mcp,
-        // 扩展页的 `mcp` 那一屏读两个端点（第二个是她的申请单，2026-10-11 加）：
-        // 不给它就会走一次 null 响应，那一段被当成"读失败"（实测：这一页 4 条用例一起红）
-        '/api/grants': <String, dynamic>{'items': <dynamic>[], 'open': 0},
-        '/api/tools': tools,
-        '/api/hooks': hooks,
-      };
+    '/api/config': config,
+    '/api/events': events,
+    '/api/sessions': sessions,
+    '/api/keys': {
+      'qqAppId': {'configured': false, 'mask': null},
+      'qqClientSecret': {'configured': true, 'mask': 'DG5g…7x9Q'},
+      'onebotToken': {'configured': false, 'mask': null},
+    },
+    '/api/skills': skills,
+    '/api/mcp': mcp,
+    // 扩展页的 `mcp` 那一屏读两个端点（第二个是她的申请单，2026-10-11 加）：
+    // 不给它就会走一次 null 响应，那一段被当成"读失败"（实测：这一页 4 条用例一起红）
+    '/api/grants': <String, dynamic>{'items': <dynamic>[], 'open': 0},
+    '/api/tools': tools,
+    '/api/hooks': hooks,
+  };
 
   Future<AppState> pumpPage(
     WidgetTester tester,
@@ -211,10 +265,12 @@ void main() {
     final api = _FakeApi(routes());
     _lastApi = api;
     final state = AppState(api: api);
-    await tester.pumpWidget(MaterialApp(
-      theme: IrmiaTheme.light(),
-      home: Scaffold(body: build(state)),
-    ));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: IrmiaTheme.light(),
+        home: Scaffold(body: build(state)),
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
     return state;
@@ -225,8 +281,12 @@ void main() {
 
     // 列表三项各自一行；首项同时在详情里出现一次
     expect(find.text('OneBot 11'), findsOneWidget);
-    expect(find.text('Webhook 与文件监听'), findsOneWidget);
-    expect(find.text('QQ 官方 Bot API'), findsNWidgets(2), reason: '首项应在列表与详情各出现一次');
+    expect(find.text('事件与告警'), findsOneWidget);
+    expect(
+      find.text('QQ 官方 Bot API'),
+      findsNWidgets(2),
+      reason: '首项应在列表与详情各出现一次',
+    );
 
     // 行尾 icon-only「配置」：三项各一枚
     expect(find.byTooltip('配置'), findsNWidgets(3));
@@ -245,23 +305,52 @@ void main() {
     expect(activityTitle.style?.fontSize, 15, reason: '与「通道配置」同一档标题');
     expect(activityTitle.style?.color, isNull, reason: '用默认前景色，不再自降一档');
     // 卡片里标题已经把上面隔开了：第一行不顶线，行与行之间才有
-    expect(tester.widget<Container>(find.byKey(const ValueKey('feed-row-0'))).decoration, isNull);
-    expect(tester.widget<Container>(find.byKey(const ValueKey('feed-row-1'))).decoration, isNotNull,
-        reason: '行与行之间照旧分隔');
+    expect(
+      tester
+          .widget<Container>(find.byKey(const ValueKey('feed-row-0')))
+          .decoration,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<Container>(find.byKey(const ValueKey('feed-row-1')))
+          .decoration,
+      isNotNull,
+      reason: '行与行之间照旧分隔',
+    );
     // AppID / AppSecret 填值（不是环境变量名）：两把密钥的输入框各一个
     expect(find.byKey(const ValueKey('secret-qqAppId')), findsOneWidget);
     expect(find.byKey(const ValueKey('secret-qqClientSecret')), findsOneWidget);
     expect(find.text('已配置 DG5g…7x9Q'), findsOneWidget, reason: '已配置的密钥只显示掩码');
     // 用户 ③：已配置要"提醒明显一点"；用户 ⑥ 定了色与位置——**蓝色、居中**（绿色的那版他说丑）。
     // 这一组假数据正好两个都有：qqClientSecret 已配置、qqAppId 未配置，可以断言对照。
-    final configured = tester.widget<TextField>(find.byKey(const ValueKey('secret-qqClientSecret')));
-    expect(configured.decoration?.hintStyle?.color, IrmiaTheme.light().colorScheme.primary,
-        reason: '已配置的密钥格：提示文字转蓝');
+    final configured = tester.widget<TextField>(
+      find.byKey(const ValueKey('secret-qqClientSecret')),
+    );
+    expect(
+      configured.decoration?.hintStyle?.color,
+      IrmiaTheme.light().colorScheme.primary,
+      reason: '已配置的密钥格：提示文字转蓝',
+    );
     expect(configured.textAlign, TextAlign.center, reason: '已配置的密钥格：居中');
-    expect(configured.decoration?.enabledBorder, isNotNull, reason: '已配置的密钥格：边框也要跟着变');
-    final unconfigured = tester.widget<TextField>(find.byKey(const ValueKey('secret-qqAppId')));
-    expect(unconfigured.decoration?.hintStyle, isNull, reason: '未配置的密钥格照旧——蓝只留给"已配置"');
-    expect(unconfigured.textAlign, TextAlign.start, reason: '未配置就是个普通输入框，跟同页别的字段一样左对齐');
+    expect(
+      configured.decoration?.enabledBorder,
+      isNotNull,
+      reason: '已配置的密钥格：边框也要跟着变',
+    );
+    final unconfigured = tester.widget<TextField>(
+      find.byKey(const ValueKey('secret-qqAppId')),
+    );
+    expect(
+      unconfigured.decoration?.hintStyle,
+      isNull,
+      reason: '未配置的密钥格照旧——蓝只留给"已配置"',
+    );
+    expect(
+      unconfigured.textAlign,
+      TextAlign.start,
+      reason: '未配置就是个普通输入框，跟同页别的字段一样左对齐',
+    );
     // 字段说明按用户 ③ 改短：一句一行，只留"留空怎么算 + 收哪种协议"
     expect(find.text('留空用官方地址，只收 http(s)。'), findsNWidgets(2));
     expect(find.text('留空向凭证接口取，只收 ws(s)。'), findsOneWidget);
@@ -276,20 +365,34 @@ void main() {
     await pumpPage(tester, (state) => ChannelsPage(state: state));
 
     expect(find.text('会话联系人'), findsOneWidget, reason: '看得见（不再要逐个通道翻）');
-    expect(find.text('qq:c2c:OPENID-A'), findsOneWidget, reason: '官 Bot 那条在自己那一页');
-    expect(find.text('onebot:group-at:90001'), findsNothing,
-        reason: 'OneBot 的会话不许出现在官 Bot 这一页：两台手机互相独立');
+    expect(
+      find.text('qq:c2c:OPENID-A'),
+      findsOneWidget,
+      reason: '官 Bot 那条在自己那一页',
+    );
+    expect(
+      find.text('onebot:group-at:90001'),
+      findsNothing,
+      reason: 'OneBot 的会话不许出现在官 Bot 这一页：两台手机互相独立',
+    );
 
     await tester.tap(find.text('OneBot 11'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('onebot:group-at:90001'), findsOneWidget, reason: '切过来才看得到它自己的');
+    expect(
+      find.text('onebot:group-at:90001'),
+      findsOneWidget,
+      reason: '切过来才看得到它自己的',
+    );
     expect(find.text('qq:c2c:OPENID-A'), findsNothing, reason: '反过来也一样');
-    expect(find.textContaining('还没有通道活动'), findsOneWidget,
-        reason: '空态是卡内一行灰字，不再是一块占半张卡的 StateBlock（用户 ⑤）');
+    expect(
+      find.textContaining('还没有通道活动'),
+      findsOneWidget,
+      reason: '空态是卡内一行灰字，不再是一块占半张卡的 StateBlock（用户 ⑤）',
+    );
 
     // Webhook 那条是告警出口 + 文件监听，根本不会有会话：不摆这张卡
-    await tester.tap(find.text('Webhook 与文件监听'));
+    await tester.tap(find.text('事件与告警'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('会话联系人'), findsNothing);
@@ -308,7 +411,8 @@ void main() {
   testWidgets('渠道页：开关与字段改动只提交差异项，改回原值即回干净', (tester) async {
     await pumpPage(tester, (state) => ChannelsPage(state: state));
 
-    FilledButton saveButton() => tester.widget<FilledButton>(find.byType(FilledButton));
+    FilledButton saveButton() =>
+        tester.widget<FilledButton>(find.byType(FilledButton));
     expect(saveButton().onPressed, isNull, reason: '未改动时「保存」应禁用');
 
     // 关掉 QQ 官方通道：只有开关这一项进 fields
@@ -327,20 +431,31 @@ void main() {
     // 反向判据：这一笔写的是 `channels.qqOfficial.enabled`，**不是** `trust.mode`，
     // 所以不许带字段短语 `trust-full-access`——那是"改信任范围"专用的门。
     // 无脑给所有 config 提交都加，等于把那条门放宽到"随便谁都能声明"，判据就没了。
-    expect(post.confirm, isNot(contains('trust-full-access')),
-        reason: '不带 trust.mode 的提交不该带那个字段短语');
+    expect(
+      post.confirm,
+      isNot(contains('trust-full-access')),
+      reason: '不带 trust.mode 的提交不该带那个字段短语',
+    );
     expect(post.body['fields'], {'channels.qqOfficial.enabled': false});
 
     // 改一个字段：只提交该字段，不带上没动过的项
-    await tester.enterText(find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')), 'https://api.example.com');
+    await tester.enterText(
+      find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')),
+      'https://api.example.com',
+    );
     await tester.pump();
     await tester.tap(find.byType(FilledButton));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
-    expect(_lastApi!.posts.last.body['fields'], {'channels.qqOfficial.apiBase': 'https://api.example.com'});
+    expect(_lastApi!.posts.last.body['fields'], {
+      'channels.qqOfficial.apiBase': 'https://api.example.com',
+    });
 
     // 填密钥：走 set-key（值写进本机密钥文件），与 config-update 是两条通道
-    await tester.enterText(find.byKey(const ValueKey('secret-qqAppId')), '102000000');
+    await tester.enterText(
+      find.byKey(const ValueKey('secret-qqAppId')),
+      '102000000',
+    );
     await tester.pump();
     await tester.tap(find.byType(FilledButton));
     await tester.pump();
@@ -351,18 +466,26 @@ void main() {
     expect(secretPost.confirm, 'set-key', reason: '写密钥必须带 X-Confirm');
 
     // 改回生效值：脏状态自动消失，按钮回到禁用
-    await tester.enterText(find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')), 'https://api.sgroup.qq.com');
+    await tester.enterText(
+      find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')),
+      'https://api.sgroup.qq.com',
+    );
     await tester.pump();
     expect(saveButton().onPressed, isNull, reason: '改回原值后应重新禁用');
     expect(find.text('有未保存的更改'), findsNothing);
 
     // 清空一项：提交 null（= 回到默认值），而不是空串——空串会被服务端的配置校验拒掉并回滚
-    await tester.enterText(find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')), '');
+    await tester.enterText(
+      find.byKey(const ValueKey('field-channels.qqOfficial.apiBase')),
+      '',
+    );
     await tester.pump();
     await tester.tap(find.byType(FilledButton));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
-    expect(_lastApi!.posts.last.body['fields'], {'channels.qqOfficial.apiBase': null});
+    expect(_lastApi!.posts.last.body['fields'], {
+      'channels.qqOfficial.apiBase': null,
+    });
     await tester.pump(const Duration(seconds: 5));
   });
 
@@ -402,8 +525,16 @@ void main() {
   testWidgets('渠道页：没启用任何通道时顶部给引导条，动作落到配置区', (tester) async {
     final disabled = <String, dynamic>{
       'channels': {
-        'qqOfficial': {'enabled': false, 'appIdEnv': 'QQ_BOT_APPID', 'clientSecretEnv': 'QQ_BOT_SECRET'},
-        'onebot': {'enabled': false, 'wsUrl': 'ws://127.0.0.1:3001', 'tokenEnv': 'ONEBOT_TOKEN'},
+        'qqOfficial': {
+          'enabled': false,
+          'appIdEnv': 'QQ_BOT_APPID',
+          'clientSecretEnv': 'QQ_BOT_SECRET',
+        },
+        'onebot': {
+          'enabled': false,
+          'wsUrl': 'ws://127.0.0.1:3001',
+          'tokenEnv': 'ONEBOT_TOKEN',
+        },
       },
       'alerts': <String, dynamic>{},
       'web': {'host': '127.0.0.1', 'port': 7788},
@@ -412,10 +543,22 @@ void main() {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
-    final api = _FakeApi({'/api/config': disabled, '/api/events': events, '/api/skills': skills, '/api/mcp': <String, dynamic>{}, '/api/tools': <String, dynamic>{}, '/api/hooks': <String, dynamic>{}});
+    final api = _FakeApi({
+      '/api/config': disabled,
+      '/api/events': events,
+      '/api/skills': skills,
+      '/api/mcp': <String, dynamic>{},
+      '/api/tools': <String, dynamic>{},
+      '/api/hooks': <String, dynamic>{},
+    });
     _lastApi = api;
     final state = AppState(api: api);
-    await tester.pumpWidget(MaterialApp(theme: IrmiaTheme.light(), home: Scaffold(body: ChannelsPage(state: state))));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: IrmiaTheme.light(),
+        home: Scaffold(body: ChannelsPage(state: state)),
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
@@ -446,7 +589,10 @@ void main() {
     // 详情是首项（技能）：待确认 / 已生效两段都在，行尾带确认与忽略两枚 icon-only 动作
     expect(find.text('待确认'), findsOneWidget);
     expect(find.text('已生效'), findsOneWidget);
-    expect(find.byTooltip('确认：写入 skill/installed，技能进入 catalog'), findsOneWidget);
+    expect(
+      find.byTooltip('确认：写入 skill/installed，技能进入 catalog'),
+      findsOneWidget,
+    );
     expect(find.byTooltip('忽略：收进「已忽略」，不写事件、不进 catalog'), findsOneWidget);
     // 三处添加引导：技能这一项的主动作
     expect(find.text('新建技能'), findsOneWidget);
@@ -473,7 +619,11 @@ void main() {
     expect(find.text('启动命令'), findsOneWidget);
     expect(find.textContaining('npx'), findsWidgets);
     expect(find.text('测试连接'), findsOneWidget);
-    expect(find.textContaining('读一个文件'), findsOneWidget, reason: '展开后要能看到它提供的工具');
+    expect(
+      find.textContaining('读一个文件'),
+      findsOneWidget,
+      reason: '展开后要能看到它提供的工具',
+    );
 
     // 再点一次折叠回去
     await tester.tap(find.byTooltip('折叠这个服务'));
@@ -509,7 +659,10 @@ void main() {
 
     // 容器按组遍历：两个组各一张卡（将来加 computer use 组时这里一个字都不用改）
     expect(find.byKey(const ValueKey('tool-group-builtin')), findsOneWidget);
-    expect(find.byKey(const ValueKey('tool-group-mcp:mcpdemo')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('tool-group-mcp:mcpdemo')),
+      findsOneWidget,
+    );
     expect(find.text('内置工具'), findsWidgets);
     expect(find.text('全开'), findsNWidgets(2));
     expect(find.text('全关'), findsNWidgets(2));
@@ -538,8 +691,14 @@ void main() {
     expect(find.byKey(const ValueKey('form-name')), findsOneWidget);
     expect(find.byKey(const ValueKey('form-description')), findsOneWidget);
 
-    await tester.enterText(find.byKey(const ValueKey('form-name')), 'morning-review');
-    await tester.enterText(find.byKey(const ValueKey('form-description')), '每天早上整理一遍昨天的进展并落一份摘要');
+    await tester.enterText(
+      find.byKey(const ValueKey('form-name')),
+      'morning-review',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('form-description')),
+      '每天早上整理一遍昨天的进展并落一份摘要',
+    );
     await tester.tap(find.text('创建'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
@@ -561,16 +720,24 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
     await tester.enterText(find.byKey(const ValueKey('form-name')), '晨间总结');
-    await tester.enterText(find.byKey(const ValueKey('form-description')), '每天早上整理一遍昨天的进展');
+    await tester.enterText(
+      find.byKey(const ValueKey('form-description')),
+      '每天早上整理一遍昨天的进展',
+    );
     await tester.tap(find.text('创建'));
     await tester.pump();
 
     expect(find.text('只允许小写字母、数字与连字符'), findsOneWidget, reason: '校验在弹窗里当场说');
-    expect(_lastApi!.posts.where((p) => p.path == '/api/commands/skill-create'), isEmpty);
+    expect(
+      _lastApi!.posts.where((p) => p.path == '/api/commands/skill-create'),
+      isEmpty,
+    );
     await tester.pump(const Duration(seconds: 5));
   });
 
-  testWidgets('扩展页：添加 MCP 服务的表单提交 name/command/args/env/enabled', (tester) async {
+  testWidgets('扩展页：添加 MCP 服务的表单提交 name/command/args/env/enabled', (
+    tester,
+  ) async {
     await pumpPage(tester, (state) => ExtensionsPage(state: state));
     await tester.tap(find.byKey(const ValueKey('ext-item-mcp')));
     await tester.pump();
@@ -582,10 +749,22 @@ void main() {
     expect(find.text('测试连接'), findsOneWidget, reason: '还没保存也要能先试一下');
 
     // 按 key 定位输入框（hint 是会被改的文案，key 是契约）
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-name')), 'demo');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-command')), 'node');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-args')), 'server.mjs\n--root\nD:/work');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-env')), 'ROOT=D:/work');
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-name')),
+      'demo',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-command')),
+      'node',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-args')),
+      'server.mjs\n--root\nD:/work',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-env')),
+      'ROOT=D:/work',
+    );
     await tester.tap(find.text('保存'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
@@ -611,10 +790,18 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('mcp-add')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-name')), 'obscura');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-command')), 'node');
     await tester.enterText(
-        find.byKey(const ValueKey('mcp-field-desc')), '读本机浏览器历史与当前标签页');
+      find.byKey(const ValueKey('mcp-field-name')),
+      'obscura',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-command')),
+      'node',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-desc')),
+      '读本机浏览器历史与当前标签页',
+    );
     await tester.tap(find.text('保存'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
@@ -632,9 +819,18 @@ void main() {
 
     // 默认值就摆在表单里：服务端那个 8 秒兜底是"宁可快些失败"，给人按的默认值是 30 秒
     expect(find.text('30000'), findsOneWidget);
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-name')), 'demo');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-command')), 'npx');
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-args')), '-y\n@modelcontextprotocol/server-demo');
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-name')),
+      'demo',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-command')),
+      'npx',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-args')),
+      '-y\n@modelcontextprotocol/server-demo',
+    );
     await tester.tap(find.text('测试连接'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
@@ -652,7 +848,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     // 改成别的值：跟着走，不被界面写死
-    await tester.enterText(find.byKey(const ValueKey('mcp-field-timeout')), '45000');
+    await tester.enterText(
+      find.byKey(const ValueKey('mcp-field-timeout')),
+      '45000',
+    );
     await tester.pump();
     await tester.tap(find.text('测试连接'));
     await tester.pump();
@@ -680,7 +879,11 @@ void main() {
     // ① 元工具口径：调用走内置的 mcp 工具（不是"每件 MCP 工具进她的清单"）
     expect(inDialog('内置的 mcp 工具'), findsOneWidget);
     // ② 废弃说法一个都不许留在界面上
-    expect(inDialog('mcp__'), findsNothing, reason: '工具名不再合成，对话框里不该提 mcp__服务名__工具名');
+    expect(
+      inDialog('mcp__'),
+      findsNothing,
+      reason: '工具名不再合成，对话框里不该提 mcp__服务名__工具名',
+    );
     expect(inDialog('合成'), findsNothing);
     // ③ 服务名 = 给这个 server 起的名字（调用时用得到），不是"工具名前缀"
     expect(inDialog('调用时用得到'), findsOneWidget);
@@ -690,7 +893,11 @@ void main() {
     //     所以它不再排第一个——这一条锁的是提示里先给能起的写法、并明说 npx 起不来。
     //     （长度受 copy_rules_test.dart 的 100 字闸约束：这条提示现在 98 字，超了那条闸会当场拦下。）
     expect(inDialog('uvx …'), findsOneWidget, reason: 'command 提示要先给本机能起的写法');
-    expect(inDialog('npx 在 Windows 上起不来'), findsOneWidget, reason: '本机实测起不来的写法要明说，别让人照着试');
+    expect(
+      inDialog('npx 在 Windows 上起不来'),
+      findsOneWidget,
+      reason: '本机实测起不来的写法要明说，别让人照着试',
+    );
     // ⑤ env 是"追加"，不是"只给这些"（池把 entry.env 合进 process.env，client.ts 的 spawner）
     expect(inDialog('继承主进程的环境变量'), findsOneWidget);
     // ⑥ 开关 = 参与/不参与拉起，与"随主进程启动"无关（生产**不** registerAll）
@@ -712,9 +919,15 @@ void main() {
     final staleSkills = <String, dynamic>{
       'items': [
         {
-          'name': 'demo-skill', 'trust': 'never-confirmed', 'inCatalog': false, 'ignored': true,
-          'description': '演示技能', 'skillPath': 'skills/demo-skill/SKILL.md', 'bytes': 1,
-          'contentHash': 'abcdef1234567890', 'trustDetail': '从未确认',
+          'name': 'demo-skill',
+          'trust': 'never-confirmed',
+          'inCatalog': false,
+          'ignored': true,
+          'description': '演示技能',
+          'skillPath': 'skills/demo-skill/SKILL.md',
+          'bytes': 1,
+          'contentHash': 'abcdef1234567890',
+          'trustDetail': '从未确认',
         },
       ],
       'rejected': <dynamic>[],
@@ -724,13 +937,22 @@ void main() {
     final api = _FakeApi({...routes(), '/api/skills': staleSkills});
     _lastApi = api;
     final state = AppState(api: api);
-    await tester.pumpWidget(MaterialApp(theme: IrmiaTheme.light(), home: Scaffold(body: ExtensionsPage(state: state))));
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: IrmiaTheme.light(),
+        home: Scaffold(body: ExtensionsPage(state: state)),
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(find.text('已忽略'), findsOneWidget, reason: '真正存在的被忽略技能要照常摆出来');
     expect(find.text('demo-skill'), findsOneWidget);
-    expect(find.text('deleted-skill'), findsNothing, reason: '扫不到的记录不该在界面上变成一行"查无此技"');
+    expect(
+      find.text('deleted-skill'),
+      findsNothing,
+      reason: '扫不到的记录不该在界面上变成一行"查无此技"',
+    );
     expect(find.text('0 已生效 · 0 待确认'), findsOneWidget, reason: '摘要也不该把它算成待确认');
     await tester.pump(const Duration(seconds: 5));
   });
@@ -740,7 +962,11 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('ext-item-hooks')));
     await tester.pump();
 
-    expect(find.textContaining('agent 对它只读'), findsOneWidget, reason: '安全边界要写在页面上');
+    expect(
+      find.textContaining('agent 对它只读'),
+      findsOneWidget,
+      reason: '安全边界要写在页面上',
+    );
     final sw = find.descendant(
       of: find.byKey(const ValueKey('hook-0')),
       matching: find.byType(Switch),
@@ -760,3 +986,4 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 }
+

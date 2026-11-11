@@ -65,6 +65,18 @@ test('stderr 洪泛有字节、行数与单行上限，仍能处理后续协议�
   assert.ok(fx.logs.some((line) => /stderr.*已丢弃 \d+ 字节/u.test(line)));
 });
 
+test('Node 停用会等待异步 deactivate 收尾', async (t) => {
+  const fx = directProcess(t, `export function activate() {}
+    export async function deactivate(ctx) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      ctx.log.info('DEACTIVATE_DONE');
+    }`);
+  await fx.child.start();
+  await fx.child.stop('test');
+  assert.equal(fx.notifications.some((item) => item.method === 'log.write'
+    && (item.params as { message?: unknown }).message === 'DEACTIVATE_DONE'), true);
+});
+
 test('Python 首次运行不生成字节码，正常及损坏包都可通过管理命令停用卸载', async (t) => {
   if (!probePython().available) { t.skip('Python unavailable'); return; }
   const fx = await createHarness({ fixture: 'plugin-py', enable: false });

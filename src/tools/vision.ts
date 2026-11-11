@@ -18,8 +18,8 @@
  *   - **结构化容错**：要求 json_schema，但模型可能回带代码围栏或混解释文字，因此解析走
  *     「剥离围栏 → 直接 parse → 提取首个 JSON 对象 → 全部失败则回退纯文本」四段降级，
  *     回退结果标注 `fallback: true`，绝不因为一次格式漂移就丢掉整张图的描述。
- *   - **GIF 只按静态首帧读**：零依赖下不做动图拆帧，读取时按静态图送入并注明这一点，
- *     避免模型对「动图」产生不存在的信息。
+ *   - **GIF 多帧会转帧序列矩阵**：读取时用系统 GDI+ 抽帧、标帧号和时间，矩阵图再送入视觉模型；
+ *     单帧 GIF 仍按静态图读，并注明这一点。inline 直通则保留原文件（不做静默替换）。
  *
  * 路径白名单复用 `./fs/path-guard.ts`（符号链接展开后再比前缀），不另起一套语义。
  */
@@ -36,6 +36,7 @@ import { FS_ERROR_CODES } from './fs/types.ts';
 // 进上下文的图片型别白名单：**只有一处**（`log/types.ts`）。inline 这条路的准入判据与渲染层
 // 挑图用的是同一个函数——两处各抄一份名单，必然漂成"回执说进了、请求体里没有"（2026-10-11 修）
 import { CONTEXT_IMAGE_MEDIA_TYPES, contextImageMimeAllowed } from '../log/types.ts';
+import { ensureGifMatrix, gifMatrixPath, isGifFile } from '../channel/gif-matrix.ts';
 import type { DsReasoningEffort, DsResponse } from '../model/ds-client.ts';
 import {
   TOOL_ERROR_CODES,
@@ -715,9 +716,20 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
 
         for (const file of unique) {
           const filename = posixRelative(ctx.workspaceRoot, file);
+          let visionFile = file;
+          let gifNote: string | undefined;
+          if (isGifFile(file)) {
+            const matrix = await ensureGifMatrix(file, gifMatrixPath(options.dataDir, file), {
+              timeoutMs: 20_000,
+            });
+            if (matrix.ok && matrix.path !== undefined) {
+              visionFile = matrix.path;
+              gifNote = `多帧 GIF 已转帧序列矩阵（原 ${matrix.frames ?? '?'} 帧，取 ${matrix.selected ?? '?'} 帧；帧号和时间标在图上）`;
+            }
+          }
           let bytes: Buffer;
           try {
-            const info = await stat(file);
+            const info = await stat(visionFile);
             if (info.size > maxImageBytes) {
               items.push({
                 filename,
@@ -728,7 +740,7 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
               });
               continue;
             }
-            bytes = await readFile(file);
+            bytes = await readFile(visionFile);
           } catch (err) {
             items.push({
               filename,
@@ -751,7 +763,7 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
           }
 
           const sha256 = sha256Hex(bytes);
-          const mime = imageMimeOf(file) ?? 'application/octet-stream';
+          const mime = imageMimeOf(visionFile) ?? 'application/octet-stream';
           const resultId = visionResultId(sha256, model, question);
           const entries = await readCacheEntries(join(cacheDir, `${sha256}.json`));
           const hit = entries.find((entry) => entry.result_id === resultId);
@@ -769,7 +781,7 @@ export function createVisionTools(options: VisionToolsOptions): ToolDefinition[]
             continue;
           }
 
-          const note = mime === 'image/gif' ? 'GIF 仅首帧：按静态图读取，动图后续帧未分析' : undefined;
+          const note = gifNote ?? (mime === 'image/gif' ? 'GIF 仅首帧：按静态图读取，动图后续帧未分析' : undefined);
 
           const request: VisionGenerateRequest = {
             lane: 'light',

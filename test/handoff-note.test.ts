@@ -722,9 +722,12 @@ function reasoningTextsOf(input: readonly InputItem[]): string[] {
 }
 
 /** 估算器里 reasoning 那一部分的贡献：整份估算 − 剔掉全部 reasoning 之后的估算 */
-function reasoningTokensOfEstimate(events: readonly AppEvent[]): number {
-  return estimateHistoryTokens(events)
-    - estimateHistoryTokens(events.filter(e => e.type !== 'message/reasoning'));
+function reasoningTokensOfEstimate(
+  events: readonly AppEvent[],
+  policy: { maxTotalChars: number | null } | null = null,
+): number {
+  return estimateHistoryTokens(events, undefined, policy)
+    - estimateHistoryTokens(events.filter(e => e.type !== 'message/reasoning'), undefined, policy);
 }
 
 /** 全文口径（**这一组要排除掉的那个旧口径**）：把每条 `message/reasoning` 的全文各量一遍 */
@@ -759,12 +762,7 @@ test('v73 思维链**全量**计入：估算器量的是请求里那几条（两
   assert.equal(dump.includes('SHORT-A'), true, 'SHORT-A 也在（不再被 3 条的窗口切掉）');
   assert.equal(dump.includes(LONG_HEAD), true, '超长那条的开头不许丢（v73 不截思维链）');
   assert.equal(dump.includes(LONG_TAIL), true);
-  for (const text of texts) {
-    assert.ok(
-      text.length <= REASONING_ECHO_POLICY.maxTotalChars!,
-      `单条越界（总上限 ${REASONING_ECHO_POLICY.maxTotalChars}）：${text.length}`,
-    );
-  }
+  assert.equal(REASONING_ECHO_POLICY.maxTotalChars, null, '当前默认没有独立字符帽');
 
   // ② 同一把尺、两个消费者：渲染层推出去的就是 `reasoningEchoOf` 挑的那几条；
   //    估算器量的也是**同一批字符串**（逐条 estimateTokens 加起来逐值相等）。
@@ -780,28 +778,27 @@ test('v73 思维链**全量**计入：估算器量的是请求里那几条（两
   const fullChars = events
     .filter((e): e is AppEvent & { type: 'message/reasoning' } => e.type === 'message/reasoning')
     .reduce((sum, e) => sum + e.data.text.length, 0);
-  assert.equal(requestChars, fullChars, '没撞硬上限 ⇒ 全量原样回传（不加工、不截断）');
-  assert.ok(requestChars < REASONING_ECHO_POLICY.maxTotalChars!,
-    `（前置）这一窗必须没撞硬上限：${requestChars} < ${REASONING_ECHO_POLICY.maxTotalChars}`);
+  assert.equal(requestChars, fullChars, '默认只追加 ⇒ 全量原样回传（不加工、不截断）');
   assert.equal(fromEstimate, fullReasoningTokensOf(events),
-    'v73：估算读数 = 思维链全文之和（全量回传，不再有"帽内/帽外"两套账）');
+    '估算读数 = 思维链全文之和（不再有"帽内/帽外"两套账）');
 });
 
-test('v73 思维链全量计入：撞总字符硬上限时，估算与请求**一起**只算留下来的那几条', () => {
+test('旧显式字符帽：估算与回放请求一起只算留下来的那几条', () => {
   const events = overCapWindowLog();
-  const plan = reasoningEchoPlan(events, 0);
-  // 前置：这一窗真的超了（两条各 20 万字符，合计 40 万 > 出厂的 30 万）
+  const legacy = { maxTotalChars: 300_000 };
+  const plan = reasoningEchoPlan(events, 0, legacy);
   assert.equal(plan.limit, 'maxTotalChars');
-  assert.equal(plan.dropped.length, 1, '超上限 ⇒ 丢掉最老那一整条');
+  assert.equal(plan.dropped.length, 1, '超旧上限 ⇒ 丢掉最老那一整条');
   assert.equal(plan.kept.length, 1);
 
-  const texts = reasoningTextsOf(render({ ...HISTORY_RENDER_BASE, events } satisfies RenderInput).input);
-  assert.deepEqual(texts, plan.kept.map(entry => entry.text), '请求里只剩留下来的那条');
+  const texts = reasoningTextsOf(render({
+    ...HISTORY_RENDER_BASE, events, reasoningEcho: legacy,
+  } satisfies RenderInput).input);
+  assert.deepEqual(texts, plan.kept.map(entry => entry.text), '回放请求里只剩留下来的那条');
   assert.equal(texts[0]?.startsWith('NEWEST'), true, '留下的是**最新**那条');
 
-  // 两个消费者读同一份结论：估算器的 reasoning 贡献 = 请求里那条的 token
   const fromRequest = texts.reduce((sum, text) => sum + estimateTokens(text), 0);
-  assert.equal(reasoningTokensOfEstimate(events), fromRequest,
+  assert.equal(reasoningTokensOfEstimate(events, legacy), fromRequest,
     '估算器也按硬上限后的那几条量（不许把被丢的 20 万字符偷偷算进历史规模）');
   // 反面：全文和明显更大 —— 那个数不许再出现在任何一份读数里
   assert.ok(fullReasoningTokensOf(events) > fromRequest * 1.5,

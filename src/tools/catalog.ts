@@ -25,7 +25,7 @@ import type { WakeChannel, MemoryRead } from '../log/types.js';
 import { defaultVisibility } from '../log/types.ts';
 import type { DepsManager } from '../deps/manager.js';
 import type { DsClient, DsResponse } from '../model/ds-client.js';
-import type { MediaPoster, AdminEventEmitter, ChannelNameResolver, ChannelNoticeReader, ChannelReader, ChannelSelfActionReader, ChannelSessionRow, ChannelSpokenReader, InputNotifyPoster, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
+import type { MediaPoster, AdminEventEmitter, AttachmentResolver, ChannelNameResolver, ChannelNoticeReader, ChannelReader, ChannelSelfActionReader, ChannelSessionRow, ChannelSpokenReader, InputNotifyPoster, Notifier, PersonaUpdatedPayload, ReplyPoster } from './admin.js';
 import type { ToolDefinition } from './types.js';
 import type { ListForModelOptions, ToolModelSpec } from './registry.js';
 import type { IsolationConfig, ToolPlanGate } from './executor.js';
@@ -52,6 +52,7 @@ import { buildFsTools, DEFAULT_READ_ONLY_PREFIXES } from './fs/index.ts';
 import { createVisionTools } from './vision.ts';
 import { createMemoryReadTool } from './memory-tools.ts';
 import { createMcpEntryTool, type McpEntryClient } from './mcp-entry.ts';
+import { DEFAULT_MCP_TOOL_TIMEOUT_MS } from '../mcp/client.ts';
 // 「我做过」的判据（认不认这个动作 / 怎么渲染）**只有那一处**：这里只把回执交给它
 import { recordSelfAction } from '../channel/self-action.ts';
 // 申请单目录（`<dataDir>/grants`）：只用于 `mcp` 入口回执里那句指路，不进 `tools` 段
@@ -312,6 +313,8 @@ export interface ToolCatalogOptions {
   mentionMessage?: () => { sid: string; messageId: string } | null;
   /** 媒体投递口（`send_media` 用）：宿主注入 */
   mediaPoster?: MediaPoster;
+  /** 外部附件地址解析口（`resolve_attachment` 用）；不传时该工具如实报未接线 */
+  attachmentResolver?: AttachmentResolver;
   /** 贴纸选择与发送运行期；省略时 speak 保持不带贴纸的既有行为 */
   stickerRuntime?: StickerRuntime;
   /** 发言人（openid）→ 名字：read_channel 每行那个"谁"（不是会话名） */
@@ -445,6 +448,7 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
     ...(options.timezone === undefined ? {} : { timezone: options.timezone }),
     ...(options.mentionMessage === undefined ? {} : { mentionMessage: options.mentionMessage }),
     ...(options.mediaPoster === undefined ? {} : { mediaPoster: options.mediaPoster }),
+    ...(options.attachmentResolver === undefined ? {} : { attachmentResolver: options.attachmentResolver }),
     ...(options.resolvePersonName === undefined ? {} : { resolvePersonName: options.resolvePersonName }),
     // ask_human 的回执要说清"多久之后你会得知他可能不在"：这个数字与 real-loop 落 human/expired
     // 用的是同一个配置值，两处各写一个数必然漂移
@@ -556,6 +560,7 @@ export async function buildToolCatalog(options: ToolCatalogOptions): Promise<Too
       ? []
       : [createMcpEntryTool({
         client: options.mcpClient,
+        callTimeoutMs: DEFAULT_MCP_TOOL_TIMEOUT_MS,
         blobOffload: options.blobOffload ?? { dataDir: options.dataDir },
         // 申请单目录（只影响**回执文本**里的指路：没有 server 时那段"你可以自己加一个"）。
         // 缺省给 `<dataDir>/grants`；显式给 `null` = **没接线**（测试台/离线装配），

@@ -193,7 +193,7 @@ test('OneBot：回投回来的 id 落进 speak/sent，`（我）`那一行行尾
     channel: { channel: 'onebot', chatType: 'group', chatId: 'G1', messageId: '1739441710' },
   });
 
-  const out = await rig.speak({ text: '长任务跑完了，共 42 个文件' });
+  const out = await rig.speak({ to: 'onebot:group:G1', text: '长任务跑完了，共 42 个文件' });
   assert.equal(out.isError, undefined, out.content);
 
   // ① 凭据里真的有它（这是原先缺掉的那一格）
@@ -228,7 +228,7 @@ test('**反向**：回投不给 id ⇒ 那一格整个缺席，`（我）`那一
     outcomes: [{ ok: true, status: 200 }],
     channel: { channel: 'onebot', chatType: 'group', chatId: 'G1', messageId: '1739441710' },
   });
-  await rig.speak({ text: '在的' });
+  await rig.speak({ to: 'onebot:group:G1', text: '在的' });
 
   const credentials = await rig.credentials();
   assert.equal(credentials.length, 1, '话照样发出去了，凭据照样有');
@@ -259,7 +259,7 @@ test('**反向**：官方门那一行不印 `·m`（id 不可操作 ⇒ 印了�
     }],
     channel: { channel: 'qq-official', chatType: 'group', chatId: 'A1B2C3', messageId: 'm-official-1' },
   });
-  await rig.speak({ text: '在的' });
+  await rig.speak({ to: 'qq:group:A1B2C3', text: '在的' });
 
   // **记下来**是对的（日志只增不改：今天没有撤回路径，不等于将来也没有）
   const credentials = await rig.credentials();

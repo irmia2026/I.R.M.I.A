@@ -378,9 +378,9 @@ const LANG_NOTES = Object.freeze({
     '- 宿主用系统 Python（`python -I`，隔离模式）直接跑入口，**不会**替你执行 pip；',
     '- 如果确实需要第三方包：在插件目录放 `requirements.txt` 写清依赖，并在本 README 里写明',
     '  安装方式。宿主当前不自动安装，缺包会在运行期 import 失败；',
-    '- 安装期有一道 Python AST 扫描（提高门槛，不是沙箱）：`os` / `pathlib` 等要 `files`，',
-    '  `socket` / `requests` 等要 `net`（还要在 `net.allow` 里写放行的主机），',
-    '  `subprocess` / `ctypes` 等要 `shell`（本平台默认永不授予）；`eval` / `exec` / 动态导入一律拒绝。',
+    '- 安装期有一道 Python AST 扫描（提高门槛，不是沙箱）：`os` / `pathlib` 等要 `files`；',
+    '  `socket` / `requests` 等网络模块一律拒收，联网只能走 `ctx.net.fetch`（另需 `net` 与 `net.allow`）；',
+    '  `subprocess` / `ctypes` 等命令或原生调用模块也一律拒收；`eval` / `exec` / 动态导入同样拒绝。',
     '  样板不碰这些。',
   ],
 });

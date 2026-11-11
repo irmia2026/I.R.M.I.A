@@ -1,5 +1,5 @@
 /**
- * v73 · 思维链**全量回传**（`src/model/render.ts` 的 `reasoningEchoMaxCharsFor, REASONING_ECHO_POLICY` / `reasoningEchoPlan` /
+ * v73/v87 · 思维链**全量回传与只追加**（`REASONING_ECHO_POLICY` / `reasoningEchoPlan` /
  * `enforceReasoningEchoIntegrity` / `assertReasoningEchoIntegrity`）
  * 这一版治的是 2026-10-20 那场"每轮 400、干着干着就停了"：
  * v68 的帽子只回传最近 3 条思维链，而历史里那些 assistant 条目一条都没少 ⇒
@@ -32,7 +32,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
-  NOW_LAYER_BANNER, reasoningEchoMaxCharsFor, REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity,
+  NOW_LAYER_BANNER, REASONING_ECHO_POLICY, RENDER_VERSION, assertReasoningEchoIntegrity,
   enforceReasoningEchoIntegrity, reasoningEchoOf, reasoningEchoPlan, render,
   type AssistantGroup, type InputItem, type RenderInput, type RenderPersona, type ReasoningEchoPolicy,
 } from '../src/model/render.ts';
@@ -161,14 +161,14 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 86（v85 → v86 SELF_BRIEF speak 准则与情欲方向）', () => {
-    assert.equal(RENDER_VERSION, '86');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '86');
+  test('RENDER_VERSION 递到 88（发言工具显式 to 与已投递/未投递回执）', () => {
+    assert.equal(RENDER_VERSION, '88');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '88');
   });
 
-  test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {
-    assert.deepEqual({ ...REASONING_ECHO_POLICY }, { maxTotalChars: 300_000, outOfRegion: 'keep' });
-    assert.equal('maxItems' in REASONING_ECHO_POLICY, false, '★ 按条数截那个旋钮已删（2026-10-21）');
+  test('缺省口径 = 不限字符 + 区外照旧全传；显式旧上限仍可用于回放', () => {
+    assert.deepEqual({ ...REASONING_ECHO_POLICY }, { maxTotalChars: null, outOfRegion: 'keep' });
+    assert.equal('maxItems' in REASONING_ECHO_POLICY, false, '按条数截那个旋钮已删');
   });
 });
 
@@ -194,13 +194,7 @@ describe('② 超硬上限：丢的是**整组**（正文 + 思维链 + 工具�
     return events;
   }
 
-  test('回传上限跟压缩阈值缩放：200k→300k（与旧常量一致），450k→675k，边界夹住', () => {
-  assert.equal(reasoningEchoMaxCharsFor(200_000), REASONING_ECHO_POLICY.maxTotalChars);
-  assert.equal(reasoningEchoMaxCharsFor(450_000), 675_000);
-  assert.equal(reasoningEchoMaxCharsFor(1), 100_000);
-  assert.equal(reasoningEchoMaxCharsFor(9_999_999), 2_000_000);
-});
-test('maxTotalChars 卡到只留最新 2 组 ⇒ 被丢的组**正文与思维链都不在**（不是只缺思维链）', () => {
+  test('maxTotalChars 卡到只留最新 2 组 ⇒ 被丢的组**正文与思维链都不在**（不是只缺思维链）', () => {
     const events = logOfToolSteps(['R1', 'R2', 'R3']); // 每组 2 字符，共 6
     const r = render(baseInput(events, { reasoningEcho: { maxTotalChars: 4 } }));
     const dump = inputText(r.input);
@@ -349,12 +343,12 @@ describe('③ 自洽：条目在、reasoning_text 缺 ⇒ 补回或整组丢（�
 
 // ──────────────────────────────── ④ 对照实验：正常历史一个字节都不动（反） ────────────────────────────────
 
-describe('④ 对照：没撞上限的正常历史 ⇒ 一个字节都不动', () => {
-  test('不给上限（缺省）与显式给同一份出厂上限 ⇒ input 逐字节相同', () => {
+describe('④ 对照：默认只追加的正常历史 ⇒ 一个字节都不动', () => {
+  test('缺省与显式不限字符 ⇒ input 逐字节相同', () => {
     const events = logOfSteps(['N1', 'N2', 'N3', 'N4', 'N5']);
     const a = render(baseInput(events));
-    const b = render(baseInput(events, { reasoningEcho: { maxTotalChars: 300_000 } }));
-    assert.equal(JSON.stringify(b.input), JSON.stringify(a.input), '缺省就是出厂那一份：两串字节必须相同');
+    const b = render(baseInput(events, { reasoningEcho: { maxTotalChars: null } }));
+    assert.equal(JSON.stringify(b.input), JSON.stringify(a.input), '缺省就是只追加那一份');
     assert.deepEqual(a.reasoningEchoRepair.dropped, []);
     assert.deepEqual(a.reasoningEchoRepair.restored, []);
   });
@@ -584,9 +578,13 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
     return index;
   }
 
+  const legacyPolicy = { maxTotalChars: 300_000 } as const;
+  const legacyPlan = (events: AppEvent[]) => reasoningEchoPlan(events, 0, legacyPolicy);
+  const legacyRender = (events: AppEvent[]) => render(baseInput(events, { reasoningEcho: legacyPolicy }));
+
   test('① 阶梯制：一次撞击至少挤掉 32,000 字符（不是"超一个字符挤一组"）', () => {
     const events = incidentEvents();
-    const plan = reasoningEchoPlan(events, 0);
+    const plan = legacyPlan(events);
     const droppedChars = plan.dropped.reduce((sum, entry) => sum + entry.chars, 0);
     // 前置：这一窗真的顶穿了（300,001 > 300,000），而且一条都没被遮蔽
     assert.equal(plan.totalChars + droppedChars, OVER_CAP_TOTAL, '（前置）总量 = 300,001');
@@ -600,13 +598,35 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
     assert.deepEqual(reasoningEchoPlan(events, 0, { maxTotalChars: null }).dropped, []);
   });
 
-  test('② 三笔同头：headItems 逐字节相同，history 是"严格前缀延长"（只尾部增长）', () => {
+  test('v87 当前默认：超过旧帽后多步仍只追加，没有驱逐或顶破账', () => {
     const step1 = filler('S1-', 40_000);
     const step2 = filler('S2-', 1_000);
     const requests = [
       render(baseInput(incidentEvents())),
       render(baseInput(incidentEvents([step1]))),
       render(baseInput(incidentEvents([step1, step2]))),
+    ];
+    for (const request of requests) {
+      assert.deepEqual(request.reasoningEchoRepair.dropped, []);
+      assert.equal(request.reasoningEchoRepair.overChars, 0);
+    }
+    assert.ok(reasoningTexts(requests[0]!.input).some(text => text.startsWith('OLD-1-')), '最老一组仍在');
+    for (let index = 1; index < requests.length; index += 1) {
+      const previous = historyOf(requests[index - 1]!);
+      const current = historyOf(requests[index]!);
+      assert.ok(current.length > previous.length);
+      assert.equal(JSON.stringify(current.slice(0, previous.length)), JSON.stringify(previous),
+        '当前默认只允许尾部追加，不得移动历史头部');
+    }
+  });
+
+  test('② 旧显式上限：三笔同头，history 是"严格前缀延长"（只尾部增长）', () => {
+    const step1 = filler('S1-', 40_000);
+    const step2 = filler('S2-', 1_000);
+    const requests = [
+      legacyRender(incidentEvents()),
+      legacyRender(incidentEvents([step1])),
+      legacyRender(incidentEvents([step1, step2])),
     ];
     // ① 现场 `cacheBreak.diff` 那一格：#1–#7 恒不变、#8 每次都变。修完之后**整排都不变**。
     const heads = requests.map(request => JSON.stringify(request.context.history.headItems));
@@ -627,9 +647,9 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
     const step1 = filler('S1-', 40_000);
     const step2 = filler('S2-', 1_000);
     const serialized = [
-      render(baseInput(incidentEvents())),
-      render(baseInput(incidentEvents([step1]))),
-      render(baseInput(incidentEvents([step1, step2]))),
+      legacyRender(incidentEvents()),
+      legacyRender(incidentEvents([step1])),
+      legacyRender(incidentEvents([step1, step2])),
     ].map(request => JSON.stringify(request.input));
     for (let index = 1; index < serialized.length; index += 1) {
       const previous = serialized[index - 1]!;
@@ -646,7 +666,7 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
     const steps = Array.from({ length: 6 }, (_, index) => filler(`S${index + 1}-`, 3_000));
     const snapshots = steps.map((_, index) => incidentEvents(steps.slice(0, index)));
     const dropped = snapshots.map((events) => {
-      const repair = render(baseInput(events)).reasoningEchoRepair;
+      const repair = legacyRender(events).reasoningEchoRepair;
       return repair.dropped.map(group => ({ assistantSeq: group.assistantSeq, chars: group.chars, why: group.why }));
     });
     assert.ok(dropped[0]!.length > 0, '（前置）第 1 笔就在驱逐');
@@ -659,8 +679,8 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
 
   test('⑤ 顶穿硬上限是**故意的**：本轮自己写的思维链不进切点，超额如实记在 overChars', () => {
     const step1 = filler('S1-', 40_000);
-    const first = render(baseInput(incidentEvents()));
-    const second = render(baseInput(incidentEvents([step1])));
+    const first = legacyRender(incidentEvents());
+    const second = legacyRender(incidentEvents([step1]));
     assert.equal(first.reasoningEchoRepair.overChars, 0, '（前置）第 1 笔没顶穿');
     // 262,501 + 40,000 = 302,501 > 300,000 ⇒ 顶穿 2,501
     assert.equal(second.reasoningEchoRepair.overChars, 2_501,
@@ -673,7 +693,7 @@ describe('⑦ v75：超限之后一次挤够、本轮不再移动（前缀稳定
 
   test('⑥ 没有 `turn/start` 的调用点（重放片段/诊断/裸 render）⇒ 不冻结，行为与 v74 同形', () => {
     const events = incidentEvents().filter(event => event.type !== 'turn/start');
-    const plan = reasoningEchoPlan(events, 0);
+    const plan = legacyPlan(events);
     assert.equal(plan.anchorSeq, 0, '没有轮的概念就没有轮内的边界可谈');
     assert.ok(plan.dropped.reduce((sum, entry) => sum + entry.chars, 0) >= 32_000, '阶梯制照旧生效');
   });

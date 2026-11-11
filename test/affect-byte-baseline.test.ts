@@ -8,15 +8,14 @@
  *   (cd <tmp> && node --experimental-strip-types scripts/render-baseline-fixture.mts) \
  *     > test/fixtures/render-baseline-pre-affect.json
  *
- * ⚠ 正常情况下 fixture 只许由旧树生成；v86 因为 SELF_BRIEF 是用户明确要求的模板换代，
+ * ⚠ 正常情况下 fixture 只许由旧树生成；v88 因为 SELF_BRIEF 是用户明确要求的模板换代，
  * 按当前关闭态请求重新锚定了一次（不是用它掩盖非预期字节变化）。
  *
  * ## 为什么不是逐字节全等
  *
- * 当前 HEAD 的 `RENDER_VERSION` 是 86；`e5902a0`（贴纸接线，晚于 Affect）往
- * `SELF_BRIEF` 里加了一段静态规则。当前关闭态与 `829337f^` 的差异**只有这一段**，
- * 与 Affect 无关。本文件在 v86 按当前关闭态请求重新锚定 fixture（v85 后 SELF_BRIEF
- * 又补了 speak 准则与情欲方向；这是有意的模板换代，不是 Affect 回潮）。
+ * 当前 HEAD 的 `RENDER_VERSION` 是 88。v88 因三件发言工具显式 to 与 speak 新回执修改了
+ * `SELF_BRIEF`，所以按当前关闭态请求重新锚定 fixture；这是知情的模板换代，
+ * 不是 Affect 回潮。
  *
  * 如果将来 `RENDER_VERSION` 又变、`SELF_BRIEF` 再改，`V82_STICKER_RULES` 会失配而红——
  * 这是有意的：那时要重新审视基线，而不是让这条用例悄悄失效。
@@ -111,13 +110,13 @@ function canonical(req: ReturnType<typeof request>): {
   };
 }
 
-/** 关闭态断言：整份关闭态请求与 v86 重新锚定的 fixture 逐字节相等。 */
+/** 关闭态断言：整份关闭态请求与 v88 重新锚定的 fixture 逐字节相等。 */
 function assertDisabledMatchesPreAffect(events: readonly AppEvent[] = EVENTS): void {
   const actual = canonical(request(events, null));
-  assert.equal(JSON.stringify(actual, null, 2), FIXTURE_TEXT, '关闭态请求必须与 v86 fixture 逐字节相等');
+  assert.equal(JSON.stringify(actual, null, 2), FIXTURE_TEXT, '关闭态请求必须与 v88 fixture 逐字节相等');
 }
 
-test('关闭态：整份请求与 v86 重新锚定的 fixture 逐字节相等', () => {
+test('关闭态：整份请求与 v88 重新锚定的 fixture 逐字节相等', () => {
   assertDisabledMatchesPreAffect();
 });
 

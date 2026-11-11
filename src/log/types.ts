@@ -228,8 +228,8 @@ export interface StepStart extends EventEnvelope<'step/start', {
   affectRules?: boolean;
   /** 本步 instructions 是否带了亲密静态规范（看 enabled，不看这一轮是不是私聊）。 */
   intimacyRules?: boolean;
-  /** 本步生效的思维链回传字符上限（随上下文/压缩阈值缩放；老日志没有）。 */
-  reasoningEchoMaxChars?: number;
+  /** 本步生效的思维链回传字符上限；null = 只追加，老日志没有这一格。 */
+  reasoningEchoMaxChars?: number | null;
   turn: number; step: number; model: string;
   lane: ModelLane;
   renderVersion: string;
@@ -373,6 +373,18 @@ export interface WakeFile extends EventEnvelope<'wake/file', {
 export interface WakeWebhook extends EventEnvelope<'wake/webhook', {
   path: string; body: string; headers: Record<string, string>;
   dedupeKey?: string;
+  /**
+   * 通用事件入口的结构化元数据（可选）。旧脚本只发 raw body 时一个字段都不出现，
+   * 事件形状与以前逐字节相同；新脚本可附带 source / kind / severity / title / message。
+   */
+  source?: string;
+  kind?: string;
+  severity?: 'info' | 'warn' | 'critical';
+  title?: string;
+  message?: string;
+  observedAt?: string;
+  /** false = 只落库（internal），不进入 pending、不唤醒；缺省 true */
+  wake?: boolean;
 }> {}
 
 /**
@@ -581,7 +593,7 @@ export interface WakeChannel extends EventEnvelope<'wake/channel', {
   msgSeq: number;
   /** 平台原始附件描述（图片/文件等，文本已剥离） */
   /** `text`：平台对这条附件的**转写**（目前只有语音的 `asr_refer_text`）；只作可读化，不是她"听到的" */
-  attachments?: Array<{ type: string; url?: string; name?: string; text?: string }>;
+  attachments?: Array<{ type: string; url?: string; name?: string; text?: string; fileId?: string }>;
   /**
    * 这条是不是 @/提到 了她（适配器给得出就填，给不出就不填）。
    *
@@ -632,7 +644,7 @@ export interface ChannelMessage extends EventEnvelope<'channel/message', {
   text: string;
   messageId: string;
   msgSeq: number;
-  attachments?: Array<{ type: string; url?: string; name?: string }>;
+  attachments?: Array<{ type: string; url?: string; name?: string; fileId?: string }>;
   /** 这条是不是 @/提到 了她。群里的 @ 与普通发言要能分开（适配器给得出就填） */
   mentionsMe?: boolean;
 }> {}
@@ -1734,10 +1746,8 @@ export interface CompactionSummary extends EventEnvelope<'compaction/summary', {
  *     "上一个 turn/end"，也不是"本 turn 起始 seq"——那两个都会让第一次折叠永远压不动；
  *   • `maskedTokens`——④甲 闸门量：`(参照点, 遮蔽点]` 之间的可见历史规模
  *     （`estimateMaskedTokens`），也就是"这次折叠将要改变的字节有多少"；
- *   • `echoChars` / `echoCharsLimit`（**v75 加**）——回传集合的正文字符与它的上限：
- *     **进第一道门有两条路**，这是第二条路的两个数（`echoChars > echoCharsLimit` ⇒ 立即压）；
- *   • `trigger`（**v75 加**）——是**哪一条**把这一拍推过第一道门的（`history-tokens` /
- *     `echo-chars`；`threshold` 那一支缺席 = 谁都没推）。
+ *   • `echoChars` / `echoCharsLimit`（**v75 加**）——回传集合的字符观测；v87 起不参与压缩判定；
+ *   • `trigger`——当前只产生 `history-tokens`；`echo-chars` 仅为 v75/v86 旧日志保留。
  *
  * 后四格里 `coveredUpToSeq` / `previousCoveredUpToSeq` / `maskedTokens` **可选**：
  * 阈值没过时后面那几格**根本没算**（那时"遮蔽点在哪"不是一个已经成立的事实），
@@ -1768,39 +1778,15 @@ export interface CompactionDecision extends EventEnvelope<'compaction/decision',
   previousCoveredUpToSeq?: number;
   /** ④甲 闸门量：`(previousCovered, covered]` 的可见历史规模；`threshold`/`monotonic`/`no-shrink` 时缺席 */
   maskedTokens?: number;
-  /**
-   * **回传集合的字符账**（**v75 加，每轮都有**）：`echoChars` = **会回传的总字符**
-   * （= 遮蔽点之后、model 可见的思维链正文全部；截与不截都算进来，与渲染层同一处算出）。
-   *
-   * 为什么它必须每轮都写：v75 给压缩判定加了**第二条触发**——
-   * `echoChars > echoCharsLimit` 时**不等 token 阈值**、这一轮收尾就压（见下 `trigger`）。
-   * 判据用到的数要能从日志里读回来（本仓库的既有纪律，与 `maintenanceWindow.atMs` 同款），
-   * 否则"这一轮为什么突然压了"事后只能靠重算。
-   *
-   * ⚠ **判据读它（总量）、不读 `echoCharsKept`**：后者一驱逐一压就"变好看"（被压回上限以内），
-   * 拿它当压力读会在真正出事的那一刻失去信号——2026-10-21 凌晨那 39 分钟正是这个形状
-   * （`kept` 一直 ≤ 300K，而驱逐一直在发生）。
-   */
+  /** 思维链回传字符观测；v87 起只追加，不再作为第二条压缩触发。 */
   echoChars?: number;
-  /** **真正留在请求里**的那一份（`echoChars` − 已被挤掉的）；只服务观测，不参与判据 */
+  /** 真正留在请求里的字符数；当前只追加时与 `echoChars` 相同。 */
   echoCharsKept?: number;
-  /**
-   * 那一刻生效的回传字符上限（`REASONING_ECHO_POLICY.maxTotalChars`）。
-   * `null` = 出厂没设上限（那种实例上第二条触发没有对象）。它与 `echoChars` 成对，缺一个都读不出比例。
-   */
+  /** 当前默认为 null；旧日志中的数值上限仍按原值保留。 */
   echoCharsLimit?: number | null;
   /**
-   * **这一拍是"哪一条判据"把它推过第一道门的**（**v75 加**；`threshold` 时缺席 = 谁都没推）。
-   *
-   * 为什么 `reason` 答不了这个问题：`reason` 记的是"**第一条拦下它**的判据"（threshold /
-   * monotonic / no-shrink / gate / wrote），而 v75 起**进门**的条件有两个——`historyTokens`
-   * 过阈值，或者 `echoChars` 过回传上限。所以"进去了"这件事得单独有一格：
-   *   · `history-tokens` —— 老口径（可见历史估算过 `thresholdTokens`）；
-   *   · `echo-chars`    —— **v75 的新口径**：回传字符过 `echoCharsLimit` ⇒ 立即压
-   *     （把老 reasoning 用"遮蔽点"一次性移出，而不是让渲染层在轮内一点点挤）。
-   *
-   * 它出现在**所有**非 `threshold` 的结论上（`wrote`：压了；`monotonic`/`no-shrink`/`gate`：
-   * 被别的判据拦下了，但"谁推的门"照样可归因）。
+   * 当前只有 `history-tokens`：可见历史估算超过用户配置的阈值。
+   * `echo-chars` 是 v75/v86 的历史值，读旧日志仍认识，但新判定不再产生。
    */
   trigger?: 'history-tokens' | 'echo-chars';
   /**

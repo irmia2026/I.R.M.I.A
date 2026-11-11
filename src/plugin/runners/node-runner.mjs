@@ -44,6 +44,7 @@ let pluginConfig = Object.freeze({});
 let netAllow = Object.freeze([]);
 let activated = false;
 let pluginModule = null;
+let deactivation = null;
 
 function emitFrame(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -349,8 +350,9 @@ async function handleLine(line) {
   }
   if (typeof frame.method !== 'string') return;
   if (frame.id === undefined) {
-    // 通知：目前宿主只发 plugin.deactivate；按方法跑一遍但不用回帧
-    void dispatch(frame).catch(() => undefined);
+    const task = dispatch(frame);
+    if (frame.method === 'plugin.deactivate') deactivation = task;
+    void task.catch(() => undefined);
     return;
   }
   try {
@@ -381,7 +383,9 @@ process.stdin.on('data', (chunk) => {
     index = buffer.indexOf('\n');
   }
 });
-process.stdin.on('end', () => { process.exit(0); });
+process.stdin.on('end', () => {
+  void Promise.resolve(deactivation).catch(() => undefined).then(() => { process.exit(0); });
+});
 
 process.on('uncaughtException', (error) => {
   notify('log.write', { level: 'error', message: `未捕获异常：${error instanceof Error ? error.stack ?? error.message : String(error)}` });

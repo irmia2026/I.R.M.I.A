@@ -610,7 +610,7 @@ test('契约：compaction/decision 的事件形状与可见性（新增事件不
   assert.equal(defaultVisibility(summary.type), 'model');
 });
 
-// ────────── ⑪ v75：回传字符超上限 ⇒ **立即压**（`trigger = 'echo-chars'`） ──────────
+// ────────── ⑪ v87：旧字符帽不再是压缩触发器 ──────────
 
 /**
  * 只读复算把 **2026-10-21 凌晨那 39 分钟**追到了一个很具体的错位上（零反例）：
@@ -652,23 +652,19 @@ function echoTriggerEvents(): { events: AppEvent[]; turnStartSeq: number } {
   return { events, turnStartSeq: start.seq };
 }
 
-test('★ v75：回传字符顶穿 300,000 ⇒ 压缩判定的 trigger 是 echo-chars（token 侧根本没越线）', () => {
+test('★ v87：思维链超过旧 300,000 帽子，但历史没到用户线 ⇒ 不驱逐也不旁路压缩', () => {
   const { events, turnStartSeq } = echoTriggerEvents();
   const decision = compactionDecision({
-    events, turn: 9, turnStartSeq, cfg: { thresholdTokens: 200_000 },
+    events, turn: 9, turnStartSeq, cfg: { thresholdTokens: 1_000_000 },
   });
-  // 前置：token 那一条路**没有**越线——这正是现场的形状（估算器一直在 200,000 以下）
-  assert.ok(decision.historyTokens < 200_000,
-    `（前置）token 侧没越线：${decision.historyTokens} < 200,000`);
-  // 新判据的三个数都在账上（缺一个都读不出"超了多少"）
-  assert.equal(decision.echoChars, 300_001, '★ 会回传的总字符（留下的 + 已被挤掉的）');
-  assert.equal(decision.echoCharsLimit, 300_000, '★ 生效的上限');
-  assert.ok((decision.echoCharsKept ?? 0) < 300_000,
-    `留下的那一份已经被挤回上限以内（${decision.echoCharsKept}）——所以判据读的是总字符，不是它`);
-  // 结论：压了，且推门的是新判据
-  assert.equal(decision.trigger, 'echo-chars', '★ "哪一条判据把它推过第一道门"');
-  assert.equal(decision.reason, 'wrote', '两条进门路都通到同一道结论（压）');
-  assert.ok((decision.coveredUpToSeq ?? 0) > turnStartSeq, '遮蔽点落在本轮之内（交接覆盖本轮）');
+  assert.ok(decision.historyTokens < 1_000_000,
+    `（前置）可见历史没到用户线：${decision.historyTokens} < 1,000,000`);
+  assert.equal(decision.echoChars, 300_001, '思维链字符仍如实留账');
+  assert.equal(decision.echoCharsKept, 300_001, '只追加：没有一组被字符帽挤掉');
+  assert.equal(decision.echoCharsLimit, null, '新请求没有独立思维链上限');
+  assert.equal(decision.trigger, undefined, '字符数不再是压缩触发器');
+  assert.equal(decision.reason, 'threshold');
+  assert.equal(decision.coveredUpToSeq, undefined, '没到历史线就不计算或移动遮蔽点');
 });
 
 test('对照：字符侧没超 ⇒ 老口径说了算（token 越线 = history-tokens；都没越线 = 连 trigger 都没有）', () => {

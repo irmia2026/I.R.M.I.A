@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PluginProcess, PluginRuntimeSupervisor } from '../src/plugin/runtime-process.ts';
+import { PLUGIN_RPC_ERRORS } from '../src/plugin/protocol.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 import { rmSync } from 'node:fs';
 
@@ -33,6 +34,26 @@ test('Windows taskkill 不在 PATH 时直接终止自己的子进程，激活仍
     if (before === undefined) delete process.env.PATH; else process.env.PATH = before;
     if (pid !== null && alive(pid)) process.kill(pid, 'SIGKILL');
     await plugin.stop('test'); rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('plugin.ready 协议不匹配时激活失败并回收子进程', async () => {
+  const root = tempDirSync('irmia-plugin-protocol-version-');
+  const plugin = new PluginProcess({ ...options(root), timeouts: { activationMs: 1_000 } });
+  (plugin as any).buildCommand = () => ({
+    file: process.execPath,
+    args: ['-e', 'process.stdout.write(JSON.stringify({jsonrpc:"2.0",method:"plugin.ready",params:{protocol:99}})+"\\n"); setInterval(()=>{},1000)'],
+  });
+  try {
+    await assert.rejects(plugin.start(), (error: unknown) => {
+      assert.equal((error as { code?: number }).code, PLUGIN_RPC_ERRORS.unsupported);
+      assert.match((error as Error).message, /protocol=1.*99/);
+      return true;
+    });
+    assert.equal(plugin.status.pid, null);
+  } finally {
+    await plugin.stop('test');
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
