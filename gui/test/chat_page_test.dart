@@ -83,7 +83,7 @@ class _FakeApi extends IrmiaApi {
 }
 
 Map<String, dynamic> evt(int seq, String type, Map<String, dynamic> data,
-        {String? origin, String? visibility}) =>
+        {String? origin, String? visibility, String? agentId}) =>
     {
       'seq': seq,
       'ts': '2026-09-30T02:00:0$seq.000Z',
@@ -91,6 +91,7 @@ Map<String, dynamic> evt(int seq, String type, Map<String, dynamic> data,
       'data': data,
       if (origin != null) 'origin': origin,
       if (visibility != null) 'visibility': visibility,
+      if (agentId != null) 'agentId': agentId,
     };
 
 /// 一条人工 reset 写的遮蔽摘要：`src/web/server.ts` 的 reset-context 命令
@@ -211,6 +212,25 @@ void main() {
     await pumpChat(tester);
     // 打字机时代这里只能看到「先读日志」的一小截
     expect(find.textContaining('先读日志，再动手。'), findsOneWidget);
+  });
+
+  testWidgets('子代理事件不进主对话流：工具卡与子代理消息都不上屏', (tester) async {
+    await pumpChat(tester, history: [
+      evt(1, 'message/assistant', {'text': '主代理先说一句。', 'toolCalls': <dynamic>[]}),
+      evt(2, 'tool/call', {
+        'turn': 4808, 'step': 1, 'callId': 'sub-call-1', 'name': 'skill_read',
+        'arguments': '{"skill":"auto-deep-research","path":"SKILL.md"}', 'sideEffect': 'none',
+      }, agentId: 'sub-8406bb30'),
+      evt(3, 'tool/result', {
+        'turn': 4808, 'step': 1, 'callId': 'sub-call-1', 'callSeq': 2, 'status': 'ok',
+        'content': '子代理读到的 SKILL', 'durationMs': 2,
+      }, agentId: 'sub-8406bb30'),
+      evt(4, 'message/assistant', {'text': '主代理最后一句。', 'toolCalls': <dynamic>[]}),
+    ]);
+    expect(find.text('主代理先说一句。'), findsOneWidget);
+    expect(find.text('主代理最后一句。'), findsOneWidget);
+    expect(find.text('skill_read'), findsNothing, reason: '子代理工具调用不能进主聊天');
+    expect(find.textContaining('子代理读到的 SKILL'), findsNothing);
   });
 
   testWidgets('工具调用配成一个块：名字只出现一次，状态与耗时都在块头', (tester) async {

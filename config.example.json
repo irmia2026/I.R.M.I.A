@@ -229,6 +229,16 @@
     "activeProbability": 1,
     "cooldownSeconds": 0
   },
+  "subagents": {
+    "$comment": [
+      "后台可续聊子代理（P1）：默认关闭；打开后才注册 delegate / subagent_message / subagent_cancel / subagent_status。",
+      "maxConcurrent 是进程内同时运行的 AgentSession 上限（1–16）。",
+      "archiveAfterDays 目前只定义 TTL，清理任务后续接入。"
+    ],
+    "enabled": false,
+    "maxConcurrent": 2,
+    "archiveAfterDays": 7
+  },
   "speak": {
     "$comment": [
       "发言节奏（speak 的拆条投递）：段与段之间按「这一段要打多久」隔开，界面与 IM 同一个节奏。",

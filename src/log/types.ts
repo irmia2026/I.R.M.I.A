@@ -38,6 +38,8 @@ export interface EventEnvelope<T extends string = string, D = unknown> {
   origin?: string;
   /** 子代理 turn 链归属标记：指向父 turn 的 task 调用 */
   parentCallId?: string;
+  /** 可续聊子代理的稳定 id；同一条链的所有事件同值 */
+  agentId?: string;
 }
 
 // ──────────────────────────────── 基础枚举 ────────────────────────────────
@@ -117,7 +119,7 @@ export type TurnEndReason =
 
 export type BudgetLayer = 'step' | 'turn' | 'task' | 'daily';
 
-export type WakeSource = 'timer' | 'file' | 'webhook' | 'manual' | 'heartbeat' | 'intention' | 'job' | 'channel';
+export type WakeSource = 'timer' | 'file' | 'webhook' | 'manual' | 'heartbeat' | 'intention' | 'job' | 'channel' | 'subagent';
 
 export type ModelLane = 'heavy' | 'light';
 
@@ -3596,12 +3598,81 @@ export interface StickerReviewed extends EventEnvelope<'sticker/reviewed', {
 }> {}
 export interface StickerUnknownTag extends EventEnvelope<'sticker/unknown-tag', { tag: string }> {}
 
+// ──────────────────────────────── 子代理 ────────────────────────────────
+
+export type SubagentStatus = 'queued' | 'running' | 'waiting' | 'reporting'
+  | 'interrupted' | 'completed' | 'cancelled' | 'archived';
+
+export interface SubagentStarted extends EventEnvelope<'subagent/started', {
+  agentId: string;
+  profileId: string;
+  parentCallId: string;
+  parentTurn: number;
+  forkFromSeq?: number;
+  prefixHash?: string;
+  /** 本次激活的轮数上限（P3.2.1：Profile.maxTurns 的执行值；缺省 = 老日志没记）。 */
+  maxTurns?: number;
+  tokens: {used: number; limit: number};
+}> {}
+
+export interface SubagentReport extends EventEnvelope<'subagent/report', {
+  agentId: string;
+  kind: 'progress' | 'final';
+  reportId: string;
+  summary: string;
+  tokens: {used: number; limit: number};
+}> {}
+
+export interface SubagentFinished extends EventEnvelope<'subagent/finished', {
+  agentId: string;
+  status: 'completed' | 'cancelled' | 'interrupted';
+  summary: string;
+  steps: number;
+  turn: number;
+  tokens: {used: number; limit: number};
+}> {}
+
+export interface SubagentInterrupted extends EventEnvelope<'subagent/interrupted', {
+  agentId: string;
+  turn: number;
+  /**
+   * `max-turns`（P3.2.1）：一次激活跑满 Profile 的 `maxTurns` 就停手，等父代理 resume/续聊。
+   * 它不是崩溃、也不是取消：会话、队列与 workspace 全部保留。
+   */
+  reason: 'restart' | 'cancel' | 'shutdown' | 'max-turns';
+  /** 撞上限那一档的轮数（只有 `reason:'max-turns'` 带它）。 */
+  maxTurns?: number;
+}> {}
+
+export interface SubagentResumed extends EventEnvelope<'subagent/resumed', {
+  agentId: string;
+  fromTurn: number;
+  resumeCount: number;
+}> {}
+
+export interface SubagentCancelled extends EventEnvelope<'subagent/cancelled', {
+  agentId: string;
+  reason: string;
+}> {}
+
+export interface WakeSubagent extends EventEnvelope<'wake/subagent', {
+  agentId: string;
+  parentCallId: string;
+  status: 'running' | 'completed' | 'cancelled' | 'interrupted';
+  kind?: 'progress' | 'final';
+  summary: string;
+  tokens: {used: number; limit: number};
+  reportId?: string;
+}> {}
+
 // ──────────────────────────────── 联合类型 ────────────────────────────────
 
 export type AppEvent =
   | AffectAppraised
   | IntimacyUpdated
   | StickerSent | StickerSkipped | StickerHarvested | StickerTagged | StickerReviewed | StickerUnknownTag
+  | SubagentStarted | SubagentReport | SubagentFinished | SubagentInterrupted | SubagentResumed | SubagentCancelled
+  | WakeSubagent
   | SessionStart | SessionEnd
   | RuntimeRestart
   | TurnStart | TurnEnd | StepStart | StepEnd | StepReasoningProgress
@@ -3649,6 +3720,9 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   'sticker/tagged': 'internal',
   'sticker/reviewed': 'internal',
   'sticker/unknown-tag': 'internal',
+  'subagent/started': 'internal', 'subagent/report': 'internal', 'subagent/finished': 'internal',
+  'subagent/interrupted': 'internal', 'subagent/resumed': 'internal', 'subagent/cancelled': 'internal',
+  'wake/subagent': 'model',
   // 协议切换的留痕（2026-10-21）：**internal**——审计账（凭什么切、切到哪、首次何时），
   // 不是给她的输入；她该看见的是切换之后那次调用的结果。
   // 不进请求体 ⇒ 不动 RENDER_VERSION。写在这里而不是靠 defaultVisibility 兜底，

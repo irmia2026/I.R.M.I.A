@@ -190,11 +190,24 @@ test('passive：本轮工具失败与 owner_setback 原因都严肃收敛', asyn
   assert.equal(setback.posts.length, 0);
 });
 
-test('passive：低情绪、骰子未命中都不发，阈值不做放宽', async (t) => {
-  const low = rig(t, { affect: true });
-  assert.equal(await passive(low.runtime), false);
-  assert.ok(low.events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'affect-too-low'));
-  const dice = rig(t, { affect: true, state: joyful('owner_success'), random: () => 0.12 });
+test('passive：低情绪不再拦发图；骰子未命中仍不发', async (t) => {
+  const low = rig(t, { affect: true, random: () => 0 });
+  assert.equal(await passive(low.runtime), true, '2026-11-07 起去掉情绪 <0.35 门槛，低情绪也能走概率');
+  assert.equal(low.posts.length, 1);
+  assert.equal(low.events.some((event) => event.type === 'sticker/skipped'
+    && (event.data as { reason: string }).reason === 'affect-too-low'), false);
+  const dice = rig(t, { affect: true, state: joyful('owner_success'), random: () => 0.3 });
   assert.equal(await passive(dice.runtime), false);
   assert.ok(dice.events.some((event) => event.type === 'sticker/skipped' && (event.data as { reason: string }).reason === 'dice'));
+});
+
+test('五次不带 sticker 的 speak 后，下一次被动机会强制兜底一张并清零', async (t) => {
+  const { runtime, posts, events } = rig(t, { affect: false, random: () => 0.99 });
+  for (let i = 0; i < 4; i += 1) runtime.noteSpeakWithoutSticker();
+  assert.equal(await passive(runtime), false, '不到五次不触发，且情绪关闭仍走普通门');
+  runtime.noteSpeakWithoutSticker();
+  assert.equal(await passive(runtime, 6), true, '第五次后强制放行，绕过情绪/概率');
+  assert.equal(posts.length, 1);
+  assert.equal(events.filter((event) => event.type === 'sticker/sent').length, 1);
+  assert.equal(await passive(runtime, 7), false, '兜底只发一次，next passive 回到普通门');
 });

@@ -24,6 +24,7 @@ import { contextImageMediaType, resolveEventVisibility } from './log/types.ts';
 import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channel/inbox.ts';
 // P1b 的入站唯一收口：过滤链 → 指令 → 原有唤醒/信箱分流（语义全在模块文件头）
 import { InboundPipeline } from './channel/inbound.ts';
+import { SubagentManager, createSubagentTools } from './runtime/subagent-manager.ts';
 import { StickerHarvester } from './stickers/harvest.ts';
 import { backfillStickerPHashes } from './stickers/phash-backfill.ts';
 import { StickerRuntime } from './stickers/runtime.ts';
@@ -154,7 +155,7 @@ import {
  * （**具体是第几个内测版、版号是什么，以这一行的字面量为准**——别把版号抄进注释：
  * 出包脚本只改版号那一行、不改注释，抄一处就留一处对不上）。
  */
-export const AGENT_VERSION = '0.1.0-beta.14';
+export const AGENT_VERSION = '0.1.0-beta.15';
 /** 事件形状版本（docs/schema.md） */
 export const SCHEMA_VERSION = '1';
 export const DEFAULT_DATA_DIR_NAME = 'data';
@@ -1695,6 +1696,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     ? lightKey
     : (lightKeyPolicy === 'share-heavy' ? undefined : null);
   let loop: FakeLoop | RealLoop;
+  /** P3.1: 给 Web API 的同一个运行期实例；未启用时为 undefined。 */
+  let subagentManager: SubagentManager | undefined;
 
   /**
    * 真循环的句柄（惰性）：speak 的回投地址由它现取（M9）。
@@ -2849,6 +2852,32 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 组合变了就地换根（同上：SkillManager 被循环与 web 视图按引用持有）
     replacePluginSkills = (roots) => { skills.setPackageRoots(roots); };
 
+    if (config.subagents.enabled) {
+      subagentManager = new SubagentManager({
+        dataDir,
+        log,
+        registry,
+        projection: recovery.projection,
+        persona,
+        ds: pluginModelClient,
+        config: () => config,
+        projectRoots: [launchCwd],
+        now: () => now().toISOString(),
+        timezone: config.timezone ?? 'Asia/Shanghai',
+      });
+      for (const subagentTool of createSubagentTools(subagentManager)) {
+        try {
+          registry.register(subagentTool);
+        } catch {
+          // 同名工具已存在：保留既有定义，不阻断启动
+        }
+      }
+      await subagentManager.start();
+      for (const profileError of subagentManager.profileErrors()) {
+        write(`[子代理] Profile 配置：${profileError}`);
+      }
+      write(`[子代理] 后台运行时已启用（${registry.size} 件工具，${subagentManager.profileSummaries().length} 个 Profile）`);
+    }
     loop = new RealLoop({
       log, dataDir, projection: recovery.projection, now,
       timezone: config.timezone ?? 'Asia/Shanghai',
@@ -3022,6 +3051,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
        */
       configPath: loadedConfig.path,
       stickers: stickerService,
+      ...(subagentManager !== undefined ? {subagents: subagentManager} : {}),
       // 插件管理器：`GET /api/plugins` 与四条 plugin-* 命令的宿主
       plugins: pluginManager,
       // 管理视图（/api/skills、/api/mcp）要看到插件贡献：给的是函数，读的永远是当下这一份组合

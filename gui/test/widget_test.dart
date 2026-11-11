@@ -34,7 +34,7 @@ void main() {
 
   test('一级七项、其余收进「更多」：顺序与注册表稳定', () {
     // 条数不是判据：一级只放高频功能。2026-11 情绪上移后，人格 / 扩展 / 消息适配器也
-    // 移回一级，只把记忆 / 日志 / 设置留在「更多」（见 app.dart 里 navPages 上方的注释）。
+    // 移回一级，只把子代理 / 记忆 / 日志 / 设置留在「更多」（见 app.dart 里 navPages 上方的注释）。
     expect(navPages.map((p) => p.id).toList(), [
       'overview',
       'chat',
@@ -44,7 +44,12 @@ void main() {
       'extensions',
       'channels',
     ]);
-    expect(morePages.map((p) => p.id).toList(), ['memory', 'logs', 'settings']);
+    expect(morePages.map((p) => p.id).toList(), [
+      'subagents',
+      'memory',
+      'logs',
+      'settings',
+    ]);
     expect(allPages.length, navPages.length + morePages.length);
     expect(pageEntryById('persona')?.label, '人格');
     expect(pageEntryById('extensions')?.label, '扩展');

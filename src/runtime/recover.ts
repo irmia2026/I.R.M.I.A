@@ -91,7 +91,7 @@ interface State {
 }
 
 const WAKE_TYPES = new Set<string>([
-  'wake/timer', 'wake/file', 'wake/webhook', 'wake/manual', 'wake/heartbeat', 'wake/intention', 'wake/job',
+  'wake/timer', 'wake/file', 'wake/webhook', 'wake/manual', 'wake/heartbeat', 'wake/intention', 'wake/job', 'wake/subagent',
   // IM 通道（M9）：漏了它，来自 QQ 的输入在崩溃重入队时会"查不到原事件"而被丢掉
   'wake/channel',
 ]);
@@ -132,6 +132,7 @@ function wakeSourceOf(type: string | undefined): WakeSource {
     case 'wake/webhook': return 'webhook';
     case 'wake/intention': return 'intention';
     case 'wake/job': return 'job';
+    case 'wake/subagent': return 'subagent';
     case 'wake/heartbeat': return 'heartbeat';
     case 'wake/channel': return 'channel';
     default: return 'manual';

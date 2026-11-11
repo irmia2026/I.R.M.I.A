@@ -1397,6 +1397,66 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'intimacyRenderLineMissing': s.intimacyRenderLineMissing,
     'intimacyLineEmpty': s.intimacyLineEmpty,
     'intimacyInvalidData': s.intimacyInvalidData,
+    // 2026-11-04 亲密面板重做新增的无参句子
+    'intimacyPageEyebrow': s.intimacyPageEyebrow,
+    'intimacyHeadingLead': s.intimacyHeadingLead,
+    'intimacyHeadingAccent': s.intimacyHeadingAccent,
+    'intimacyHeadingTail': s.intimacyHeadingTail,
+    'intimacyTagline': s.intimacyTagline,
+    'intimacyConnectionLive': s.intimacyConnectionLive,
+    'intimacyConnectionLoading': s.intimacyConnectionLoading,
+    'intimacyConnectionError': s.intimacyConnectionError,
+    'intimacyConnectionOff': s.intimacyConnectionOff,
+    'intimacySyncNote': s.intimacySyncNote,
+    'intimacyReadingsSection': s.intimacyReadingsSection,
+    'intimacyMetricFoot': s.intimacyMetricFoot,
+    'intimacyScale': s.intimacyScale,
+    'intimacyPhaseCardTitle': s.intimacyPhaseCardTitle,
+    'intimacyCurrentPhase': s.intimacyCurrentPhase,
+    'intimacyPhaseEstrusSuffix': s.intimacyPhaseEstrusSuffix,
+    'intimacyPhaseCalmKicker': s.intimacyPhaseCalmKicker,
+    'intimacyPhaseWarmKicker': s.intimacyPhaseWarmKicker,
+    'intimacyPhaseTenseKicker': s.intimacyPhaseTenseKicker,
+    'intimacyPhaseEstrusKicker': s.intimacyPhaseEstrusKicker,
+    'intimacyPhaseCalmSub': s.intimacyPhaseCalmSub,
+    'intimacyPhaseWarmSub': s.intimacyPhaseWarmSub,
+    'intimacyPhaseTenseSub': s.intimacyPhaseTenseSub,
+    'intimacyPhaseEstrusSub': s.intimacyPhaseEstrusSub,
+    'intimacyAfterglow': s.intimacyAfterglow,
+    'intimacyLevelMeta': s.intimacyLevelMeta,
+    'intimacyUpdatedMeta': s.intimacyUpdatedMeta,
+    'intimacyNoUpdated': s.intimacyNoUpdated,
+    'intimacyCausesHeading': s.intimacyCausesHeading,
+    'intimacyCausesLimit': s.intimacyCausesLimit,
+    'intimacyCausesEmptyHint': s.intimacyCausesEmptyHint,
+    'intimacyHistoryHeading': s.intimacyHistoryHeading,
+    'intimacyHistoryNote': s.intimacyHistoryNote,
+    'intimacySettingsTooltip': s.intimacySettingsTooltip,
+    'intimacySettingsTitle': s.intimacySettingsTitle,
+    'intimacyEnabledLabel': s.intimacyEnabledLabel,
+    'intimacyEnabledNote': s.intimacyEnabledNote,
+    'intimacyMaxLevelNote': s.intimacyMaxLevelNote,
+    'intimacyPrivateScope': s.intimacyPrivateScope,
+    'intimacyPrivateScopeNote': s.intimacyPrivateScopeNote,
+    'intimacyPrivateOnlyPill': s.intimacyPrivateOnlyPill,
+    'intimacySaveSettings': s.intimacySaveSettings,
+    'intimacySettingsSaved': s.intimacySettingsSaved,
+    'intimacySettingsPending': s.intimacySettingsPending,
+    'intimacyClosedEyebrow': s.intimacyClosedEyebrow,
+    'intimacyClosedTitle': s.intimacyClosedTitle,
+    'intimacyClosedBody': s.intimacyClosedBody,
+    'intimacyClosedStatus': s.intimacyClosedStatus,
+    'intimacyErrorUnsupportedTitle': s.intimacyErrorUnsupportedTitle,
+    'intimacyErrorUnsupportedBody': s.intimacyErrorUnsupportedBody,
+    'intimacyErrorAuthTitle': s.intimacyErrorAuthTitle,
+    'intimacyErrorAuthBody': s.intimacyErrorAuthBody,
+    'intimacyErrorInvalidTitle': s.intimacyErrorInvalidTitle,
+    'intimacyErrorInvalidBody': s.intimacyErrorInvalidBody,
+    'intimacyErrorLoadTitle': s.intimacyErrorLoadTitle,
+    'intimacyErrorEyebrow': s.intimacyErrorEyebrow,
+    'intimacyDetailsTooltip': s.intimacyDetailsTooltip,
+    'intimacyFooterPrivate': s.intimacyFooterPrivate,
+    'intimacyFooterSync': s.intimacyFooterSync,
     // 日志页：事件类型标签（无参、可覆盖）
     'logsTypeAffectAppraised': s.logsTypeAffectAppraised,
     'logsTypeStickerSent': s.logsTypeStickerSent,
@@ -1450,6 +1510,49 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
     'stickerNoMatches': s.stickerNoMatches,
     'stickerIntensityLabel': s.stickerIntensityLabel,
     'stickerConfidence': s.stickerConfidence,
+    // 子代理（P3.3）：静态标签可改；带参句子在 OverriddenStrings 里原样委托。
+    'navSubagents': s.navSubagents,
+    'subagentsEyebrow': s.subagentsEyebrow,
+    'subagentsHeading': s.subagentsHeading,
+    'subagentsTagline': s.subagentsTagline,
+    'subagentsSystem': s.subagentsSystem,
+    'subagentsDisabledTitle': s.subagentsDisabledTitle,
+    'subagentsDisabledBody': s.subagentsDisabledBody,
+    'subagentsRestartNote': s.subagentsRestartNote,
+    'subagentsProfilesTitle': s.subagentsProfilesTitle,
+    'subagentsProfilesCaption': s.subagentsProfilesCaption,
+    'subagentsProfilesDisabled': s.subagentsProfilesDisabled,
+    'subagentsSessionsTitle': s.subagentsSessionsTitle,
+    'subagentsActiveTab': s.subagentsActiveTab,
+    'subagentsArchivedTab': s.subagentsArchivedTab,
+    'subagentsEmptyTitle': s.subagentsEmptyTitle,
+    'subagentsEmptyBody': s.subagentsEmptyBody,
+    'subagentsArchivedEmptyTitle': s.subagentsArchivedEmptyTitle,
+    'subagentsArchivedEmptyBody': s.subagentsArchivedEmptyBody,
+    'subagentsDetailTitle': s.subagentsDetailTitle,
+    'subagentsDetailEmpty': s.subagentsDetailEmpty,
+    'subagentsReportTitle': s.subagentsReportTitle,
+    'subagentsNoReport': s.subagentsNoReport,
+    'subagentsTimelineTitle': s.subagentsTimelineTitle,
+    'subagentsTimelineEmpty': s.subagentsTimelineEmpty,
+    'subagentsMessageHint': s.subagentsMessageHint,
+    'subagentsMessageBlocked': s.subagentsMessageBlocked,
+    'subagentsSend': s.subagentsSend,
+    'subagentsResume': s.subagentsResume,
+    'subagentsCancelTitle': s.subagentsCancelTitle,
+    'subagentsResumeTitle': s.subagentsResumeTitle,
+    'subagentsSafetyNote': s.subagentsSafetyNote,
+    'subagentsProfileAvailable': s.subagentsProfileAvailable,
+    'subagentsProfileLocked': s.subagentsProfileLocked,
+    'subagentsProfileReady': s.subagentsProfileReady,
+    'subagentsProfileNeedsInstall': s.subagentsProfileNeedsInstall,
+    'subagentsProfileAvailableHint': s.subagentsProfileAvailableHint,
+    'subagentsProfileLockedHint': s.subagentsProfileLockedHint,
+    'subagentsProfileSkills': s.subagentsProfileSkills,
+    'subagentsProfileMcp': s.subagentsProfileMcp,
+    'subagentsProfileMissing': s.subagentsProfileMissing,
+    'subagentsProfileCollapse': s.subagentsProfileCollapse,
+    'subagentsProfileVerify': s.subagentsProfileVerify,
 };
 
 /// 可覆盖的键（懒加载一次：= [AppStrings] 的全部无参 getter）
@@ -4992,6 +5095,193 @@ class OverriddenStrings extends AppStrings {
   @override
   String intimacySaveFailed(String reason) => base.intimacySaveFailed(reason);
 
+  // 2026-11-04 亲密面板重做新增（无参走覆盖，带参原样委托）
+  @override
+  String get intimacyPageEyebrow =>
+      overrides['intimacyPageEyebrow'] ?? base.intimacyPageEyebrow;
+  @override
+  String get intimacyHeadingLead =>
+      overrides['intimacyHeadingLead'] ?? base.intimacyHeadingLead;
+  @override
+  String get intimacyHeadingAccent =>
+      overrides['intimacyHeadingAccent'] ?? base.intimacyHeadingAccent;
+  @override
+  String get intimacyHeadingTail =>
+      overrides['intimacyHeadingTail'] ?? base.intimacyHeadingTail;
+  @override
+  String get intimacyTagline =>
+      overrides['intimacyTagline'] ?? base.intimacyTagline;
+  @override
+  String get intimacyConnectionLive =>
+      overrides['intimacyConnectionLive'] ?? base.intimacyConnectionLive;
+  @override
+  String get intimacyConnectionLoading =>
+      overrides['intimacyConnectionLoading'] ?? base.intimacyConnectionLoading;
+  @override
+  String get intimacyConnectionError =>
+      overrides['intimacyConnectionError'] ?? base.intimacyConnectionError;
+  @override
+  String get intimacyConnectionOff =>
+      overrides['intimacyConnectionOff'] ?? base.intimacyConnectionOff;
+  @override
+  String get intimacySyncNote =>
+      overrides['intimacySyncNote'] ?? base.intimacySyncNote;
+  @override
+  String get intimacyReadingsSection =>
+      overrides['intimacyReadingsSection'] ?? base.intimacyReadingsSection;
+  @override
+  String get intimacyMetricFoot =>
+      overrides['intimacyMetricFoot'] ?? base.intimacyMetricFoot;
+  @override
+  String get intimacyScale => overrides['intimacyScale'] ?? base.intimacyScale;
+  @override
+  String get intimacyPhaseCardTitle =>
+      overrides['intimacyPhaseCardTitle'] ?? base.intimacyPhaseCardTitle;
+  @override
+  String get intimacyCurrentPhase =>
+      overrides['intimacyCurrentPhase'] ?? base.intimacyCurrentPhase;
+  @override
+  String get intimacyPhaseEstrusSuffix =>
+      overrides['intimacyPhaseEstrusSuffix'] ?? base.intimacyPhaseEstrusSuffix;
+  @override
+  String get intimacyPhaseCalmKicker =>
+      overrides['intimacyPhaseCalmKicker'] ?? base.intimacyPhaseCalmKicker;
+  @override
+  String get intimacyPhaseWarmKicker =>
+      overrides['intimacyPhaseWarmKicker'] ?? base.intimacyPhaseWarmKicker;
+  @override
+  String get intimacyPhaseTenseKicker =>
+      overrides['intimacyPhaseTenseKicker'] ?? base.intimacyPhaseTenseKicker;
+  @override
+  String get intimacyPhaseEstrusKicker =>
+      overrides['intimacyPhaseEstrusKicker'] ?? base.intimacyPhaseEstrusKicker;
+  @override
+  String get intimacyPhaseCalmSub =>
+      overrides['intimacyPhaseCalmSub'] ?? base.intimacyPhaseCalmSub;
+  @override
+  String get intimacyPhaseWarmSub =>
+      overrides['intimacyPhaseWarmSub'] ?? base.intimacyPhaseWarmSub;
+  @override
+  String get intimacyPhaseTenseSub =>
+      overrides['intimacyPhaseTenseSub'] ?? base.intimacyPhaseTenseSub;
+  @override
+  String get intimacyPhaseEstrusSub =>
+      overrides['intimacyPhaseEstrusSub'] ?? base.intimacyPhaseEstrusSub;
+  @override
+  String get intimacyAfterglow =>
+      overrides['intimacyAfterglow'] ?? base.intimacyAfterglow;
+  @override
+  String get intimacyLevelMeta =>
+      overrides['intimacyLevelMeta'] ?? base.intimacyLevelMeta;
+  @override
+  String get intimacyUpdatedMeta =>
+      overrides['intimacyUpdatedMeta'] ?? base.intimacyUpdatedMeta;
+  @override
+  String get intimacyNoUpdated =>
+      overrides['intimacyNoUpdated'] ?? base.intimacyNoUpdated;
+  @override
+  String get intimacyCausesHeading =>
+      overrides['intimacyCausesHeading'] ?? base.intimacyCausesHeading;
+  @override
+  String get intimacyCausesLimit =>
+      overrides['intimacyCausesLimit'] ?? base.intimacyCausesLimit;
+  @override
+  String get intimacyCausesEmptyHint =>
+      overrides['intimacyCausesEmptyHint'] ?? base.intimacyCausesEmptyHint;
+  @override
+  String get intimacyHistoryHeading =>
+      overrides['intimacyHistoryHeading'] ?? base.intimacyHistoryHeading;
+  @override
+  String get intimacyHistoryNote =>
+      overrides['intimacyHistoryNote'] ?? base.intimacyHistoryNote;
+  @override
+  String get intimacySettingsTooltip =>
+      overrides['intimacySettingsTooltip'] ?? base.intimacySettingsTooltip;
+  @override
+  String get intimacySettingsTitle =>
+      overrides['intimacySettingsTitle'] ?? base.intimacySettingsTitle;
+  @override
+  String get intimacyEnabledLabel =>
+      overrides['intimacyEnabledLabel'] ?? base.intimacyEnabledLabel;
+  @override
+  String get intimacyEnabledNote =>
+      overrides['intimacyEnabledNote'] ?? base.intimacyEnabledNote;
+  @override
+  String get intimacyMaxLevelNote =>
+      overrides['intimacyMaxLevelNote'] ?? base.intimacyMaxLevelNote;
+  @override
+  String get intimacyPrivateScope =>
+      overrides['intimacyPrivateScope'] ?? base.intimacyPrivateScope;
+  @override
+  String get intimacyPrivateScopeNote =>
+      overrides['intimacyPrivateScopeNote'] ?? base.intimacyPrivateScopeNote;
+  @override
+  String get intimacyPrivateOnlyPill =>
+      overrides['intimacyPrivateOnlyPill'] ?? base.intimacyPrivateOnlyPill;
+  @override
+  String get intimacySaveSettings =>
+      overrides['intimacySaveSettings'] ?? base.intimacySaveSettings;
+  @override
+  String get intimacySettingsSaved =>
+      overrides['intimacySettingsSaved'] ?? base.intimacySettingsSaved;
+  @override
+  String get intimacySettingsPending =>
+      overrides['intimacySettingsPending'] ?? base.intimacySettingsPending;
+  @override
+  String get intimacyClosedEyebrow =>
+      overrides['intimacyClosedEyebrow'] ?? base.intimacyClosedEyebrow;
+  @override
+  String get intimacyClosedTitle =>
+      overrides['intimacyClosedTitle'] ?? base.intimacyClosedTitle;
+  @override
+  String get intimacyClosedBody =>
+      overrides['intimacyClosedBody'] ?? base.intimacyClosedBody;
+  @override
+  String get intimacyClosedStatus =>
+      overrides['intimacyClosedStatus'] ?? base.intimacyClosedStatus;
+  @override
+  String get intimacyErrorUnsupportedTitle =>
+      overrides['intimacyErrorUnsupportedTitle'] ??
+      base.intimacyErrorUnsupportedTitle;
+  @override
+  String get intimacyErrorUnsupportedBody =>
+      overrides['intimacyErrorUnsupportedBody'] ??
+      base.intimacyErrorUnsupportedBody;
+  @override
+  String get intimacyErrorAuthTitle =>
+      overrides['intimacyErrorAuthTitle'] ?? base.intimacyErrorAuthTitle;
+  @override
+  String get intimacyErrorAuthBody =>
+      overrides['intimacyErrorAuthBody'] ?? base.intimacyErrorAuthBody;
+  @override
+  String get intimacyErrorInvalidTitle =>
+      overrides['intimacyErrorInvalidTitle'] ?? base.intimacyErrorInvalidTitle;
+  @override
+  String get intimacyErrorInvalidBody =>
+      overrides['intimacyErrorInvalidBody'] ?? base.intimacyErrorInvalidBody;
+  @override
+  String get intimacyErrorLoadTitle =>
+      overrides['intimacyErrorLoadTitle'] ?? base.intimacyErrorLoadTitle;
+  @override
+  String get intimacyErrorEyebrow =>
+      overrides['intimacyErrorEyebrow'] ?? base.intimacyErrorEyebrow;
+  @override
+  String get intimacyDetailsTooltip =>
+      overrides['intimacyDetailsTooltip'] ?? base.intimacyDetailsTooltip;
+  @override
+  String get intimacyFooterPrivate =>
+      overrides['intimacyFooterPrivate'] ?? base.intimacyFooterPrivate;
+  @override
+  String get intimacyFooterSync =>
+      overrides['intimacyFooterSync'] ?? base.intimacyFooterSync;
+  @override
+  String intimacyMetricEn(String key) => base.intimacyMetricEn(key);
+  @override
+  String intimacyStrength(int value) => base.intimacyStrength(value);
+  @override
+  String intimacyHistoryCount(int count) => base.intimacyHistoryCount(count);
+
+
   @override
   String get logsTypeAffectAppraised => overrides['logsTypeAffectAppraised'] ?? base.logsTypeAffectAppraised;
   @override
@@ -5138,4 +5428,187 @@ class OverriddenStrings extends AppStrings {
   String stickerActionFailed(String reason) => base.stickerActionFailed(reason);
   @override
   String stickerBatchDone(int count) => base.stickerBatchDone(count);
+
+  // ── 子代理（P3.3）────────────────────────────────────────────────
+  @override
+  String get navSubagents => overrides['navSubagents'] ?? base.navSubagents;
+  @override
+  String get subagentsEyebrow =>
+      overrides['subagentsEyebrow'] ?? base.subagentsEyebrow;
+  @override
+  String get subagentsHeading =>
+      overrides['subagentsHeading'] ?? base.subagentsHeading;
+  @override
+  String get subagentsTagline =>
+      overrides['subagentsTagline'] ?? base.subagentsTagline;
+  @override
+  String get subagentsSystem =>
+      overrides['subagentsSystem'] ?? base.subagentsSystem;
+  @override
+  String get subagentsDisabledTitle =>
+      overrides['subagentsDisabledTitle'] ?? base.subagentsDisabledTitle;
+  @override
+  String get subagentsDisabledBody =>
+      overrides['subagentsDisabledBody'] ?? base.subagentsDisabledBody;
+  @override
+  String get subagentsRestartNote =>
+      overrides['subagentsRestartNote'] ?? base.subagentsRestartNote;
+  @override
+  String get subagentsProfilesTitle =>
+      overrides['subagentsProfilesTitle'] ?? base.subagentsProfilesTitle;
+  @override
+  String get subagentsProfilesCaption =>
+      overrides['subagentsProfilesCaption'] ?? base.subagentsProfilesCaption;
+  @override
+  String get subagentsProfilesDisabled =>
+      overrides['subagentsProfilesDisabled'] ?? base.subagentsProfilesDisabled;
+  @override
+  String get subagentsSessionsTitle =>
+      overrides['subagentsSessionsTitle'] ?? base.subagentsSessionsTitle;
+  @override
+  String get subagentsActiveTab =>
+      overrides['subagentsActiveTab'] ?? base.subagentsActiveTab;
+  @override
+  String get subagentsArchivedTab =>
+      overrides['subagentsArchivedTab'] ?? base.subagentsArchivedTab;
+  @override
+  String get subagentsEmptyTitle =>
+      overrides['subagentsEmptyTitle'] ?? base.subagentsEmptyTitle;
+  @override
+  String get subagentsEmptyBody =>
+      overrides['subagentsEmptyBody'] ?? base.subagentsEmptyBody;
+  @override
+  String get subagentsArchivedEmptyTitle =>
+      overrides['subagentsArchivedEmptyTitle'] ??
+      base.subagentsArchivedEmptyTitle;
+  @override
+  String get subagentsArchivedEmptyBody =>
+      overrides['subagentsArchivedEmptyBody'] ??
+      base.subagentsArchivedEmptyBody;
+  @override
+  String get subagentsDetailTitle =>
+      overrides['subagentsDetailTitle'] ?? base.subagentsDetailTitle;
+  @override
+  String get subagentsDetailEmpty =>
+      overrides['subagentsDetailEmpty'] ?? base.subagentsDetailEmpty;
+  @override
+  String get subagentsReportTitle =>
+      overrides['subagentsReportTitle'] ?? base.subagentsReportTitle;
+  @override
+  String get subagentsNoReport =>
+      overrides['subagentsNoReport'] ?? base.subagentsNoReport;
+  @override
+  String get subagentsTimelineTitle =>
+      overrides['subagentsTimelineTitle'] ?? base.subagentsTimelineTitle;
+  @override
+  String get subagentsTimelineEmpty =>
+      overrides['subagentsTimelineEmpty'] ?? base.subagentsTimelineEmpty;
+  @override
+  String get subagentsMessageHint =>
+      overrides['subagentsMessageHint'] ?? base.subagentsMessageHint;
+  @override
+  String get subagentsMessageBlocked =>
+      overrides['subagentsMessageBlocked'] ?? base.subagentsMessageBlocked;
+  @override
+  String get subagentsSend => overrides['subagentsSend'] ?? base.subagentsSend;
+  @override
+  String get subagentsResume =>
+      overrides['subagentsResume'] ?? base.subagentsResume;
+  @override
+  String get subagentsCancelTitle =>
+      overrides['subagentsCancelTitle'] ?? base.subagentsCancelTitle;
+  @override
+  String get subagentsResumeTitle =>
+      overrides['subagentsResumeTitle'] ?? base.subagentsResumeTitle;
+  @override
+  String get subagentsSafetyNote =>
+      overrides['subagentsSafetyNote'] ?? base.subagentsSafetyNote;
+  @override
+  String get subagentsProfileAvailable =>
+      overrides['subagentsProfileAvailable'] ?? base.subagentsProfileAvailable;
+  @override
+  String get subagentsProfileLocked =>
+      overrides['subagentsProfileLocked'] ?? base.subagentsProfileLocked;
+  @override
+  String get subagentsProfileReady =>
+      overrides['subagentsProfileReady'] ?? base.subagentsProfileReady;
+  @override
+  String get subagentsProfileNeedsInstall =>
+      overrides['subagentsProfileNeedsInstall'] ??
+      base.subagentsProfileNeedsInstall;
+  @override
+  String get subagentsProfileAvailableHint =>
+      overrides['subagentsProfileAvailableHint'] ??
+      base.subagentsProfileAvailableHint;
+  @override
+  String get subagentsProfileLockedHint =>
+      overrides['subagentsProfileLockedHint'] ??
+      base.subagentsProfileLockedHint;
+  @override
+  String get subagentsProfileSkills =>
+      overrides['subagentsProfileSkills'] ?? base.subagentsProfileSkills;
+  @override
+  String get subagentsProfileMcp =>
+      overrides['subagentsProfileMcp'] ?? base.subagentsProfileMcp;
+  @override
+  String get subagentsProfileMissing =>
+      overrides['subagentsProfileMissing'] ?? base.subagentsProfileMissing;
+  @override
+  String subagentsProfileMore(int count) => base.subagentsProfileMore(count);
+  @override
+  String get subagentsProfileCollapse =>
+      overrides['subagentsProfileCollapse'] ?? base.subagentsProfileCollapse;
+  @override
+  String get subagentsProfileVerify =>
+      overrides['subagentsProfileVerify'] ?? base.subagentsProfileVerify;
+  @override
+  String subagentsProfileMeta(int tools, String workspace, String lane) =>
+      base.subagentsProfileMeta(tools, workspace, lane);
+  @override
+  String subagentsWorkspace(String key) => base.subagentsWorkspace(key);
+  @override
+  String subagentsLane(String key) => base.subagentsLane(key);
+  @override
+  String subagentsStatus(String status) => base.subagentsStatus(status);
+  @override
+  String subagentsField(String key) => base.subagentsField(key);
+  @override
+  String subagentsEventTitle(String type) => base.subagentsEventTitle(type);
+  @override
+  String subagentsReason(String key) => base.subagentsReason(key);
+  @override
+  String subagentsLoadFailed(String reason) => base.subagentsLoadFailed(reason);
+  @override
+  String subagentsProfilesLoadFailed(String reason) =>
+      base.subagentsProfilesLoadFailed(reason);
+  @override
+  String subagentsDetailLoadFailed(String reason) =>
+      base.subagentsDetailLoadFailed(reason);
+  @override
+  String subagentsTimelineLoadFailed(String reason) =>
+      base.subagentsTimelineLoadFailed(reason);
+  @override
+  String subagentsMessageSent() => base.subagentsMessageSent();
+  @override
+  String subagentsMessageFailed(String reason) =>
+      base.subagentsMessageFailed(reason);
+  @override
+  String subagentsCancelBody(String agentId) =>
+      base.subagentsCancelBody(agentId);
+  @override
+  String subagentsResumeBody(String agentId) =>
+      base.subagentsResumeBody(agentId);
+  @override
+  String subagentsCancelDone() => base.subagentsCancelDone();
+  @override
+  String subagentsResumeDone() => base.subagentsResumeDone();
+  @override
+  String subagentsActionFailed(String reason) =>
+      base.subagentsActionFailed(reason);
+  @override
+  String subagentsToggleSaved(bool enabled, bool restartRequired) =>
+      base.subagentsToggleSaved(enabled, restartRequired);
+  @override
+  String subagentsToggleFailed(String reason) =>
+      base.subagentsToggleFailed(reason);
 }

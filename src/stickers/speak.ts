@@ -45,7 +45,10 @@ export function withStickerSpeak(
     handler: async (rawArgs, ctx): Promise<ToolHandlerResult> => {
       const args = argsRecord(rawArgs, 'speak');
       const rawSticker = args['sticker'];
-      if (rawSticker === undefined) return await base.handler(rawArgs, ctx);
+      if (rawSticker === undefined) {
+        runtime.noteSpeakWithoutSticker();
+        return await base.handler(rawArgs, ctx);
+      }
       const text = typeof args['text'] === 'string' ? args['text'] : '';
       const rawTo = typeof args['to'] === 'string' ? args['to'].trim() : '';
       const resolved = targetOf(rawTo, currentWakeChannel(), ctx.turn);

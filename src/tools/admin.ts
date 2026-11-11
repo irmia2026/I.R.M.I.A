@@ -888,21 +888,6 @@ export type AdminToolName = (typeof ADMIN_TOOL_NAMES)[number];
  */
 export const TIMER_TOOL_NAME = 'timer';
 
-/**
- * `timer action=wait` 的**上限**（分钟）：12 小时。防呆，不是能力边界。
- *
- * 为什么要有它（用户 2026-10-08：「上限要写清（例如最长几小时，防呆）」）：
- * `wait` 的全部价值是"**过一会儿再叫我**"——一个拍内的短等（几分钟到几小时）。
- * 没有上限时，一个手滑的 `minutes: 100000` 会排出一条七年后的唤醒：它在表里躺一辈子、
- * 每次 `list` 都占一行，而她要的多半是"明天这时看一眼"（那件事本来就该用 `set` 的 `at`/`cron`，
- * 值也写得更明白）。所以超限**当场报参数错并指路**，不静默夹到上限——
- * 夹掉之后她以为排的是自己说的那个时长，那比报错坏得多。
- *
- * 12 这个数的来历：跨一夜（睡/下班）与跨半天都在里面，而"更长"的等待用 `set` 表达得更准
- * （带时区的绝对时刻、或者 cron 的周期语义）。
- */
-export const TIMER_WAIT_MAX_MINUTES = 12 * 60;
-
 /** `wait` 的理由（`reason`）上限：它进的是到点那一轮的上下文，太长等于每轮都在为它付费 */
 export const TIMER_WAIT_REASON_MAX = 200;
 
@@ -2383,10 +2368,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
   };
 
   /**
-   * 读 `wait` 的时长（秒或分）。**读不出一个正整数就当场报参数错**，不猜、不兜底。
+   * 读 `wait` 的时长（秒或分）。
    *
-   * 猜的代价不是"差一点"：把 `0` 或 `0.5` 兜成 1 秒等于排了一次立刻唤醒，
-   * 而她以为排的是半分钟——那种错只有到点之后才会发现，且看起来像"定时器不准"。
+   * 2026-11-06 用户拍板：**不再限制正整数/上限**——`minutes: 1.5`、`seconds: "90"`
+   * 这类自然写法都要能换算；两个单位同时给就相加。只拒绝非数字、NaN、<=0。
    */
   const readWaitAmount = (
     args: Record<string, unknown>,
@@ -2394,14 +2379,17 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
   ): number | undefined => {
     const raw = args[field];
     if (raw === undefined || raw === null) return undefined;
-    if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
+    const value = typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(value) || value <= 0) {
       throw new ToolArgumentError(
         field,
-        `${field} 必须是正整数（单位${field === 'seconds' ? '秒' : '分钟'}），`
-        + `收到 ${JSON.stringify(raw)}——例：${field === 'seconds' ? '90' : '10'}。`,
+        `${field} 要是大于 0 的数字（可带小数，单位${field === 'seconds' ? '秒' : '分钟'}），`
+        + `收到 ${JSON.stringify(raw)}——例：${field === 'seconds' ? '1.5 / 90' : '1.5 / 10'}。`,
       );
     }
-    return raw;
+    return value;
   };
 
   /**
@@ -2467,32 +2455,18 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     const minutes = readWaitAmount(args, 'minutes');
     if (seconds === undefined && minutes === undefined) {
       return errorResult(
-        'timer 的 action=wait 需要 seconds 或 minutes 之一（多久之后叫醒你）：'
-        + `seconds 单位秒、minutes 单位分钟，上限 ${TIMER_WAIT_MAX_MINUTES} 分钟`
-        + `（${TIMER_WAIT_MAX_MINUTES / 60} 小时），更远的唤醒用 action=set 带 at 或 cron。`,
+        'timer 的 action=wait 需要 seconds 或 minutes（可小数，两个都给会相加）。',
         TOOL_ERROR_CODES.invalidArgs,
       );
     }
-    if (seconds !== undefined && minutes !== undefined) {
-      return errorResult(
-        'seconds 与 minutes 二选一：它们是同一个时长的两种单位，两个都给我不知道按哪个算。'
-        + '本次没有布防。',
-        TOOL_ERROR_CODES.invalidArgs,
-      );
-    }
-    const totalSeconds = seconds ?? (minutes as number) * 60;
-    const durationText = seconds === undefined
-      ? `${minutes} 分钟`
-      : seconds >= 120 ? `${seconds} 秒（约 ${Math.round(seconds / 60)} 分钟）` : `${seconds} 秒`;
-    if (totalSeconds / 60 > TIMER_WAIT_MAX_MINUTES) {
-      return errorResult(
-        `wait 的时长 ${durationText}，超过上限 ${TIMER_WAIT_MAX_MINUTES} 分钟`
-        + `（${TIMER_WAIT_MAX_MINUTES / 60} 小时）：那是"排一个远期闹钟"，用 action=set 带 at`
-        + '（带时区的 ISO 8601）或 cron 排更合适。本次没有布防。',
-        TOOL_ERROR_CODES.invalidArgs,
-      );
-    }
+    const totalSeconds = (seconds ?? 0) + (minutes ?? 0) * 60;
+    const formatNumber = (value: number): string =>
+      Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
+    const durationText = totalSeconds < 60
+      ? `${formatNumber(totalSeconds)} 秒`
+      : `${formatNumber(totalSeconds / 60)} 分钟`;
     const reason = readWaitReason(args['payload']);
+    const receiptReason = reason.replace(/\s+/gu, ' ').trim();
     // "同一会话"的判据与 speak 的隐式目标**同一条派生路**（不另造一套"当前会话"的算法）：
     // 没有可回投的会话时是 null（本机/心跳那一拍），那时按"没有会话"这一档去重。
     const sid = replyTargetOf(ctx)?.url ?? null;
@@ -2504,11 +2478,9 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       // 如实说"已经有一个到点唤醒了"，**不叠第二条**：她要的是"到点叫我"这件事成立一次，
       // 而不是排 N 个一样的闹钟（到点会被连着叫 N 次，每一次都是一整轮 turn）。
       return okResult(
-        `已经有一个到点唤醒了：id=${existing.timerId}，到点 ${existing.at}`
-        + (reason === '' ? '' : `，理由「${reason}」`)
-        + `——同一个${sid === null ? '理由' : '会话、同一个理由'}不重复布防，本次没有新增。\n`
-        + `要改时间就先 action=cancel（timer_id=${existing.timerId}）再 wait；`
-        + '要看现在排了什么用 action=list。这一拍照旧收尾就行。',
+        `已有同类唤醒 id=${existing.timerId}，到点 ${existing.at}`
+        + `${receiptReason === '' ? '' : `，理由「${receiptReason}」`}；`
+        + `改时间先 action=cancel timer_id=${existing.timerId} 再 wait。`,
       );
     }
     // "现在"只有一处：排定时器的那个时钟（`TimerStore.nowMs`，见那里的注释）
@@ -2520,16 +2492,11 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     }
     const entry = timers.get(result.id);
     const due = entry === null ? at : entry.at;
-    return okResult([
-      `到点唤醒已排好：id=${result.id}，${durationText}之后（${due}）以 wake/timer 唤醒你。`,
-      reason === ''
-        ? '到点你看到的是那一行 [定时器触发]（这条没写理由，只有 id 可认）——'
-          + '想留下"到点要做什么"就把那句话填进 payload，它会原样出现在那一行。'
-        : `到点你会看到：[定时器触发] ${reason}（计划时刻 ${due}）——那时接着做。`,
-      '**这一拍不用等**：现在就收尾（它是框架在同一拍里排的一次唤醒，与心跳、外部事件'
-      + '走的是同一条唤醒路径——到点正常叫醒你，不是让你在这里守着）。',
-      `撤销用 action=cancel 加 timer_id=${result.id}；看当前排了什么用 action=list。`,
-    ].join('\n'));
+    return okResult(
+      `已排 id=${result.id}：${durationText}后（${due}）唤醒`
+      + `${receiptReason === '' ? '' : `，到点：${receiptReason}`}`
+      + `；撤销 action=cancel timer_id=${result.id}`,
+    );
   };
 
   /** action=set：布防（at 一次性 / cron 周期，两者给定时以 at 为准——TimerStore 的既有语义） */
@@ -2625,9 +2592,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     // `payload` 的参数描述里（参数不进单件描述那份预算，而她两处都看得到：schema 与描述一起进清单）。
     // 同一条纪律见 `read_channel` 的瘦身记录（那件 98/100 距硬门只剩 2 token 的教训）。
     description:
-      '定时器：到点以 wake/timer 唤醒你自己（不是提醒用户）。action 四选一：'
-      + 'set 布防（at 一次性 / cron 周期）；wait 定时叫醒你；'
-      + 'list 列出未触发的（带 id）；cancel 按 id 撤销。',
+      '定时器：到点唤醒你自己（不是提醒用户）。set=at/cron 布防；'
+      + 'wait=定时（秒/分可小数、相加）；list=列出；cancel=撤销。',
     parameters: {
       type: 'object',
       properties: {
@@ -2662,11 +2628,10 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             + "scope:'self' 就不上日程页的周历。判据：这条是替用户记的，还是我自己要做的。"
             + 'wait：写一句"到点叫你的理由"（字符串）',
         },
-        seconds: { type: 'number', description: 'wait：时长，单位秒（与 minutes 二选一）' },
+        seconds: { type: 'number', description: 'wait：时长（秒，可为小数；与 minutes 同时给会相加）' },
         minutes: {
           type: 'number',
-          description: `wait：时长，单位分钟（与 seconds 二选一；`
-            + `最长 ${TIMER_WAIT_MAX_MINUTES} = ${TIMER_WAIT_MAX_MINUTES / 60} 小时，更远的用 set 带 at/cron）`,
+          description: 'wait：时长（分钟，可为小数；与 seconds 同时给会相加）',
         },
         timer_id: { type: 'string', description: 'cancel：要撤的那个 id（各动作的回执里都有）' },
       },

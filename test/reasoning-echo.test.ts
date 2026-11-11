@@ -161,9 +161,9 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 85（v84 → v85 SELF_BRIEF 情绪与欲望）', () => {
-    assert.equal(RENDER_VERSION, '85');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '85');
+  test('RENDER_VERSION 递到 86（v85 → v86 SELF_BRIEF speak 准则与情欲方向）', () => {
+    assert.equal(RENDER_VERSION, '86');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '86');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {

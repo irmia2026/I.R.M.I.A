@@ -49,6 +49,7 @@ import 'pages/overview_page.dart';
 import 'pages/persona_page.dart';
 import 'pages/schedule_page.dart';
 import 'pages/settings_page.dart';
+import 'pages/subagents_page.dart';
 import 'password_prompt.dart';
 // 重启那条路：首页那颗按钮与托盘那一项**共用这一个函数**（三态判据只有一份）
 import 'restart_action.dart';
@@ -302,6 +303,14 @@ final navPages = <PageEntry>[
 
 /// 二级入口：低频功能，收进底部「更多」折叠组，不占一级位置
 final morePages = <PageEntry>[
+  PageEntry(
+    id: 'subagents',
+    // 新导航标签的中文字面量：见 test/copy_coverage_test.dart 的 kPendingCopy 说明
+    label: '子代理',
+    icon: Icons.account_tree_outlined,
+    solidIcon: Icons.account_tree_rounded,
+    builder: (state) => SubagentsPage(state: state),
+  ),
   PageEntry(
     id: 'memory',
     label: '记忆',
@@ -979,6 +988,67 @@ class AppState extends ChangeNotifier {
 
   /// 待批几张（0 = 左侧不显示角标、托盘不摆首项）
   int get pendingGrantCount => pendingGrants.length;
+
+  // ── 子代理角标（P3.3，2026-11-05）──
+  //
+  // 侧栏「更多 → 子代理」上的活跃数要**不点进页面也在**：它只算 queued / running /
+  // interrupted（与页面顶部的读数同一口径），不把 completed / cancelled / archived 算进去。
+  // 数据来源两条：进壳时读一次 `/api/subagents`，之后由事件流里的 subagent/* 触发重读；
+  // 页面自己每次读列表也会把结果交回 [applySubagentOverview]，所以三条路的数字一致。
+  //
+  // 它失败时**静默**：角标是旁证，不是页面主内容；老服务端没有这条端点（404）时
+  // 侧栏照旧可用，不该多一条红字或把人挡在门外。
+  bool subagentsEnabled = false;
+  int subagentActiveCount = 0;
+
+  /// 把一份 `/api/subagents` 摘要收进角标（页面与后台重读共用；用例也可直接摆数据）。
+  void applySubagentOverview({required bool enabled, required List<dynamic> items}) {
+    if (_disposed) return;
+    var active = 0;
+    for (final item in items) {
+      if (item is! Map) continue;
+      final status = item['status']?.toString() ?? '';
+      if (status == 'queued' || status == 'running' || status == 'interrupted') {
+        active += 1;
+      }
+    }
+    if (subagentsEnabled == enabled && subagentActiveCount == active) return;
+    subagentsEnabled = enabled;
+    subagentActiveCount = active;
+    notifyListeners();
+  }
+
+  bool _subagentBadgeReading = false;
+  bool _subagentBadgeDirty = false;
+
+  /// 重读侧栏子代理角标。并发调用合并成一次（事件可能连着来），失败静默。
+  Future<void> refreshSubagentBadge() async {
+    if (_disposed || !ready) return;
+    if (_subagentBadgeReading) {
+      _subagentBadgeDirty = true;
+      return;
+    }
+    _subagentBadgeReading = true;
+    try {
+      do {
+        _subagentBadgeDirty = false;
+        try {
+          final raw = await api.get('/api/subagents?includeArchived=1');
+          if (_disposed) return;
+          if (raw is Map) {
+            applySubagentOverview(
+              enabled: raw['enabled'] == true,
+              items: raw['items'] is List ? raw['items'] as List : const <dynamic>[],
+            );
+          }
+        } catch (_) {
+          // 角标是旁证：读不到就保持上一份，下一件事来了再读。
+        }
+      } while (_subagentBadgeDirty && !_disposed);
+    } finally {
+      _subagentBadgeReading = false;
+    }
+  }
 
   // ── 更新检查（2026-10-22）──
 
@@ -2714,6 +2784,8 @@ class AppState extends ChangeNotifier {
     _syncEventsFeed();
     // 待批清单：进门就开始读（右下角卡 / 左侧角标 / 托盘首项共用这一份）
     _startGrantPolling();
+    // 子代理侧栏角标：进壳读一次（之后由 subagent/* 事件驱动重读，页面也会回交读数）。
+    unawaited(refreshSubagentBadge());
     // 更新检查：进门读一次现状（**只读 `/api/update`，不发外部请求**）+ 读回"关掉的是哪一版"。
     // 之后由事件流那条 `update/checked` 驱动再读（见 [_onFeedEvent]）——不必另起轮询。
     unawaited(restoreUpdateDismissed());
@@ -2879,6 +2951,9 @@ class AppState extends ChangeNotifier {
       return;
     }
     final type = event['type']?.toString();
+    if (type != null && (type.startsWith('subagent/') || type == 'wake/subagent')) {
+      unawaited(refreshSubagentBadge());
+    }
     final data = event['data'];
     final fields = data is Map ? data['fields'] : null;
     final affectConfig = type == 'config/changed' && fields is List &&

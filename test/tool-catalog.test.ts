@@ -381,13 +381,15 @@ test('工具清单：定时器三件已并成一件 `timer`，旧名不许回来
     'action 四个取值就是四个能力');
   assert.equal('at' in props && 'cron' in props && 'payload' in props, true, 'set 的两条路与 payload 都要在');
   assert.equal('timer_id' in props, true, 'cancel 必须能指定撤哪一个');
-  // wait（2026-10-08）：时长两个单位都在（参数描述里写明单位），上限写在 minutes 那一格里
+  // wait（2026-10-08；2026-11-06 用户改为可小数/可相加、不设上限）：两个单位都在，参数描述写明可小数与相加
   assert.equal('seconds' in props && 'minutes' in props, true, 'wait 的时长要有分钟与秒两个单位');
   assert.match(String((props['seconds'] as { description?: string }).description), /秒/u,
     '单位必须写进参数描述（她看得到的就是那一行）');
   assert.match(String((props['minutes'] as { description?: string }).description), /分钟/u);
-  assert.match(String((props['minutes'] as { description?: string }).description), /12 小时/u,
-    '上限要写清（防呆：更远的唤醒该走 set 的 at/cron）');
+  assert.match(String((props['minutes'] as { description?: string }).description), /小数/u,
+    '1.5 分钟这类自然写法要能被接受');
+  assert.match(String((props['minutes'] as { description?: string }).description), /相加/u,
+    '两个单位同时给要能相加，不要求二选一');
 });
 
 test('工具清单：read_file 已改名 safe_read，且行号是**无开关**的默认输出', async () => {

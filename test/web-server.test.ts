@@ -3100,7 +3100,7 @@ function consumedWithContext(overrides: { turn?: number; step?: number } = {}): 
     turn: overrides.turn ?? 12,
     step: overrides.step ?? 3,
     context: {
-      renderVersion: '85',
+      renderVersion: '86',
       instructions: { tokens: 7000, hash: 'h-inst' },
       tools: { tokens: 4000, hash: 'h-tools', count: 22 },
       memory: { tokens: 2000, hash: 'h-mem' },
@@ -3163,7 +3163,7 @@ assert.equal(body.empty, undefined, '有数就不是空态');
   assert.ok(Math.abs(sum - 1) < 1e-9, `三组占比合计应为 1，实际 ${sum}`);
   assert.ok(Math.abs((body.groups[2]?.ratio ?? 0) - 155200 / 168200) < 1e-9);
 
-  assert.equal(body.notes.renderVersion, '85', '渲染版本原样给（换版时这一格会变）');
+  assert.equal(body.notes.renderVersion, '86', '渲染版本原样给（换版时这一格会变）');
   assert.equal(typeof body.notes.keepReasoning, 'boolean');
   assert.equal(body.notes.keepReasoning, true, '出厂口径是"区外也全传"（线上没有调用点传 omit）');
 });
@@ -3178,7 +3178,7 @@ test('GET /api/context/breakdown：**最近一条**算数（后写的那拍覆�
     turn: 2,
     step: 1,
     context: {
-      renderVersion: '85',
+      renderVersion: '86',
       instructions: { tokens: 10, hash: 'i' },
       tools: { tokens: 5, hash: 't', count: 1 },
       memory: { tokens: 0, hash: 'm' },

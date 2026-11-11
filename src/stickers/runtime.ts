@@ -39,10 +39,25 @@ export interface StickerRuntimeDeps {
 
 export class StickerRuntime {
   private readonly sentTurns = new Set<number>();
+  /** 连续不带 sticker 的 speak 次数；到 5 次后置 fallbackPending。 */
+  private speaksWithoutSticker = 0;
+  private fallbackPending = false;
   private readonly deps: StickerRuntimeDeps;
 
   constructor(deps: StickerRuntimeDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * speak 没有带 sticker 时记一次。连续 5 次后，下一次被动机会强制补一张；
+   * 任何一次表情发送成功都会清零。这个计数只存在进程内，重启后重新开始。
+   */
+  noteSpeakWithoutSticker(): void {
+    this.speaksWithoutSticker += 1;
+    if (this.speaksWithoutSticker >= 5) {
+      this.speaksWithoutSticker = 0;
+      this.fallbackPending = true;
+    }
   }
 
   /**
@@ -123,6 +138,8 @@ export class StickerRuntime {
     }
     this.deps.store.recordSent(input.entry.id, this.now(), input.turn);
     this.sentTurns.add(input.turn);
+    this.speaksWithoutSticker = 0;
+    this.fallbackPending = false;
     this.deps.emit('sticker/sent', {
       source: input.source,
       tag: input.tag,
@@ -148,12 +165,31 @@ export class StickerRuntime {
     }
     if (this.sentTurns.has(input.turn)) return false;
     const config = this.deps.config();
-    if (!affectEnabled(config)) {
-      this.deps.emit('sticker/skipped', { reason: 'affect-disabled' });
-      return false;
-    }
     if (!this.allowed(input.chatType, input.channel)) {
       this.deps.emit('sticker/skipped', { reason: 'disabled' });
+      return false;
+    }
+    // 连续 5 次 speak 不带表情后的强制兜底：绕过情绪/概率/回合间隔，只保留冷却、
+    // 频道能力与每轮一张的硬约束。成功后 deliver 会清零 pending。
+    if (this.fallbackPending) {
+      if (input.target === null || this.deps.mediaPoster === undefined) return false;
+      const now = this.now();
+      const current = affectAt(this.deps.affect(), now.getTime());
+      const dominant = (Object.keys(EMOTION_TAG) as EmotionName[]).reduce((a, b) => current.emotions[a] >= current.emotions[b] ? a : b);
+      const selection = this.choose(EMOTION_TAG[dominant]);
+      if (selection === null) return false;
+      this.fallbackPending = false;
+      return await this.deliver({
+        ...selection,
+        source: 'passive',
+        turn: input.turn,
+        position: 'after',
+        target: input.target,
+        affect: { dominant, value: current.emotions[dominant] },
+      });
+    }
+    if (!affectEnabled(config)) {
+      this.deps.emit('sticker/skipped', { reason: 'affect-disabled' });
       return false;
     }
     const state = this.deps.store.readState();
@@ -170,10 +206,8 @@ export class StickerRuntime {
     }
     const dominant = (Object.keys(EMOTION_TAG) as EmotionName[]).reduce((a, b) => current.emotions[a] >= current.emotions[b] ? a : b);
     const value = current.emotions[dominant];
-    if (value < 0.35) {
-      this.deps.emit('sticker/skipped', { reason: 'affect-too-low' });
-      return false;
-    }
+    // 2026-11-07 用户拍板：去掉“主导情绪 < 0.35 就不发”的情绪门槛。
+    // 情绪层仍用于选标签；是否发由 passiveProbability、冷却和候选池决定。
     const dice = this.deps.random?.() ?? Math.random();
     if (dice >= config.stickers.passiveProbability) {
       this.deps.emit('sticker/skipped', { reason: 'dice' });

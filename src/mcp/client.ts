@@ -77,7 +77,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = ['2025-06-18', '20
 /** clientInfo（握手时上报；server 侧日志靠它辨认调用方）。version 与 main.ts 的 AGENT_VERSION 同步 */
 export const DEFAULT_CLIENT_INFO: { readonly name: string; readonly version: string } = {
   name: 'irmia-agent',
-  version: '0.1.0-beta.14',
+  version: '0.1.0-beta.15',
 };
 
 /** 每请求软超时：progress 通知可重置这个时钟 */
@@ -371,6 +371,8 @@ export interface McpServerEntry {
   args?: readonly string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** 内部隔离入口：false = 只带最小运行环境，不继承宿主密钥；缺省保持历史继承行为。 */
+  inheritEnv?: boolean;
   /** true = 配置里保留条目但不起进程（临时停用一个 server 不必删配置） */
   disabled?: boolean;
   /** 该 server 全部工具的默认三属性（缺省 destructive / exclusive / 与每请求软超时同源，120s） */
@@ -1059,7 +1061,16 @@ export function mcpToolName(server: string, tool: string): string {
  * （`registerAll` 那条纪律：一个坏扩展不该让整机起不来）。平台事实就在起进程这一刻判。
  */
 export const defaultMcpProcessSpawner: McpProcessSpawner = (entry) => {
-  const childEnv = entry.env === undefined ? process.env : { ...process.env, ...entry.env };
+  const childEnv = entry.inheritEnv === false ? {
+    PATH: process.env['PATH'] ?? process.env['Path'] ?? '',
+    ...(process.env['SystemRoot'] === undefined ? {} : {SystemRoot: process.env['SystemRoot']}),
+    ...(process.env['COMSPEC'] === undefined ? {} : {COMSPEC: process.env['COMSPEC']}),
+    ...(process.env['HOME'] === undefined ? {} : {HOME: process.env['HOME']}),
+    ...(process.env['USERPROFILE'] === undefined ? {} : {USERPROFILE: process.env['USERPROFILE']}),
+    ...(process.env['TEMP'] === undefined ? {} : {TEMP: process.env['TEMP']}),
+    ...(process.env['TMP'] === undefined ? {} : {TMP: process.env['TMP']}),
+    ...(entry.env ?? {}),
+  } : entry.env === undefined ? process.env : { ...process.env, ...entry.env };
   const unstartable = unstartableLauncherReason(entry.command, process.platform, childEnv);
   if (unstartable !== null) throw new Error(unstartable);
   const child = spawn(entry.command, [...(entry.args ?? [])], {

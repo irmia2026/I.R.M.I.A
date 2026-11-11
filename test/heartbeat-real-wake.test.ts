@@ -413,7 +413,7 @@ const BEFORE_MANUAL_TYPES = [
 //   v76 的 `5f0b11e528bf8fc8`（混批 `46b672ac9c9fb55f`）。判据未放宽：仍是 16 位 sha256 精确比对。
 // v85（2026-11-03，SELF_BRIEF 新增「情绪与欲望」并把动态行瘦身）：`1029fc0787f6526a` → **`54b07acda8d67af0`**。
 // 位移只来自 instructions；台子仍不装配贴纸运行期，事件类型序列与工具名集合均未变。
-const BEFORE_MANUAL_FINGERPRINT = '818b7a1b8e9903c4';
+const BEFORE_MANUAL_FINGERPRINT = '56f5e2cbf6c27554';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
 const BEFORE_MIXED_TYPES = [
@@ -483,7 +483,7 @@ const BEFORE_MIXED_TYPES = [
 //   （这一拍也没有 `person`，固定块里的关系档案那一段一个字节都不出现；`instructions` 撤回那句
 //   之后回到 v76）⇒ 混批仍回到 `46b672ac9c9fb55f`。
 // v85 同批复量：`e34892f6b19987fa` → **`863e390fa16e4c91`**，仍是 16 位 SHA-256 精确比对。
-const BEFORE_MIXED_FINGERPRINT = '413fb0e46fd4ccab';
+const BEFORE_MIXED_FINGERPRINT = 'e5d89ae870346ddc';
 /** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [
   'wake/heartbeat', 'budget/rollover', 'snapshot/checkpoint', 'turn/start', 'input/claimed', 'turn/end',

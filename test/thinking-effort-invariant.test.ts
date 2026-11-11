@@ -47,6 +47,7 @@ import { DsClientError } from '../src/model/ds-client.ts';
 import { completePluginModel } from '../src/plugin/model-call.ts';
 import { maintainMemory } from '../src/persona/memory-maintain.ts';
 import { runTurn, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
+import { generateCompactSummary } from '../src/runtime/subagent-compaction.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
 import { StickerStore } from '../src/stickers/store.ts';
 import { StickerTagger } from '../src/stickers/tagger.ts';
@@ -528,6 +529,26 @@ async function driveStickerTagger(_t: TestContext): Promise<DsRequest[]> {
   return requests;
 }
 
+async function driveSubagentCompaction(_t: TestContext): Promise<DsRequest[]> {
+  const requests: DsRequest[] = [];
+  const ds = {
+    generate: async (request: DsRequest) => {
+      requests.push(request);
+      return {
+        status: 'completed', model: 'compact-test', usage: {inputTokens: 1, outputTokens: 1, cachedTokens: 0, reasoningTokens: 0},
+        outputItems: [{type: 'message', text: JSON.stringify({
+          goal: '', task: '', constraints: [], plan: '', progress: '', decisions: [], artifacts: [],
+          openQuestions: [], recentTurns: [], toolResultsIndex: [],
+        })}],
+      };
+    },
+  } as unknown as DsClient;
+  await generateCompactSummary({
+    ds, session: {task: 'task', context: '', turn: 1}, events: [], parentCallId: 'call', effort: 'high',
+  });
+  return requests;
+}
+
 interface ModelCallSite {
   /** 源码落点（与扫描结果对得上） */
   source: string;
@@ -579,6 +600,12 @@ const MODEL_CALL_SITES: ModelCallSite[] = [
     where: 'tools/vision.ts（vision_read，light）',
     drive: driveVision,
     efforts: ['low'],
+  },
+  {
+    source: 'src/runtime/subagent-compaction.ts',
+    where: 'runtime/subagent-compaction.ts（子代理结构化 compact，沿用会话冻结档）',
+    drive: driveSubagentCompaction,
+    efforts: ['high'],
   },
   {
     source: 'src/runtime/agent-loop.ts',
@@ -668,6 +695,7 @@ test('② 清单是全的：源码里每一处模型调用都有人在表里认�
     // 2 = 主循环那一处 + v73 的 400 自救那一处（同一个文件、两处 `.stream(`）；
     // 两处都在下面 `MODEL_CALL_SITES` 里各有一行（各自断言 heavy/high）。
     ['src/runtime/agent-loop.ts', 2],
+    ['src/runtime/subagent-compaction.ts', 1],
     ['src/stickers/tagger.ts', 1],
     ['src/tools/vision.ts', 1],
   ];

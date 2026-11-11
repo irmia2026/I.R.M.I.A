@@ -7,6 +7,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'app.dart';
+import 'i18n/app_strings.dart';
+import 'i18n/strings_scope.dart';
 import 'theme.dart';
 import 'ui_state.dart';
 // 主界面顶部那条"有新版本"提醒（一次性可关；required 不可关。文案在 i18n，数据在 AppState）
@@ -40,6 +42,7 @@ class HomeShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final brightness = Theme.of(context).brightness;
+    final strings = IrmiaStrings.of(context);
 
     return Scaffold(
       body: Row(
@@ -69,7 +72,7 @@ class HomeShell extends StatelessWidget {
                           key: ValueKey('nav-${page.id}'),
                           icon: page.icon,
                           activeIcon: page.activeIcon,
-                          label: page.label,
+                          label: _navLabel(strings, page),
                           selected: state.pageId == page.id,
                           badge: _badgeOf(state, page),
                           onTap: () => state.setPage(page.id),
@@ -123,8 +126,15 @@ int? _badgeOf(AppState state, PageEntry page) {
   if (page.id == 'logs' && state.needsReview > 0) return state.needsReview;
   if (page.id == 'chat' && state.askTotal > 0) return state.askTotal;
   if (page.id == 'extensions' && state.pendingGrantCount > 0) return state.pendingGrantCount;
+  // 活跃 = queued / running / interrupted；0 时不摆一枚「0」（见 AppState.subagentActiveCount）。
+  if (page.id == 'subagents' && state.subagentActiveCount > 0) return state.subagentActiveCount;
   return null;
 }
+
+/// 导航文案：新入口走文案表（英文界面下是 Subagents）；其余旧入口维持原样，
+/// 不在这轮做一次全局重命名（那会把既有页面的中文测试断言一起带偏）。
+String _navLabel(AppStrings strings, PageEntry page) =>
+    page.id == 'subagents' ? strings.navSubagents : page.label;
 
 class _Brand extends StatelessWidget {
   const _Brand({required this.state});
@@ -259,6 +269,7 @@ class _MoreGroupState extends State<_MoreGroup> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final strings = IrmiaStrings.of(context);
     final collapsedBadge = _collapsedBadge;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -266,7 +277,7 @@ class _MoreGroupState extends State<_MoreGroup> {
         _NavItem(
           icon: Icons.more_horiz_rounded,
           activeIcon: Icons.more_horiz_rounded,
-          label: '更多',
+          label: strings.navMore,
           selected: _holdsSelection,
           badge: open || collapsedBadge == 0 ? null : collapsedBadge,
           trailing: AnimatedRotation(
@@ -294,7 +305,7 @@ class _MoreGroupState extends State<_MoreGroup> {
                         key: ValueKey('nav-${page.id}'),
                         icon: page.icon,
                         activeIcon: page.activeIcon,
-                        label: page.label,
+                        label: _navLabel(strings, page),
                         selected: widget.state.pageId == page.id,
                         badge: _badgeOf(widget.state, page),
                         indented: true,

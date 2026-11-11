@@ -184,6 +184,7 @@ import { WebhookSecretStore, WEBHOOK_SECRET_FILE_NAME } from './webhook-secret.t
 import { sleepSync, writeFileAtomicSync } from './atomic.ts';
 import { STICKER_UPLOAD_BODY_MAX_BYTES, StickerServiceError } from '../stickers/service.ts';
 import type { StickerService } from '../stickers/service.ts';
+import type { SubagentManager } from '../runtime/subagent-manager.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
@@ -512,7 +513,61 @@ export const CONFIRM_PHRASES: Record<string, string | null> = {
   'sticker-delete': 'sticker-delete',
   'stickers-purge': 'stickers-purge',
   'sticker-harvest': null,
+  // 子代理控制：取消会中断正在跑的工作，恢复会重新消耗预算；短语 = 命令名。
+  'subagent-cancel': 'subagent-cancel',
+  'subagent-resume': 'subagent-resume',
+  'subagent-install': 'subagent-install',
+  'subagent-verify': 'subagent-verify',
+  // 追加一条消息只进 inbox，不改变能力边界。
+  'subagent-message': null,
 };
+
+const SUBAGENT_REPORT_PREVIEW_CHARS = 240;
+const SUBAGENT_REPORT_DETAIL_CHARS = 4_000;
+
+/** API 只暴露摘要：workspace 绝对路径、transcript、工具输出一律不在这里出现。 */
+function subagentApiView(view: Record<string, unknown>, detail = false): Record<string, unknown> {
+  const report = typeof view['lastReport'] === 'string' ? view['lastReport'] : null;
+  const cut = (text: string, limit: number): string =>
+    text.length <= limit ? text : `${text.slice(0, limit)}…`;
+  const out: Record<string, unknown> = {
+    agentId: view['agentId'],
+    profileId: view['profileId'],
+    label: view['profileLabel'],
+    ...(view['profileLegacy'] === true ? {profileLegacy: true} : {}),
+    status: view['status'],
+    parentCallId: view['parentCallId'],
+    parentTurn: view['parentTurn'],
+    createdAt: view['createdAt'],
+    updatedAt: view['updatedAt'],
+    tokens: view['tokens'],
+    canResume: view['canResume'],
+    canCancel: view['canCancel'],
+  };
+  if (detail) {
+    out['lastReport'] = report === null ? null : cut(report, SUBAGENT_REPORT_DETAIL_CHARS);
+    out['headError'] = view['headError'] ?? null;
+  } else if (report !== null && report.trim() !== '') {
+    out['lastReportPreview'] = cut(report, SUBAGENT_REPORT_PREVIEW_CHARS);
+  }
+  return out;
+}
+
+function subagentErrorStatus(error: unknown): {status: number; code: string; message: string} {
+  const code = error instanceof Error ? error.message : String(error);
+  switch (code) {
+    case 'subagent-not-found': return {status: 404, code, message: '找不到这个子代理会话'};
+    case 'subagents-disabled': return {status: 400, code, message: '本实例没有启用后台子代理'};
+    case 'subagent-not-resumable':
+    case 'subagent-terminal': return {status: 409, code, message: '当前状态不能执行这个操作'};
+    case 'fork-head-missing':
+      return {status: 409, code, message: 'Fork 头快照缺失/损坏，拒绝恢复（不会静默使用当前父头）'};
+    case 'fork-head-render-version':
+      return {status: 409, code, message: 'Fork 头的 RENDER_VERSION 与当前进程不一致，拒绝恢复'};
+    case 'message-invalid': return {status: 400, code, message: 'message 不能为空'};
+    default: return {status: 400, code, message: code};
+  }
+}
 
 /**
  * 字段级危险标识：改这些字段等于改"它能碰什么"，因此 `config-update` 必须带上字段短语。
@@ -739,6 +794,8 @@ export interface WebServerDeps {
   configPath?: string | undefined;
   /** 贴纸库、打标与审核；缺省时贴纸端点如实回 501 */
   stickers?: StickerService | undefined;
+  /** P3.1 子代理管理 API；缺省 = 本进程未启用后台子代理 */
+  subagents?: SubagentManager | undefined;
   /** 人格被批准修改后的回调（宿主据此热更内存里的 PersonaAssets） */
   onPersonaUpdated?: (() => void) | undefined;
   /**
@@ -1623,7 +1680,10 @@ export async function queryEvents(
     // 不是"收多少条"——过滤稀疏时窗口内可能一条都不匹配，那时才退化全量
     fromSeq = Math.max(1, latest - limit * LATEST_SCAN_FACTOR);
     events = await tailMatches(log, fromSeq, query.filters, limit);
-    if (events.length < limit && fromSeq > 1) {
+    // 只有**无类型过滤**的常规时间线才值得为"凑满 limit"全量扫。
+    // 带 types 的稀疏过滤（如子代理时间线 `types=subagent/`）在 28 万条日志上
+    // 全量扫要十几秒，会把请求挂成 wait banner；这类调用接受尾部窗口内不足 limit 条。
+    if (events.length < limit && fromSeq > 1 && query.filters.types.length === 0) {
       // 过滤极稀疏：全量扫一次，保证"最新 N 条"名副其实
       // （否则界面会显示一个看起来像没数据的残缺列表）
       fromSeq = 1;
@@ -4158,6 +4218,38 @@ class WebServerImpl implements WebServer {
     }
 
     if (req.method === 'GET') {
+      if (path === '/api/subagents/profiles') {
+        if (req.method !== 'GET') throw new HttpError(405, 'method-not-allowed', 'Profile 列表只接受 GET');
+        const manager = this.deps.subagents;
+        const enabled = manager !== undefined && manager.enabled;
+        sendJson(res, 200, {enabled, items: enabled ? manager!.profileSummaries() : []});
+        return;
+      }
+      if (path === '/api/subagents' || path.startsWith('/api/subagents/')) {
+        if (req.method !== 'GET') {
+          throw new HttpError(405, 'method-not-allowed', '子代理读接口只接受 GET');
+        }
+        const manager = this.deps.subagents;
+        const enabled = manager !== undefined && manager.enabled;
+        if (path === '/api/subagents') {
+          const includeArchived = url.searchParams.get('includeArchived') === '1'
+            || url.searchParams.get('includeArchived') === 'true';
+          const items = enabled ? manager!.list(includeArchived).map((item) => subagentApiView(item)) : [];
+          sendJson(res, 200, {enabled, items});
+          return;
+        }
+        let agentId: string;
+        try {
+          agentId = decodeURIComponent(path.slice('/api/subagents/'.length));
+        } catch {
+          throw notFound('子代理 id 不是合法的 URL 编码', 'subagent-not-found');
+        }
+        if (!enabled) throw notFound('子代理会话不存在', 'subagent-not-found');
+        const view = manager!.status(agentId);
+        if (view === null) throw notFound('子代理会话不存在', 'subagent-not-found');
+        sendJson(res, 200, {enabled, ...subagentApiView(view, true)});
+        return;
+      }
       switch (path) {
         case '/api/plugins': {
           // 未注入 manager ⇒ 501（不是空列表）：空列表会被界面读成"一个插件都没装"
@@ -8132,6 +8224,53 @@ class WebServerImpl implements WebServer {
         });
         return;
       }
+      case 'subagent-install':
+      case 'subagent-verify': {
+        const manager = this.deps.subagents;
+        if (manager === undefined || !manager.enabled) {
+          throw new HttpError(400, 'subagents-disabled', '本实例没有启用后台子代理');
+        }
+        const profileId = typeof payload['profileId'] === 'string' ? payload['profileId'].trim() : '';
+        if (profileId === '') throw badRequest('缺少 profileId');
+        try {
+          const profile = command === 'subagent-install'
+            ? await manager.installProfile(profileId)
+            : await manager.verifyProfile(profileId);
+          if (profile === null) throw new Error('profile-unknown');
+          sendJson(res, 200, {ok: true, profile});
+          return;
+        } catch (error) {
+          const mapped = subagentErrorStatus(error);
+          throw new HttpError(mapped.status, mapped.code, mapped.message);
+        }
+      }
+      case 'subagent-message':
+      case 'subagent-cancel':
+      case 'subagent-resume': {
+        const manager = this.deps.subagents;
+        if (manager === undefined || !manager.enabled) {
+          throw new HttpError(400, 'subagents-disabled', '本实例没有启用后台子代理');
+        }
+        const agentId = typeof payload['agentId'] === 'string' ? payload['agentId'].trim() : '';
+        if (agentId === '') throw badRequest('缺少 agentId');
+        try {
+          if (command === 'subagent-message') {
+            const message = typeof payload['message'] === 'string' ? payload['message'] : '';
+            manager.message(agentId, message);
+          } else if (command === 'subagent-cancel') {
+            manager.cancel(agentId);
+          } else {
+            manager.resume(agentId);
+          }
+          const view = manager.status(agentId);
+          if (view === null) throw new Error('subagent-not-found');
+          sendJson(res, 200, {ok: true, status: view['status'], agent: subagentApiView(view)});
+          return;
+        } catch (error) {
+          const mapped = subagentErrorStatus(error);
+          throw new HttpError(mapped.status, mapped.code, mapped.message);
+        }
+      }
       default:
         // CONFIRM_PHRASES 里登记过但这里没实现：显式报错，不做"尽力而为"
         throw new HttpError(501, 'not-implemented', `命令 ${command} 已登记但尚未实现`);
@@ -10102,7 +10241,7 @@ interface McpProbeOutcome {
  */
 class McpProbeHost implements McpConnectionHost {
   // version 与 `main.ts` 的 AGENT_VERSION 同步（两处必须一起改）
-  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.14' };
+  readonly clientInfo = { name: 'irmia-agent', version: '0.1.0-beta.15' };
   readonly protocolVersion = DEFAULT_PROTOCOL_VERSION;
   readonly progressHardCapMs = 60_000;
   readonly defaultRequestTimeoutMs: number;

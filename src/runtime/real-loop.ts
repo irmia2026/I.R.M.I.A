@@ -245,6 +245,12 @@ const DEFAULT_FAIL_COOLDOWN_MS = 30 * 60 * 1000;
  * （历史上 turn 1277 的双实例就是这么来的）。真正的恢复靠传输层超时 + 重试上限。
  */
 const DEFAULT_TICK_STUCK_MS = 3 * 60 * 1000;
+/**
+ * 哪些事件算“这一拍还在推进”。watchdog 只在**连续没有进展**时才报警/中断；
+ * 长 turn 里的每个 step、tool 结果、模型输出都会刷新计时，不会被整拍总时长误杀。
+ * 外部事件（channel/*）、告警、runtime/slow-tick 刻意不算——它们不能证明 turn 在动。
+ */
+const TICK_PROGRESS_TYPE_RE = /^(?:turn\/start$|step\/|tool\/|message\/|budget\/|model\/|speak\/|compaction\/|affect\/|intimacy\/|image\/)/u;
 /** 单拍最多认领的输入条数（与 M2 一致：一批多条时的边界固定，便于复盘） */
 const BATCH_LIMIT = 8;
 
@@ -1749,12 +1755,16 @@ export class RealLoop {
    * 而 `busy` 的置位也已提到 prepare 段之前（同一处修的另一半），两者一起才堵住这个缺口。
    */
   private tickInFlight = false;
-  /** 看门狗定时器：一拍超过 `tickStuckMs` 还没收尾就告警一次 */
+  /** 看门狗定时器：连续 `tickStuckMs` 没有任何 step/tool/模型进展就告警一次 */
   private tickStuckTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 看门狗的第二只闸：超过两倍阈值还没收尾，就 abort 当前 turn（只报警不掐，现场会挂十几分钟） */
+  /** 看门狗的第二只闸：连续两倍阈值没有进展，就 abort 当前 turn */
   private tickAbortTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 这一拍已经报过"卡住"了吗（同一拍只报一次） */
+  /** 这一拍已经报过"卡住"了吗（同一段无进展只报一次；有进展会复位） */
   private tickStuckReported = false;
+  /** 本拍开始的时刻：用于告警里写“整拍已跑多久” */
+  private tickStartedAt = 0;
+  /** 最近一次有进展的时刻：step/tool/message 等事件会刷新它 */
+  private tickLastProgressAt = 0;
   private readonly tickStuckMs: number;
   /** 本拍那个 promise（`stop()` 要等它收场，免得"退出时还有一个 turn 在写日志"） */
   private tickCompletion: Promise<void> | null = null;
@@ -2994,6 +3004,80 @@ export class RealLoop {
    * 必然恒为 1，所以有信息量的是"这一慢拍压掉了几拍"——它正是重叠发生过的证据。
    * 写成 internal 而不是 model 是刻意的：它是**框架的账**，不是对她说的话。
    */
+  /**
+   * 记录“这一拍还在推进”：只有 step/tool/模型输出一类事件算进展。
+   * 连续没有进展才由 watchdog 报警/中断，长 turn 不会因为总时长被误杀。
+   */
+  private noteTickProgress(type: string): void {
+    if (!this.tickInFlight) return;
+    if (!TICK_PROGRESS_TYPE_RE.test(type)) return;
+    this.tickLastProgressAt = Date.now();
+    this.tickStuckReported = false;
+    this.armTickWatchdog();
+  }
+
+  /** 按“最近一次进展”重新布防两个 watchdog 定时器；有进展就整体后移。 */
+  private armTickWatchdog(): void {
+    if (this.tickStuckTimer !== null) {
+      clearTimeout(this.tickStuckTimer);
+      this.tickStuckTimer = null;
+    }
+    if (this.tickAbortTimer !== null) {
+      clearTimeout(this.tickAbortTimer);
+      this.tickAbortTimer = null;
+    }
+    if (!this.tickInFlight) return;
+    const idle = Math.max(0, Date.now() - this.tickLastProgressAt);
+    const alertIn = Math.max(0, this.tickStuckMs - idle);
+    const abortIn = Math.max(0, this.tickStuckMs * 2 - idle);
+    this.tickStuckTimer = setTimeout(() => {
+      if (!this.tickInFlight) return;
+      const idleNow = Date.now() - this.tickLastProgressAt;
+      if (idleNow < this.tickStuckMs) {
+        this.armTickWatchdog();
+        return;
+      }
+      if (this.tickStuckReported) return;
+      this.tickStuckReported = true;
+      const total = Math.round((Date.now() - this.tickStartedAt) / 1000);
+      const waited = Math.round(idleNow / 1000);
+      this.write(`[循环] 连续 ${waited} 秒没有进展（整拍已 ${total} 秒）：后续拍会被静默丢弃`);
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍连续 ${Math.round(this.tickStuckMs / 60_000)} 分钟没有进展`,
+        body: `这一拍已经连续 ${waited} 秒没有新的 step/tool/模型输出（整拍 ${total} 秒）。`
+          + '她的消息会一直排在队列里（界面看起来像"不说话"）。恢复靠传输层超时；若长时间不恢复，重启后端即可。',
+        params: { thresholdMs: this.tickStuckMs },
+      }).catch(() => undefined);
+    }, alertIn);
+    this.tickStuckTimer.unref?.();
+    this.tickAbortTimer = setTimeout(() => {
+      if (!this.tickInFlight) return;
+      const idleNow = Date.now() - this.tickLastProgressAt;
+      if (idleNow < this.tickStuckMs * 2) {
+        this.armTickWatchdog();
+        return;
+      }
+      if (!this.busy || this.stopController.signal.aborted) return;
+      const total = Math.round((Date.now() - this.tickStartedAt) / 1000);
+      const waited = Math.round(idleNow / 1000);
+      this.write(`[循环] 连续 ${waited} 秒没有进展（整拍已 ${total} 秒）：自动中断当前 turn`);
+      this.stoppedByOwner = false;
+      this.stopController.abort(new Error('看门狗：turn 连续无进展超时'));
+      this.stopController = new AbortController();
+      void this.notifier.alert({
+        category: 'tick-stuck',
+        level: 'warn',
+        title: `循环一拍连续 ${Math.round((this.tickStuckMs * 2) / 60_000)} 分钟没有进展，已自动中断`,
+        body: `这一拍已经连续 ${waited} 秒没有新的 step/tool/模型输出，watchdog 已 abort 当前 turn。`
+          + '输入会按 aborted 语义处理；若仍不恢复，再重启后端。',
+        params: { thresholdMs: this.tickStuckMs * 2 },
+      }).catch(() => undefined);
+    }, abortIn);
+    this.tickAbortTimer.unref?.();
+  }
+
   private async tick(): Promise<void> {
     if (!this.running) return;
     // 上一拍还在飞：这一拍整拍丢掉，只记一笔。丢拍是安全的——下一拍会把所有推导重做一遍
@@ -3004,41 +3088,10 @@ export class RealLoop {
     }
     this.tickInFlight = true;
     const startedAt = Date.now();
+    this.tickStartedAt = startedAt;
+    this.tickLastProgressAt = startedAt;
     this.tickStuckReported = false;
-    this.tickStuckTimer = setTimeout(() => {
-      this.tickStuckReported = true;
-      const elapsed = Date.now() - startedAt;
-      this.write(`[循环] 一拍卡住超过 ${Math.round(this.tickStuckMs / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：后续拍会被静默丢弃`);
-      void this.notifier.alert({
-        category: 'tick-stuck',
-        level: 'warn',
-        title: `循环一拍卡住超过 ${Math.round(this.tickStuckMs / 60_000)} 分钟`,
-        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒还没收尾。她的消息会一直排在队列里（界面看起来像"不说话"）。`
-          + '恢复靠传输层超时；若长时间不恢复，重启后端即可。',
-        params: { thresholdMs: this.tickStuckMs },
-      }).catch(() => undefined);
-    }, this.tickStuckMs);
-    this.tickStuckTimer.unref?.();
-    // 第二只闸：告警之后再等一个阈值，仍没收尾就真掐掉这一轮。
-    // 现场（2026-11-03）：turn 4330 卡在 step/start 之前，模型连接一直 Established，
-    // watchdog 只发了告警、/stop 也没把 turn 结束，整轮挂了 12 分钟。只报警不够。
-    this.tickAbortTimer = setTimeout(() => {
-      if (!this.busy || this.stopController.signal.aborted) return;
-      const elapsed = Date.now() - startedAt;
-      this.write(`[循环] 一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 1000)} 秒（已 ${Math.round(elapsed / 1000)} 秒）：自动中断当前 turn`);
-      this.stoppedByOwner = false;
-      this.stopController.abort(new Error('看门狗：turn 卡住超时'));
-      this.stopController = new AbortController();
-      void this.notifier.alert({
-        category: 'tick-stuck',
-        level: 'warn',
-        title: `循环一拍卡住超过 ${Math.round((this.tickStuckMs * 2) / 60_000)} 分钟，已自动中断`,
-        body: `这一拍已经跑了 ${Math.round(elapsed / 1000)} 秒，watchdog 已 abort 当前 turn。`
-          + '输入会按 aborted 语义处理；若仍不恢复，再重启后端。',
-        params: { thresholdMs: this.tickStuckMs * 2 },
-      }).catch(() => undefined);
-    }, this.tickStuckMs * 2);
-    this.tickAbortTimer.unref?.();
+    this.armTickWatchdog();
     const completion = this.tickOnce();
     this.tickCompletion = completion;
     try {
@@ -6812,6 +6865,40 @@ export class RealLoop {
   }
 
   /**
+   * 有界窗口扫描：从 `ceiling` 前方最近的一段日志里收集 `map` 命中的事件。
+   *
+   * 为什么必须补这一层：`read_channel` 一次会顺序调用消息、她自己的发言、群 notice、
+   * 自己的动作四个读取口。消息那一口已改成窗口读，另外三口却仍是 `readAll()` 全量扫——
+   * 28 万条 / 200+MB 的日志下，一次 `read_channel` 会超过 10s 工具超时（现场：
+   * `status=timeout`，随后 handler 才完成，落成 zombie）。这里给它们统一的有界窗口：
+   * 先在最近 `max(2000, target*500)` 条事件里找，够数就停；不够再 ×2，封顶 20k。
+   *
+   * 这不是只追求快：对“最近这一屏”语义，窗口外的旧事件本来就不该参与；翻页时
+   * `ceiling=before` 会把窗口放到游标前方，带游标的页仍能取到对应历史。极端冷清会话
+   * 若 20k 内没有命中，返回空而不是继续扫全库——交互式读不该为一条旧记录付 10 秒。
+   */
+  private async recentChannelEvents<T>(
+    ceiling: number,
+    map: (event: AppEvent) => T | null,
+    target: number,
+  ): Promise<T[]> {
+    const latest = this.deps.log.latestSeq();
+    let window = Math.max(2_000, target * 500);
+    const maxWindow = 20_000;
+    for (;;) {
+      const hits: T[] = [];
+      const from = Math.max(1, Math.min(ceiling, latest + 1) - window);
+      for await (const event of this.deps.log.readRange(from)) {
+        if (event.seq >= ceiling) break;
+        const value = map(event);
+        if (value !== null) hits.push(value);
+      }
+      if (hits.length >= target || from === 1 || window >= maxWindow) return hits;
+      window = Math.min(maxWindow, window * 2);
+    }
+  }
+
+  /**
    * `read_channel` 的**第三个**读取口：这个会话里**发生过的事**（`channel/notice`）。
    *
    * 与 `readChannelMessages` 同一个理由由宿主来读（工具层不读日志），也与它同一套游标语义：
@@ -6827,18 +6914,16 @@ export class RealLoop {
    */
   // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelNotices(sid: string, limit: number, before?: number): Promise<ChannelNoticeView[]> {
-    const hits: ChannelNoticeView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/notice') continue;
+    const ceiling = before ?? this.deps.log.latestSeq() + 1;
+    const hits = await this.recentChannelEvents<ChannelNoticeView>(ceiling, (event) => {
+      if (event.type !== 'channel/notice') return null;
       const d = event.data;
       // 形状再判一次：畸形事件（手工改过日志、旧版本写下的）**不进这一屏**——
       // 一条渲染不出来的东西摆进去只会让她读到一行空的
-      if (!isChannelNoticeData(d)) continue;
-      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
-      // 游标那一刀在读完字段之前（与 readChannelMessages 同一条：翻页时绝大多数事件落在游标之后）
-      if (before !== undefined && event.seq >= before) continue;
-      hits.push(noticeViewOf(d, event.seq, event.ts));
-    }
+      if (!isChannelNoticeData(d)) return null;
+      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) return null;
+      return noticeViewOf(d, event.seq, event.ts);
+    }, limit);
     return hits.slice(-limit);
   }
 
@@ -6855,16 +6940,15 @@ export class RealLoop {
    */
   // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelActions(sid: string, limit: number, before?: number): Promise<ChannelSelfActionView[]> {
-    const hits: ChannelSelfActionView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/self-action') continue;
+    const ceiling = before ?? this.deps.log.latestSeq() + 1;
+    const hits = await this.recentChannelEvents<ChannelSelfActionView>(ceiling, (event) => {
+      if (event.type !== 'channel/self-action') return null;
       const d = event.data;
       // 畸形事件（手工改过日志、旧版本写下的）不进这一屏：渲染不出来的一行只是噪音
-      if (!isChannelSelfActionData(d)) continue;
-      if (normalizeSid(d.sid) !== sid) continue;
-      if (before !== undefined && event.seq >= before) continue;
-      hits.push({ ...d, seq: event.seq, ts: event.ts });
-    }
+      if (!isChannelSelfActionData(d)) return null;
+      if (normalizeSid(d.sid) !== sid) return null;
+      return { ...d, seq: event.seq, ts: event.ts };
+    }, limit);
     return hits.slice(-limit);
   }
 
@@ -6888,7 +6972,15 @@ export class RealLoop {
     /** 归并键 → 那一段话（旧事件没有 callId 时退回按 turn、再退回"各自一行"） */
     const bySpoken = new Map<string, ChannelSpoken>();
     let counter = 0;
-    for await (const event of this.deps.log.readAll()) {
+    // 只读最近窗口：`readAll()` 全量扫在 28 万条日志上会把 read_channel 拖过 10s。
+    // 一次交互式读只需最近这一屏相关的发言；窗口外没有命中就返回空，不拿交互式超时
+    // 去换一条很旧的 `speak/sent`。
+    const events = await this.recentChannelEvents<AppEvent>(
+      this.deps.log.latestSeq() + 1,
+      (event) => event.type === 'speak/sent' ? event : null,
+      200,
+    );
+    for (const event of events) {
       if (event.type !== 'speak/sent') continue;
       const d = event.data;
       // 三件闸：**判据只此一处**（`deliveredToSid`，与产生侧 `deliverToSession` 同源）。
@@ -7375,6 +7467,8 @@ export class RealLoop {
     finalizePressure(this.deps.projection, event.ts);
     // 信任事件就地折入（不等下一拍）：确认后本拍就能生效，不必重启
     this.skills?.applyTrustEvent(event);
+    // 有 step/tool/模型输出 = 这一拍还在推进：watchdog 按“无进展”计时，不按整拍总时长。
+    this.noteTickProgress(type);
     return event;
   }
 }

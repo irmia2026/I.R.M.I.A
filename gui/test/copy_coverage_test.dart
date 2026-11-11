@@ -61,7 +61,8 @@ const Map<String, int> kPendingCopy = <String, int>{
   // 话全在 AppStrings 里拼）⇒ 34 → 33，棘轮跟着走。
   // 2026-10-31：新增「情绪」导航标签（更多 → 情绪）⇒ 33 → 34；棘轮随实际值同步抬高
   //（新增导航标签是唯一允许抬高的情形，已在此注明）。
-  'lib/app.dart': 34,
+  // 2026-11-05：新增「子代理」导航标签（更多 → 子代理）⇒ 34 → 35；同上。
+  'lib/app.dart': 35,
   'lib/pages/memory_page.dart': 28,
   'lib/pages/logs_widgets.dart': 24,
   'lib/ui_kit.dart': 25,
@@ -78,7 +79,7 @@ const Map<String, int> kPendingCopy = <String, int>{
   'lib/pages/page_chrome.dart': 5,
   'lib/format.dart': 4,
   'lib/mention_prompt.dart': 5,
-  'lib/home.dart': 3,
+  'lib/home.dart': 2,
   'lib/ask_card.dart': 2,
   'lib/markdown.dart': 2,
 };

@@ -60,7 +60,7 @@ export const DEFAULT_VISION_MODEL = 'deepseek-flash';
 /** 单图字节上限：20MB（§4.18） */
 export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const VISION_READ_TIMEOUT_MS = 120_000;
-export const VISION_QUERY_TIMEOUT_MS = 10_000;
+export const VISION_QUERY_TIMEOUT_MS = 30_000;
 /**
  * **单次视觉模型请求**的超时（2026-10-11 补）。
  *

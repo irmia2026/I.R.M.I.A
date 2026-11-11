@@ -50,7 +50,7 @@ function rig(t: TestContext, options: { mediaFail?: boolean } = {}) {
     text: '', messageId: 'm0', msgSeq: 1,
   };
   const tool = withStickerSpeak(base, runtime, () => current);
-  return { tool, calls, posts, events, id: imported.entry.id };
+  return { tool, calls, posts, events, runtime, id: imported.entry.id };
 }
 
 function initialAffectForTest() {
@@ -155,6 +155,22 @@ test('speak 标签没有候选：只发图时仍空成功', async (t) => {
   const result = await tool.handler({ sticker: '难过', stickerPos: 'only' }, { turn: 1 });
   assert.equal(posts.length, 0);
   assert.equal(result.content, '');
+});
+
+test('speak 连续 5 次不带 sticker：下一次被动强制补一张', async (t) => {
+  const { tool, runtime, posts } = rig(t);
+  for (let i = 0; i < 5; i += 1) {
+    await tool.handler({ text: `第 ${i + 1} 句` }, { turn: 1 });
+  }
+  const sent = await runtime.passive({
+    turn: 2,
+    chatType: 'c2c',
+    channel: 'onebot',
+    target: { url: 'onebot:c2c:owner', idempotencyKey: 'fallback' },
+    toolFailure: false,
+  });
+  assert.equal(sent, true);
+  assert.equal(posts.length, 1);
 });
 
 test('speak 同一轮第二次不再发图，文字回执不提图', async (t) => {

@@ -1083,6 +1083,15 @@ export interface StickersConfig {
   };
 }
 
+/** 后台可续聊子代理（P1）。默认关闭；打开才会注册 `delegate` / `subagent` 两件工具。 */
+export interface SubagentsConfig {
+  enabled: boolean;
+  /** 同一进程内并发运行的 AgentSession 上限。 */
+  maxConcurrent: number;
+  /** 归档 TTL（天）；P1 只定义，不自动清理。 */
+  archiveAfterDays: number;
+}
+
 /** 生效的配置全量。人可读、可 JSON 序列化、无循环引用，可直接参与指纹计算 */
 export interface AppConfig {
   /** 配置 schema 版本 */
@@ -1098,6 +1107,7 @@ export interface AppConfig {
   affect: AffectConfig;
   intimacy: IntimacyConfig;
   stickers: StickersConfig;
+  subagents: SubagentsConfig;
   speak: SpeakConfig;
   persona: PersonaConfig;
   tools: ToolsConfig;
@@ -1357,7 +1367,7 @@ function buildDefaults(dir: string): AppConfig {
     },
     stickers: {
       enabled: true,
-      passiveProbability: 0.12,
+      passiveProbability: 0.3,
       activeProbability: 1,
       cooldownSeconds: 0,
       minTurnsBetween: 4,
@@ -1366,6 +1376,7 @@ function buildDefaults(dir: string): AppConfig {
       harvest: { enabled: true, probability: 0.15, maxGlobalPerHour: 50 },
       tagging: { enabled: true, maxPerHour: 20, concurrency: 1 },
     },
+    subagents: { enabled: false, maxConcurrent: 2, archiveAfterDays: 7 },
     mcp: { servers: [], maxInFlight: 8, rssSample: true, extraLaunchers: [] },
     // 默认一个路径都不指定：探测的三段顺序里"用户指定"是显式干预，
     // 默认值必须是"没干预"，否则框架自装目录与 PATH 就永远轮不到
@@ -1874,7 +1885,7 @@ function defaultDocument(dir: string): JsonObject {
     stickers: {
       $comment: [
         '私聊默认允许贴纸；群聊还要 channels.<x>.stickers=true 才发。enabled=false 时主动/被动都停用。',
-        '被动默认 p=0.12、连续 4 轮未发且主导情绪 >=0.35 才候选；groups 是群功能总开关，默认关。',
+        '被动默认 p=0.3、连续 4 轮未发才候选（2026-11-07 去掉情绪 >=0.35 门槛）；groups 是群功能总开关，默认关。',
         'activeProbability：speak 带图时按此概率放行（0=永不，1=都尝试）；cooldownSeconds 是全局成功发图后的强制间隔。',
         '静默采收默认 p=0.15，0=关闭；enabled=false 也可关闭。私聊只收用户图，自我回声不收。',
         '打标默认开，单小时 20 张、并发 1；关闭后仍可入 inbox，但全部待审。拒绝图默认保留 7 天。',
@@ -1896,6 +1907,16 @@ function defaultDocument(dir: string): JsonObject {
         maxPerHour: d.stickers.tagging.maxPerHour,
         concurrency: d.stickers.tagging.concurrency,
       },
+    },
+    subagents: {
+      $comment: [
+        '后台可续聊子代理（P1）。默认 false：不注册 delegate / subagent，不改变现有工具清单与缓存前缀。',
+        '打开后注册两件：delegate（创建）与 subagent（action：status/message/cancel）。',
+        'maxConcurrent 是进程内同时运行的 AgentSession 上限（1–16）；archiveAfterDays 暂保留给后续清理任务。',
+      ],
+      enabled: d.subagents.enabled,
+      maxConcurrent: d.subagents.maxConcurrent,
+      archiveAfterDays: d.subagents.archiveAfterDays,
     },
     affect: {
       $comment: [
@@ -2545,6 +2566,14 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     privateOnly: true,
   };
 
+  const subagentsRaw = objectOr(doc['subagents'], 'subagents');
+  const subagents: SubagentsConfig = {
+    enabled: pickBoolean(subagentsRaw['enabled'], 'subagents.enabled', base.subagents.enabled),
+    maxConcurrent: pickInt(subagentsRaw['maxConcurrent'], 'subagents.maxConcurrent', base.subagents.maxConcurrent, 1, 16),
+    archiveAfterDays: pickInt(
+      subagentsRaw['archiveAfterDays'], 'subagents.archiveAfterDays', base.subagents.archiveAfterDays, 1, 365,
+    ),
+  };
   const stickersRaw = objectOr(doc['stickers'], 'stickers');
   const harvestRaw = objectOr(stickersRaw['harvest'], 'stickers.harvest');
   const taggingRaw = objectOr(stickersRaw['tagging'], 'stickers.tagging');
@@ -2742,7 +2771,7 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
   // 缺 mcp 段 = 合法的"没声明任何 server"，不是错误。
   const mcp: McpConfig = readMcpConfig(doc['mcp']);
   return {
-    schemaVersion, dataDir, models, budget, wake, vision, affect, intimacy, stickers, speak, persona, tools, mcp, deps, channels,
+    schemaVersion, dataDir, models, budget, wake, vision, affect, intimacy, stickers, subagents, speak, persona, tools, mcp, deps, channels,
     alerts, contextAudit, web, update, plugins, timezone, trust,
   };
 }

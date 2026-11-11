@@ -474,6 +474,9 @@ const DYNAMIC_EMIT_SITES: readonly string[] = [
   siteKey('src/runtime/job-manager.ts', "{ type: 'job/finished', data: { jobId, exitCode: null, outputRef: JSON.stringify(output) } }"),
   siteKey('src/runtime/job-manager.ts', "{ type: 'wake/job', data: this.#wakeDataOf(record, settledOutput.ok ? settledOutput.text : null) }"),
   siteKey('src/runtime/job-manager.ts', 'event: JobEventInput'),
+  // 子代理生命周期写入器：`write(type, data, visibility, session)` 的可见性是**必填形参**，
+  // 调用点逐条给出 'internal'/'model'；扫描器只看见动态 `type`，所以在这里认领。
+  siteKey('src/runtime/subagent-manager.ts', 'type: string'),
   // 定时器内部回调（`WakeSink` / `TimerStore` 的 emit 收条目、不收事件类型）
   siteKey('src/wake/sources.ts', 'entry'),
   siteKey('src/wake/sources.ts', 'entry: StoredTimerEntry'),

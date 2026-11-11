@@ -9,7 +9,8 @@
  *   ② **不阻塞当前拍**：工具当场返回、虚拟时钟一格没走、`wake/timer` 一条都还没有；
  *   ③ **到点走既有的那条路**：`TimerWakeSource` → `timer/fired` + `wake/timer` → 真 `RealLoop`
  *      起一个 turn，她这一轮的请求里**真的能看到那句理由**（复用既有唤醒机制，没有第二套）；
- *   ④ **同一会话 + 同一理由不重复布防**（如实提示"已经有一个到点唤醒了"）、**超上限报参数错**。
+ *   ④ **同一会话 + 同一理由不重复布防**（如实提示已有唤醒）；**不再限制正整数/上限**，
+ *      `minutes: 1.5`、`seconds: "90"`、两个单位同时给相加都支持。
  *
  * 走**真链路**：真 EventLog + 真 TimerStore（虚拟时钟）+ 真 TimerWakeSource + 真 RealLoop，
  * 替身只有模型通道那一个。判据的落点全是"日志里/表里到底发生了什么"，不是"回执说了什么"。
@@ -27,7 +28,6 @@ import { fold, applyOne } from '../src/state/fold.ts';
 import { RealLoop } from '../src/runtime/real-loop.ts';
 import {
   createAdminTools,
-  TIMER_WAIT_MAX_MINUTES,
   TIMER_WAIT_PAYLOAD_KIND,
   timerWaitPayloadOf,
   type TimerStore as TimerStoreType,
@@ -35,7 +35,7 @@ import {
 import { TimerStore } from '../src/wake/timer-store.ts';
 import { TimerWakeSource } from '../src/wake/sources.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
-import { TOOL_ERROR_CODES, type ToolHandlerResult } from '../src/tools/types.ts';
+import { type ToolHandlerResult } from '../src/tools/types.ts';
 import type { DsClient } from '../src/model/ds-client.ts';
 import type { PersonaAssets } from '../src/persona/loader.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
@@ -279,13 +279,13 @@ test('wait：表里真的多了一条，到期时刻 = 现在 + 时长（按调�
     kind: TIMER_WAIT_PAYLOAD_KIND, note: '看看邮件回来没有', sid: SID,
   }, 'payload 带 kind（判重复）、note（到点给她看的那句话）、sid（哪个会话排的）');
 
-  // 回执：id、时长、到期时刻、理由、以及"这一拍不用等"那条语义
+  // 回执压缩成一行：id、时长、到期时刻、理由、撤销路都在
   assert.match(out.content, new RegExp(`id=${entry.timerId}`), out.content);
-  assert.match(out.content, /5 分钟之后/, out.content);
+  assert.match(out.content, /5 分钟之后|5 分钟后/u, out.content);
   assert.match(out.content, new RegExp(entry.at.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')), out.content);
-  assert.match(out.content, /到点你会看到：\[定时器触发\] 看看邮件回来没有/u, out.content);
-  assert.match(out.content, /这一拍不用等/u, `语义必须写在回执里：${out.content}`);
+  assert.match(out.content, /到点：看看邮件回来没有/u, out.content);
   assert.match(out.content, /action=cancel/u, '撤销的路要给她');
+  assert.doesNotMatch(out.content, /\n/u, `回执必须是一行：${out.content}`);
   // 与既有 timer 语义一致：同一件工具的 list 看得到它
   const list = await rig.call('list');
   assert.match(list.content, new RegExp(entry.timerId), list.content);
@@ -358,7 +358,7 @@ test('到点：timer/fired + wake/timer 落进真日志，真 RealLoop 起一个
 
 // ──────────────────────────────── ③ 重复 wait：如实提示，不叠第二条 ────────────────────────────────
 
-test('同一会话 + 同一理由重复 wait：如实说"已经有一个到点唤醒了"，不叠第二条', async (t) => {
+test('同一会话 + 同一理由重复 wait：如实说"已有同类唤醒"，不叠第二条', async (t) => {
   const rig = await makeRig(t);
   const first = await rig.wait({ minutes: 10, payload: '看构建结果' });
   assert.equal(first.isError, undefined, first.content);
@@ -366,7 +366,8 @@ test('同一会话 + 同一理由重复 wait：如实说"已经有一个到点�
 
   const again = await rig.wait({ minutes: 10, payload: '看构建结果' });
   assert.equal(again.isError, undefined, again.content);
-  assert.match(again.content, /已经有一个到点唤醒了/u, `要如实说，别默默再排一条：${again.content}`);
+  assert.match(again.content, /已有同类唤醒/u, `要如实说，别默默再排一条：${again.content}`);
+  assert.doesNotMatch(again.content, /\n/u, `重复 wait 的回执也必须是一行：${again.content}`);
   assert.match(again.content, new RegExp(`id=${entry.timerId}`), '要给已有的那条 id');
   assert.match(again.content, new RegExp(entry.at.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')), '要说清它什么时候到点');
   assert.match(again.content, /action=cancel/u, '要给她"改时间"的路（撤掉再排）');
@@ -378,46 +379,45 @@ test('同一会话 + 同一理由重复 wait：如实说"已经有一个到点�
   assert.equal(rig.timers.list().length, 2, '理由不同 ⇒ 是另一件要等的事');
 });
 
-// ──────────────────────────────── ④ 上限与参数错 ────────────────────────────────
+// ──────────────────────────────── ④ 任意时长与参数错 ────────────────────────────────
 
-test('超上限报参数错并指路：分钟与秒两条路都拦，且一个字都不布防', async (t) => {
+test('可小数 / 可数字字符串 / 两单位相加 / 不再有上限', async (t) => {
   const rig = await makeRig(t);
-  const tooFar = await rig.wait({ minutes: TIMER_WAIT_MAX_MINUTES + 1 });
-  assert.equal(tooFar.isError, true, tooFar.content);
-  assert.equal(tooFar.error?.code, TOOL_ERROR_CODES.invalidArgs);
-  assert.match(tooFar.content, /超过上限/u, tooFar.content);
-  assert.match(tooFar.content, /12 小时/u, '上限要写成她读得懂的量（小时）');
-  assert.match(tooFar.content, /action=set/u, '要给出去路：更远的唤醒用 set 的 at/cron');
-  assert.match(tooFar.content, /本次没有布防/u, '不许静默夹到上限（她以为排的是自己说的那个时长）');
+  const decimal = await rig.wait({ minutes: 1.5, payload: '小数分钟' });
+  assert.equal(decimal.isError, undefined, decimal.content);
+  assert.equal(rig.timers.list()[0]!.at, new Date(START_MS + 90_000).toISOString());
 
-  const tooFarSeconds = await rig.wait({ seconds: TIMER_WAIT_MAX_MINUTES * 60 + 1 });
-  assert.equal(tooFarSeconds.isError, true, tooFarSeconds.content);
-  assert.match(tooFarSeconds.content, /超过上限/u);
-  assert.equal(rig.timers.list().length, 0, '两次都被拒 ⇒ 表里一条都没有');
+  const numericString = await rig.wait({ seconds: '90', payload: '字符串秒' });
+  assert.equal(numericString.isError, undefined, numericString.content);
 
-  // 正好在上限上：照排（边界是精确的）
-  const edge = await rig.wait({ minutes: TIMER_WAIT_MAX_MINUTES });
-  assert.equal(edge.isError, undefined, edge.content);
-  assert.equal(rig.timers.list().length, 1);
+  const both = await rig.wait({ seconds: 30, minutes: 1, payload: '两单位相加' });
+  assert.equal(both.isError, undefined, both.content);
+  assert.equal(rig.timers.list()[2]!.at, new Date(START_MS + 90_000).toISOString(),
+    'seconds 30 + minutes 1 = 90 秒');
+
+  const huge = await rig.wait({ minutes: 100_000, payload: '远期' });
+  assert.equal(huge.isError, undefined, huge.content);
+  assert.equal(rig.timers.list().length, 4, '不再有 12 小时上限，远期也能排');
 });
 
-test('参数错：时长缺失 / 两个单位同时给 / 非正整数 —— 都当场拒绝并说清怎么改', async (t) => {
+test('参数错：缺时长 / 非正数 / 非数字字符串 / 坏 payload 都当场拒绝', async (t) => {
   const rig = await makeRig(t);
   const missing = await rig.wait({ payload: '到点看看' });
   assert.equal(missing.isError, true, missing.content);
   assert.match(missing.content, /seconds 或 minutes/u, missing.content);
 
-  const both = await rig.wait({ seconds: 30, minutes: 1 });
-  assert.equal(both.isError, true, both.content);
-  assert.match(both.content, /二选一/u, both.content);
-
   const zero = await rig.wait({ seconds: 0 });
   assert.equal(zero.isError, true, zero.content);
-  assert.match(zero.content, /正整数/u, zero.content);
+  assert.match(zero.content, /大于 0/u, zero.content);
 
-  const notNumber = await rig.wait({ minutes: '5' });
-  assert.equal(notNumber.isError, true, `时长只认数字（不猜字符串）：${notNumber.content}`);
-  assert.equal(rig.timers.list().length, 0, '四次都没有布防');
+  const negative = await rig.wait({ minutes: -1 });
+  assert.equal(negative.isError, true, negative.content);
+
+  const notNumber = await rig.wait({ minutes: 'abc' });
+  assert.equal(notNumber.isError, true, notNumber.content);
+  assert.match(notNumber.content, /数字/u, notNumber.content);
+
+  assert.equal(rig.timers.list().length, 0, '以上都没有布防');
 
   // 理由的形状也要当场判：静默丢掉它比报错坏得多（她到点会看到一行没有理由的 [定时器触发]）
   const badReason = await rig.wait({ minutes: 5, payload: { 想看: '邮件' } });
@@ -436,7 +436,7 @@ test('本机那一拍（没有可回投会话）照样能 wait：sid 记 null，
   }, '没有会话坐标就记 null（不编一个假 sid）');
 
   const again = await rig.wait({ minutes: 3, payload: '回头看那件事' });
-  assert.match(again.content, /已经有一个到点唤醒了/u, again.content);
-  assert.match(again.content, /同一个理由/u, `没有会话时那句话要说得准（不许说"同一个会话"）：${again.content}`);
+  assert.match(again.content, /已有同类唤醒/u, again.content);
+  assert.doesNotMatch(again.content, /\n/u, `没有会话时的重复回执也保持一行：${again.content}`);
   assert.equal(rig.timers.list().length, 1);
 });

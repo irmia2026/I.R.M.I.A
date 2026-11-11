@@ -308,6 +308,7 @@ export function wakeSourceOfType(type: string): WakeSource | null {
     case 'wake/manual': return 'manual';
     case 'wake/intention': return 'intention';
     case 'wake/job': return 'job';
+    case 'wake/subagent': return 'subagent';
     case 'wake/channel': return 'channel';
     default: return null;
   }
