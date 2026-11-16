@@ -3,14 +3,14 @@ import { createHash } from 'node:crypto';
 import { parseImageDataUrl } from '../log/types.ts';
 import { normalizeStickerMime, sniffStickerMime, stickerDimensions } from './media.ts';
 import { computeStickerPHash, type StickerPHasher } from './phash.ts';
-import { resizeStickerImage, type StickerResizer } from './resize.ts';
+import { resizeStickerImage, STICKER_MAX_EDGE, type StickerResizer } from './resize.ts';
 import type { StickerStore } from './store.ts';
 import type { StickerTagger } from './tagger.ts';
 import type { StickerEntry, StickerMime } from './types.js';
 
 export const STICKER_HARVEST_MAX_BYTES = 1_500_000;
 /** 参考包最大边约 160px；非 GIF 超长边先缩到这里。 */
-export const STICKER_HARVEST_MAX_EDGE = 160;
+export const STICKER_HARVEST_MAX_EDGE = STICKER_MAX_EDGE;
 
 export interface HarvestMessage {
   channel: string;

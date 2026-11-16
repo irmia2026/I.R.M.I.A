@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
+import { delimiter, dirname, join, resolve, sep } from 'node:path';
 
 import type { AppConfig } from '../config/config.ts';
 import {
@@ -25,7 +25,9 @@ import {
   SubagentProfileRegistry, type SubagentProfile, type ProfileAvailability,
 } from './subagent-profiles.ts';
 import { SubagentPackageInstaller } from './subagent-packages.ts';
+import { binaryAvailable } from './subagent-binaries.ts';
 import { healthcheckSubagentProfile } from './subagent-health.ts';
+import { installSubagentDependencies } from './subagent-deps.ts';
 import { toolDenialClass } from './subagent-capabilities.ts';
 import {
   compactCutoff, generateCompactSummary, readingForRequest, SUBAGENT_COMPACT_REQUIRED,
@@ -122,6 +124,8 @@ export interface SubagentManagerDeps {
   binaryCheck?: (id: string) => boolean;
   /** healthcheck 的 Python 模块探测注入（测试用；生产走真 spawn）。 */
   pythonModulesCheck?: (modules: readonly string[]) => readonly string[];
+  /** 安装 worker 依赖前确保有 Python；生产由 main 接到 DepsManager，测试可不给。 */
+  ensurePython?: () => Promise<string | null>;
   /** 测试/替代注入：codegraph 的 Python/CLI 路径与执行器（生产用默认解析）。 */
   codePythonPath?: string;
   codeCliPath?: string;
@@ -402,7 +406,9 @@ export class SubagentManager {
     this.deps = deps;
     this.root = resolve(deps.dataDir, 'subagents');
     this.sessionsDir = join(this.root, 'sessions');
-    this.profiles = deps.profiles ?? new SubagentProfileRegistry(deps.dataDir);
+    this.profiles = deps.profiles ?? new SubagentProfileRegistry(deps.dataDir, {
+      binaryCheck: deps.binaryCheck ?? ((id) => binaryAvailable(id, deps.dataDir)),
+    });
   }
 
   /** `includeHidden` 只给测试/诊断：HTTP 只用默认值（general 隐式兜底不进列表）。 */
@@ -424,6 +430,14 @@ export class SubagentManager {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    // MinGit 装在 data/tools/git；重启后把它放进 PATH，子代理 shell 里的 `git` 才找得到。
+    const gitCmd = join(this.deps.dataDir, 'tools', 'git', 'cmd');
+    if (existsSync(join(gitCmd, 'git.exe'))) {
+      const path = process.env['PATH'] ?? process.env['Path'] ?? '';
+      if (!path.split(delimiter).some((item) => item.toLowerCase() === gitCmd.toLowerCase())) {
+        process.env['PATH'] = `${gitCmd}${delimiter}${path}`;
+      }
+    }
     mkdirSync(this.sessionsDir, {recursive: true});
     for (const session of this.loadAll()) this.sessions.set(session.agentId, session);
     await this.recoverInterrupted();
@@ -438,6 +452,22 @@ export class SubagentManager {
   async installProfile(profileId: string): Promise<ReturnType<SubagentProfileRegistry['summaries']>[number] | null> {
     if (!this.enabled) throw new Error('subagents-disabled');
     await new SubagentPackageInstaller({dataDir: this.deps.dataDir}).install(profileId);
+    const profile = this.profiles.get(profileId);
+    if (profile !== null) {
+      if ((profile.requires?.pythonModules?.length ?? 0) > 0
+        && !existsSync(join(this.deps.dataDir, 'tools', 'python', 'python.exe'))
+        && this.deps.ensurePython !== undefined) {
+        try { await this.deps.ensurePython(); } catch { /* healthcheck 会如实报缺 */ }
+      }
+      const dependencies = await installSubagentDependencies(profile.requires, this.deps.dataDir);
+      this.write('subagent/dependencies', {
+        profileId,
+        ok: dependencies.ok,
+        git: dependencies.git,
+        python: dependencies.python,
+        details: dependencies.details,
+      }, 'internal', null);
+    }
     this.profiles.reloadRolePackages();
     const availability = await this.refreshProfileHealth(profileId);
     this.write('subagent/profile-installed', {
@@ -902,10 +932,14 @@ export class SubagentManager {
     }) : null;
     // worker 专用 codegraph 工具：只在有项目根时注入（没有项目就没有可索引的东西）。
     // 条件与 shell 同一个会话事实（session.projectRoot），不是“猜 profile 应该有什么”。
+    const codePythonPath = this.deps.codePythonPath
+      ?? (existsSync(join(this.deps.dataDir, 'tools', 'python', 'python.exe'))
+        ? join(this.deps.dataDir, 'tools', 'python', 'python.exe')
+        : undefined);
     const codeTool = forkHead === null && profile.id === 'worker' && session.projectRoot !== undefined
       ? createCodeTool({
         profileId: profile.id, workspace, projectRoot: session.projectRoot, agentId, emit: runtimeEmit,
-        ...(this.deps.codePythonPath === undefined ? {} : {pythonPath: this.deps.codePythonPath}),
+        ...(codePythonPath === undefined ? {} : {pythonPath: codePythonPath}),
         ...(this.deps.codeCliPath === undefined ? {} : {cliPath: this.deps.codeCliPath}),
         ...(this.deps.codeRunner === undefined ? {} : {runner: this.deps.codeRunner}),
       }) : null;

@@ -103,7 +103,7 @@ export const ES_DOWNLOAD_PAGE = 'https://www.voidtools.com/downloads/#everything
 
 /** PowerShell 7 的官方下载页（自动安装代价过高，只做提示 + 一键打开） */
 export const PWSH_DOWNLOAD_PAGE = 'https://github.com/PowerShell/PowerShell/releases/latest';
-export const PWSH_WINGET_HINT = 'winget install Microsoft.PowerShell';
+export const PWSH_WINGET_HINT = 'winget install --id Microsoft.PowerShell --scope user';
 
 /**
  * Python 的下载页（人看的）。**指向 Windows 那一页**，因为一键安装给的是
@@ -140,8 +140,8 @@ export interface DependencySpec {
    * 界面要"显式告知建议安装"，而"建议"只有在说清代价之后才成立。
    */
   impact: string;
-  /** 装它的方式：zip = 框架一键装；manual = 只能人去装（界面给「打开下载页」+ 指令） */
-  install: 'zip' | 'manual';
+  /** 装它的方式：zip = 框架下载 ZIP；winget = 优先走系统 winget；manual = 只能人去装 */
+  install: 'zip' | 'winget' | 'manual';
   /** 手动安装时给用户的一句话指令（winget / 下载页说明）；一键装的依赖这里是 null */
   manualHint: string | null;
   /** 手动安装的下载页（界面按钮用）；一键装的依赖这里是 null */
@@ -163,6 +163,11 @@ export interface DependencySpec {
   sourceOrder?: 'managed-first' | 'path-first' | undefined;
   /** 版本探测参数。做成函数是因为 pwsh 走 -EncodedCommand（见 pwsh.ts 的实测依据） */
   versionArgs: () => readonly string[];
+  /**
+   * 版本之后的**功能探测**参数（可选）。只给那些“有客户端不等于服务可用”的依赖：
+   * `es.exe -version` 在 Everything 主程序没启动时也能返回版本，必须再查一次 IPC。
+   */
+  readinessArgs?: (() => readonly string[]) | undefined;
   /** 版本探测的额外 spawn 选项 */
   versionSpawn?: { useEncodedCommand?: boolean } | undefined;
   /**
@@ -355,7 +360,7 @@ export const DEP_SPECS: Readonly<Record<DepName, DependencySpec>> = {
     purpose: 'pwsh 工具的默认 shell；工具的第一条通道',
     impact: '没有它时 pwsh 工具如实回退到 Windows PowerShell 5.1（多数命令照跑，'
       + '但 5.1 与 7 的语法与默认编码有差异，每次都只做到"能用"）',
-    install: 'manual',
+    install: 'winget',
     manualHint: PWSH_WINGET_HINT,
     downloadPage: PWSH_DOWNLOAD_PAGE,
     candidates: ['pwsh.exe', 'pwsh'],
@@ -396,9 +401,10 @@ export const DEP_SPECS: Readonly<Record<DepName, DependencySpec>> = {
     manualHint: null,
     downloadPage: ES_DOWNLOAD_PAGE,
     candidates: ['es.exe', 'es'],
-    // es 的版本参数是单横线 `-version`（不是 --version），且它对 Everything 客户端
-    // 是否在跑不敏感——探测只读它自己的版本号
+    // es 的版本参数是单横线 `-version`（不是 --version）。它只证明客户端在，
+    // 不证明 Everything 主程序/IPC 可用；readinessArgs 会再查一次真实索引。
     versionArgs: () => ['-version'],
+    readinessArgs: () => ['-n', '1', '-name', '*.exe', '.'],
     parseVersion: (stdout) => {
       const version = parseEsVersion(stdout);
       if (version === null) return null;
@@ -478,8 +484,29 @@ export async function probeCandidate(
   source: DepSource | null,
   options: DepProbeOptions = {},
 ): Promise<CandidateProbe> {
-  const run = await runProbeCommand(exe, spec.versionArgs(), options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
-  return judgeCandidate(spec, exe, source, run);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const run = await runProbeCommand(exe, spec.versionArgs(), timeoutMs);
+  const judged = judgeCandidate(spec, exe, source, run);
+  if (!judged.result.ok || spec.readinessArgs === undefined) return judged;
+  // 客户端版本对，不等于它背后的服务可用（es.exe 的 Everything IPC 是典型）。
+  const readiness = await runProbeCommand(exe, spec.readinessArgs(), timeoutMs);
+  if (readiness.timedOut || readiness.failed || readiness.code !== 0) {
+    return {
+      result: {
+        ok: false,
+        path: exe,
+        version: '',
+        source: null,
+        reason: `${exe} 版本可用，但功能探测失败：${readiness.stderr.trim()
+          || (readiness.timedOut ? '超时' : `退出码 ${readiness.code ?? 'null'}`)}`
+          + '（Everything 主程序可能没有运行，或服务/IPC 未就绪）',
+        dir: null,
+      },
+      // 故意清空 anyVersion：这不是“版本不对”，是“服务不可用”。
+      anyVersion: '',
+    };
+  }
+  return judged;
 }
 
 /**

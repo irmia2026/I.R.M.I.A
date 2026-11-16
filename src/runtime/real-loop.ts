@@ -65,6 +65,7 @@ import { TopicSummarizer, isUnattendedGroup } from '../channel/topic.ts';
 import type { WakeEmission } from '../wake/sources.js';
 import type { EventLog } from '../log/event-log.js';
 import type { DsClient } from '../model/ds-client.js';
+import type { DeepSeekBalanceService } from '../model/deepseek-balance.ts';
 import type { ToolRegistry } from '../tools/registry.js';
 import {
   DEFAULT_ASK_HUMAN_TIMEOUT_MIN,
@@ -1497,6 +1498,8 @@ export interface RealLoopDeps {  log: EventLog;
   now: () => Date;
   timezone: string;
   ds: DsClient;
+  /** DeepSeek 余额服务；非 DeepSeek 端点不构造，此刻层不出现余额行。 */
+  balance?: DeepSeekBalanceService | null;
   registry: ToolRegistry;
   persona: PersonaAssets;
   config: AppConfig;
@@ -5737,6 +5740,7 @@ export class RealLoop {
       // 在宿主手上，而渲染层是纯函数（不读环境值，缓存铁律 1）。一 turn 算一次。
       machine: this.machineFacts(),
       usage: this.usageFacts(),
+      balance: this.deps.balance?.snapshot() ?? null,
       // 豁免判据（显式入参那条路）：渲染层"旧日志现算"的兜底扫描要问它。判据仍是
       // `WarnExemptBook.isExempt` 这一处实现，宿主在这里递一次、每步原样转手（渲染不读盘）。
       // 名单只在本方法开头 refresh 一次——粒度就是"轮"（改完下一轮生效）。

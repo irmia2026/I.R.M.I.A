@@ -68,16 +68,22 @@ export const PYTHON_RELEASE_API = 'https://www.python.org/api/v2/downloads/relea
 
 /** 官方 embeddable 包在 ftp 上的路径形状（3.5 至今没变过）与文件名后缀 */
 export const PYTHON_FTP_PREFIX = 'https://www.python.org/ftp/python/';
+/**
+ * 默认从国内镜像取 Python；官方 ftp 只作为代码里的参照，不再作为首选。
+ * 环境变量允许出包机/企业部署换源，不把某一台机器的镜像写死。
+ */
+export const PYTHON_MIRROR_FTP_PREFIX =
+  (process.env.IRMIA_PYTHON_MIRROR ?? 'https://mirrors.huaweicloud.com/python/').trim();
 export const PYTHON_EMBED_ASSET_MARKER = '-embed-amd64.zip';
 
 /**
  * 钉住的兜底：3.13.16（用户 2026-10-16 批的那一版）。
- * 实测 `HEAD` → 200 · 11,439,094 字节 · Last-Modified 2026-09-30；range 摸前 4KB →
+ * 实测 HEAD → 200 · 11,439,094 字节 · Last-Modified 2026-09-30；range 摸前 4KB →
  * 标准 zip（`504b0304`）、首成员 **`python.exe`**、method 8（deflate）
  * ⇒ 走我们那个只收 store/deflate 的手写解压器没问题。
  */
 export const PYTHON_EMBED_URL =
-  `${PYTHON_FTP_PREFIX}3.13.16/python-3.13.16${PYTHON_EMBED_ASSET_MARKER}`;
+  `${PYTHON_MIRROR_FTP_PREFIX}3.13.16/python-3.13.16${PYTHON_EMBED_ASSET_MARKER}`;
 
 /** zip 探测签名：末尾的 22 字节 EOCD 里以它开头 */
 const EOCD_SIGNATURE = 0x06054b50;
@@ -660,7 +666,7 @@ export function pickLatestPythonRelease(
   stable.sort((a, b) => (b[0]! - a[0]!) || (b[1]! - a[1]!) || (b[2]! - a[2]!));
   const best = stable[0]!;
   const version = best.join('.');
-  return { ok: true, version, url: `${PYTHON_FTP_PREFIX}${version}/python-${version}${PYTHON_EMBED_ASSET_MARKER}` };
+  return { ok: true, version, url: `${PYTHON_MIRROR_FTP_PREFIX}${version}/python-${version}${PYTHON_EMBED_ASSET_MARKER}` };
 }
 
 /**

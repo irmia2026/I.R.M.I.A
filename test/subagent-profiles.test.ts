@@ -35,6 +35,15 @@ function summaryOf(registry: SubagentProfileRegistry, id: string) {
   return registry.summaries(true).find((item) => item.id === id);
 }
 
+test('availability 的 binaries 走探测，不再无条件锁定', (t) => {
+  const registry = new SubagentProfileRegistry(dir(t), {binaryCheck: (id) => id === 'python'});
+  const base = registry.get('general')!;
+  const profile = { ...base, id: 'fixture-binaries', requires: {binaries: ['python', 'not-installed']} };
+  const availability = registry.availability(profile as never);
+  assert.equal(availability.available, false);
+  assert.deepEqual(availability.missing, ['not-installed'], '存在的 python 不应再进 missing');
+});
+
 test('三个角色包 + 隐式 general：加载、摘要、general 隐藏', (t) => {
   const registry = new SubagentProfileRegistry(dir(t));
   assert.deepEqual(registry.list().map((profile) => profile.id).sort(),
@@ -152,11 +161,11 @@ test('锁定态：三个角色包默认未安装 ⇒ locked + missing；general 
   assert.equal(summaryOf(registry, 'general')!.available, true);
 });
 
-test('安装登记后静态缺项精确；二进制与 Python 模块留给 healthcheck', (t) => {
+test('安装登记后静态缺项精确；二进制走注入探测，Python 模块留给 healthcheck', (t) => {
   const root = dir(t);
   writeRolePackages(root, ['worker', 'scribe']);
   writeSkill(root, 'dev-workflow');
-  const partial = new SubagentProfileRegistry(root);
+  const partial = new SubagentProfileRegistry(root, {binaryCheck: () => false});
   assert.equal(summaryOf(partial, 'worker')!.locked, true);
   assert.deepEqual(summaryOf(partial, 'worker')!.missing,
     ['review', 'irmia-framework', 'plugin-dev', 'design-taste-frontend', 'ui-ux-pro-max', 'impeccable',
@@ -168,7 +177,7 @@ test('安装登记后静态缺项精确；二进制与 Python 模块留给 healt
   assert.equal(summaryOf(partial, 'researcher')!.locked, true, '没装包的研究员仍锁');
 
   for (const id of ['review', 'irmia-framework', 'plugin-dev', 'design-taste-frontend', 'ui-ux-pro-max', 'impeccable', 'motion-design']) writeSkill(root, id);
-  const ready = new SubagentProfileRegistry(root);
+  const ready = new SubagentProfileRegistry(root, {binaryCheck: () => false});
   assert.deepEqual(summaryOf(ready, 'worker')!.missing, ['node', 'npm', 'git']);
   assert.equal(summaryOf(ready, 'scribe')!.locked, true, 'scribe 没装技能仍锁');
 });

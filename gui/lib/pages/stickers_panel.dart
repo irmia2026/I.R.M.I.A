@@ -9,12 +9,22 @@ import '../app.dart';
 import '../i18n/app_strings.dart';
 import '../i18n/strings_scope.dart';
 import '../theme.dart';
+import '../ui_kit.dart';
 
 class StickerFile {
   const StickerFile({required this.bytes, required this.mime, required this.name});
   final Uint8List bytes;
   final String mime;
   final String name;
+}
+
+/// 审核页的两段各自持有页码与总数：待审、已拒绝互不牵连。
+class _PagedStickers {
+  List<Map<String, dynamic>> items = const [];
+  int page = 1;
+  int total = 0;
+  int epoch = 0;
+  bool loading = false;
 }
 
 typedef StickerFilePicker = Future<StickerFile?> Function();
@@ -51,10 +61,9 @@ bool validStickerView(dynamic raw) =>
     raw is Map && raw['items'] is List && raw['counts'] is Map && raw['settings'] is Map && raw['tags'] is Map;
 
 class StickersPanel extends StatefulWidget {
-  const StickersPanel({super.key, required this.state, required this.view, this.onRefresh, this.picker = pickStickerFile});
+  const StickersPanel({super.key, required this.state, required this.view, this.picker = pickStickerFile});
   final AppState state;
   final Map<String, dynamic> view;
-  final Future<void> Function()? onRefresh;
   final StickerFilePicker picker;
 
   @override
@@ -72,11 +81,24 @@ class _StickersPanelState extends State<StickersPanel> {
   List<dynamic>? _events;
   bool _eventsLoading = false;
 
+  /// 分页游标（来自 `/api/stickers` 的 page/pageSize/total）：
+  /// 左栏库存是全局计数，右栏一次只有一页——两者必须靠翻页对齐。
+  int _page = 1;
+  int _pageSize = 48;
+  int _total = 0;
+  bool _listLoading = false;
+  int _loadEpoch = 0;
+
+  /// 审核页：待审与已拒绝分别请求，各自翻页；计数一律看整库 counts。
+  final _reviewPending = _PagedStickers();
+  final _reviewRejected = _PagedStickers();
+  int _reviewPageSize = 48;
+
   /// 左栏与右栏各自一个滚动位置：两边互不牵连，右栏里始终只有一个滚动区。
   final ScrollController _sideScroll = ScrollController();
   final ScrollController _rightScroll = ScrollController();
 
-  /// 库模式的本地筛选（只影响右侧显示，不发任何请求）。
+  /// 库模式的筛选：交给服务端做（`status`/`tag`），右栏只重新取第一页。
   String? _selectedTag;
   String? _selectedStatus;
 
@@ -110,13 +132,29 @@ class _StickersPanelState extends State<StickersPanel> {
   void _accept(Map<String, dynamic> value) {
     _view = Map<String, dynamic>.from(value);
     _settings = Map<String, dynamic>.from((_view['settings'] as Map?) ?? const {});
+    final page = (_view['page'] as num?)?.toInt() ?? 1;
+    final pageSize = (_view['pageSize'] as num?)?.toInt() ?? _pageSize;
+    _page = page < 1 ? 1 : page;
+    _pageSize = pageSize < 1 ? 48 : pageSize;
+    _total = ((_view['total'] as num?)?.toInt() ?? _entries.length).clamp(0, 1 << 30);
     _syncCooldownInput();
   }
 
-  List<Map<String, dynamic>> get _entries => [
-        for (final item in (_view['items'] as List? ?? const []))
+  List<Map<String, dynamic>> _itemsFrom(Map<String, dynamic> value) => [
+        for (final item in (value['items'] as List? ?? const []))
           if (item is Map) Map<String, dynamic>.from(item),
       ];
+
+  List<Map<String, dynamic>> get _entries => _itemsFrom(_view);
+
+  /// 审核页的两段响应仍带整库 counts/tags/settings；只吸收这些，不碰库/打标的页码。
+  void _absorbGlobals(Map<String, dynamic> value) {
+    _view['counts'] = value['counts'];
+    _view['tags'] = value['tags'];
+    _view['settings'] = value['settings'];
+    _settings = Map<String, dynamic>.from((value['settings'] as Map?) ?? const {});
+    _syncCooldownInput();
+  }
 
   int _count(String key) => ((_view['counts'] as Map?)?[key] as num?)?.toInt() ?? 0;
 
@@ -157,7 +195,7 @@ class _StickersPanelState extends State<StickersPanel> {
   List<Map<String, dynamic>> get _approvedEntries =>
       _entries.where((entry) => entry['status'] == 'approved').toList();
 
-  /// 左栏标签上的数量来自服务端这份 tags 计数；没有就按已入库的图现算。
+  /// 九标签计数始终来自服务端整库（不是当前页），标签分区标题也用它。
   Map<String, int> get _tagCounts {
     final raw = _view['tags'];
     if (raw is Map) {
@@ -172,6 +210,9 @@ class _StickersPanelState extends State<StickersPanel> {
             .length,
     };
   }
+
+  /// 打标面板的库存总数：四个状态相加，避免只数当前页。
+  int get _allStoredCount => _count('approved') + _count('pending') + _count('rejected') + _count('blocked');
 
   /// 库模式当前筛选出的条目。标签筛选只碰已入库；已拒绝 / 停用是独立状态筛选。
   List<Map<String, dynamic>> get _libraryEntries {
@@ -189,11 +230,8 @@ class _StickersPanelState extends State<StickersPanel> {
   }
 
   int? get _headerCount => switch (_tab) {
-        0 => _libraryEntries.length,
-        1 => _entries.length,
-        2 => _entries
-            .where((entry) => entry['status'] == 'pending' || entry['status'] == 'rejected')
-            .length,
+        0 || 1 => _total,
+        2 => _count('pending') + _count('rejected'),
         4 => _events?.length,
         _ => null,
       };
@@ -224,6 +262,7 @@ class _StickersPanelState extends State<StickersPanel> {
       _selectedStatus = null;
     });
     _jumpRightToTop();
+    unawaited(_load(page: 1));
   }
 
   void _selectStatusFilter(String status) {
@@ -232,22 +271,109 @@ class _StickersPanelState extends State<StickersPanel> {
       _selectedStatus = status;
     });
     _jumpRightToTop();
+    unawaited(_load(page: 1));
   }
 
-  Future<void> _load() async {
-    try {
-      if (widget.onRefresh != null) {
-        await widget.onRefresh!();
+  /// 列表取数路径：库页按已入库 + 当前标签/状态筛选，打标页取全部状态。
+  /// 筛选交给服务端，翻页才能在整库范围内连续，而不是只筛当前这一页。
+  String _listPath({required int page, required int pageSize}) {
+    final params = <String, String>{'page': '$page', 'pageSize': '$pageSize'};
+    if (_tab == 0) {
+      final status = _selectedStatus;
+      if (status != null) {
+        params['status'] = status;
       } else {
-        final raw = await widget.state.api.get('/api/stickers');
-        if (!validStickerView(raw)) throw const FormatException('invalid-sticker-response');
-        if (mounted) setState(() => _accept(Map<String, dynamic>.from(raw as Map)));
+        params['status'] = 'approved';
+        final tag = _selectedTag;
+        if (tag != null) params['tag'] = tag;
       }
-      if (mounted) setState(() => _error = null);
+    }
+    return Uri(path: '/api/stickers', queryParameters: params).toString();
+  }
+
+  /// 取一页列表；晚到的旧响应不许盖掉新页码（翻页/筛选可能连点）。
+  Future<void> _load({int? page, int? pageSize}) async {
+    final epoch = ++_loadEpoch;
+    final targetPage = page ?? _page;
+    final targetSize = pageSize ?? _pageSize;
+    if (mounted) setState(() => _listLoading = true);
+    try {
+      final raw = await widget.state.api.get(_listPath(page: targetPage, pageSize: targetSize));
+      if (!validStickerView(raw)) throw const FormatException('invalid-sticker-response');
+      if (!mounted || epoch != _loadEpoch) return;
+      setState(() {
+        _accept(Map<String, dynamic>.from(raw as Map));
+        _error = null;
+      });
+      // 显式翻页/改每页条数后回到顶部：新一页不该继承上一页的滚动位置。
+      if (page != null) _jumpRightToTop();
+      // 删除/移出最后一页的唯一一张后，页码可能已经越界；回到最后一页，别摆假空态。
+      final lastPage = _total <= 0 ? 1 : ((_total + _pageSize - 1) ~/ _pageSize);
+      if (_entries.isEmpty && _page > lastPage) unawaited(_load(page: lastPage));
     } catch (err) {
-      if (mounted) setState(() => _error = '$err');
+      if (mounted && epoch == _loadEpoch) setState(() => _error = '$err');
+    } finally {
+      if (mounted && epoch == _loadEpoch) setState(() => _listLoading = false);
     }
   }
+
+  String _statusPath(String status, int page, int pageSize) => Uri(
+        path: '/api/stickers',
+        queryParameters: {'status': status, 'page': '$page', 'pageSize': '$pageSize'},
+      ).toString();
+
+  /// 审核一段（待审或已拒绝）取一页；总数用整库 counts，而不是这一页的条数。
+  Future<void> _loadReviewSection(String status, int page) async {
+    final slot = status == 'pending' ? _reviewPending : _reviewRejected;
+    final epoch = ++slot.epoch;
+    final pageSize = _reviewPageSize;
+    if (mounted) setState(() => slot.loading = true);
+    try {
+      final raw = await widget.state.api.get(_statusPath(status, page, pageSize));
+      if (!validStickerView(raw)) throw const FormatException('invalid-sticker-response');
+      if (!mounted || epoch != slot.epoch) return;
+      final view = Map<String, dynamic>.from(raw as Map);
+      final items = _itemsFrom(view);
+      final counts = view['counts'] as Map?;
+      final total = ((counts?[status] as num?)?.toInt() ?? (view['total'] as num?)?.toInt() ?? items.length).clamp(0, 1 << 30);
+      setState(() {
+        slot.items = items;
+        slot.page = ((view['page'] as num?)?.toInt() ?? page).clamp(1, 1 << 30);
+        slot.total = total;
+        slot.loading = false;
+        _reviewPageSize = ((view['pageSize'] as num?)?.toInt() ?? pageSize).clamp(1, 1 << 30);
+        _absorbGlobals(view);
+        _error = null;
+      });
+      final lastPage = slot.total <= 0 ? 1 : ((slot.total + pageSize - 1) ~/ pageSize);
+      if (items.isEmpty && slot.total > 0 && slot.page > lastPage) {
+        unawaited(_loadReviewSection(status, lastPage));
+      }
+    } catch (err) {
+      if (mounted && epoch == slot.epoch) {
+        setState(() {
+          slot.loading = false;
+          _error = '$err';
+        });
+      }
+    }
+  }
+
+  Future<void> _loadReview({bool reset = false}) async {
+    await Future.wait([
+      _loadReviewSection('pending', reset ? 1 : _reviewPending.page),
+      _loadReviewSection('rejected', reset ? 1 : _reviewRejected.page),
+    ]);
+  }
+
+  void _changeReviewPageSize(int size) {
+    if (size == _reviewPageSize) return;
+    setState(() => _reviewPageSize = size);
+    unawaited(_loadReviewSection('pending', 1));
+    unawaited(_loadReviewSection('rejected', 1));
+  }
+
+  Future<void> _reloadCurrentTab() => _tab == 2 ? _loadReview() : _load();
 
   Future<void> _review(String id, Map<String, dynamic> patch) async {
     if (_busy) return;
@@ -258,7 +384,7 @@ class _StickersPanelState extends State<StickersPanel> {
     });
     try {
       await widget.state.api.patch('/api/stickers/$id', patch);
-      await _load();
+      await _reloadCurrentTab();
     } catch (err) {
       if (mounted) setState(() => _error = '$err');
     } finally {
@@ -280,7 +406,7 @@ class _StickersPanelState extends State<StickersPanel> {
         done += 1;
       }
       _selected.clear();
-      await _load();
+      await _reloadCurrentTab();
       if (mounted) setState(() => _notice = IrmiaStrings.read(context).stickerBatchDone(done));
     } catch (err) {
       if (mounted) setState(() => _error = '$err');
@@ -410,7 +536,7 @@ class _StickersPanelState extends State<StickersPanel> {
     });
     try {
       await widget.state.api.delete(path, body: body, confirm: confirm);
-      await _load();
+      await _reloadCurrentTab();
     } catch (err) {
       if (mounted) setState(() => _error = '$err');
     } finally {
@@ -468,9 +594,17 @@ class _StickersPanelState extends State<StickersPanel> {
   }
 
   void _selectTab(int value) {
+    final changed = value != _tab;
     setState(() => _tab = value);
     _jumpRightToTop();
     if (value == 4 && _events == null) unawaited(_loadEvents());
+    if (!changed) return;
+    // 库/打标共用一份列表视图；审核页是待审、已拒绝两段各自按 status 取页。
+    if (value == 2) {
+      unawaited(_loadReview(reset: true));
+    } else if (value < 3) {
+      unawaited(_load(page: 1));
+    }
   }
 
   @override
@@ -483,7 +617,7 @@ class _StickersPanelState extends State<StickersPanel> {
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 Text(s.stickerInvalidData, textAlign: TextAlign.center, style: const TextStyle(color: IrmiaTheme.danger)),
                 const SizedBox(height: 8),
-                TextButton(onPressed: _busy ? null : _load, child: Text(s.retry)),
+                TextButton(onPressed: _busy ? null : () => unawaited(_load()), child: Text(s.retry)),
               ]),
             )
           : Row(
@@ -541,7 +675,7 @@ class _StickersPanelState extends State<StickersPanel> {
               key: const ValueKey('sticker-tab-1'),
               icon: Icons.sell_outlined,
               label: s.stickerTabTagging,
-              count: _entries.length,
+              count: _allStoredCount,
               selected: _tab == 1,
               onTap: () => _selectTab(1),
             ),
@@ -714,11 +848,30 @@ class _StickersPanelState extends State<StickersPanel> {
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         _cardHeader(s, _headerCount),
-        if (_busy) const LinearProgressIndicator(minHeight: 2),
+        if (_busy || _listLoading) const LinearProgressIndicator(minHeight: 2),
         Expanded(child: _rightScrollArea(s)),
+        if (_pagerVisible) ...[
+          Divider(height: 1, color: scheme.outlineVariant),
+          LayoutBuilder(
+            builder: (context, constraints) => PagerBar(
+              key: const ValueKey('sticker-pager'),
+              page: _page,
+              pageSize: _pageSize,
+              total: _total,
+              onPage: (page) => unawaited(_load(page: page)),
+              onPageSize: (size) => unawaited(_load(page: 1, pageSize: size)),
+              // 窄窗先收「每页条数」下拉；箭头与页码必须留下，否则翻不了页。
+              showPageSize: constraints.maxWidth >= 520,
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            ),
+          ),
+        ],
       ]),
     );
   }
+
+  /// 超过一页才摆分页栏；事件区走自己的 `limit`，不在这一套里。
+  bool get _pagerVisible => (_tab == 0 || _tab == 1) && _total > _pageSize;
 
   Widget _cardHeader(AppStrings s, int? count) {
     final scheme = Theme.of(context).colorScheme;
@@ -757,7 +910,7 @@ class _StickersPanelState extends State<StickersPanel> {
         const SizedBox(width: 8),
         IconButton(
           key: const ValueKey('sticker-refresh'),
-          onPressed: _busy ? null : _load,
+          onPressed: _busy ? null : () => unawaited(_reloadCurrentTab()),
           icon: const Icon(Icons.refresh_rounded, size: 19),
           tooltip: s.retry,
           padding: EdgeInsets.zero,
@@ -827,33 +980,46 @@ class _StickersPanelState extends State<StickersPanel> {
 
   Widget _library() {
     final s = IrmiaStrings.of(context);
-    if (_entries.isEmpty) return _empty();
     final selected = _libraryEntries;
-    if (selected.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 24),
-        child: Text(s.stickerNoMatches, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
-      );
+    if (_total == 0) {
+      // 库里只有待审/已拒绝时，已入库为 0，但「还没有贴纸」是假话。
+      final hasAny = _selectedTag != null || _selectedStatus != null || _allStoredCount > 0;
+      return hasAny ? _noMatches() : _empty();
     }
+    if (selected.isEmpty) return _noMatches();
     if (_selectedStatus != null) {
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         _hint(s.stickerLibraryHint),
-        _group(s.stickerStatus(_selectedStatus!), selected),
+        _group(s.stickerStatus(_selectedStatus!), selected, count: _count(_selectedStatus!)),
       ]);
     }
     final approved = _approvedEntries;
+    final counts = _tagCounts;
     if (_selectedTag != null) {
+      final tag = _selectedTag!;
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         _hint(s.stickerLibraryHint),
-        _group(_selectedTag!, selected),
+        _group(tag, selected, count: counts[tag] ?? selected.length),
       ]);
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _hint(s.stickerLibraryHint),
       for (final tag in kStickerTags)
         if (approved.any((entry) => (entry['tags'] as List? ?? const []).contains(tag)))
-          _group(tag, approved.where((entry) => (entry['tags'] as List? ?? const []).contains(tag)).toList()),
+          _group(
+            tag,
+            approved.where((entry) => (entry['tags'] as List? ?? const []).contains(tag)).toList(),
+            count: counts[tag] ?? 0,
+          ),
     ]);
+  }
+
+  Widget _noMatches() {
+    final s = IrmiaStrings.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Text(s.stickerNoMatches, style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+    );
   }
 
   Widget _tagging() {
@@ -867,20 +1033,61 @@ class _StickersPanelState extends State<StickersPanel> {
 
   Widget _reviewTab() {
     final s = IrmiaStrings.of(context);
-    final pending = _entries.where((entry) => entry['status'] == 'pending').toList();
-    final rejected = _entries.where((entry) => entry['status'] == 'rejected').toList();
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _hint(s.stickerReviewHint),
       Row(children: [
-        Text(s.stickerStatus('pending'), style: const TextStyle(fontWeight: FontWeight.w600)),
+        Text('${s.stickerStatus('pending')} ${_count('pending')}', style: const TextStyle(fontWeight: FontWeight.w600)),
         const Spacer(),
         TextButton(key: const ValueKey('sticker-batch-approve'), onPressed: _busy || _selected.isEmpty ? null : () => _batch('approved'), child: Text(s.stickerBatchApprove)),
         TextButton(key: const ValueKey('sticker-batch-reject'), onPressed: _busy || _selected.isEmpty ? null : () => _batch('rejected'), child: Text(s.stickerBatchReject)),
       ]),
-      if (pending.isEmpty) Text(s.stickerNoPending) else Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in pending) _card(entry, selectable: true)]),
+      _reviewSection(
+        key: const ValueKey('sticker-review-pending'),
+        status: 'pending',
+        slot: _reviewPending,
+        emptyText: s.stickerNoPending,
+        selectable: true,
+      ),
       const SizedBox(height: 16),
-      Text(s.stickerStatus('rejected'), style: const TextStyle(fontWeight: FontWeight.w600)),
-      if (rejected.isEmpty) Text(s.stickerNoRejected) else Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in rejected) _card(entry)]),
+      Text('${s.stickerStatus('rejected')} ${_count('rejected')}', style: const TextStyle(fontWeight: FontWeight.w600)),
+      _reviewSection(
+        key: const ValueKey('sticker-review-rejected'),
+        status: 'rejected',
+        slot: _reviewRejected,
+        emptyText: s.stickerNoRejected,
+        selectable: false,
+      ),
+    ]);
+  }
+
+  /// 审核的一段：卡片区 + 自己的分页栏；总数来自整库 counts。
+  Widget _reviewSection({
+    required Key key,
+    required String status,
+    required _PagedStickers slot,
+    required String emptyText,
+    required bool selectable,
+  }) {
+    final s = IrmiaStrings.of(context);
+    return Column(key: key, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (slot.loading) const LinearProgressIndicator(minHeight: 2),
+      if (slot.items.isNotEmpty)
+        Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in slot.items) _card(entry, selectable: selectable)])
+      else if (!slot.loading || slot.total > 0)
+        Text(slot.total == 0 ? emptyText : s.stickerNoMatches),
+      if (slot.total > _reviewPageSize)
+        LayoutBuilder(
+          builder: (context, constraints) => PagerBar(
+            key: ValueKey('sticker-review-$status-pager'),
+            page: slot.page,
+            pageSize: _reviewPageSize,
+            total: slot.total,
+            onPage: (page) => unawaited(_loadReviewSection(status, page)),
+            onPageSize: _changeReviewPageSize,
+            showPageSize: constraints.maxWidth >= 520,
+            padding: const EdgeInsets.fromLTRB(0, 8, 0, 8),
+          ),
+        ),
     ]);
   }
 
@@ -977,8 +1184,8 @@ class _StickersPanelState extends State<StickersPanel> {
     ]);
   }
 
-  Widget _group(String title, List<Map<String, dynamic>> entries) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text('$title ${entries.length}', style: const TextStyle(fontWeight: FontWeight.w600))),
+  Widget _group(String title, List<Map<String, dynamic>> entries, {int? count}) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text('$title ${count ?? entries.length}', style: const TextStyle(fontWeight: FontWeight.w600))),
         Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in entries) _card(entry)]),
       ]);
 

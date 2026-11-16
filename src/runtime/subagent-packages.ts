@@ -4,12 +4,15 @@ import {
   closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync,
   renameSync, rmSync, writeFileSync, writeSync,
 } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { McpServerEntry } from '../mcp/client.ts';
 import { BUILTIN_PROFILES, ROLE_PACKAGES_FILE, type ProfileInstallSource } from './subagent-profiles.ts';
+import { npmCliPath } from './subagent-binaries.ts';
 import { inside } from './subagent-workspace.ts';
+
+export { npmCliPath } from './subagent-binaries.ts';
 
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
@@ -350,44 +353,7 @@ function installPlaywrightDependencies(root: string): void {
   ], root);
 }
 
-/**
- * 找到 npm 的 CLI 入口（用 `process.execPath` 直接跑它，不经过 .cmd / shell）。
- *
- * 候选顺序：
- *   ① `npm_execpath`（父进程就是 npm 时它一定对）；
- *   ② `<当前 node 目录>/node_modules/npm/bin/npm-cli.js`（标准 Node 发行版布局）；
- *   ③ `%APPDATA%\npm\node_modules\npm\bin\npm-cli.js`（npm 全局前缀）；
- *   ④ **PATH 里每个目录下的 `node_modules/npm/bin/npm-cli.js`**（P4.5 补）——
- *      安装版后端自带的 `runtime\node` 只有 node.exe、没有 npm；而用户的 Node 可能装在
- *      任意目录（本机 `<安装根>\tools\node`）并且已经进了 PATH。不查 PATH 的话，
- *      Playwright 这类 MCP 依赖的安装与 healthcheck 的 `npm` 二进制定位会直接失败。
- * 一处实现，安装与 healthcheck 共用。
- */
-export function npmCliPath(): string {
-  const candidates = [
-    process.env['npm_execpath'],
-    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    ...(process.env['APPDATA'] === undefined ? [] : [join(process.env['APPDATA'], 'npm', 'node_modules', 'npm', 'bin', 'npm-cli.js')]),
-    ...pathNpmCliCandidates(),
-  ];
-  for (const candidate of candidates) {
-    if (candidate !== undefined && candidate.endsWith('.js') && existsSync(candidate)) return resolve(candidate);
-  }
-  throw new Error('npm-not-found');
-}
-
-function pathNpmCliCandidates(): string[] {
-  const pathValue = process.env['PATH'] ?? process.env['Path'] ?? '';
-  const out: string[] = [];
-  for (const dir of pathValue.split(delimiter)) {
-    const trimmed = dir.trim().replace(/^"|"$/gu, '');
-    if (trimmed === '') continue;
-    out.push(join(trimmed, 'node_modules', 'npm', 'bin', 'npm-cli.js'));
-    // 有些发行版把 npm-cli.js 直接放在 node 主目录（少见但成本很低）
-    out.push(join(trimmed, 'npm-cli.js'));
-  }
-  return out;
-}
+/** npm CLI 解析已移到 `subagent-binaries.ts`（安装与 healthcheck 共用）。 */
 
 function run(command: string, args: readonly string[], cwd: string): string {
   const result = spawnSync(command, [...args], {

@@ -9,6 +9,7 @@ import { EventLog } from '../src/log/event-log.ts';
 import type { AppEvent } from '../src/log/types.js';
 import { defaultVisibility, emptyProjection } from '../src/log/types.ts';
 import type { StickerPHasher } from '../src/stickers/phash.ts';
+import type { StickerResizer } from '../src/stickers/resize.ts';
 import { StickerService } from '../src/stickers/service.ts';
 import { StickerStore } from '../src/stickers/store.ts';
 import { StickerTagger } from '../src/stickers/tagger.ts';
@@ -24,7 +25,7 @@ const PASSWORD = 'sticker-api-test-password';
 const SALT = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
 const HASH = scryptSync(PASSWORD, SALT, 32, { N: SCRYPT_PARAMS.N, r: SCRYPT_PARAMS.r, p: SCRYPT_PARAMS.p }).toString('hex');
 
-async function rig(t: TestContext, withService = true, tagText = '', phash?: StickerPHasher) {
+async function rig(t: TestContext, withService = true, tagText = '', phash?: StickerPHasher, resize?: StickerResizer) {
   const dir = tempDirSync('irmia-sticker-api-');
   const dataDir = join(dir, 'data');
   mkdirSync(dataDir, { recursive: true });
@@ -63,6 +64,7 @@ async function rig(t: TestContext, withService = true, tagText = '', phash?: Sti
   const service = new StickerService({
     store, tagger, config: () => config, emit: append,
     phash: phash ?? (async (bytes) => createHash('sha256').update(bytes).digest('hex').slice(0, 16)),
+    ...(resize === undefined ? {} : { resize }),
   });
   const server: WebServer = await startWebServer({
     log, projection, config, personaRoot: join(dataDir, 'persona'), dataDir,
@@ -101,6 +103,7 @@ test('API：列表、筛选、九标签计数与分页参数都走真实库存',
   const collected = fx.store.importSticker({ bytes: pngBytes(2, 2), mime: 'image/png', source: 'collected' });
   const list = await fx.call('GET', '/api/stickers');
   assert.equal(list.status, 200);
+  assert.equal(list.body.pageSize, 48, '默认页大小是 GUI 首屏依赖的契约');
   assert.equal(list.body.counts.approved, 1);
   assert.equal(list.body.counts.pending, 1);
   assert.equal(list.body.tags['开心'], 1);
@@ -115,11 +118,34 @@ test('API：列表、筛选、九标签计数与分页参数都走真实库存',
   const filtered = await fx.call('GET', '/api/stickers?status=pending&source=collected');
   assert.deepEqual(filtered.body.items.map((item: any) => item.id), [collected.entry.id]);
   assert.equal(filtered.body.items[0].source, 'collected');
+  // GUI 库页的标签筛选就是 status+tag 组合：计数与分页都必须按整库算。
+  const tagged = await fx.call('GET', `/api/stickers?status=approved&tag=${encodeURIComponent('开心')}`);
+  assert.deepEqual(tagged.body.items.map((item: any) => item.id), [owner.entry.id]);
+  assert.equal(tagged.body.total, 1);
+  assert.equal(tagged.body.tags['开心'], 1);
+  const noTag = await fx.call('GET', `/api/stickers?status=approved&tag=${encodeURIComponent('难过')}`);
+  assert.equal(noTag.body.total, 0);
+  assert.equal(noTag.body.items.length, 0);
   const tags = await fx.call('GET', '/api/stickers/tags');
   assert.equal(tags.body.tags['开心'], 1);
   const bad = await fx.call('GET', '/api/stickers?page=1.5');
   assert.equal(bad.status, 400);
   assert.equal(bad.body.error.code, 'invalid-sticker-page');
+  // 245 条库存那类管理页要能翻页：pageSize 由 GUI 传，边界与默认值都在服务端定。
+  const firstPage = await fx.call('GET', '/api/stickers?pageSize=1');
+  assert.equal(firstPage.body.pageSize, 1);
+  assert.equal(firstPage.body.total, 2);
+  assert.equal(firstPage.body.totalPages, 2);
+  assert.equal(firstPage.body.items.length, 1);
+  const secondPage = await fx.call('GET', '/api/stickers?pageSize=1&page=2');
+  assert.equal(secondPage.body.items.length, 1);
+  assert.notEqual(secondPage.body.items[0].id, firstPage.body.items[0].id);
+  const badSize = await fx.call('GET', '/api/stickers?pageSize=0');
+  assert.equal(badSize.status, 400);
+  assert.equal(badSize.body.error.code, 'invalid-sticker-page-size');
+  const tooLarge = await fx.call('GET', '/api/stickers?pageSize=201');
+  assert.equal(tooLarge.status, 400);
+  assert.equal(tooLarge.body.error.code, 'invalid-sticker-page-size');
 });
 
 test('API：上传→视觉打标→待审预览；高置信也不绕过人工确认，重复上传不再打标', async (t) => {
@@ -149,6 +175,23 @@ test('API：上传近重复 phash 被 duplicate 拒绝，不新增条目', async
   assert.equal(second.duplicate, true);
   assert.equal(second.entry.id, first.entry.id);
   assert.equal(fx.store.listEntries().length, 1);
+});
+
+test('API：上传非 GIF 超过 160px 先缩尺，和静默采收同一口径', async (t) => {
+  const calls: Array<{ maxEdge: number; mime: string }> = [];
+  const resizedBytes = pngBytes(160, 120);
+  const fx = await rig(t, true, '', undefined, async (input) => {
+    calls.push({ maxEdge: input.maxEdge, mime: input.mime });
+    return { bytes: resizedBytes, mime: 'image/png', width: 160, height: 120, resized: true };
+  });
+  const response = await fx.call('POST', '/api/stickers', {
+    mime: 'image/png', data: pngBytes(300, 200).toString('base64'),
+  });
+  assert.equal(response.status, 201, JSON.stringify(response.body));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.maxEdge, 160);
+  assert.equal(calls[0]!.mime, 'image/png');
+  assert.deepEqual(fx.store.readEntryBytes(response.body.entry.id), resizedBytes);
 });
 
 test('API：上传非表情包 isSticker=false 返回 400 not-sticker，库里不新增', async (t) => {

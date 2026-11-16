@@ -897,6 +897,7 @@ class PagerBar extends StatelessWidget {
     required this.onPage,
     required this.onPageSize,
     this.pageSizes = kPageSizes,
+    this.showPageSize = true,
     this.padding = kStateBlockPadding,
   });
 
@@ -917,6 +918,9 @@ class PagerBar extends StatelessWidget {
 
   /// 下拉档位
   final List<int> pageSizes;
+
+  /// 窄容器里可以收起「每页 N 条」下拉；计数与页码仍然保留
+  final bool showPageSize;
 
   final EdgeInsets padding;
 
@@ -954,30 +958,32 @@ class PagerBar extends StatelessWidget {
       padding: padding,
       child: Row(
         children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: scheme.surface,
-              border: Border.all(color: scheme.outlineVariant),
-              borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+          if (showPageSize) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                color: scheme.surface,
+                border: Border.all(color: scheme.outlineVariant),
+                borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+              ),
+              child: DropdownButton<int>(
+                value: pageSize,
+                isDense: true,
+                underline: const SizedBox.shrink(),
+                borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
+                style: TextStyle(fontSize: 12.5, color: scheme.onSurface),
+                items: [
+                  for (final size in _sizes)
+                    DropdownMenuItem<int>(value: size, child: Text('每页 $size 条')),
+                ],
+                onChanged: (value) {
+                  if (value == null || value == pageSize) return;
+                  onPageSize(value);
+                },
+              ),
             ),
-            child: DropdownButton<int>(
-              value: pageSize,
-              isDense: true,
-              underline: const SizedBox.shrink(),
-              borderRadius: BorderRadius.circular(IrmiaTheme.radiusCtl),
-              style: TextStyle(fontSize: 12.5, color: scheme.onSurface),
-              items: [
-                for (final size in _sizes)
-                  DropdownMenuItem<int>(value: size, child: Text('每页 $size 条')),
-              ],
-              onChanged: (value) {
-                if (value == null || value == pageSize) return;
-                onPageSize(value);
-              },
-            ),
-          ),
-          const SizedBox(width: 12),
+            const SizedBox(width: 12),
+          ],
           // 计数吸掉中间所有余量：窗口再窄也只是把「共 N 条」截掉，不会把页码顶出去
           Expanded(
             child: Text(

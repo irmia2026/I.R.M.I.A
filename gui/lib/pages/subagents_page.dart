@@ -362,22 +362,30 @@ class _SubagentsPageState extends State<SubagentsPage> {
       final map = raw is Map
           ? Map<String, dynamic>.from(raw)
           : const <String, dynamic>{};
-      final summary = SubagentSummary.tryParse(map);
-      if (summary == null) {
+      final parsed = SubagentSummary.tryParse(map);
+      if (parsed == null) {
         throw const FormatException('invalid subagent detail');
       }
+      final report = _stringOrNull(map['lastReport']);
+      final index = _items.indexWhere(
+        (item) => item.agentId == parsed.agentId,
+      );
+      // 详情视图按设计不带 `lastReportPreview`（server.ts 的 subagentApiView 在
+      // detail 分支只给 lastReport），所以这里不能整项覆盖列表摘要：那样左侧
+      // 卡片会因为 preview 变 null 掉回“还没有报告”，而右侧同一份报告有正文。
+      final summary = parsed.mergeDetailReport(
+        report,
+        previousPreview: index >= 0 ? _items[index].lastReportPreview : null,
+      );
       setState(() {
         _detail = SubagentDetail(
           summary: summary,
-          lastReport: _stringOrNull(map['lastReport']),
+          lastReport: report,
           headError: _stringOrNull(map['headError']),
         );
         _detailLoading = false;
         _detailError = null;
         // 概要用详情回读校正（状态/可恢复性可能在列表那一拍之后变了）
-        final index = _items.indexWhere(
-          (item) => item.agentId == summary.agentId,
-        );
         if (index >= 0) {
           final next = [..._items];
           next[index] = summary;
@@ -1184,6 +1192,48 @@ class SubagentSummary {
   }
 
   static int _int(dynamic value) => value is num ? value.toInt() : 0;
+
+  /// 与后端 `SUBAGENT_REPORT_PREVIEW_CHARS` 同口径：列表摘要就是报告正文的前 240 字。
+  static const int reportPreviewChars = 240;
+
+  /// 详情回读与列表摘要是**同一份报告**的两处投影，不能互相覆盖成空。
+  ///
+  /// `GET /api/subagents` 给 `lastReportPreview`，`GET /api/subagents/:id` 只给
+  /// `lastReport`（见 server.ts 的 subagentApiView）：详情回读后若把整个摘要写回
+  /// 列表，选中项的 preview 会变成 null，左侧卡片就显示“还没有报告”。
+  /// 以详情为准确认“有没有报告”：有报告就保住摘要（`previousPreview` 是列表那
+  /// 一拍已有的摘要，优先沿用它；缺失时按后端同口径从正文截 240 字派生），
+  /// 详情明确没有报告则一并清空，无报告会话的空态照旧。
+  SubagentSummary mergeDetailReport(
+    String? report, {
+    String? previousPreview,
+  }) {
+    final next = report == null
+        ? null
+        : (previousPreview ?? _previewOf(report));
+    if (next == lastReportPreview) return this;
+    return SubagentSummary(
+      agentId: agentId,
+      profileId: profileId,
+      profileLabel: profileLabel,
+      status: status,
+      parentTurn: parentTurn,
+      parentCallId: parentCallId,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      lastReportPreview: next,
+      tokensUsed: tokensUsed,
+      tokensLimit: tokensLimit,
+      canResume: canResume,
+      canCancel: canCancel,
+    );
+  }
+
+  /// 兜底派生：列表摘要缺失时才用报告正文的前 240 字（后缀用 ASCII `...`，
+  /// 源码里的界面无关字符仍要守住 copy_coverage 的「非注释不许有中文/全角」）。
+  static String _previewOf(String report) => report.length <= reportPreviewChars
+      ? report
+      : '${report.substring(0, reportPreviewChars)}...';
 }
 
 class SubagentDetail {

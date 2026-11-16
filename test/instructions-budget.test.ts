@@ -233,7 +233,7 @@ const HEADER_TOTAL_TOKENS = 7994;
  * ⚠ hash 只认字节内容：`tokens` / `bytes` 相同**不**代表这一串没变（v71 那 4 个字符就是这种形状）。
  * v78 没碰 `instructions` ⇒ 仍是 v76 的 **7052 / 31826 / `d3738e093b9bf40a`**。
  */
-const FULL_INSTRUCTIONS = { tokens: 7959, bytes: 35968, hash: '355e1bf14b822085' } as const;
+const FULL_INSTRUCTIONS = { tokens: 8223, bytes: 36997, hash: '717298ed06c4cbe2' } as const;
 /**
  * v76 · ① 里人格三层占的 token。口径 = **① 整段 − ② 确定性分量合计**（`7052 − 5874 = 1178`）。
  * ⚠ **显式字面量、不许写成 `FULL_INSTRUCTIONS.tokens - HEADER_BRIEF.tokens`**：
@@ -242,7 +242,7 @@ const FULL_INSTRUCTIONS = { tokens: 7959, bytes: 35968, hash: '355e1bf14b822085'
  * ⚠ v72 从 1178 变成 1179 是**取整**（人格三层一个字没动，两个量各自的 ceil 撞在一起），不是人格变了；
  * v76 复量回到 1178（同一份人格、同一次自述增长之后的取整结果）。
  */
-const PERSONA_LAYERS_TOKENS = 1212;
+const PERSONA_LAYERS_TOKENS = 229;
 
 // ──────────────────────────────── 量 ────────────────────────────────
 
@@ -318,13 +318,13 @@ test('instructions 预算：工具的当前值与上界在同一份报告里可�
   // 放在同一个文件里，让下一个人一次读全，不必在两个文件之间对账。
   // 口径：`tools` 那一侧的权威门是 `tool-catalog.test.ts` 的 `catalogTokens`（**代码口径**）。
   const toolTotal = 5323;              // v74 工作树实测（代码口径；权威值在 tool-catalog.test.ts 文件头）
-  const toolCount = 22;                // 同上（运行期口径是 23 件，多一件 mcp）
+  const toolCount = 21;                // 同上（运行期口径是 22 件，多一件 mcp）
   assert.ok(
     toolTotal < TOOLS_TOKEN_CEILING,
     `常驻工具说明 ${toolTotal} token、上界 ${TOOLS_TOKEN_CEILING}、超出 ${toolTotal - TOOLS_TOKEN_CEILING}`
     + '——权威门在 test/tool-catalog.test.ts，这里只是把两条线并排写出来',
   );
-  assert.equal(toolCount, 22, `代码口径件数变了（v65：22 件 = 运行期 23 件 − mcp）：${toolCount}`);
+  assert.equal(toolCount, 21, `代码口径件数变了（21 件 = 运行期 22 件 − mcp）：${toolCount}`);
   assert.equal(INSTRUCTIONS_TOKEN_CEILING, 8800,
     'v86：SELF_BRIEF 新增 speak 准则与情欲方向后两条上界同步 +500（8300/6800 → 8800/7300）');
   assert.equal(INSTRUCTIONS_HEADER_TOKEN_CEILING, 8400,

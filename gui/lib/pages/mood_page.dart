@@ -154,10 +154,11 @@ class _MoodPageState extends State<MoodPage> with WidgetsBindingObserver {
     _intimacyPoll = null;
   }
 
-  Future<void> _loadStickers({bool silent = false}) async {
-    if (!silent && mounted) setState(() => _stickersLoading = true);
+  Future<void> _loadStickers() async {
+    if (mounted) setState(() => _stickersLoading = true);
     try {
-      final raw = await widget.state.api.get('/api/stickers?pageSize=200');
+      // 首屏只取库页要的那一页；翻页/筛选由面板自己按同一协议续取。
+      final raw = await widget.state.api.get('/api/stickers?status=approved');
       if (!mounted) return;
       if (raw is! Map<String, dynamic>) throw const FormatException('invalid stickers response');
       setState(() {
@@ -585,7 +586,6 @@ class _MoodPageState extends State<MoodPage> with WidgetsBindingObserver {
     return StickersPanel(
       state: widget.state,
       view: _stickers!,
-      onRefresh: () => _loadStickers(silent: true),
     );
   }
 

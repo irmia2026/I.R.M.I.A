@@ -430,12 +430,12 @@ describe('read_channel · 她自己点开信箱', () => {
     assert.ok(bodyAt < result.content.indexOf('[/external_event]'), '正文在闭标签之前');
   });
 
-  test('管理员工具清单是九件，read_channel/send_media/ask_human 按序排在最后', () => {
+  test('管理员工具清单是八件，read_channel/send_media/ask_human 按序排在最后', () => {
     const tk = toolkitWith(null, recorder());
     assert.deepEqual(
       tk.tools.map((tool) => tool.name),
       [
-        'write_persona', 'timer', 'speak', 'report', 'resolve_attachment', 'todo',
+        'write_persona', 'timer', 'speak', 'report', 'todo',
         'read_channel', 'send_media', 'ask_human',
       ],
       // ask_human 是 v27 删、design §6.5 恢复的那一件（"错在等，不在问"）：它排在最后，
@@ -448,23 +448,27 @@ describe('read_channel · 她自己点开信箱', () => {
     );
   });
 
-  test('resolve_attachment 只把 file_id 换成地址，不下载字节', async () => {
-    let seen: { fileId?: string; messageId?: string; channel?: string } | null = null;
+  test('read_channel 按需把 file_id 换成临时 URL，且不新增模型工具', async () => {
+    const rec = recorder();
+    let seen: { messageId?: string; fileId?: string; index?: number } | null = null;
     const tk = createAdminTools({
       timers: new TimerStore(null),
-      emit: recorder().emit as never,
+      emit: rec.emit as never,
+      channelReader: async (sid) => [message({
+        chatId: 'G1', chatType: 'group', sid, text: '看看这个文件',
+        attachments: [{ type: 'file', fileId: 'file-1', name: 'report.pdf' }],
+      })],
       attachmentResolver: async (input) => {
         seen = input;
-        return { ok: true, url: 'https://files.example/temp.pdf', name: 'report.pdf' };
+        return { ok: true, url: 'https://files.example/temp.pdf' };
       },
     });
-    const result = await tk.byName('resolve_attachment').handler({
-      file_id: 'file-123',
-      channel: 'onebot',
-    }, CTX);
+
+    const result = await tk.byName('read_channel').handler({ sid: 'qq:group:G1' }, CTX);
     assert.equal(result.isError, undefined, result.content);
-    assert.deepEqual(seen, { fileId: 'file-123', channel: 'onebot', index: 0 });
     assert.match(result.content, /https:\/\/files\.example\/temp\.pdf/);
-    assert.match(result.content, /http_download/);
+    assert.deepEqual(seen, { messageId: 'm-G1', fileId: 'file-1', index: 0 });
+    assert.equal(tk.tools.some((tool) => tool.name === 'resolve_attachment'), false,
+      '解析必须是 read_channel 的内部行为，不再暴露新工具');
   });
 });

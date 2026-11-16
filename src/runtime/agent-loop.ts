@@ -67,6 +67,7 @@ import {
   type AuditedCall, type CacheBreakThresholds, type ContextBreakdown,
 } from '../model/context-audit.ts';
 import type { ContactFacts } from '../model/self-brief.ts';
+import type { BalanceFacts } from '../model/deepseek-balance.ts';
 import { renderMentionNote } from '../model/self-brief.ts';
 import { sidOf } from '../channel/sessions.ts';
 // 待办清单的唯一载体是 STATE 的两节（见 persona/todo-state.ts）：任务卡只从那里读
@@ -761,6 +762,8 @@ export interface AgentLoopDeps {
   machine?: MachineFacts | null;
   /** 用度事实（此刻层 `用度：` 一行的素材，见 UsageFacts）：投影折叠结论 + 生效日上限。不配即"未知" */
   usage?: UsageFacts | null;
+  /** DeepSeek 余额快照；非 DeepSeek 端点或尚未取到时不出现。 */
+  balance?: BalanceFacts | null;
   /**
    * 「这条通道消息豁免吗」——规则层那条**渲染期现算**的出口要问的判据，由宿主传（2026-10-04）。
    *
@@ -1089,6 +1092,8 @@ export interface RequestDerivation {
   machine?: MachineFacts | null;
   /** 用度事实（此刻层 `用度：` 素材，见 AgentLoopDeps.usage）：投影 + 生效上限，宿主算好 */
   usage?: UsageFacts | null;
+  /** DeepSeek 余额快照（此刻层 `余额：` 素材，宿主余额服务提供） */
+  balance?: BalanceFacts | null;
   /**
    * 「这条通道消息豁免吗」的判据（见 AgentLoopDeps.warnExempt）：重建与运行期都要带着它，
    * 否则"同一批事件"在两边会渲染出不同的字节（一边贴了那句规则提示、一边没贴）。
@@ -1278,6 +1283,7 @@ export function deriveRequest(input: RequestDerivation): RenderedRequest {
     // 此刻层那两行写"未知"，不抛也不编。
     machine: input.machine ?? null,
     usage: input.usage ?? null,
+    balance: input.balance ?? null,
     // 豁免判据（见 AgentLoopDeps.warnExempt）：**显式传**给渲染入参——渲染层不读盘、不判据，
     // 只用这个函数（唯一实现仍是 WarnExemptBook.isExempt）。缺省 = 谁都不豁免：子代理、诊断、
     // 以及不带它的旧调用点都走这一支，渲染结果与引入它之前逐字节相同。

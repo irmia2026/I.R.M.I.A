@@ -29,6 +29,7 @@ import { SELF_BRIEF, renderMentionNote, type ContactFacts, type OpenAskFacts } f
 import { INJECTION_WARN_WINDOW_MS, type InjectionWarnFacts } from '../src/channel/injection.ts';
 import { defaultVisibility } from '../src/log/types.ts';
 import type { ContextImageChosen } from '../src/log/types.ts';
+import type { BalanceFacts } from '../src/model/deepseek-balance.ts';
 // 提醒的长度是成本口径的一部分（用户的钱包）：用例按仓库自己的估算器量它的量级
 import { estimateTokens } from '../src/tools/registry.ts';
 import type {
@@ -182,6 +183,8 @@ interface RenderOverrides {
   channelRender?: RenderInput['channelRender'];
   /** v76：本轮新输入的钉住位置（与运行期同一个形状：`turn/start` 的 seq 之前） */
   pinnedWake?: RenderInput['pinnedWake'];
+  /** DeepSeek 余额事实（此刻层余额行）；缺省 null = 非 DeepSeek / 尚未取到。 */
+  balance?: BalanceFacts | null;
 }
 
 function renderOnce(
@@ -212,6 +215,7 @@ function renderOnce(
     mentionNotice: o.mentionNotice ?? null,
     machine: o.machine ?? null,
     usage: o.usage ?? null,
+    balance: o.balance ?? null,
     asks: o.asks ?? null,
     injection: o.injection ?? null,
     loadImage,
@@ -1487,6 +1491,11 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
       asks: ASKS_A,
       machine: MACHINE_A,
       usage: USAGE_B,
+      balance: {
+        isAvailable: true,
+        balances: [{ currency: 'CNY', total: '12.34', granted: '2.00', toppedUp: '10.34' }],
+        fetchedAtMs: T0_MS,
+      },
       injection: [{
         who: '用户（阿岚）', chatType: 'c2c', person: 'OPENID_A', count: 2, lastTs: '2020-06-01T08:48:00.000Z',
       }],
@@ -1497,7 +1506,7 @@ describe('此刻层 · 行首标签不变量 + 维护窗口 2/3 档（P1-04）',
       now: NOW_A,
     });
     const layer = envLayer(r);
-    assert.equal(NOW_LAYER_FIELD_LABELS.length, 13, '登记表就是这 13 个字段（加字段要一起加这里）');
+    assert.equal(NOW_LAYER_FIELD_LABELS.length, 14, '登记表就是这 14 个字段（加字段要一起加这里）');
     assert.equal(NOW_MUST_KEEP_LABELS.length, 5, 'must-keep 清单是 P1-01 三样 + 亲密 + Affect 情绪行');
     for (const label of NOW_LAYER_FIELD_LABELS) {
       const marks = layer.split(`\n${label}：`).length - 1;
@@ -2053,7 +2062,7 @@ describe('铁律 5 · 外部输入边界', () => {
     const m = asMessage(eventItems(r)[0], '事件流第 1 条');
     assert.match(m.content, /\[file: report\.pdf\]/);
     assert.match(m.content, /file_id: file-123/);
-    assert.match(m.content, /resolve_attachment/);
+    assert.ok(!m.content.includes('resolve_attachment'), '未获准新增工具，file_id 不再指向一个工具');
     assert.ok(!m.content.includes('临时地址'), '没有 URL 时不许伪造临时地址');
   });
 
@@ -3425,6 +3434,19 @@ describe('可见性单向承诺与固定模板', () => {
   });
 });
 
+test('DeepSeek 余额事实只进此刻层，并在关闭/未取到时整行消失', () => {
+  const withBalance = renderOnce({
+    balance: {
+      isAvailable: true,
+      balances: [{ currency: 'CNY', total: '12.34', granted: '2.00', toppedUp: '10.34' }],
+      fetchedAtMs: Date.parse(NOW_A),
+    },
+  });
+  assert.match(dumpInput(withBalance), /DeepSeek API 余额：CNY 12\.34（赠金 2\.00 · 充值 10\.34）/u);
+  const without = renderOnce({});
+  assert.equal(dumpInput(without).includes('DeepSeek API 余额：'), false);
+});
+
 test('情绪/亲密规范在 SELF_BRIEF，动态行只进此刻层而不改系统前缀', () => {
   const off = renderOnce({});
   assert.match(off.instructions, /## 6\. 情绪与欲望/u);
@@ -3438,3 +3460,4 @@ test('情绪/亲密规范在 SELF_BRIEF，动态行只进此刻层而不改系�
   assert.ok(both.input.some((item) => item.type === 'message' && item.role === 'developer'
     && typeof item.content === 'string' && item.content.includes('亲密：平稳')));
 });
+

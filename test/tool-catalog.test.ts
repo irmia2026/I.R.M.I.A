@@ -358,7 +358,7 @@ test('工具清单：v52 的五件一批在上界之内（余量别被下一件�
   assert.deepEqual(problems, [], `有工具被跳过：${problems.join('；')}`);
   const total = registry.catalogTokens({ includeDestructive: true });
   const names = registry.listForModel({ includeDestructive: true }).map((tool) => tool.name);
-  assert.equal(names.length, 22, `代码口径的件数变了（v64：22 件 = 运行期 23 件 − mcp；砍 read_blob 后 23 → 22）：${names.length}`);
+  assert.equal(names.length, 21, `代码口径的件数变了（21 = 运行期 22 件 − mcp）：${names.length}`);
   // 两件"这一批动过的"必须在场：`web_search` 是新加的、`pwsh` 是改造过的
   assert.ok(names.includes('web_search'), 'web_search 必须常驻（它固化的是她一直在手搓的那条路）');
   assert.ok(names.includes('pwsh'), 'pwsh 必须常驻');

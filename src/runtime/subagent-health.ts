@@ -3,12 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { assertPathAllowed } from './subagent-workspace.ts';
-import { probePythonModules } from './python-probe.ts';
+import { probePythonModules, resolvePythonBinary } from './python-probe.ts';
 
 import type { DsClient } from '../model/ds-client.js';
 import { SubagentMcpRuntime, type SubagentMcpOptions } from './subagent-mcp.ts';
 import { SubagentSkillRuntime } from './subagent-skills.ts';
-import { npmCliPath, readRolePackageRecords, verifyRolePackage } from './subagent-packages.ts';
+import { binaryAvailable } from './subagent-binaries.ts';
+import { readRolePackageRecords, verifyRolePackage } from './subagent-packages.ts';
 import type {
   ProfileAvailability, SubagentProfile, SubagentProfileRegistry,
 } from './subagent-profiles.ts';
@@ -55,7 +56,7 @@ export async function healthcheckSubagentProfile(
   const skills = new SubagentSkillRuntime(options.dataDir, profile.id, profile.skills);
   missing.push(...checkExecutableSkills(skills));
   if (missing.length > 0) return {available: false, locked: true, missing: [...new Set(missing)]};
-  const binaryCheck = options.binaryCheck ?? binaryAvailable;
+  const binaryCheck = options.binaryCheck ?? ((id: string) => binaryAvailable(id, options.dataDir));
   for (const id of profile.requires?.binaries ?? []) {
     let ok = false;
     try { ok = binaryCheck(id); } catch { ok = false; }
@@ -67,9 +68,14 @@ export async function healthcheckSubagentProfile(
   if (pythonModules.length > 0) {
     let missingModules: readonly string[];
     try {
+      // 与 binaries 探测同一口径：PATH 上那份优先；没有 PATH 时再看托管 Python。
+      // 只让 probePythonModules 自己找 PATH 会漏掉 data/tools/python。
+      const managedPython = join(options.dataDir, 'tools', 'python', 'python.exe');
+      // 托管 Python 优先：安装按钮把 tree-sitter 装到这一份，探测也必须看同一份。
+      const pythonBinary = existsSync(managedPython) ? managedPython : (resolvePythonBinary() ?? undefined);
       missingModules = options.pythonModulesCheck !== undefined
         ? options.pythonModulesCheck(pythonModules)
-        : probePythonModules(pythonModules);
+        : probePythonModules(pythonModules, pythonBinary === undefined ? {} : {binary: pythonBinary});
     } catch {
       missingModules = pythonModules;
     }
@@ -119,23 +125,6 @@ export function knownModelCapabilities(ds: DsClient): SubagentModelCapabilities 
     return {contextLimit: 1_000_000, reasoningEfforts: ['low', 'medium', 'high', 'max']};
   }
   return {contextLimit: null, reasoningEfforts: []};
-}
-
-function binaryAvailable(id: string): boolean {
-  if (!/^[A-Za-z0-9._-]+$/u.test(id)) return false;
-  // `node` / `npm` 用当前进程自己的 node：安装版后端的 PATH 不保证有 node.exe
-  //（它的运行时就住在 `<安装根>\runtime\node`，且不带 npm），但 process.execPath 一定对。
-  if (id === 'node' || id === 'npm') {
-    const args = id === 'node' ? ['--version'] : [npmCliPath(), '--version'];
-    const result = spawnSync(process.execPath, args, {
-      shell: false, windowsHide: true, timeout: 5_000, encoding: 'utf8',
-    });
-    return result.status === 0;
-  }
-  const result = spawnSync(id, ['--version'], {
-    shell: false, windowsHide: true, timeout: 5_000, encoding: 'utf8',
-  });
-  return result.status === 0;
 }
 
 function checkExecutableSkills(skills: SubagentSkillRuntime): string[] {

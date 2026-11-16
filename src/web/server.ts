@@ -6049,6 +6049,7 @@ class WebServerImpl implements WebServer {
           sendJson(res, 200, service.list({
             status: url.searchParams.get('status'), tag: url.searchParams.get('tag'),
             source: url.searchParams.get('source'), page: url.searchParams.get('page'),
+            pageSize: url.searchParams.get('pageSize'),
           }));
           return;
         }

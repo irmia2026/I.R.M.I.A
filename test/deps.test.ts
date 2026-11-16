@@ -31,6 +31,7 @@ import {
   pathInterpreterSlotOf,
   PYTHON_DOWNLOAD_PAGE,
   PYTHON_EMBED_URL,
+  PYTHON_MIRROR_FTP_PREFIX,
   PWSH_DOWNLOAD_PAGE,
   managedDirFor,
   pickLatestPythonRelease,
@@ -53,6 +54,8 @@ import {
   findPthFile,
   parsePipVersion,
   pickPipWheel,
+  PIP_MIRROR_INDEX_URL,
+  repairPipIni,
 } from '../src/deps/pip.ts';
 import { tempDir } from './helpers/temp-dirs.ts';
 
@@ -469,6 +472,8 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
         reason: name === 'rg' ? '' : `${name} 未安装`,
         attempts: [],
       }),
+      // 测试固定为“没有 winget”，报告形状才不随出包机环境漂移
+      wingetPath: () => null,
     });
     const report = await manager.report(() => new Date('2026-10-01T00:00:00.000Z'));
     assert.equal(report.entries.length, 4);
@@ -1028,7 +1033,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     assert.equal(existsSync(join(managedDirFor(join(root, 'data'), 'rg'), 'rg.exe')), true, '文件确实落地了');
   });
 
-  it('pwsh **不提供一键安装**：如实说清为什么，并给出官方下载页', async () => {
+  it('pwsh：没有 winget 时如实失败并给手动下载页；有 winget 时报告可一键安装', async () => {
     const root = await tempDir('irmia-dep-');
     const manager = new DepsManager({
       dataDir: join(root, 'data'),
@@ -1036,17 +1041,30 @@ describe('一键安装：下载 → 解压 → 复检', () => {
         name, status: 'missing', path: '', version: '', anyVersion: '',
         source: null, dir: null, reason: '', attempts: [],
       }),
-      // 给了下载器也不该被用到：pwsh 这条路根本不进下载
+      // 这条钉“没有 winget 的回退”；有 winget 的路径另用 report 的 wingetPath 注入验证
+      wingetPath: () => null,
       download: fakeDownload(Buffer.from('should-not-be-used', 'utf8')),
     });
 
     const outcome = await manager.install('pwsh');
     assert.equal(outcome.ok, false);
     if (outcome.ok) return;
-    assert.match(outcome.error, /不支持一键安装/u);
+    assert.match(outcome.error, /没有可用的 winget/u);
     assert.ok(outcome.details.some((line) => line.includes(PWSH_DOWNLOAD_PAGE)));
-    assert.ok(outcome.details.some((line) => /UAC|提权|MSI/u.test(line)), '取舍理由要写在回执里');
     assert.equal(packageFor('pwsh'), null);
+
+    const withWinget = new DepsManager({
+      dataDir: join(root, 'data'),
+      probe: async (name) => ({
+        name, status: 'missing', path: '', version: '', anyVersion: '',
+        source: null, dir: null, reason: '', attempts: [],
+      }),
+      wingetPath: () => 'C:\\Windows\\winget.exe',
+    });
+    const report = await withWinget.report();
+    const pwsh = report.entries.find((entry) => entry.name === 'pwsh')!;
+    assert.equal(pwsh.installable, true);
+    assert.equal(pwsh.action, 'install');
   });
 
   it('es 的包地址是 voidtools 的 CLI 包；rg 用 GitHub API 解析最新版', async () => {
@@ -1097,8 +1115,8 @@ describe('一键安装：下载 → 解压 → 复检', () => {
   it('python 的包地址：钉住 3.13.16 兜底，API 那条路挑最新稳定版（rc 与字符串序都不许混进来）', async () => {
     const pkg = packageFor('python');
     assert.equal(pkg?.url, PYTHON_EMBED_URL);
-    assert.match(PYTHON_EMBED_URL, /^https:\/\/www\.python\.org\/ftp\/python\/[\d.]+\/python-[\d.]+-embed-amd64\.zip$/u);
-    assert.equal(PYTHON_EMBED_URL, 'https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip');
+    assert.match(PYTHON_EMBED_URL, /^https:\/\/mirrors\.huaweicloud\.com\/python\/[\d.]+\/python-[\d.]+-embed-amd64\.zip$/u);
+    assert.equal(PYTHON_EMBED_URL, 'https://mirrors.huaweicloud.com/python/3.13.16/python-3.13.16-embed-amd64.zip');
     // embeddable 包没有顶层目录：`python.exe` 就在根；`python3.exe` 是商店版的名字，手工放包时会出现
     assert.deepEqual(pkg?.exeNames, ['python.exe', 'python3.exe']);
     assert.equal(DEP_SPECS.python.downloadPage, PYTHON_DOWNLOAD_PAGE);
@@ -1116,7 +1134,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     assert.equal(picked.ok, true, picked.ok ? '' : picked.error);
     if (!picked.ok) return;
     assert.equal(picked.version, '3.15.0', '字符串序会把 3.9.0 排到最前；rc / a1 / 2.x 都不许中选');
-    assert.equal(picked.url, 'https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip');
+    assert.equal(picked.url, `${PYTHON_MIRROR_FTP_PREFIX}3.15.0/python-3.15.0-embed-amd64.zip`);
 
     const resolved = await resolvePythonEmbedUrl(async () => list);
     assert.equal(resolved.ok, true);
@@ -1582,6 +1600,20 @@ describe('pip 引导：托管 Python 装完必须自带可用的 pip', () => {
     assert.equal(parsePipVersion(''), null);
     // 前面有别的行时也要认（有的环境会先打印一句警告）
     assert.equal(parsePipVersion('WARNING: something\npip 26.2.1 from /x (python 3.13)'), '26.2.1');
+  });
+
+  it('pip.ini 用纯 ASCII；旧的 UTF-8 中文配置会备份并修复', async () => {
+    const dir = await tempDir('irmia-pip-ini-repair-');
+    const ini = join(dir, 'pip.ini');
+    await writeFile(ini, '# 由 Irmia 框架生成：中文注释\n[global]\ntimeout = 30\n', 'utf8');
+    assert.equal(await repairPipIni(dir), true);
+    const fixed = await readFile(ini, 'utf8');
+    assert.ok([...fixed].every((ch) => ch.charCodeAt(0) < 0x80), 'pip.ini 必须保持纯 ASCII');
+    assert.match(fixed, /\[global\]/u);
+    assert.ok(fixed.includes(`index-url = ${PIP_MIRROR_INDEX_URL}`), '默认必须写镜像源');
+    assert.ok(fixed.includes('extra-index-url = https://pypi.org/simple/'), '镜像缺包时有官方回退');
+    assert.equal(existsSync(`${ini}.non-ascii.bak`), true, '旧坏文件要留备份');
+    assert.equal(await repairPipIni(dir), false, '已经是 ASCII 时不重复写盘');
   });
 
   it('PyPI 元数据挑选：只认 py3-none-any 的 wheel；结构不对/没有 wheel 都如实报', () => {

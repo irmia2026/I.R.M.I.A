@@ -21,6 +21,7 @@ import type { ContextImageChosen } from '../log/types.ts';
 import { noteForFlagged, ruleNoteFor, type InjectionWarnFacts } from '../channel/injection.ts';
 import type { WarnExemptJudge } from '../channel/warn-exempt.ts';
 import { MAINTENANCE_WINDOW_WORDS, SELF_BRIEF, renderAskNote, renderContactNote, renderContactParts, renderInjectionNote, renderMentionNote, type ContactFacts, type OpenAskFacts } from './self-brief.ts';
+import { formatDeepSeekBalance, type BalanceFacts } from './deepseek-balance.ts';
 import { DEFAULT_SOFT_RATIO } from '../runtime/budget-guard.ts';
 import { DEFAULT_STATE_BUDGET_BYTES } from '../config/config.ts';
 import type { RelationshipNote } from '../persona/relationship.ts';
@@ -2318,6 +2319,7 @@ const NOW_LABEL = {
   clock: '时刻',
   machine: '本机',
   usage: '用度',
+  balance: 'DeepSeek API 余额',
   warn: '预警',
   channel: '通道',
   sessions: '会话',
@@ -2441,6 +2443,8 @@ export interface UsageFacts {
   /** 连续失败上限（到它就暂停唤醒）；null = 不知道 */
   failStreakMax?: number | null;
 }
+
+/** DeepSeek 余额快照（宿主服务只读传入；渲染层不自己请求）。 */
 
 /**
  * 任务卡标题的字符上限。任务卡进 `instructions`（最大公共前缀的一部分），标题过长等于
@@ -2721,6 +2725,11 @@ export interface RenderInput {
   machine?: MachineFacts | null;
   /** 用度事实（此刻层 `用度：`，见 UsageFacts）：投影 + 生效上限，同样由调用方算。缺省 = "未知" */
   usage?: UsageFacts | null;
+  /**
+   * DeepSeek 余额事实（此刻层 `余额：`）：只由宿主余额服务传入快照。
+   * 非 DeepSeek 端点或尚未取到时为 null/缺省，整行不出现。
+   */
+  balance?: BalanceFacts | null;
   model: string;
   lane: ModelLane;
   /**
@@ -3261,6 +3270,7 @@ export function render(input: RenderInput): RenderedRequest {
     input.contact ?? null,
     taskCard, input.asks ?? [],
     input.machine ?? null, input.usage ?? null,
+    input.balance ?? null,
     input.injection ?? [],
     // 提及那一轮：通知已经在她这一轮的输入里了，此刻层不再重复写「点名：」
     input.mentionNotice ?? null,
@@ -3626,6 +3636,7 @@ function renderNowLayer(
   asks: readonly OpenAskFacts[],
   machine: MachineFacts | null,
   usage: UsageFacts | null,
+  balance: BalanceFacts | null,
   injection: readonly InjectionWarnFacts[],
   mentionNotice: { messageId: string; text: string } | null,
   maintenanceWindow: MaintenanceWindowNote | null,
@@ -3659,6 +3670,8 @@ function renderNowLayer(
   // 在作为告警信息时出现"）。不写"0%"、不写"未知"——那些都是"出现"，而他要的是"不出现"。
   const alert = usageAlert(usage);
   if (alert !== null) push(NOW_LABEL.usage, `用度：⚠ ${alert.parts.join(' · ')}`);
+  const balanceText = formatDeepSeekBalance(balance);
+  if (balanceText !== null) push(NOW_LABEL.balance, balanceText);
 
   // 预警（v25）：最近 24 小时谁被示过警。**有示警才出现**（没有就整段不出现，不写"0 次"）。
   // 它在说一件跨多轮的事：那些"想指挥你"的话不只是一次打扰，而是有人在试——她该能看见这件事
@@ -6203,7 +6216,7 @@ function renderAttachments(
     .map((a) => {
       const head = `[${a.type}${a.name ? `: ${a.name}` : ''}]`;
       const hint = a.url === undefined
-        ? (a.fileId === undefined ? '' : `（file_id: ${a.fileId}；用 resolve_attachment 取地址）`)
+        ? (a.fileId === undefined ? '' : `（file_id: ${a.fileId}）`)
         : isImageAttachment(a)
           ? '（临时地址，想看就现在下载）'
           : '（临时地址；要内容就立即用 http_download 存到 workspace/downloads/ 再读）';

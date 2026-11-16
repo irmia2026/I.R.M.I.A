@@ -26,6 +26,7 @@ void main() {
   late Map<String, dynamic> settings;
   late List<Map<String, dynamic>> patches;
   late List<Map<String, dynamic>> writes;
+  late List<Uri> queries;
   String? lastConfirm;
   Map<String, dynamic>? uploadBody;
   final png = base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=');
@@ -48,15 +49,28 @@ void main() {
         'imageUrl': '/api/stickers/$id/image',
       };
 
-  Map<String, dynamic> view() {
+  /// 与后端同形的一页：`items` 只放当前页，`counts/tags` 永远按整库算。
+  Map<String, dynamic> viewFor(Uri uri) {
+    final status = uri.queryParameters['status'];
+    final tag = uri.queryParameters['tag'];
+    final page = int.tryParse(uri.queryParameters['page'] ?? '1') ?? 1;
+    final pageSize = int.tryParse(uri.queryParameters['pageSize'] ?? '48') ?? 48;
+    bool matches(Map<String, dynamic> item) {
+      final itemTags = (item['tags'] as List).map((value) => '$value');
+      return (status == null || status.isEmpty || item['status'] == status)
+          && (tag == null || tag.isEmpty || itemTags.contains(tag));
+    }
+
     final tags = <String, int>{for (final tag in ['开心', '难过', '担心', '生气', '亲近', '好奇', '无语', '得意', '害羞']) tag: 0};
     for (final item in items.where((item) => item['status'] == 'approved')) {
       for (final tag in item['tags'] as List) {
         tags['$tag'] = (tags['$tag'] ?? 0) + 1;
       }
     }
+    final filtered = items.where(matches).toList();
+    final start = (page - 1) * pageSize;
     return {
-      'items': items,
+      'items': filtered.skip(start).take(pageSize).toList(),
       'counts': {
         'approved': items.where((item) => item['status'] == 'approved').length,
         'pending': items.where((item) => item['status'] == 'pending').length,
@@ -65,13 +79,15 @@ void main() {
         'sentToday': 0,
       },
       'tags': tags,
-      'page': 1,
-      'pageSize': 48,
-      'total': items.length,
-      'totalPages': 1,
+      'page': page,
+      'pageSize': pageSize,
+      'total': filtered.length,
+      'totalPages': (filtered.length / pageSize).ceil(),
       'settings': settings,
     };
   }
+
+  Map<String, dynamic> view() => viewFor(Uri.parse('/api/stickers'));
 
   setUp(() async {
     HttpOverrides.global = NoIdleHttpOverrides();
@@ -79,6 +95,7 @@ void main() {
     settings = {'enabled': true, 'harvestEnabled': true, 'harvestProbability': 0.15, 'taggingEnabled': true, 'groups': false, 'passiveProbability': 0.12, 'minTurnsBetween': 4, 'rejectedRetentionDays': 7};
     patches = [];
     writes = [];
+    queries = [];
     lastConfirm = null;
     uploadBody = null;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -91,7 +108,8 @@ void main() {
         if (text.trim().isNotEmpty) body = jsonDecode(text);
       }
       if (path == '/api/stickers' && req.method == 'GET') {
-        response.write(jsonEncode(view()));
+        queries.add(req.uri);
+        response.write(jsonEncode(viewFor(req.uri)));
       } else if (path == '/api/stickers' && req.method == 'POST') {
         uploadBody = Map<String, dynamic>.from(body as Map);
         final created = entry('uploaded', 'pending', ['开心']);
@@ -223,25 +241,127 @@ void main() {
     expect(find.text('全部'), findsOneWidget, reason: '库模式默认显示全部');
   });
 
-  testWidgets('左侧标签只过滤右栏，不改库存，也不发请求', (tester) async {
+  testWidgets('左侧标签改走服务端筛选：只重取右栏，不改库存', (tester) async {
     items = [entry('one', 'approved', ['开心']), entry('two', 'approved', ['亲近'])];
     await pumpPanel(tester);
     expect(find.byKey(const ValueKey('sticker-card-one')), findsOneWidget);
     expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
 
     await tap(tester, find.byKey(const ValueKey('sticker-filter-tag-亲近')));
-    await tester.pump(const Duration(milliseconds: 200));
+    await settle(tester);
     expect(find.byKey(const ValueKey('sticker-card-one')), findsNothing);
     expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
     expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '1');
-    expect(patches, isEmpty, reason: '标签筛选只改本地显示');
+    expect(queries.last.queryParameters['status'], 'approved', reason: '库页只看已入库');
+    expect(queries.last.queryParameters['tag'], '亲近', reason: '整库范围筛选交给服务端');
+    expect(patches, isEmpty, reason: '标签筛选不改条目');
     expect(writes, isEmpty, reason: '标签筛选不写后端配置');
     expect(items, hasLength(2), reason: '库存一张都不许动');
 
     await tap(tester, find.byKey(const ValueKey('sticker-filter-all')));
-    await tester.pump(const Duration(milliseconds: 200));
+    await settle(tester);
     expect(find.byKey(const ValueKey('sticker-card-one')), findsOneWidget);
     expect(find.byKey(const ValueKey('sticker-card-two')), findsOneWidget);
+    expect(queries.last.queryParameters.containsKey('tag'), isFalse);
+  });
+
+  testWidgets('状态筛选走服务端：已拒绝按整库计数，不被当前页截断', (tester) async {
+    items = [
+      entry('ok', 'approved', ['开心']),
+      entry('bad', 'rejected', ['难过']),
+      entry('blocked', 'blocked', ['生气']),
+    ];
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-filter-rejected')));
+    await settle(tester);
+    expect(queries.last.queryParameters['status'], 'rejected');
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '1');
+    expect(find.byKey(const ValueKey('sticker-card-bad')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-card-ok')), findsNothing);
+    expect(find.text('已拒绝 1'), findsOneWidget);
+
+    await tap(tester, find.byKey(const ValueKey('sticker-filter-blocked')));
+    await settle(tester);
+    expect(queries.last.queryParameters['status'], 'blocked');
+    expect(find.byKey(const ValueKey('sticker-card-blocked')), findsOneWidget);
+    expect(find.text('已停用 1'), findsOneWidget);
+  });
+
+  testWidgets('245 条库存：首屏是第 1 页，翻完六页能看全且不重复', (tester) async {
+    items = [for (var i = 0; i < 245; i++) entry('lib$i', 'approved', [i.isEven ? '开心' : '难过'])];
+    await pumpPanel(tester);
+    expect(find.textContaining('已入库 245'), findsOneWidget);
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '245');
+    expect(find.byKey(const ValueKey('sticker-pager')), findsOneWidget);
+    expect(find.text('第 1-48 条 / 共 245 条'), findsOneWidget);
+    expect(find.text('开心 123'), findsOneWidget, reason: '分组标题按整库计数，不是当前页');
+    expect(find.text('难过 122'), findsOneWidget);
+
+    Iterable<String> cardIds() sync* {
+      for (final element in find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> && key.value.startsWith('sticker-card-');
+      }).evaluate()) {
+        yield ((element.widget.key as ValueKey<String>).value).substring('sticker-card-'.length);
+      }
+    }
+
+    final seen = <String>{...cardIds()};
+    expect(seen.length, 48);
+    for (var page = 2; page <= 6; page++) {
+      await tap(tester, find.byTooltip('下一页'));
+      await settle(tester);
+      final pageIds = cardIds().toList();
+      expect(pageIds.length, page == 6 ? 5 : 48);
+      seen.addAll(pageIds);
+      expect(seen.length, page == 6 ? 245 : page * 48, reason: '翻页不许重复或漏项');
+    }
+    expect(find.text('第 241-245 条 / 共 245 条'), findsOneWidget);
+    expect(queries.where((query) => query.queryParameters['page'] == '6'), isNotEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('窄窗 245 条：分页栏与卡片都不溢出', (tester) async {
+    items = [for (var i = 0; i < 245; i++) entry('n$i', 'approved', ['开心'])];
+    await pumpPanel(tester, height: 800, size: const Size(760, 800));
+    expect(find.byKey(const ValueKey('sticker-pager')), findsOneWidget);
+    expect(find.textContaining('每页'), findsNothing, reason: '窄窗先收起每页下拉');
+    expect(find.byKey(const ValueKey('sticker-card-n0')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('标签筛选在整库范围分页：60 张分两页，分组计数不缩水', (tester) async {
+    items = [
+      for (var i = 0; i < 60; i++) entry('joy$i', 'approved', ['开心']),
+      for (var i = 0; i < 185; i++) entry('sad$i', 'approved', ['难过']),
+    ];
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-filter-tag-开心')));
+    await settle(tester);
+    expect(queries.last.queryParameters['tag'], '开心');
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '60');
+    expect(find.text('开心 60'), findsOneWidget);
+    expect(find.text('第 1-48 条 / 共 60 条'), findsOneWidget);
+
+    Iterable<String> cardIds() sync* {
+      for (final element in find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> && key.value.startsWith('sticker-card-');
+      }).evaluate()) {
+        yield ((element.widget.key as ValueKey<String>).value).substring('sticker-card-'.length);
+      }
+    }
+
+    final seen = <String>{...cardIds()};
+    expect(seen.length, 48);
+    await tap(tester, find.byTooltip('下一页'));
+    await settle(tester);
+    final rest = cardIds().toList();
+    expect(rest.length, 12);
+    seen.addAll(rest);
+    expect(seen.length, 60);
+    expect(find.text('开心 60'), findsOneWidget, reason: '第二页的分组标题仍是整库计数');
+    expect(find.text('第 49-60 条 / 共 60 条'), findsOneWidget);
   });
 
   testWidgets('右栏滚动能到最底部，最后一张卡片可见', (tester) async {
@@ -290,10 +410,67 @@ void main() {
     expect(find.byKey(const ValueKey('sticker-upload')), findsOneWidget);
   });
 
+  testWidgets('审核：60 条待审、55 条已拒绝分两段翻页，计数不丢', (tester) async {
+    items = [
+      for (var i = 0; i < 60; i++) entry('p$i', 'pending', ['开心']),
+      for (var i = 0; i < 55; i++) entry('r$i', 'rejected', ['难过']),
+    ];
+    await pumpPanel(tester);
+    await tap(tester, find.byKey(const ValueKey('sticker-tab-2')));
+    await settle(tester);
+
+    expect(find.text('待审 60'), findsOneWidget);
+    expect(find.text('已拒绝 55'), findsOneWidget);
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '115');
+    expect(find.byKey(const ValueKey('sticker-review-pending-pager')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sticker-review-rejected-pager')), findsOneWidget);
+    expect(find.text('第 1-48 条 / 共 60 条'), findsOneWidget);
+    expect(find.text('第 1-48 条 / 共 55 条'), findsOneWidget);
+
+    Iterable<String> cardIds() sync* {
+      for (final element in find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> && key.value.startsWith('sticker-card-');
+      }).evaluate()) {
+        yield ((element.widget.key as ValueKey<String>).value).substring('sticker-card-'.length);
+      }
+    }
+
+    expect(cardIds().where((id) => id.startsWith('p')).length, 48);
+    expect(cardIds().where((id) => id.startsWith('r')).length, 48);
+
+    await tap(tester, find.descendant(
+      of: find.byKey(const ValueKey('sticker-review-pending-pager')),
+      matching: find.byTooltip('下一页'),
+    ));
+    await settle(tester);
+    expect(queries.last.queryParameters['status'], 'pending');
+    expect(queries.last.queryParameters['page'], '2');
+    expect(queries.last.queryParameters['pageSize'], '48');
+    expect(find.text('第 49-60 条 / 共 60 条'), findsOneWidget);
+    expect(cardIds().where((id) => id.startsWith('p')).length, 12);
+    expect(cardIds().where((id) => id.startsWith('r')).length, 48, reason: '翻待审不该动已拒绝');
+    expect(find.text('待审 60'), findsOneWidget, reason: '第二页仍报整库计数');
+
+    await tap(tester, find.descendant(
+      of: find.byKey(const ValueKey('sticker-review-rejected-pager')),
+      matching: find.byTooltip('下一页'),
+    ));
+    await settle(tester);
+    expect(queries.last.queryParameters['status'], 'rejected');
+    expect(queries.last.queryParameters['page'], '2');
+    expect(find.text('第 49-55 条 / 共 55 条'), findsOneWidget);
+    expect(cardIds().where((id) => id.startsWith('p')).length, 12);
+    expect(cardIds().where((id) => id.startsWith('r')).length, 7);
+    expect(find.text('已拒绝 55'), findsOneWidget, reason: '第二页仍报整库计数');
+    expect(tester.widget<Text>(find.byKey(const ValueKey('sticker-view-count'))).data, '115');
+  });
+
   testWidgets('审核：批准后调用 PATCH，待审区如实清空', (tester) async {
     items = [entry('one', 'pending', ['开心'])];
     await pumpPanel(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-tab-2')));
+    await settle(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-approve-one')));
     await settle(tester);
     expect(patches.single['body'], {'status': 'approved'});
@@ -305,6 +482,7 @@ void main() {
     items = [entry('one', 'pending', ['开心'])];
     await pumpPanel(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-tab-2')));
+    await settle(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-reject-one')));
     await settle(tester);
     expect(items.single['status'], 'rejected');
@@ -318,6 +496,7 @@ void main() {
     items = [entry('one', 'pending', ['开心']), entry('two', 'pending', ['亲近'])];
     await pumpPanel(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-tab-2')));
+    await settle(tester);
     expect(tester.widget<TextButton>(find.byKey(const ValueKey('sticker-batch-approve'))).onPressed, isNull);
     await tap(tester, find.byKey(const ValueKey('sticker-select-one')));
     await tap(tester, find.byKey(const ValueKey('sticker-select-two')));
@@ -504,6 +683,7 @@ void main() {
     items = [entry('one', 'rejected', ['开心'])];
     await pumpPanel(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-tab-2')));
+    await settle(tester);
     await tap(tester, find.byKey(const ValueKey('sticker-purge-one')));
     await tester.pump();
     expect(find.textContaining('彻底删除后无法恢复'), findsOneWidget);

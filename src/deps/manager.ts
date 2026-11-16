@@ -19,6 +19,7 @@
  */
 
 import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { get as httpsGet } from 'node:https';
 
 import {
@@ -51,12 +52,19 @@ import {
   type ZipPackage,
 } from './install.ts';
 import { bootstrapPip, probePipOf, type PipBootstrapOutcome } from './pip.ts';
+import { findWinget, installPowerShellWithWinget } from './winget.ts';
 
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 /** 系统常见安装位置（只在自装目录没命中时才试，见 probe.ts 的三段顺序） */
 const EXTRA_SEARCH_DIRS: Readonly<Record<DepName, readonly string[]>> = {
-  pwsh: ['C:\\Program Files\\PowerShell\\7', 'C:\\Program Files\\PowerShell\\7-preview'],
+  pwsh: [
+    'C:\\Program Files\\PowerShell\\7',
+    'C:\\Program Files\\PowerShell\\7-preview',
+    ...(process.env['LOCALAPPDATA'] === undefined
+      ? []
+      : [join(process.env['LOCALAPPDATA'], 'Microsoft', 'WindowsApps')]),
+  ],
   rg: [],
   es: [
     'C:\\Program Files\\Everything',
@@ -185,6 +193,8 @@ export interface DepsManagerOptions {
    * 不给覆盖点时走真探测（生产路径就是真探测：装完必须真能跑才算装上）。
    */
   verifyProbe?: ((exePath: string) => Promise<{ version: string } | null>) | undefined;
+  /** winget 探测覆盖点（测试用）；省略走 findWinget。 */
+  wingetPath?: (() => string | null) | undefined;
 }
 
 // ──────────────────────────────── 管理器 ────────────────────────────────
@@ -261,9 +271,11 @@ export class DepsManager {
   }
 
   /**
-   * 一键安装。可一键装的只有 zip 型（rg / es / python）；pwsh 是 manual——见 `packageFor`。
+   * 一键安装。zip 型走既有下载流水线；pwsh 优先 winget（MSIX，scope user），
+   * winget 不存在或失败时由 GUI 回退到「打开下载页」。
    */
   async install(name: DepName): Promise<DepInstallOutcome> {
+    if (name === 'pwsh') return this.#installPwshWithWinget();
     const pkg = packageFor(name, this.#options.fetchText ?? fetchTextWithNode);
     if (pkg === null) {
       return {
@@ -352,13 +364,63 @@ export class DepsManager {
 
   // ── 内部 ──
 
+  #wingetPath(): string | null {
+    return this.#options.wingetPath?.() ?? findWinget();
+  }
+
+  async #installPwshWithWinget(): Promise<DepInstallOutcome> {
+    const winget = this.#wingetPath();
+    if (winget === null) {
+      return {
+        ok: false,
+        step: 'download',
+        name: 'pwsh',
+        error: `这台机器没有可用的 winget。${PWSH_WINGET_HINT}；或点「打开下载页」手动安装 PowerShell 7。`,
+        details: [
+          'winget 不是所有 Windows 机器都有（LTSC/Server/精简镜像常缺）。',
+          `下载页：${PWSH_DOWNLOAD_PAGE}`,
+        ],
+      };
+    }
+    const result = await installPowerShellWithWinget(winget);
+    if (!result.ok) {
+      return {
+        ok: false,
+        step: 'verify',
+        name: 'pwsh',
+        error: `PowerShell 7 的 winget 安装没有完成；可以重试，或点「打开下载页」手动安装。`,
+        details: [
+          ...result.details,
+          `手动命令：${PWSH_WINGET_HINT} --scope user`,
+          `下载页：${PWSH_DOWNLOAD_PAGE}`,
+        ],
+      };
+    }
+    this.refresh();
+    return {
+      ok: true,
+      step: 'done',
+      name: 'pwsh',
+      dir: this.managedDir('pwsh'),
+      exePath: result.exePath,
+      version: result.version,
+      sourceUrl: 'winget:Microsoft.PowerShell',
+      bytes: 0,
+      details: [
+        ...result.details,
+        `已验证 pwsh ${result.version}：${result.exePath}`,
+      ],
+    };
+  }
+
   #note(message: string): void {
     this.#options.onNote?.(message);
   }
 
   #entry(name: DepName, outcome: DependencyProbeOutcome): DepReportEntry {
     const spec = DEP_SPECS[name];
-    const installable = spec.install === 'zip';
+    const installable = spec.install === 'zip'
+      || (spec.install === 'winget' && this.#wingetPath() !== null);
     return {
       name,
       label: spec.label,

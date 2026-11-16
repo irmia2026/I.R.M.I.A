@@ -313,7 +313,7 @@ export interface ToolCatalogOptions {
   mentionMessage?: () => { sid: string; messageId: string } | null;
   /** 媒体投递口（`send_media` 用）：宿主注入 */
   mediaPoster?: MediaPoster;
-  /** 外部附件地址解析口（`resolve_attachment` 用）；不传时该工具如实报未接线 */
+  /** `read_channel` 内部附件解析口：不是模型工具，只在读会话时补临时 URL */
   attachmentResolver?: AttachmentResolver;
   /** 贴纸选择与发送运行期；省略时 speak 保持不带贴纸的既有行为 */
   stickerRuntime?: StickerRuntime;

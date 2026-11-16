@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/config.ts';
 import { normalizeStickerMime, sniffStickerMime, stickerDimensions } from './media.ts';
 import { computeStickerPHash, type StickerPHasher } from './phash.ts';
+import { resizeStickerImage, STICKER_MAX_EDGE, type StickerResizer } from './resize.ts';
 import type { StickerStore } from './store.ts';
 import type { StickerTagger, StickerTaggingOutcome } from './tagger.ts';
 import {
@@ -11,6 +12,8 @@ import {
 export const STICKER_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 export const STICKER_UPLOAD_BODY_MAX_BYTES = 12 * 1024 * 1024;
 export const STICKER_PAGE_SIZE = 48;
+/** 单页上限：GUI 的每页档位与 `/api/stickers?pageSize=` 共用同一条边界 */
+export const STICKER_PAGE_SIZE_MAX = 200;
 
 export class StickerServiceError extends Error {
   readonly status: number;
@@ -30,6 +33,7 @@ export interface StickerServiceDeps {
   config: () => AppConfig;
   emit: (type: string, data: unknown) => void;
   phash?: StickerPHasher;
+  resize?: StickerResizer;
   phashReady?: Promise<unknown>;
 }
 
@@ -45,6 +49,7 @@ export interface StickerListQuery {
   tag?: string | null;
   source?: string | null;
   page?: string | null;
+  pageSize?: string | null;
 }
 
 function viewOf(pack: StickerPack, entry: StickerEntry): StickerView {
@@ -102,6 +107,11 @@ export class StickerService {
     const rawPage = query.page?.trim() ?? '';
     const page = rawPage === '' ? 1 : Number(rawPage);
     if (!Number.isSafeInteger(page) || page < 1) throw new StickerServiceError(400, 'invalid-sticker-page', 'page 要是从 1 开始的整数');
+    const rawPageSize = query.pageSize?.trim() ?? '';
+    const pageSize = rawPageSize === '' ? STICKER_PAGE_SIZE : Number(rawPageSize);
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > STICKER_PAGE_SIZE_MAX) {
+      throw new StickerServiceError(400, 'invalid-sticker-page-size', `pageSize 要是 1–${STICKER_PAGE_SIZE_MAX} 的整数`);
+    }
     const rows = this.deps.store.listEntries();
     const filtered = rows.filter(({ pack, entry }) =>
       (status === '' || entry.status === status)
@@ -117,13 +127,13 @@ export class StickerService {
     };
     const config = this.deps.config().stickers;
     return {
-      items: filtered.slice((page - 1) * STICKER_PAGE_SIZE, page * STICKER_PAGE_SIZE).map(({ pack, entry }) => viewOf(pack, entry)),
+      items: filtered.slice((page - 1) * pageSize, page * pageSize).map(({ pack, entry }) => viewOf(pack, entry)),
       counts,
       tags,
       page,
-      pageSize: STICKER_PAGE_SIZE,
+      pageSize,
       total: filtered.length,
-      totalPages: Math.ceil(filtered.length / STICKER_PAGE_SIZE),
+      totalPages: Math.ceil(filtered.length / pageSize),
       settings: {
         enabled: config.enabled,
         harvestEnabled: config.harvest.enabled,
@@ -165,15 +175,39 @@ export class StickerService {
     if (bytes.length > STICKER_UPLOAD_MAX_BYTES) throw new StickerServiceError(413, 'payload-too-large', '单张贴纸不能超过 8MB');
     const sniffed = sniffStickerMime(bytes);
     if (sniffed !== mime) throw new StickerServiceError(400, 'invalid-sticker-content', '图片内容与声明型别不一致');
-    const dimensions = stickerDimensions(bytes, mime);
+    let dimensions = stickerDimensions(bytes, mime);
     if (dimensions !== null && (dimensions.width > 1024 || dimensions.height > 1024)) {
       throw new StickerServiceError(400, 'sticker-dimensions-too-large', '图片宽高都不能超过 1024 像素');
+    }
+    let finalBytes: Buffer = Buffer.from(bytes);
+    let finalMime = mime;
+    // 手动上传与静默采收共用同一套参考尺寸：非 GIF 超过 160px 先缩，
+    // 避免“采收是 160、她自己导入却是原图”的两套口径。缩图失败就拒绝这次上传，
+    // 不把原尺寸偷偷写进库。
+    if (mime !== 'image/gif' && dimensions !== null
+      && Math.max(dimensions.width, dimensions.height) > STICKER_MAX_EDGE) {
+      const resized = await (this.deps.resize ?? resizeStickerImage)({
+        bytes, mime, maxEdge: STICKER_MAX_EDGE,
+      });
+      const resizedDims = resized === null ? null : stickerDimensions(resized.bytes, resized.mime);
+      if (resized === null || resizedDims === null
+        || resizedDims.width <= 0 || resizedDims.height <= 0
+        || Math.max(resizedDims.width, resizedDims.height) > STICKER_MAX_EDGE
+        || sniffStickerMime(resized.bytes) !== resized.mime) {
+        throw new StickerServiceError(400, 'sticker-resize-failed', '图片缩到 160px 失败，未收录');
+      }
+      finalBytes = resized.bytes;
+      finalMime = resized.mime;
+      dimensions = resizedDims;
+    }
+    if (finalBytes.length > STICKER_UPLOAD_MAX_BYTES) {
+      throw new StickerServiceError(413, 'payload-too-large', '单张贴纸不能超过 8MB');
     }
     return await this.mutate(async () => {
       await this.deps.phashReady?.catch(() => undefined);
       let phash: string | null = null;
       try {
-        phash = await (this.deps.phash ?? computeStickerPHash)(bytes, mime);
+        phash = await (this.deps.phash ?? computeStickerPHash)(finalBytes, finalMime);
       } catch {
         phash = null;
       }
@@ -182,10 +216,10 @@ export class StickerService {
         if (near !== null) return {entry: this.entry(near.entry.id), duplicate: true, tagging: null};
       }
       const imported = this.deps.store.importSticker({
-        bytes, mime, source: 'owner', ...(phash === null ? {} : {phash}),
+        bytes: finalBytes, mime: finalMime, source: 'owner', ...(phash === null ? {} : {phash}),
       });
       if (imported.duplicate) return { entry: this.entry(imported.entry.id), duplicate: true, tagging: null };
-      const outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime, autoApprove: false });
+      const outcome = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes: finalBytes, mime: finalMime, autoApprove: false });
       if (outcome.reason === 'not-sticker') {
         // 上传与采集同一条判据：非表情包直接丢弃，连 rejected 都不留。
         this.deps.store.discard(imported.entry.id);

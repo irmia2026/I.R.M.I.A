@@ -45,11 +45,15 @@ import { ensurePersonaSeeds, loadPersona, type PersonaAssets } from './persona/l
 import { ensureMemorySeeds } from './persona/memory-maintain.ts';
 import { ensureMemoryIndex } from './persona/memory-injection.ts';
 import { DsClient, type DsResponse } from './model/ds-client.ts';
+import { DeepSeekBalanceService, isDeepSeekBaseUrl } from './model/deepseek-balance.ts';
 import type { SwitchDecision } from './model/transport/registry.ts';
 import { makeMcpImageAttacher } from './mcp/attach-image.ts';
 import { McpClientPool, type McpClientPoolOptions, type McpDeclarationChange, type McpServerEntry } from './mcp/client.ts';
 import { buildCatalogRegistry } from './tools/catalog.ts';
 import { createDepsManager, summarizeNotReady } from './deps/manager.ts';
+import { repairPipIni } from './deps/pip.ts';
+import { applyInstallProfile } from './runtime/install-profile.ts';
+import { ensureInstallCheck } from './runtime/install-check.ts';
 import type { ToolRegistry } from './tools/registry.ts';
 import type { AttachmentResolver, InputNotifyPoster, MediaPoster, MediaRequest, ReplyPoster } from './tools/admin.js';
 import { SkillManager, planSkillRoots, type SkillRootRef } from './skill/skills.ts';
@@ -1699,6 +1703,10 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const heavyKey = readApiKey(config.models.heavy, process.env, config.dataDir, 'heavy');
   const lightKey = readApiKey(config.models.light, process.env, config.dataDir, 'light');
   const apiKey = heavyKey;
+  // 只有 heavy 端点确实是 DeepSeek 时才轮询余额；余额是宿主事实，不写事件日志。
+  const balanceService = heavyKey !== null && isDeepSeekBaseUrl(config.models.heavy.baseUrl)
+    ? new DeepSeekBalanceService({ baseUrl: config.models.heavy.baseUrl, apiKey: heavyKey })
+    : null;
   /** light 那一格最终递给 `DsClient` 的密钥：见上面那三条（`undefined` = 沿用 heavy） */
   const lightKeyPolicy = lightLaneKeyPolicy(config, lightKey);
   const lightLaneKey: string | null | undefined = lightKeyPolicy === 'own'
@@ -1777,8 +1785,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   if (greyHarborChannel !== null) channels.set(greyHarborChannel.name, greyHarborChannel);
 
   /**
-   * 附件地址解析口：只查临时 URL，不下载字节。
-   * 下载仍由 agent 调 http_download —— SSRF、大小、路径、超时只在一处把关。
+   * `read_channel` 内部附件解析口：只查临时 URL，不下载字节。
+   * 解析发生在 agent 主动读会话时；它不是模型工具。
    */
   const attachmentResolver: AttachmentResolver = async ({ messageId, fileId, index = 0, channel }) => {
     const candidates = channel === undefined
@@ -2205,6 +2213,46 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     configPaths: config.deps.paths,
     onNote: write,
   });
+  // 旧版本可能留下了中文 UTF-8 pip.ini；pip 按 cp936 读会让所有 pip 命令 exit 2。
+  // 启动时先修框架自己的托管配置，再让依赖探测继续。
+  try {
+    if (await repairPipIni(deps.managedDir('python'))) {
+      write('[依赖] 已把托管 python 的 pip.ini 修复为 ASCII（旧文件已备份）');
+    }
+  } catch {
+    // 修复失败不阻断启动；下一次 pip 探测/重装仍会重试。
+  }
+  try {
+    const firstRun = await applyInstallProfile({
+      dataDir,
+      configPath: loadedConfig.path,
+      config,
+      deps,
+      write,
+    });
+    if (firstRun.found) {
+      write(`[安装配置] 首启应用：Office=${firstRun.office} MCP 预设=${firstRun.deskhand}`
+        + (firstRun.errors.length === 0 ? '' : `；${firstRun.errors.join('；')}`));
+    }
+  } catch (error) {
+    // 安装器 profile 只是附加组件；失败要留痕，但不让主流程起不来。
+    write(`[安装配置] 首启应用失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const check = await ensureInstallCheck({
+      dataDir,
+      configPath: loadedConfig.path,
+      deps,
+      now,
+      write,
+    });
+    if (check.found) {
+      write(`[安装自检] ${check.needsAttention ? '有未完成项' : '全部可用'}；Todo ${check.todoAdded ? '已加入' : '已存在或未写入'}`);
+    }
+  } catch (error) {
+    // 自检单是附加信息；生成失败不能阻断主流程。
+    write(`[安装自检] 生成失败：${error instanceof Error ? error.message : String(error)}`);
+  }
   void deps.getAll().then(async (all) => {
     const report = await deps.report(now);
     for (const line of summarizeNotReady(report)) write(line);
@@ -2938,6 +2986,12 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         projectRoots: [launchCwd],
         now: () => now().toISOString(),
         timezone: config.timezone ?? 'Asia/Shanghai',
+        ensurePython: async () => {
+          const current = await deps.get('python');
+          if (current.path.trim() !== '') return current.path.trim();
+          const installed = await deps.install('python');
+          return installed.ok && installed.exePath !== '' ? installed.exePath : null;
+        },
       });
       for (const subagentTool of createSubagentTools(subagentManager)) {
         try {
@@ -2956,6 +3010,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       log, dataDir, projection: recovery.projection, now,
       timezone: config.timezone ?? 'Asia/Shanghai',
       ds: pluginModelClient, registry, persona, config, out: write,
+      balance: balanceService,
       // MCP 索引与池读**同一份**合并声明面（config + 已启用插件）
       mcpDeclarations,
       // 插件组合变了 ⇒ 常驻索引必须在下一拍失效（否则撤走的 server 会留在模型索引里）

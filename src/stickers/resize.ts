@@ -6,6 +6,9 @@ import { execFile } from 'node:child_process';
 import { sniffStickerMime, stickerDimensions, stickerExtension } from './media.ts';
 import type { StickerMime } from './types.ts';
 
+/** 表情包统一参考尺寸（最大边）；采收与手动上传共用这一处。 */
+export const STICKER_MAX_EDGE = 160;
+
 export interface StickerResizeInput {
   bytes: Buffer;
   mime: StickerMime;

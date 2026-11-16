@@ -475,15 +475,15 @@ test('⑦ v67 描述与行为一致：默认=增量 · 翻历史不改已读 · 
 
   // 整段 `tools` 的两口径：① 代码口径（**唯一的门**）；② 运行期口径 = ① ＋ `mcp` 那一件 110
   const specs = registry.listForModel({ includeDestructive: true });
-  assert.equal(specs.length, 22, `代码口径的件数变了（22 = 运行期 23 − mcp）：${specs.length}`);
+  assert.equal(specs.length, 21, `代码口径的件数变了（21 = 运行期 22 − mcp）：${specs.length}`);
   const catalogTotal = registry.catalogTokens({ includeDestructive: true });
-  // v88（2026-11-11）：工具描述与新增 resolve_attachment 之后的当前代实测值。
+  // v88：移除未经批准的 resolve_attachment 后的当前代实测值。
   // 预算门仍是 5500；这里只记录**当前代码口径**，改动工具描述时同批复测。
-  assert.equal(catalogTotal, 5092,
-    `整段 tools 的代码口径变了（当前代 5092；件数仍是 22）：`
+  assert.equal(catalogTotal, 4922,
+    `整段 tools 的代码口径变了（当前代 4922；件数仍是 21）：`
     + `要动这个数就同批复测 docs/design.md §4.18 与工具描述（现在 ${catalogTotal}）`);
   assert.ok(5500 - catalogTotal >= 30, `上界 5500 只剩 ${5500 - catalogTotal}（判据 ≥30）`);
-  assert.equal(catalogTotal + 110, 5202, '运行期口径（+ mcp 110，推算值）');
+  assert.equal(catalogTotal + 110, 5032, '运行期口径（+ mcp 110，推算值）');
   // 单件那一件：描述 90 ＋ sid 参数 39 ＋ 名字 4
   assert.equal(
     estimateTokens(tool.name) + tokens + estimateTokens(JSON.stringify(tool.parameters) ?? ''),

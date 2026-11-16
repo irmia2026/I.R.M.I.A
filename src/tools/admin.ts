@@ -699,23 +699,17 @@ export interface MediaPoster {
   post(target: ReplyTarget, media: MediaRequest): Promise<ReplyOutcome>;
 }
 
-/** 外部附件地址解析结果：成功只给临时 URL，不在这一层下载字节 */
-export type AttachmentResolverResult =
-  | { ok: true; url: string; name?: string }
-  | { ok: false; reason: string };
-
 /**
- * 宿主注入的附件解析口：把平台消息/文件标识换成临时下载地址。
- *
- * 只负责“查地址”，不负责下载；落盘仍由 agent 调 `http_download`，这样 SSRF、
- * 大小、路径和“是否真的要看”都留在同一道工具门里。
+ * `read_channel` 的内部附件地址解析口。**不是模型工具**：它只把已有消息里
+ * 只有 file_id 的文件换成临时 URL，统一由 `read_channel` 在用户主动读会话时调用；
+ * 工具层不新增入口、不自动下载。
  */
 export type AttachmentResolver = (input: {
   messageId?: string;
   fileId?: string;
   index?: number;
   channel?: string;
-}) => Promise<AttachmentResolverResult>;
+}) => Promise<{ ok: true; url: string; name?: string } | { ok: false; reason: string }>;
 
 // ──────────────────────────────── 选项 ────────────────────────────────
 
@@ -847,7 +841,7 @@ export interface AdminToolsOptions {
   mentionMessage?: () => { sid: string; messageId: string } | null;
   /** 媒体投递口（`send_media` 用）：宿主注入，缺省时那个工具如实报"没有接线" */
   mediaPoster?: MediaPoster;
-  /** 外部附件地址解析口（`resolve_attachment` 用）；缺省时该工具如实报"没有接线" */
+  /** `read_channel` 内部用：把 file_id 换成临时 URL，不新增模型工具 */
   attachmentResolver?: AttachmentResolver;
   /**
    * 单个媒体的大小上限（`send_media` 的"读之前先 `stat`"那道闸）：缺省 {@link MEDIA_MAX_BYTES}。
@@ -901,7 +895,6 @@ export const ADMIN_TOOL_NAMES = [
   'timer',
   'speak',
   'report',
-  'resolve_attachment',
   'todo',
   'read_channel',
   // send_media 从 2026-10-03 起就在这个包里注册，但一直没进这份名单——
@@ -3064,64 +3057,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     },
   };
 
-  // ── resolve_attachment ──
-  //
-  // 文件附件不自动落盘：入站事件只给 name/url 或 file_id。agent 真要看内容时，
-  // 先用这个工具把 file_id / message_id 换成临时 URL，再走 http_download 的
-  // SSRF、大小、路径和超时门。没有接线就如实报，不猜地址。
-  const resolveAttachment: ToolDefinition = {
-    name: 'resolve_attachment',
-    description:
-      '解析外部附件的临时下载地址。优先填 message_id（read_channel 行尾 ·m<id>）与 index；'
-      + '事件只给 file_id 时填 file_id。只返回地址，不下载；拿到后立即用 http_download 存到 workspace/downloads/。',
-    parameters: {
-      type: 'object',
-      properties: {
-        message_id: { type: 'string', description: '平台消息 id（read_channel 行尾 ·m<id> 里那一串）' },
-        file_id: { type: 'string', description: '平台文件 id（事件只给 file_id 时用）' },
-        index: { type: 'integer', description: 'attachments 数组下标，默认 0' },
-        channel: { type: 'string', description: '通道名（如 qq-official / onebot）；省略由宿主选择' },
-      },
-      additionalProperties: false,
-    },
-    executionMode: 'parallel',
-    sideEffect: 'none',
-    timeoutMs: 20_000,
-    handler: async (rawArgs): Promise<ToolHandlerResult> => {
-      try {
-        const args = argsRecord(rawArgs, 'resolve_attachment');
-        const messageId = optionalString(args, 'message_id')?.trim() ?? '';
-        const fileId = optionalString(args, 'file_id')?.trim() ?? '';
-        const channel = optionalString(args, 'channel')?.trim();
-        const rawIndex = args['index'];
-        const index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0
-          ? rawIndex
-          : 0;
-        if (messageId === '' && fileId === '') {
-          return errorResult('要给 message_id 或 file_id 才能解析附件地址。', TOOL_ERROR_CODES.invalidArgs);
-        }
-        if (messageId === '' && index !== 0) {
-          return errorResult('只给 file_id 时 index 无意义；请留空。', TOOL_ERROR_CODES.invalidArgs);
-        }
-        const resolver = options.attachmentResolver;
-        if (resolver === undefined) {
-          return errorResult('当前宿主没有接上附件地址解析能力。', TOOL_ERROR_CODES.notConfigured);
-        }
-        const result = await resolver({
-          ...(messageId === '' ? {} : { messageId }),
-          ...(fileId === '' ? {} : { fileId }),
-          ...(channel === undefined || channel === '' ? {} : { channel }),
-          index,
-        });
-        if (!result.ok) return errorResult(result.reason, TOOL_ERROR_CODES.notConfigured);
-        return okResult(`[附件地址] ${result.url}${result.name === undefined ? '' : `\n[文件名] ${result.name}`}`
-          + '\n它可能很快过期；要看内容就立即用 http_download 存到 workspace/downloads/ 再读。');
-      } catch (err) {
-        return errorResultFromThrown(err, TOOL_ERROR_CODES.invalidArgs);
-      }
-    },
-  };
-
   // ── todo ──
   //
   // 2026-10-04 用户的口径（「state……甚至就应该取代 todo」→「或者说合并」）：**别再有第二本账**。
@@ -3560,7 +3495,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
               ? ` ${url}（临时地址；要内容就立即用 http_download 存到 workspace/downloads/ 再读）`
               : fileId === ''
                 ? ''
-                : `（file_id: ${fileId}；用 resolve_attachment 取地址）`;
+                : `（file_id: ${fileId}）`;
             return `［文件${a.name === undefined ? '' : ` ${a.name}`}${where}］`;
           }
           const fact = facts?.[imageAt];
@@ -3701,6 +3636,49 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         }, defaultVisibility('image/attached'));
       }
     }
+  };
+
+  /**
+   * `read_channel` 内部补全文件地址：只有 URL 缺席、且通道能解析时才查一次。
+   *
+   * 这是“按需解析”的落点——只在 agent 主动读这个会话时发生；不自动下载，也不新增工具。
+   * 解析失败的附件保持 file_id 原样，避免把失败伪装成地址。
+   */
+  const resolveReadChannelFiles = async (
+    items: readonly ReadChannelItem[],
+  ): Promise<ReadChannelItem[]> => {
+    const resolver = options.attachmentResolver;
+    if (resolver === undefined) return [...items];
+    return await Promise.all(items.map(async (item) => {
+      if (!isExternalMessage(item) || item.attachments === undefined || item.attachments.length === 0) {
+        return item;
+      }
+      let changed = false;
+      const attachments = await Promise.all(item.attachments.map(async (attachment, index) => {
+        const url = typeof attachment.url === 'string' ? attachment.url.trim() : '';
+        if (isImageAttachment(attachment) || url !== '') return attachment;
+        const fileId = typeof attachment.fileId === 'string' ? attachment.fileId.trim() : '';
+        const messageId = item.messageId.trim();
+        if (fileId === '' && messageId === '') return attachment;
+        try {
+          const result = await resolver({
+            ...(messageId === '' ? {} : { messageId }),
+            ...(fileId === '' ? {} : { fileId }),
+            index,
+          });
+          if (!result.ok) return attachment;
+          changed = true;
+          return {
+            ...attachment,
+            url: result.url,
+            ...(attachment.name === undefined && result.name !== undefined ? { name: result.name } : {}),
+          };
+        } catch {
+          return attachment;
+        }
+      }));
+      return changed ? { ...item, attachments } : item;
+    }));
   };
 
   const readChannel: ToolDefinition = {
@@ -3875,12 +3853,12 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
             ...actions,
             ...spoken.filter((item) => eventSeqOf(item) < cursor.before),
           ]);
-          const batch = mergeChannelSpeech(
+          const batch = await resolveReadChannelFiles(mergeChannelSpeech(
             pool.filter((item): item is ChannelMessageView | ChannelNoticeView | ChannelSelfActionView =>
               !isChannelSpoken(item)),
             pool.filter(isChannelSpoken),
             limit,
-          );
+          ));
           // ⚠️ **翻旧话不 emit `channel/read`、也不动 readState**：往回翻旧消息既不能把已读位置
           // 退回去、也不能把旧消息重新标成未读（"已读"只按"读到最新"推进，见 sessions.ts 的
           // applyChannelRead）。这是用户 2026-10-08 那条口径的落点。
@@ -4101,7 +4079,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
         const digest: DigestView = firstSight
           ? tailWindow(pool, limit, calledThisTurn ? (caller?.messageId ?? null) : null)
           : incrementalWindow(unread, pool, limit, calledThisTurn ? (caller?.messageId ?? null) : null);
-        const display = digest.items;
+        const display = await resolveReadChannelFiles(digest.items);
         // ④ **已读只推进到"确实给她看过的那几条"**（用户 2026-10-08 的第二条口径原话：
         //    「不视作已处理。提示她还有没看到的，往上翻页」）。判据是这一屏里最大的一条的事件 seq：
         //      · 没给她的那些（掉在 limit 之外、或本来就没提及）**保持未读**，于是下一次读
@@ -4536,7 +4514,6 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     timer,
     speak,
     report,
-    resolveAttachment,
     todo,
     readChannel,
     sendMedia,

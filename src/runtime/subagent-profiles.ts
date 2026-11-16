@@ -2,8 +2,10 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 
 import { resolveProfileTools } from './subagent-capabilities.ts';
+import { binaryAvailable } from './subagent-binaries.ts';
 
 export type ProfileId = string;
+export type ProfileBinaryCheck = (id: string) => boolean;
 export type ProfileTools = 'readonly' | string[];
 export type ProfileWorkspace = 'own' | 'none';
 export type ProfileLane = 'heavy' | 'light';
@@ -516,12 +518,21 @@ export function profileToolNames(profile: SubagentProfile): string[] {
 }
 
 /**
+ * 没有 Manager 注入时的默认同步探测；Manager 会注入同一份 `binaryAvailable`。
+ */
+function defaultBinaryCheck(id: string, dataDir: string): boolean {
+  return binaryAvailable(id, dataDir);
+}
+
+/**
  * Profile definitions are data, not policy: they may add role instructions and a tool allowlist,
  * but cannot replace the framework identity or grant tools outside this registry's list.
  */
 export class SubagentProfileRegistry {
+  // ── 以下为 availability 的实现；默认探测只用于没有 Manager 注入的场景 ──
   private readonly profiles = new Map<string, SubagentProfile>();
   private readonly dataDir: string;
+  private readonly binaryCheck: ProfileBinaryCheck;
   /**
    * 装配好的 Profile context 正文（启动时读一次、校验一次）。
    *
@@ -534,8 +545,9 @@ export class SubagentProfileRegistry {
   private readonly installedRolePackages = new Set<string>();
   readonly errors: string[] = [];
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: { binaryCheck?: ProfileBinaryCheck } = {}) {
     this.dataDir = resolve(dataDir);
+    this.binaryCheck = options.binaryCheck ?? ((id) => defaultBinaryCheck(id, this.dataDir));
     for (const profile of BUILTIN_PROFILES) this.profiles.set(profile.id, profile);
     this.loadRolePackages();
     this.loadGlobal();
@@ -580,7 +592,7 @@ export class SubagentProfileRegistry {
       });
   }
 
-  /** 静态锁定态：安装登记 + skill/MCP 声明；二进制、Python 模块、模型与真实 MCP 由 P4.4 healthcheck 判定。 */
+  /** 安装登记 + skill/MCP 声明 + 二进制探测；Python 模块、模型与真实 MCP 由 P4.4 healthcheck 判定。 */
   availability(profile: SubagentProfile): ProfileAvailability {
     if (profile.id === 'general') return {available: true, locked: false, missing: []};
     const missing: string[] = [];
@@ -602,8 +614,13 @@ export class SubagentProfileRegistry {
           && existsSync(join(this.dataDir, 'subagents', 'packs', profile.id, 'mcp', `${id}.json`));
         if (!declaration && !missing.includes(id)) missing.push(id);
       }
-      // 静态读取保持保守：二进制是否存在由 manager 的 healthcheck 真探测后覆盖。
-      for (const id of requires.binaries ?? []) if (!missing.includes(id)) missing.push(id);
+      // 二进制在静态摘要时也做一次同步探测；Manager 会注入 healthcheck 的同一份
+      // binaryAvailable（含托管 node/npm 的定位），直接使用 Registry 的调用方也有默认探测。
+      for (const id of requires.binaries ?? []) {
+        let ok = false;
+        try { ok = this.binaryCheck(id); } catch { ok = false; }
+        if (!ok && !missing.includes(id)) missing.push(id);
+      }
       // pythonModules 刻意不静态预判：解释器可能在 PATH / 托管目录里，只有真 spawn 才知道。
       // 它由 healthcheck 逐模块 import 探测后写进 missing（缺失即 locked，不静默可用）。
     }

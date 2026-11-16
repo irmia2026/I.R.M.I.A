@@ -77,9 +77,13 @@ class _FakeSubagentApi extends IrmiaApi {
       final id = Uri.decodeComponent(path.substring('/api/subagents/'.length));
       final item = _itemOf(id);
       if (item == null) throw const ApiError(404, 'subagent not found');
+      // server.ts 的 subagentApiView(view, true) 只给 lastReport，不带
+      // lastReportPreview：夹具照抄这个形状，否则“详情回读把列表摘要清空”
+      // 这条缺陷在测试里复现不出来。
+      final view = Map<String, dynamic>.from(item)..remove('lastReportPreview');
       return <String, dynamic>{
         'enabled': enabled,
-        ...item,
+        ...view,
         'lastReport': reports[id],
         'headError': null,
       };
@@ -630,6 +634,73 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 500));
     expect(find.text('另一个子代理的报告'), findsNothing);
+  });
+
+  testWidgets('选中已完成会话：左侧摘要与详情同源，不掉回「还没有报告」', (tester) async {
+    const doneId = 'sub-done-1111';
+    const noReportId = 'sub-done-2222';
+    const preview = '文档草稿已写入 workspace，共 4 节。';
+    const report = '文档草稿已写入 workspace，共 4 节。\n第二节补了引用与页码。';
+    api.enabled = true;
+    api.items = <Map<String, dynamic>>[
+      _item(
+        id: doneId,
+        status: 'completed',
+        label: '文档',
+        canCancel: false,
+        canResume: true,
+        preview: preview,
+      ),
+      _item(
+        id: noReportId,
+        status: 'completed',
+        label: '通用',
+        canCancel: false,
+        canResume: true,
+      ),
+    ];
+    api.profiles = <Map<String, dynamic>>[_profile(id: 'general', label: '通用')];
+    api.reports[doneId] = report;
+
+    await pumpPage(tester);
+    final doneRow = find.byKey(const ValueKey('subagent-row-$doneId'));
+    await pumpUntil(tester, doneRow);
+
+    await tester.tap(doneRow);
+    await pumpUntil(tester, find.text(report));
+    expect(
+      find.descendant(of: doneRow, matching: find.text(preview)),
+      findsOneWidget,
+      reason: '详情只带 lastReport，选中后左侧卡片仍要显示同一份报告的摘要',
+    );
+    expect(
+      find.descendant(of: doneRow, matching: find.text('还没有报告。')),
+      findsNothing,
+    );
+
+    // 列表 + 详情并发回读（12 秒轮询 / SSE 合并重读）后不能因顺序回退成空态。
+    await tester.pump(const Duration(seconds: 13));
+    await tester.pump();
+    expect(
+      find.descendant(of: doneRow, matching: find.text(preview)),
+      findsOneWidget,
+      reason: '刷新一拍后摘要仍是同一份报告事实',
+    );
+
+    // 无报告会话的空态不能被“补齐”逻辑污染。
+    final emptyRow = find.byKey(const ValueKey('subagent-row-$noReportId'));
+    expect(
+      find.descendant(of: emptyRow, matching: find.text('还没有报告。')),
+      findsOneWidget,
+    );
+    await tester.tap(emptyRow);
+    await pumpUntil(tester, find.byKey(const ValueKey('subagent-last-report')));
+    await tester.pump();
+    expect(
+      find.descendant(of: emptyRow, matching: find.text('还没有报告。')),
+      findsOneWidget,
+      reason: '真没有报告的会话要保持空态',
+    );
   });
 
   testWidgets('SSE 实时到达：当前详情的报告立即出现，按 agentId 过滤', (tester) async {
