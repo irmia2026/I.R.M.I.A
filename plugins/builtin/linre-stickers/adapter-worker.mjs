@@ -23,6 +23,7 @@ const VLM_MIN_GAP_MS = Number.isFinite(Number(process.env.LINRE_STICKERS_VLM_GAP
   ? Math.max(0, Number(process.env.LINRE_STICKERS_VLM_GAP_MS))
   : 3000;
 const VLM_TIMEOUT_MS = 6000;
+const MAX_STEAL_BASE64_BYTES = 1_500_000;
 
 let dataDir = resolvePluginDataDir();
 let catalog = createEmptyCatalog();
@@ -226,6 +227,11 @@ async function processStealJob(job) {
   if (preCheck.matched) {
     if (preCheck.kind === 'blocked') stats.blockedSkipped += 1;
     else stats.dedupSkipped += 1;
+    return;
+  }
+
+  if (Buffer.byteLength(b64, 'utf8') > MAX_STEAL_BASE64_BYTES) {
+    stats.nonStickerSkipped += 1;
     return;
   }
 

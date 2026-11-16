@@ -162,8 +162,8 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
   });
 
   test('RENDER_VERSION 递到 87', () => {
-    assert.equal(RENDER_VERSION, '87');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '87');
+    assert.equal(RENDER_VERSION, '88');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '88');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {

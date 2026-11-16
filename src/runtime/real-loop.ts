@@ -6533,38 +6533,102 @@ export class RealLoop {
    * （那里本来就全量读一次，零额外扫描），之后用 `readRange` 增量补齐。
    */
   private readonly channelSeqIndex = new Map<string, number[]>();
-
-  /** 索引已经吃到哪个 seq（含）；`warmUp` 走完时等于当时的 lastSeq */
+  private readonly channelNoticeSeqIndex = new Map<string, number[]>();
+  private readonly channelActionSeqIndex = new Map<string, number[]>();
+  private readonly channelSpokenBySid = new Map<string, Map<string, ChannelSpoken>>();
+  private channelSpokenAnonCounter = 0;
+  private channelSpokenLastSeq = 0;
   private channelIndexSeq = 0;
 
-  private noteChannelSeq(event: AppEvent): void {
-    if (event.type !== 'wake/channel' && event.type !== 'channel/message') return;
-    const d = event.data;
-    const sid = sidOf(d.channel, d.chatType, d.chatId);
-    const list = this.channelSeqIndex.get(sid);
-    if (list === undefined) this.channelSeqIndex.set(sid, [event.seq]);
-    else if (list[list.length - 1] !== event.seq) list.push(event.seq);
+  private pushIndexedSeq(index: Map<string, number[]>, sid: string, seq: number): void {
+    const list = index.get(sid);
+    if (list === undefined) index.set(sid, [seq]);
+    else if (list[list.length - 1] !== seq) list.push(seq);
   }
 
-  /** 把索引补齐到日志末尾（通常只差重启以来的那几条，`readRange` 不从头全读） */
+  private noteSpokenEvent(event: AppEvent): void {
+    if (event.type !== 'speak/sent' || event.seq <= this.channelSpokenLastSeq) return;
+    this.channelSpokenLastSeq = event.seq;
+    const d = event.data;
+    const deliveredSid = deliveredToSid(d);
+    if (deliveredSid === null) return;
+    const normSid = normalizeSid(deliveredSid);
+    let bySpoken = this.channelSpokenBySid.get(normSid);
+    if (bySpoken === undefined) {
+      bySpoken = new Map<string, ChannelSpoken>();
+      this.channelSpokenBySid.set(normSid, bySpoken);
+    }
+    const text = d.text as string;
+    const messageId = typeof d.messageId === 'string' && d.messageId !== '' ? d.messageId : undefined;
+    const atMs = Date.parse(event.ts);
+    const key = d.callId !== undefined
+      ? `c\u0000${d.callId}`
+      : d.turn === undefined ? `\u0000${this.channelSpokenAnonCounter++}` : `t\u0000${d.turn}`;
+    const prev = bySpoken.get(key);
+    const parts = d.spokenParts ?? 1;
+    const mergedMessageId = prev?.messageId ?? messageId;
+    bySpoken.set(key, prev === undefined
+      ? {
+          text,
+          ts: event.ts,
+          parts,
+          seq: event.seq,
+          atMs,
+          ...(messageId === undefined ? {} : { messageId }),
+        }
+      : {
+          text: prev.text + text,
+          ts: event.ts,
+          parts: prev.parts + parts,
+          seq: event.seq,
+          atMs,
+          ...(mergedMessageId === undefined ? {} : { messageId: mergedMessageId }),
+        });
+  }
+
+  private noteChannelSeq(event: AppEvent): void {
+    if (event.type === 'wake/channel' || event.type === 'channel/message') {
+      const d = event.data;
+      this.pushIndexedSeq(this.channelSeqIndex, sidOf(d.channel, d.chatType, d.chatId), event.seq);
+      return;
+    }
+    if (event.type === 'channel/notice') {
+      const d = event.data;
+      if (isChannelNoticeData(d)) {
+        this.pushIndexedSeq(this.channelNoticeSeqIndex, sidOf(d.channel, d.chatType, d.chatId), event.seq);
+      }
+      return;
+    }
+    if (event.type === 'channel/self-action') {
+      const d = event.data;
+      if (isChannelSelfActionData(d)) {
+        this.pushIndexedSeq(this.channelActionSeqIndex, normalizeSid(d.sid), event.seq);
+      }
+      return;
+    }
+    if (event.type === 'speak/sent') {
+      this.noteSpokenEvent(event);
+    }
+  }
+
   private async topUpChannelSeqIndex(): Promise<void> {
+    const latestSeq = Math.max(this.deps.projection.lastSeq, this.deps.log.latestSeq());
     if (this.ready !== null) {
       await this.ready;
     } else if (this.channelIndexSeq === 0) {
-      // 走不到这里（工具调用必然发生在 ready 之后）；真走到了就退化成全扫，绝不给空答案
       for await (const event of this.deps.log.readAll()) this.noteChannelSeq(event);
-      this.channelIndexSeq = this.deps.projection.lastSeq;
+      this.channelIndexSeq = Math.max(latestSeq, this.deps.log.latestSeq());
       return;
     }
+    const targetSeq = Math.max(this.deps.projection.lastSeq, this.deps.log.latestSeq());
     const from = this.channelIndexSeq + 1;
-    if (from > this.deps.projection.lastSeq) return;
+    if (from > targetSeq) return;
     for await (const event of this.deps.log.readRange(from)) this.noteChannelSeq(event);
-    this.channelIndexSeq = this.deps.projection.lastSeq;
+    this.channelIndexSeq = Math.max(targetSeq, this.deps.log.latestSeq());
   }
 
-  /** 这次要取的那些 seq：从后往前挑，`before` 那一刀的语义与原来逐字节相同 */
-  private channelSeqsForRead(sid: string, limit: number, before?: number): number[] {
-    const seqs = this.channelSeqIndex.get(sid) ?? [];
+  private pickIndexedSeqs(index: ReadonlyMap<string, number[]>, sid: string, limit: number, before?: number): number[] {
+    const seqs = index.get(sid) ?? [];
     const picked: number[] = [];
     for (let i = seqs.length - 1; i >= 0 && picked.length < limit; i -= 1) {
       const seq = seqs[i]!;
@@ -6573,6 +6637,10 @@ export class RealLoop {
     }
     picked.reverse();
     return picked;
+  }
+
+  private channelSeqsForRead(sid: string, limit: number, before?: number): number[] {
+    return this.pickIndexedSeqs(this.channelSeqIndex, sid, limit, before);
   }
 
 
@@ -6751,125 +6819,34 @@ export class RealLoop {
    */
   // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelNotices(sid: string, limit: number, before?: number): Promise<ChannelNoticeView[]> {
+    await this.topUpChannelSeqIndex();
     const hits: ChannelNoticeView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/notice') continue;
+    for (const seq of this.pickIndexedSeqs(this.channelNoticeSeqIndex, sid, limit, before)) {
+      const event = this.deps.log.get(seq);
+      if (event === null || event.type !== 'channel/notice') continue;
       const d = event.data;
-      // 形状再判一次：畸形事件（手工改过日志、旧版本写下的）**不进这一屏**——
-      // 一条渲染不出来的东西摆进去只会让她读到一行空的
       if (!isChannelNoticeData(d)) continue;
-      if (sidOf(d.channel, d.chatType, d.chatId) !== sid) continue;
-      // 游标那一刀在读完字段之前（与 readChannelMessages 同一条：翻页时绝大多数事件落在游标之后）
-      if (before !== undefined && event.seq >= before) continue;
       hits.push(noticeViewOf(d, event.seq, event.ts));
     }
-    return hits.slice(-limit);
+    return hits;
   }
 
-  /**
-   * `read_channel` 的**第四个**读取口：**她在这个会话里做过什么**（`channel/self-action`）。
-   *
-   * 与 `readChannelNotices` **逐字同一套**（同一理由由宿主读日志、同一套游标语义、
-   * 同一句"拿不准就不摆"）：差别只有事件类型与字段——这条的 sid 是**落库时就写好的**
-   * （`actionRecordOf` 从 `group_id` 算出来），所以不必像 notice 那样按 `chatType` 现推，
-   * 少一处推测就少一处错的机会。
-   *
-   * 平台不对机器人自己发起的动作发 notice ⇒ 这条凭据只能从 MCP 回执那一层来
-   * （`tools/mcp-entry.ts` 的 `onReceipt` → `channel/self-action.ts`）。
-   */
-  // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelActions(sid: string, limit: number, before?: number): Promise<ChannelSelfActionView[]> {
+    await this.topUpChannelSeqIndex();
     const hits: ChannelSelfActionView[] = [];
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'channel/self-action') continue;
+    for (const seq of this.pickIndexedSeqs(this.channelActionSeqIndex, sid, limit, before)) {
+      const event = this.deps.log.get(seq);
+      if (event === null || event.type !== 'channel/self-action') continue;
       const d = event.data;
-      // 畸形事件（手工改过日志、旧版本写下的）不进这一屏：渲染不出来的一行只是噪音
       if (!isChannelSelfActionData(d)) continue;
-      if (normalizeSid(d.sid) !== sid) continue;
-      if (before !== undefined && event.seq >= before) continue;
       hits.push({ ...d, seq: event.seq, ts: event.ts });
     }
-    return hits.slice(-limit);
+    return hits;
   }
 
-  /**
-   * `read_channel` 的第二个读取口：**她在这个会话里说过的话**（"她读群时知道自己已经回过什么"）。
-   *
-   * 为什么要宿主来读（2026-10-04）：她说出去的话本身是**逐段**落进 `message/assistant` 的
-   * （一次 151 字的发言在 IM 上发了 13 条，内容就在那 13 条里），但那些事件**没有会话坐标**
-   * ——同一段历史里混着好几个通道的消息，逐段对上哪个群是不可能的。所以由 `speak` 在**IM 那一路
-   * 真发出去**的那一刻补一条带 `sid` 的 `speak/sent`：那是"她说出去过"的凭据（失败/被拒没有它）。
-   *
-   * 归并成**一次 speak 一行**：切分是投递的属性，而 read_channel 的硬预算是行数——她的 13 条气泡
-   * 在那边只占一行（用户 2026-10-04："不过不切分节省行数"）。归并键是 **`callId`**（"一次工具调用"
-   * 的本征标识，与 `tool/call` 同源）：一次 speak 的多条气泡并成一行，而同一个 turn 里她连着说的
-   * 两段各占一行——按 turn 并会把那两段读成一段。
-   *
-   * 只认带 `text` 的那些：旧日志（这个字段之前）读不回来——不是缺陷，是"日志只增不改"的必然。
-   */
-  // 公开理由同 `readChannelMessages`（宿主接口：main.ts 把它递给 read_channel）
   async readChannelSpoken(sid: string): Promise<ChannelSpoken[]> {
-    /** 归并键 → 那一段话（旧事件没有 callId 时退回按 turn、再退回"各自一行"） */
-    const bySpoken = new Map<string, ChannelSpoken>();
-    let counter = 0;
-    for await (const event of this.deps.log.readAll()) {
-      if (event.type !== 'speak/sent') continue;
-      const d = event.data;
-      // 三件闸：**判据只此一处**（`deliveredToSid`，与产生侧 `deliverToSession` 同源）。
-      // 只有真的送到某个会话的那条回执算数：本机对话流（`channel='log'`）与告警出口
-      // （`notify`）不代表话到了那边；投递失败/被拒的那些根本没有这条回执——"没发出去"
-      // 不算"她说过"。
-      //
-      // 2026-10-07 之前这里是手写的 `d.channel !== 'reply-url' || d.text === undefined …`，
-      // 与产生侧那份手写的形状**各写一遍**，于是 `report` 那条漏了 `text` 就在这里被静默丢掉
-      // ——她 report 完读"我说过什么"读不到自己那一篇（病害与修法见 `deliverToSession` 的注释）。
-      const deliveredSid = deliveredToSid(d);
-      if (deliveredSid === null) continue;
-      // 归一之后再比：`speak` 的 `to` 与唤醒派生的回投地址同形，但历史日志里可能有
-      // `group-at` 那种旧写法（归一之前），不归一会让她的发言在群里凭空消失
-      if (normalizeSid(deliveredSid) !== sid) continue;
-      // 过完闸才取文本：`deliveredToSid` 已经保证它是非空字符串（类型也据此收窄）
-      const text = d.text as string;
-      /**
-       * 平台回的这条消息 id（2026-10-12 起 `speak/sent` 才带它）。
-       *
-       * **可选、缺席是常态**：旧日志没有它（"日志只增不改"的必然），通道给不出时也没有。
-       * 缺席时这一行照旧读得出来——`（我）`那一行不过是少一格 `·m<id>`。
-       */
-      const messageId = typeof d.messageId === 'string' && d.messageId !== '' ? d.messageId : undefined;
-      const atMs = Date.parse(event.ts);
-      const key = d.callId !== undefined
-        ? `c\u0000${d.callId}`
-        : d.turn === undefined ? `\u0000${counter++}` : `t\u0000${d.turn}`;
-      const prev = bySpoken.get(key);
-      const parts = d.spokenParts ?? 1;
-      // 归并成一行时**保留第一条的 id**（`??` 的次序就是这条纪律：先来的那个锚不动，
-      // 只有它缺席才让后来的补上）。理由与 speak 那边取"第一条"同源：
-      // 这一行是"她这一段话"，锚要落在她开口的第一条上。
-      const mergedMessageId = prev?.messageId ?? messageId;
-      bySpoken.set(key, prev === undefined
-        // 第一次发言取回执自己的时刻（第一次投递那一刻）
-        ? {
-            text,
-            ts: event.ts,
-            parts,
-            seq: event.seq,
-            atMs,
-            // 可选的键只在有值时才摆（`exactOptionalPropertyTypes`：缺席 ≠ 值是 undefined）
-            ...(messageId === undefined ? {} : { messageId }),
-          }
-        // 同一次发言的下一段：接在她那口气后面，时刻推到最后一次（读起来是"这一段说到这时"）
-        : {
-            text: prev.text + text,
-            ts: event.ts,
-            parts: prev.parts + parts,
-            seq: event.seq,
-            atMs,
-            ...(mergedMessageId === undefined ? {} : { messageId: mergedMessageId }),
-          });
-    }
-    // 升序交给调用方（read_channel 合批时自己排），这里保持日志顺序即可
-    return [...bySpoken.values()];
+    await this.topUpChannelSeqIndex();
+    return [...(this.channelSpokenBySid.get(sid)?.values() ?? [])];
   }
 
   /**

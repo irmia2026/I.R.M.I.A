@@ -2133,7 +2133,7 @@ import { estimateTokens } from '../tools/registry.ts';
 //      在框外印（框里是"别人说的话"，名单是框架给的查询结果），并写明"填进 speak 正文的哪里"。
 //
 //      请求体为什么变：**参数进 `tools` 那段**（缓存前缀）。加一个参数就是加字节 ⇒ 必须递增。
-export const RENDER_VERSION = '87';
+export const RENDER_VERSION = '88';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 

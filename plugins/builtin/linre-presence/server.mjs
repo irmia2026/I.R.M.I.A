@@ -207,15 +207,28 @@ function saveState(state) {
  * 判据取"当前这次之前"最近的一条 `tool/call`：现在这条自己的事件已经在日志里了，
  * 用 5 秒的窗口把它排除掉，否则永远是"刚刚有调用"。
  */
+function findLastToolCallMs(nowMs) {
+  const files = eventFiles().sort();
+  for (let fi = files.length - 1; fi >= 0; fi -= 1) {
+    let events;
+    try {
+      events = parseLines(readFileSync(join(eventsDir, files[fi]), 'utf8'));
+    } catch {
+      continue;
+    }
+    for (let ei = events.length - 1; ei >= 0; ei -= 1) {
+      const event = events[ei];
+      if (event.type !== 'tool/call') continue;
+      const at = Date.parse(String(event.ts ?? ''));
+      if (Number.isFinite(at) && at <= nowMs - SELF_CALL_GUARD_MS) return at;
+    }
+  }
+  return null;
+}
+
 function expiredAt(state, nowMs) {
   if (state === null || typeof state.sid !== 'string' || state.sid === '') return null;
-  const stamps = [];
-  for (const event of readAllEvents()) {
-    if (event.type !== 'tool/call') continue;
-    const at = Date.parse(String(event.ts ?? ''));
-    if (Number.isFinite(at) && at <= nowMs - SELF_CALL_GUARD_MS) stamps.push(at);
-  }
-  const lastCall = stamps.length === 0 ? null : Math.max(...stamps);
+  const lastCall = findLastToolCallMs(nowMs);
   /**
    * 参照点必须是**两者取大**：日志里最后一条工具调用，与"这次进屋的时刻"。
    *
@@ -319,19 +332,23 @@ function enterFromRead(sid, event) {
 function findRecentRead() {
   const files = eventFiles().sort();
   if (files.length === 0) return null;
-  let events;
-  try {
-    events = parseLines(readFileSync(join(eventsDir, files[files.length - 1]), 'utf8'));
-  } catch {
-    return null;
-  }
   const floor = Date.now() - AUTO_ENTER_WINDOW_MS;
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    const sid = readChannelSidOf(event);
-    if (sid === null) continue;
-    if (clockOf(event.ts) < floor) return null;
-    return { sid, event };
+  const minFi = Math.max(0, files.length - 4);
+  for (let fi = files.length - 1; fi >= minFi; fi -= 1) {
+    let events;
+    try {
+      events = parseLines(readFileSync(join(eventsDir, files[fi]), 'utf8'));
+    } catch {
+      continue;
+    }
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      const sid = readChannelSidOf(event);
+      if (sid === null) continue;
+      const at = Date.parse(String(event.ts ?? ''));
+      if (Number.isFinite(at) && at < floor) return null;
+      return { sid, event };
+    }
   }
   return null;
 }
@@ -358,9 +375,29 @@ function enterChannel(args) {
     ? `已离开 ${previous.sid}${expired === null ? '（换频道）' : '（10 分钟没有工具调用，自动退出）'}`
     : null;
 
-  const all = readAllEvents();
-  const history = all.filter((event) => isChannelMessage(event) && matchesSid(event.data, match)).slice(-count);
-  const latestSeq = all.length === 0 ? 0 : all[all.length - 1].seq;
+  const files = eventFiles().sort();
+  const reversedHits = [];
+  let latestSeq = 0;
+  for (let fi = files.length - 1; fi >= 0; fi -= 1) {
+    let events;
+    try {
+      events = parseLines(readFileSync(join(eventsDir, files[fi]), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (latestSeq === 0 && events.length > 0) {
+      latestSeq = events[events.length - 1].seq;
+    }
+    for (let ei = events.length - 1; ei >= 0; ei -= 1) {
+      const event = events[ei];
+      if (isChannelMessage(event) && matchesSid(event.data, match)) {
+        reversedHits.push(event);
+        if (reversedHits.length >= count) break;
+      }
+    }
+    if (reversedHits.length >= count) break;
+  }
+  const history = reversedHits.reverse();
   saveState({ sid, match, enteredAtMs: nowMs, cursorSeq: latestSeq });
 
   const lines = history.length === 0

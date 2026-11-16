@@ -329,7 +329,7 @@ test('工具清单：v52 的五件一批在上界之内（余量别被下一件�
   // `ask_human` **入口已断**（2026-10-15 裁决第二版）：清单与注册表里都没有它
   assert.ok(!names.includes('ask_human'), 'ask_human 不许再进工具数组');
   assert.equal(registry.has('ask_human'), false, '注册表里也没有它（"移除入口"的可执行定义）');
-  assert.equal(total, 5419);
+  assert.equal(total, 5453);
   assert.ok(
     5500 - total >= MIN_HEADROOM,
     `上界 5500 只剩 ${5500 - total} token（v87 之后的余量是 81；判据 ≥ ${MIN_HEADROOM}）：`

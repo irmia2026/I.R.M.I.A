@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { EventView } from './api.ts';
 import type { EventSubscriptionHandle, AfterCommitEventBus } from './event-bus.ts';
 
-const MAX_LINE_BYTES = 2 * 1024 * 1024;
+const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
@@ -260,7 +260,7 @@ export class AdapterSupervisor {
   private notify(state: WorkerState, method: string, params: unknown): void {
     if (state.status.state !== 'ready') return;
     try {
-      state.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
+      state.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params }).replace(/\u2028/gu, '\\u2028').replace(/\u2029/gu, '\\u2029')}\n`);
     } catch (error) {
       this.failWorker(state, error);
     }
@@ -274,7 +274,7 @@ export class AdapterSupervisor {
         reject(new Error(`adapter handshake timed out: ${method}`));
       }, timeoutMs);
       state.pending.set(id, { resolve: resolvePromise, reject, timer });
-      state.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+      state.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params }).replace(/\u2028/gu, '\\u2028').replace(/\u2029/gu, '\\u2029')}\n`);
     });
   }
 

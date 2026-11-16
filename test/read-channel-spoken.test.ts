@@ -300,7 +300,7 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     t.after(() => { setSleepForTest(null); });
     const tk = speakToolkit(rec, async (_target, text) => { posted.push(text); return { ok: true, status: 200 }; });
 
-    const spoken = '长任务跑完了，共 42 个文件。';
+    const spoken = '长任务跑完了。共 42 个文件。';
     const result = await tk.byName('speak').handler({ text: spoken }, CTX);
     assert.equal(result.isError, undefined, result.content);
     assert.ok(posted.length > 1, '这段话本来就该被切成多条气泡（否则这条用例没测到东西）');
@@ -359,7 +359,7 @@ describe('speak · 投递回执里带上"她说了什么"', () => {
     });
     const ctx: ToolContext = { ...CTX, interruptEpoch: () => epoch };
 
-    const result = await tk.byName('speak').handler({ text: '第一句在这里，第二句在这里，第三句在这里。' }, ctx);
+    const result = await tk.byName('speak').handler({ text: '第一句在这里。第二句在这里。第三句在这里。' }, ctx);
     assert.match(result.content, /发言被打断/u, result.content);
     assert.equal(posted.length, 2, '第二段之后被打断（否则这条用例没测到打断）');
 

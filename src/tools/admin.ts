@@ -3886,7 +3886,7 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
     if (pairs.size === 0) return [];
     return [
       '（下面这张名单是「名字 = 完整 openid」，框架给的、不在框里，也不是谁说的话；'
-        + '要 @ 谁就把等号右边那串整串填进 speak 正文的 <qqbot-at-user id="…" /> 里。）',
+        + '要 @ 谁：onebot 会话写 [CQ:at,qq=右边那串]，qq 官方会话写 <qqbot-at-user id="右边那串" />；日常回话不必每句都 @。）',
       ...[...pairs].map(([openid, label]) => `· ${label} = ${openid}`),
     ];
   };
@@ -3977,7 +3977,8 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
       properties: {
         sid: {
           type: 'string',
-          description: '会话标识，形如 qq:group:<群 id>（见外部会话清单）。'
+          description: '会话标识，形如 onebot:group:<群号> 或 qq:group:<群 id>（见外部会话清单）；'
+            + '读完某会话后已自动联动进屋，想蹲后续实时消息可直接调 plugin__linre-presence__wait_messages。'
             + '不给它就是"列会话簿"：返回每个会话的类型、未读数、最后活跃与在聊什么',
         },
         before: {

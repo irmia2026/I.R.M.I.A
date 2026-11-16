@@ -28,7 +28,6 @@ import {
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
 import type { AppEvent, EventEnvelope } from './types.js';
 
 // ──────────────────────────────── 对外类型 ────────────────────────────────
@@ -877,15 +876,27 @@ export class EventLog {
   private async *readShardLines(shard: Shard, fromOffset: number): AsyncGenerator<AppEvent> {
     const size = shard.bytes;
     if (fromOffset >= size) return;
-    const stream = createReadStream(shard.path, { start: fromOffset, end: size - 1 });
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    const stream = createReadStream(shard.path, { start: fromOffset, end: size - 1, encoding: 'utf8' });
+    let remainder = '';
     try {
-      for await (const line of lines) {
-        if (line.length === 0) continue;
-        yield parseEnvelope(line, `${shard.file} 流式读取`) as AppEvent;
+      for await (const chunk of stream) {
+        remainder += chunk as string;
+        let nl = remainder.indexOf('\n');
+        while (nl >= 0) {
+          let line = remainder.slice(0, nl);
+          remainder = remainder.slice(nl + 1);
+          if (line.endsWith('\r')) line = line.slice(0, -1);
+          if (line.length > 0) {
+            yield parseEnvelope(line, `${shard.file} 流式读取`) as AppEvent;
+          }
+          nl = remainder.indexOf('\n');
+        }
+      }
+      if (remainder.endsWith('\r')) remainder = remainder.slice(0, -1);
+      if (remainder.length > 0) {
+        yield parseEnvelope(remainder, `${shard.file} 流式读取`) as AppEvent;
       }
     } finally {
-      lines.close();
       stream.destroy();
     }
   }

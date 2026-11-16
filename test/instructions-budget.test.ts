@@ -220,10 +220,10 @@ const TOOLS_TOKEN_CEILING = 5500;
 // ⚠ 注释里的"线上值"是**v64**，别混（见文件头）。
 
 const HEADER_RULES = { tokens: 44, bytes: 378, hash: 'bbe1674eb8a77743' } as const;
-const HEADER_BRIEF = { tokens: 6021, bytes: 27057, hash: 'cd6c5ae8c7d115b9' } as const;
-const HEADER_TOTAL_TOKENS = 6055;
-const FULL_INSTRUCTIONS = { tokens: 7035, bytes: 31749, hash: '62e1985b8adcdb60' } as const;
-const PERSONA_LAYERS_TOKENS = 980;
+const HEADER_BRIEF = { tokens: 6113, bytes: 27464, hash: '923bc378483249e6' } as const;
+const HEADER_TOTAL_TOKENS = 6146;
+const FULL_INSTRUCTIONS = { tokens: 7127, bytes: 32156, hash: 'bc6f8857c63d2068' } as const;
+const PERSONA_LAYERS_TOKENS = 981;
 
 // ──────────────────────────────── 量 ────────────────────────────────
 

@@ -1798,7 +1798,10 @@ export class OneBotChannel implements ChannelAdapter {
     // 正文里若带 CQ 码且 `file=` 指向**本机文件**，先转成 `base64://` 再上线：
     // 协议端在别的机器上，看不到我们的盘（`inlineLocalCqMedia` 的注释里有现场日志）。
     // 放在这层而不是工具层：这是**这条通道**的约束，换一个协议端（本机跑的）就不成立。
-    const message = await inlineLocalCqMedia(text);
+    const normalizedText = text
+      .replace(/<qqbot-at-user\s+id="([^"\s]+)"\s*\/?>/giu, '[CQ:at,qq=$1]')
+      .replace(/<@!?(\d+)>/gu, '[CQ:at,qq=$1]');
+    const message = await inlineLocalCqMedia(normalizedText);
     const params: Record<string, unknown> = isGroup
       ? { group_id: oneBotIdOf(chatId), message }
       : { user_id: oneBotIdOf(chatId), message };
