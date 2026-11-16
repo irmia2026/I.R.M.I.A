@@ -5438,6 +5438,7 @@ export class RealLoop {
       // 与 workspaceRoot 一样是启动期定下的（它进的是 `AgentLoopDeps`，每 turn 重新装配一次，
       // 但值来自同一份 config，改配置要重启才接管——GUI 的开关也是这么写的）。
       boundaryRoot: trustBoundaryRoot(d.config.trust),
+      modelRetry: d.config.models.retry,
       ...(outboundPolicy === undefined ? {} : { outboundPolicy }),
       /**
        * **外部取消**（2026-10-16 接线）：`AgentLoopDeps.signal` 这个字段早就在了

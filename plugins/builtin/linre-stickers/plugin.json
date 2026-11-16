@@ -1,7 +1,7 @@
 {
   "apiVersion": 2,
   "id": "linre-stickers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engine": {
     "irmia": ">=0.1.0-beta.14"
   },
@@ -9,6 +9,8 @@
     "skills": [
       "skills"
     ],
+    "mcp": "mcp.json",
+    "tools": "tools.json",
     "events": {
       "namespace": "linre-stickers"
     },
@@ -18,8 +20,11 @@
         "apiVersion": 2,
         "capabilities": [
           "event.observe",
+          "event.publish",
+          "model.invoke",
           "prompt.inject",
           "asset.store",
+          "asset.resolve",
           "ui.api"
         ]
       }
@@ -29,7 +34,7 @@
         "id": "stickers",
         "title": "表情包",
         "icon": "emoji",
-        "subtitle": "可配图目录；数据来自 linre-stickers 插件"
+        "subtitle": "自动偷图、AI分类、待审工作台与黑名单管理"
       }
     ]
   },

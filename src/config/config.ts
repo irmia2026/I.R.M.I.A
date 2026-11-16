@@ -197,6 +197,13 @@ export interface ModelsConfig {
   degraded?: ModelLaneConfig | undefined;
   /** 单次模型请求的时限（2026-10-16 加，见 {@link RequestTimeoutConfig}） */
   requestTimeout: RequestTimeoutConfig;
+  retry: ModelRetryConfig;
+}
+
+export interface ModelRetryConfig {
+  maxAttempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
 }
 
 /**
@@ -1129,6 +1136,11 @@ function buildDefaults(dir: string): AppConfig {
         requestHardCapMs: DEFAULT_STREAM_HARD_CAP_MS,
         nonStreamTimeoutMs: DEFAULT_TIMEOUT_MS,
       },
+      retry: {
+        maxAttempts: 3,
+        initialDelayMs: 800,
+        maxDelayMs: 15000,
+      },
     },
     budget: {
       stepTools: 20,
@@ -2045,6 +2057,18 @@ function parseRequestTimeout(raw: JsonValue | undefined, base: RequestTimeoutCon
   return { requestSilenceMs, requestHardCapMs, nonStreamTimeoutMs };
 }
 
+function parseRetry(raw: JsonValue | undefined, base: ModelRetryConfig): ModelRetryConfig {
+  if (raw === undefined || raw === null) return { ...base };
+  if (!isPlainObject(raw)) {
+    throw new ConfigError(`models.retry 必须是对象，收到 ${describeValue(raw)}`, 'models.retry');
+  }
+  const where = 'models.retry';
+  const maxAttempts = pickInt(raw['maxAttempts'], `${where}.maxAttempts`, base.maxAttempts, 1, 30);
+  const initialDelayMs = pickInt(raw['initialDelayMs'], `${where}.initialDelayMs`, base.initialDelayMs, 100, 60000);
+  const maxDelayMs = pickInt(raw['maxDelayMs'], `${where}.maxDelayMs`, base.maxDelayMs, 1000, 300000);
+  return { maxAttempts, initialDelayMs, maxDelayMs };
+}
+
 function pickBoolean(raw: JsonValue | undefined, where: string, fallback: boolean): boolean {  if (raw === undefined || raw === null) return fallback;
   if (typeof raw !== 'boolean') {
     throw new ConfigError(`${where} 只能是 true / false，收到 ${describeValue(raw)}`, where);
@@ -2298,6 +2322,7 @@ function parseAppConfig(doc: JsonObject, dir: string): AppConfig {
     light: parseLane(modelsRaw['light'], 'models.light', base.models.light),
     // 三格时限：缺字段即出厂值，非法即报错（见 parseRequestTimeout）
     requestTimeout: parseRequestTimeout(modelsRaw['requestTimeout'], base.models.requestTimeout),
+    retry: parseRetry(modelsRaw['retry'], base.models.retry),
   };
   const degradedRaw = modelsRaw['degraded'];
   if (degradedRaw !== undefined && degradedRaw !== null) {

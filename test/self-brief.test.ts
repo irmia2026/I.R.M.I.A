@@ -313,6 +313,21 @@ describe('装置自述 · 静态常量（v61：用户手写稿逐字置换后按
     assert.ok(SELF_BRIEF.includes("scope:'self'"), '日程：内务标 scope（单引号照用户原稿）');
     assert.ok(SELF_BRIEF.includes('日程页是给用户看的生活安排'), '助理地位：那页是给用户看的');
   });
+
+  test('v87：去机器味 / 表情包礼仪 / 人格中立 / 轻量好奇检查', () => {
+    for (const banned of ['成为唯一', '那个**唯一**', 'PUA', '欲擒故纵', '病娇', '女儿', '妈妈', '恋人']) {
+      assert.ok(!SELF_BRIEF.includes(banned), `不应出现 "${banned}"`);
+    }
+    assert.ok(SELF_BRIEF.includes('超 40 字直接退回'));
+    assert.ok(SELF_BRIEF.includes('刷屏'));
+    assert.ok(SELF_BRIEF.includes('不是…而是'));
+    assert.ok(SELF_BRIEF.includes('已核实/我认/我记'));
+    assert.ok(SELF_BRIEF.includes('只在用户明确要求'));
+    assert.ok(SELF_BRIEF.includes('优雅搪塞'));
+    assert.ok(SELF_BRIEF.includes('绝不发表情包'));
+    assert.ok(SELF_BRIEF.includes('禁止重型全盘扫描'));
+    assert.ok(SELF_BRIEF.includes('1 步轻量的环境好奇检查'));
+  });
 });
 
 describe('联络方式 · 此刻的能力', () => {

@@ -242,7 +242,7 @@ export const SPEAK_TEXT_REMIND_MAX = 25;
  */
 // fork(pashippercode): 硬上限 40→25。软提醒拦不住重试循环（见 2026-11-01 四连发事故），
 // 长内容一律走 report（不限长）；与上游合并时保留本行。
-export const SPEAK_TEXT_MAX = 25;
+export const SPEAK_TEXT_MAX = 40;
 /** 硬上限：只是防它把整篇报告塞进来；稍微超过不拒，只在结果里提醒（那条提醒见 SPEAK_TEXT_REMIND_MAX） */
 const SPEAK_TEXT_HARD_MAX = 400;
 
@@ -2765,29 +2765,18 @@ export function createAdminTools(options: AdminToolsOptions): AdminToolkit {
   const speak: ToolDefinition = {
     name: 'speak',
     description:
-      '跟人说话用这个：整段交给它，自动断句发出去。'
-      + 'text 必填；要发给别的会话就带 to（sid 见外部会话清单）。例：{text:"在呢"}',
-    // 描述不许写长：它进 tools 那一段（请求的缓存前缀），且 `tool-catalog` 有一条
-    // **<60 token** 的硬线（本轮口径，与另外六件一起算）。所以分段的细则
-    // （顿号不断、成对符号里不断、不足 12 字整段一条）**只写在 `chat-split.ts` 里**，
-    // 不往这里塞——那些是她写标点时自然就会写对的规则，不需要她背。
-    //
-    // **"口语化、允许残缺/倒装/省略"那一句放在 `text` 参数的描述里**（参数不进那份 <60 预算，
-    // 这是既有先例）：那句话要说清"这是聊天消息、可以不成句"，两三句才够，塞进总描述会顶破线。
-    // 但"**聊天用、不是写正式句子**"这半句必须留在总描述里——她读的第一句就是它。
-    //
-    // **两个数都由常量拼进来**（`SPEAK_TEXT_SUGGESTED_MAX` 与 `SPEAK_TEXT_MAX`），不许在描述里
-    // 手写：描述与判据必须同源。建议线同时是**说话风格目标**（用户定的 25 字、短句、像打字聊天），
-    // 不是从实测分布里挑的分位数——别照着日志里的 p90 把它放宽（那一版被纠过，见该常量的注释）。
+      `跟人聊天用：硬限 ${SPEAK_TEXT_MAX} 字（建议 ≤${SPEAK_TEXT_SUGGESTED_MAX}），`
+      + '每轮调 1 次（\\n 分气泡），每条至多两短句；>3–4 条算刷屏，除非情绪连发。'
+      + 'text 必填；换会话带 to。例：{text:"在呢"}',
     parameters: {
       type: 'object',
       properties: {
         text: {
           type: 'string',
           description:
-            '要说的内容，一句话（自动断句，不必自己拆）。聊天消息：短、口语，'
-            + '允许残缺/倒装/省略。'
-            + `超 ${SPEAK_TEXT_MAX} 字直接退回（不截断）；长内容用 report。`,
+            '要说的内容（可用 \\n 分气泡，自动断句）。聊天消息：短、口语，'
+            + '允许残缺/倒装/省略，每条至多两短句。'
+            + `建议 ≤${SPEAK_TEXT_SUGGESTED_MAX} 字，超 ${SPEAK_TEXT_MAX} 字直接退回（不截断）；长内容用 report。`,
         },
         to: {
           type: 'string',

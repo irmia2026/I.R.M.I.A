@@ -219,33 +219,11 @@ const TOOLS_TOKEN_CEILING = 5500;
 // 因脱敏那一笔（`cdc6b92`）复量——长度没变、内容变了，见文件头那一段。
 // ⚠ 注释里的"线上值"是**v64**，别混（见文件头）。
 
-/** v76 · ② 四条分割线常量按 `\n\n` 相连（不依赖 `data/`）——v78 没碰它，未复量 */
 const HEADER_RULES = { tokens: 44, bytes: 378, hash: 'bbe1674eb8a77743' } as const;
-/**
- * v78 · ② 自述那一段（不依赖 `data/`）：v72 整段置换之后是 5712 / 25684 / `b051f01fa99ec325`；
- * v76 加了一段回执说明 ⇒ 5840 / 26254 / `ff003fd6807f4047`。
- * **v78 没碰 `SELF_BRIEF`**（首版补的那一句"正文要你自己 safe_read"已撤回——它也是"给指令"）
- * ⇒ 读数就是 v76 那一组，未复量、也不许改。
- */
-const HEADER_BRIEF = { tokens: 5840, bytes: 26254, hash: 'ff003fd6807f4047' } as const;
-/** v76 · ② 确定性分量合计（= 人格全空时 `renderInstructions` 的逐字节输出）：5873 */
-const HEADER_TOTAL_TOKENS = 5873;
-/**
- * v76 · ① `renderInstructions` 整段（含**本机**人格三层）。
- * ⚠ 线上此刻（未部署 v78）跑的是旧一代，别抄线上那个 hash（见文件头）。
- * ⚠ hash 只认字节内容：`tokens` / `bytes` 相同**不**代表这一串没变（v71 那 4 个字符就是这种形状）。
- * v78 没碰 `instructions` ⇒ 仍是 v76 的 **7052 / 31826 / `d3738e093b9bf40a`**。
- */
-const FULL_INSTRUCTIONS = { tokens: 7052, bytes: 31826, hash: 'd3738e093b9bf40a' } as const;
-/**
- * v76 · ① 里人格三层占的 token。口径 = **① 整段 − ② 确定性分量合计**（`7052 − 5874 = 1178`）。
- * ⚠ **显式字面量、不许写成 `FULL_INSTRUCTIONS.tokens - HEADER_BRIEF.tokens`**：
- * 那样写会把它变成 1212（减错了被减数——`HEADER_BRIEF` 是"自述段"，不是"确定性分量"），
- * 于是这条恒等式**永远不会红**、也就永远发现不了"忘了复量"。见文件头那个 ⚠ 的两个口径。
- * ⚠ v72 从 1178 变成 1179 是**取整**（人格三层一个字没动，两个量各自的 ceil 撞在一起），不是人格变了；
- * v76 复量回到 1178（同一份人格、同一次自述增长之后的取整结果）。
- */
-const PERSONA_LAYERS_TOKENS = 1179;
+const HEADER_BRIEF = { tokens: 6021, bytes: 27057, hash: 'cd6c5ae8c7d115b9' } as const;
+const HEADER_TOTAL_TOKENS = 6055;
+const FULL_INSTRUCTIONS = { tokens: 7035, bytes: 31749, hash: '62e1985b8adcdb60' } as const;
+const PERSONA_LAYERS_TOKENS = 980;
 
 // ──────────────────────────────── 量 ────────────────────────────────
 
@@ -320,7 +298,7 @@ test('instructions 预算：工具的当前值与上界在同一份报告里可�
   // 这一条**不重复** tool-catalog 的门（那边是权威）：它只把"两条预算线各自的当前值"
   // 放在同一个文件里，让下一个人一次读全，不必在两个文件之间对账。
   // 口径：`tools` 那一侧的权威门是 `tool-catalog.test.ts` 的 `catalogTokens`（**代码口径**）。
-  const toolTotal = 5323;              // v74 工作树实测（代码口径；权威值在 tool-catalog.test.ts 文件头）
+  const toolTotal = 5419;
   const toolCount = 22;                // 同上（运行期口径是 23 件，多一件 mcp）
   assert.ok(
     toolTotal < TOOLS_TOKEN_CEILING,

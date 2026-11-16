@@ -1,0 +1,21 @@
+[
+  {
+    "name": "peek_host",
+    "description": "轻量看看宿主电脑此刻在发生什么：前台与可见窗口（windows）、近期下载或桌面新文件及关键词查找（recent_files）、磁盘与临时目录占用（storage），或一次全看（all）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["windows", "recent_files", "storage", "all"]
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "server": "linre-ambient__ambient",
+    "tool": "peek_host"
+  }
+]

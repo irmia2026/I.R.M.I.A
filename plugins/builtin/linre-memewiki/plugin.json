@@ -1,0 +1,28 @@
+{
+  "apiVersion": 2,
+  "id": "linre-memewiki",
+  "version": "0.1.0",
+  "engine": { "irmia": ">=0.1.0-beta.14" },
+  "contributions": {
+    "skills": ["skills"],
+    "mcp": "mcp.json",
+    "tools": "tools.json",
+    "events": { "namespace": "linre-memewiki" },
+    "adapters": [
+      {
+        "worker": "adapter-worker.mjs",
+        "apiVersion": 2,
+        "capabilities": ["event.observe", "event.publish", "prompt.inject", "ui.api"]
+      }
+    ],
+    "views": [
+      {
+        "id": "memewiki",
+        "title": "梗百科",
+        "icon": "chat",
+        "subtitle": "6792+ 热梗词库、自动预查接梗、串子程度与词条管理"
+      }
+    ]
+  },
+  "permissions": []
+}

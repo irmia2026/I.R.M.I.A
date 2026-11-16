@@ -2501,15 +2501,14 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     const texts = eventItems(r).filter((i): i is MessageItem => i.type === 'message').map(i => i.content);
     // **v53（2026-10-12 用户裁决逐字）**：空拍唤醒末尾多附一句——旧那半句**一个字节都没动**，
     // 只是后面接上了"这段时间是你自己的"。逐字锁在这里，别改成"包含"式断言。
-    const IDLE_APPEND = '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。'
-      + '做完记得留下点东西——一句话、一条记录都行。）';
+    const IDLE_APPEND = '（没人找你，这段时间归你自己：真有好玩的发现或自然想说的话再开口，不做例行报平安。）';
     const beat = (quiet: string): string =>
-      `[system] 已安静 ${quiet}。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）${IDLE_APPEND}`;
+      `[system] 已安静 ${quiet}。（心跳自省：扫一眼待办与 \`插件：\` 此刻状态，可顺手做 1–3 步轻量好奇检查、处理私事或记一笔，也可以安静待着）${IDLE_APPEND}`;
     assert.equal(
       texts[0],
-      '[system] 已安静 15 分钟。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）'
-      + '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。做完记得留下点东西——一句话、一条记录都行。）',
-      '整串字节逐字锁：前半句照旧 + v53 附上的那一句',
+      '[system] 已安静 15 分钟。（心跳自省：扫一眼待办与 `插件：` 此刻状态，可顺手做 1–3 步轻量好奇检查、处理私事或记一笔，也可以安静待着）'
+      + '（没人找你，这段时间归你自己：真有好玩的发现或自然想说的话再开口，不做例行报平安。）',
+      '整串字节逐字锁：前半句照旧 + 附上的那一句',
     );
     assert.equal(texts[1], beat('1 分钟'));
     assert.equal(texts[2], beat('30 秒'));
@@ -2552,8 +2551,7 @@ test('wake/heartbeat 报"已安静"，分钟/秒分档', () => {
     // 到点叫她本来就是那条约的全部内容，再附一句"这段时间是你自己的"是噪音。
     // 判据落在渲染层：`renderWake` 只有 `wake/heartbeat` 那一个分支带 `HEARTBEAT_IDLE_APPEND`。
     resetFactory();
-    const APPEND = '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。'
-      + '做完记得留下点东西——一句话、一条记录都行。）';
+    const APPEND = '（没人找你，这段时间归你自己：真有好玩的发现或自然想说的话再开口，不做例行报平安。）';
     const events: AppEvent[] = [
       // 她自己的 wait：payload 的 `kind` 就是 `wait` 那一档（`TIMER_WAIT_PAYLOAD_KIND`）
       evt<TimerSet>('timer/set', { timerId: 'wait-1', at: tsAfter(30), payload: { kind: 'wait', reason: '过一会儿再看' } }),

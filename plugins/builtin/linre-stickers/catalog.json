@@ -1,20 +1,12 @@
-[
-  {
-    "id": "happy-clap",
-    "tags": ["开心", "好耶", "笑"],
-    "intensity": 3,
-    "status": "approved"
-  },
-  {
-    "id": "tired-sigh",
-    "tags": ["累", "困", "睡"],
-    "intensity": 2,
-    "status": "approved"
-  },
-  {
-    "id": "unreviewed-demo",
-    "tags": ["开心"],
-    "intensity": 9,
-    "status": "pending"
+{
+  "version": 2,
+  "items": [],
+  "blocked": [],
+  "settings": {
+    "autoSteal": true,
+    "autoApproveOwner": false,
+    "cooldownSec": 180,
+    "fallbackAfterSpeaks": 5,
+    "maxPending": 200
   }
-]
+}

@@ -329,9 +329,10 @@ test('工具清单：v52 的五件一批在上界之内（余量别被下一件�
   // `ask_human` **入口已断**（2026-10-15 裁决第二版）：清单与注册表里都没有它
   assert.ok(!names.includes('ask_human'), 'ask_human 不许再进工具数组');
   assert.equal(registry.has('ask_human'), false, '注册表里也没有它（"移除入口"的可执行定义）');
+  assert.equal(total, 5419);
   assert.ok(
     5500 - total >= MIN_HEADROOM,
-    `上界 5500 只剩 ${5500 - total} token（v86 之后的余量是 98；判据 ≥ ${MIN_HEADROOM}）：`
+    `上界 5500 只剩 ${5500 - total} token（v87 之后的余量是 81；判据 ≥ ${MIN_HEADROOM}）：`
     + '再加一件工具（整件 ≥100 token）或让某件的说明长回去，都会把余量吃到线下。'
     + '要加就先按 docs/design.md §4.18 复测、再决定从哪里腾地方（v52 腾的是 ask_human 那 134、'
     + 'v55 腾的是四件大工具参数说明里重复与废话那 85、v61 腾的是 find/safe_edit 那 37）',

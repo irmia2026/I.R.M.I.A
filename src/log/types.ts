@@ -3269,6 +3269,15 @@ export interface ModelRejectRecord extends EventEnvelope<'model/reject-record', 
   truncated?: true;
 }> {}
 
+export interface ModelZeroByteRetry extends EventEnvelope<'model/zero-byte-retry', {
+  turn: number;
+  step: number;
+  kind: string;
+  code: string;
+  waitedMs: number;
+  outcome: 'recovered' | 'failed';
+}> {}
+
 /**
  * 界面的密码被设上/被改掉（2026-10，本地认证从共享 token 换成密码）。
  *
@@ -3534,7 +3543,7 @@ export type AppEvent =
   | AuthWebhookTokenRotated
   | TempSwept
   | UpdateChecked
-  | ModelDegraded | ModelRestored | ModelProtocolSwitched | ModelReasoningEcho | ModelRejectRecord
+  | ModelDegraded | ModelRestored | ModelProtocolSwitched | ModelReasoningEcho | ModelRejectRecord | ModelZeroByteRetry
   | RuntimeModelSwitch;
 
 export type AppEventType = AppEvent['type'];
@@ -3691,6 +3700,7 @@ export const EVENT_VISIBILITY: Record<string, Visibility> = {
   // 服务端判一次（"区段里出现了不该出现的东西"正是 400 的成因）。
   // ⚠ 它**不进请求体 ⇒ 不动 `RENDER_VERSION`**：`renderEvents` 的 default 分支不认它。
   'model/reject-record': 'internal',
+  'model/zero-byte-retry': 'internal',
   // 申请单的两条都 **internal，刻意不进她的上下文**（2026-10-11）：
   //   · `grant/requested` —— 她**知道**自己递过单子（工具回执当场回了她一句），
   //     而"框架在下一拍把这份单子拾起来了"是簿记，进上下文只是同一件事渲染两遍；

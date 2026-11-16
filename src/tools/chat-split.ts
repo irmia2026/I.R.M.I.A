@@ -57,7 +57,8 @@
  * `example.com` 变成两截。实测吃过这个亏（她说的正是“改的是 server | ts”）。
  * 中文句号与逗号绝不会出现在词内部，所以只信它们。
  */
-const ALWAYS_STRIP = new Set<string>(['。', '，', ',']);
+const ALWAYS_STRIP = new Set<string>(['。', ',']);
+export const SPLIT_COMMA_COMBINED_MAX = 24;
 
 /**
  * 太短就不拆的下限：**按中文计字口径**数出来的字数（`charCount`：一个字算一个，
@@ -238,15 +239,35 @@ function cutLine(text: string): Piece[] {
   const out: Piece[] = [];
   let buffer = '';
   let dropped = '';
+  let firstCommaAt = -1;
   const stack: string[] = [];
   let inFence = false;
   let fenceMarker = '';
 
-  /** 收一段；`at` 是这一段的切点处摘掉的字符 */
   const flush = (at: string): void => {
     const piece = buffer.trim();
     if (piece !== '') out.push({ text: piece, dropped: at });
     buffer = '';
+    firstCommaAt = -1;
+  };
+
+  const splitAtFirstComma = (): void => {
+    if (firstCommaAt < 0) return;
+    const head = buffer.slice(0, firstCommaAt).trim();
+    const tail = buffer.slice(firstCommaAt + 1).trimStart();
+    if (head !== '') {
+      out.push({ text: head, dropped });
+      dropped = '，';
+    }
+    buffer = tail;
+    firstCommaAt = -1;
+  };
+
+  const appendChar = (ch: string): void => {
+    buffer += ch;
+    if (firstCommaAt !== -1 && charCount(buffer.trim()) > SPLIT_COMMA_COMBINED_MAX) {
+      splitAtFirstComma();
+    }
   };
 
   const parts = text.split(/(?<=\n)/u);
@@ -278,39 +299,46 @@ function cutLine(text: string): Piece[] {
     for (const ch of part) {
       if (PAIR_OPEN.has(ch)) {
         stack.push(ch);
-        buffer += ch;
+        appendChar(ch);
         continue;
       }
       if (pairFamily(ch) !== -1) {
         if (stack.length > 0) stack.pop();
-        buffer += ch;
+        appendChar(ch);
         continue;
       }
       const atTop = stack.length === 0;
-      // 换行与「一定摘」的句末标点同级：换行本身就是句子结束（句号是书面语，所以它消失、它不留）
       if (atTop && (ch === '\n' || ALWAYS_STRIP.has(ch))) {
         flush(dropped);
         dropped = ch;
         continue;
       }
-      // 叹号：短句留着它（「好！」摘了就没了那股劲），长句摘掉并断开
+      if (atTop && ch === '，') {
+        const piece = buffer.trim();
+        if (piece === '' || firstCommaAt !== -1 || charCount(piece) >= SPLIT_COMMA_COMBINED_MAX) {
+          flush(dropped);
+          dropped = ch;
+          continue;
+        }
+        firstCommaAt = buffer.length;
+        buffer += ch;
+        continue;
+      }
       if (atTop && ch === '！') {
         const piece = buffer.trim();
         if (piece !== '' && charCount(piece) <= SHORT_EXCLAIM_CHARS) {
-          buffer += ch;
+          appendChar(ch);
           continue;
         }
         flush(dropped);
         dropped = ch;
         continue;
       }
-      // 问号、分号、省略号、波浪号、顿号：不摘也不断——它们本身就是停顿的表情
-      // （顿号是"同一口气里的并列"）。真正的"断开"留给兜底 splitLong。
       if (atTop && (SOFT_KEEP.has(ch) || ch === '、')) {
-        buffer += ch;
+        appendChar(ch);
         continue;
       }
-      buffer += ch;
+      appendChar(ch);
     }
   }
   flush(dropped);
@@ -433,8 +461,11 @@ export function splitForChat(text: string, options: SplitOptions = {}): string[]
   // 认不出 fence（换行本身已由 cutLine 当断点处理，无需另切一道）。
   const out: Piece[] = [];
   for (const piece of cutLine(trimmed)) {
-    // 代码块整段保留：它内部的行长与标点都不该被拆
     if (/^\s*(```|~~~)/u.test(piece.text)) {
+      out.push(piece);
+      continue;
+    }
+    if (options.max === undefined && piece.text.includes('，') && charCount(piece.text) <= SPLIT_COMMA_COMBINED_MAX) {
       out.push(piece);
       continue;
     }

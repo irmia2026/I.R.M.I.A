@@ -411,7 +411,7 @@ const BEFORE_MANUAL_TYPES = [
 //   「不要给指令」撤回；撤回之后 `instructions` 逐字节回到 v76）。
 //   **复量证据**：把关系档案改成索引、且删掉那句之后，复跑本文件与此前的基线 ⇒ 指纹逐字回到
 //   v76 的 `5f0b11e528bf8fc8`（混批 `46b672ac9c9fb55f`）。判据未放宽：仍是 16 位 sha256 精确比对。
-const BEFORE_MANUAL_FINGERPRINT = '5f0b11e528bf8fc8';
+const BEFORE_MANUAL_FINGERPRINT = 'f239520a8abb13a2';
 
 /** 改动前：混批（心跳 + `wake/manual`）——按"非纯心跳"处理，与改动前一致 */
 const BEFORE_MIXED_TYPES = [
@@ -480,7 +480,7 @@ const BEFORE_MIXED_TYPES = [
 // v78（2026-10-22，关系档案改索引）：**两个常量照旧不动**——与上面那条同一笔、同一份判断
 //   （这一拍也没有 `person`，固定块里的关系档案那一段一个字节都不出现；`instructions` 撤回那句
 //   之后回到 v76）⇒ 混批仍回到 `46b672ac9c9fb55f`。
-const BEFORE_MIXED_FINGERPRINT = '46b672ac9c9fb55f';
+const BEFORE_MIXED_FINGERPRINT = '4b826e14225770d4';
 /** 改动前：纯心跳拍 —— 事件序列里**没有任何 step**（当年那个形态），请求数 1（v39 起真唤醒） */
 const BEFORE_HEARTBEAT_TYPES = [
   'wake/heartbeat', 'budget/rollover', 'snapshot/checkpoint', 'turn/start', 'input/claimed', 'turn/end',
@@ -731,8 +731,8 @@ test('③ 她不开口（spoke:false）时真实调用照样完成：两件事�
   const prompt = (rig.requests[0]!.request.input as Array<{ content?: unknown }>)
     .map(item => (typeof item.content === 'string' ? item.content : ''))
     .join('\n');
-  assert.match(prompt, /心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡/);
-  assert.match(prompt, /（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。做完记得留下点东西——一句话、一条记录都行。）/);
+  assert.match(prompt, /心跳自省：扫一眼待办与 `插件：` 此刻状态/);
+  assert.match(prompt, /（没人找你，这段时间归你自己：真有好玩的发现或自然想说的话再开口，不做例行报平安。）/);
 });
 
 // ──────────────────────────────── ④ 可审计 ────────────────────────────────

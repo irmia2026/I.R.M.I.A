@@ -15,13 +15,14 @@
 
 import { AGENT_VERSION } from './version.ts';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
-// 值导入：工具侧写入点的**可见性判据**（表说 model 的事件省略可见性即抛，见它的注释）
-import { resolveEventVisibility } from './log/types.ts';
+import { resolveEventVisibility, sniffImageMediaType } from './log/types.ts';
+import { attachmentPath, ensureAttachment } from './channel/attachment-store.ts';
+import { isOwnerLabel } from './runtime/trust.ts';
 import { msgSeqOf, mentionsKeyword, shouldWakeForChannelMessage } from './channel/inbox.ts';
 import { ManagedProtocolService, readEndpointFromConfig, resolveServiceDir } from './services/snowluma.ts';
 import { normalizeSid, parseAliases } from './channel/sessions.ts';
@@ -1252,7 +1253,30 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
 
   const { log, lock } = recovery;
   const adapterEventBus = new AfterCommitEventBus();
+  const ATTACHMENT_URL_CACHE_MAX = 1000;
+  const attachmentUrlCache = new Map<string, string>();
+  const registerAttachmentUrls = (data: unknown): void => {
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return;
+    const attachments = (data as Record<string, unknown>)['attachments'];
+    if (!Array.isArray(attachments)) return;
+    for (const item of attachments) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
+      const rawUrl = (item as Record<string, unknown>)['url'];
+      if (typeof rawUrl !== 'string') continue;
+      const trimmed = rawUrl.trim();
+      if (trimmed === '') continue;
+      const id = createHash('sha256').update(trimmed, 'utf8').digest('hex');
+      if (attachmentUrlCache.has(id)) attachmentUrlCache.delete(id);
+      attachmentUrlCache.set(id, trimmed);
+      while (attachmentUrlCache.size > ATTACHMENT_URL_CACHE_MAX) {
+        const oldest = attachmentUrlCache.keys().next().value;
+        if (oldest === undefined) break;
+        attachmentUrlCache.delete(oldest);
+      }
+    }
+  };
   const publishAdapterEvent = (event: AppEvent): void => {
+    registerAttachmentUrls(event.data);
     adapterEventBus.publishAfterCommit({
       seq: event.seq,
       ts: event.ts,
@@ -1363,6 +1387,87 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 取值发生在 worker 真的发起调用的那一刻——那时这个格子必然已填好；
    * 没配密钥则永久为空 ⇒ 明确报错，不静默回落、不借别的 lane 的 key。
    */
+  const MEDIA_RESOLVE_MAX_BYTES = 8 * 1024 * 1024;
+  const isStrictlyInsideDir = (targetPath: string, rootDir: string): boolean => {
+    const normTarget = comparisonKey(resolve(targetPath));
+    const normRoot = comparisonKey(resolve(rootDir));
+    const prefix = normRoot.endsWith(sep) ? normRoot : `${normRoot}${sep}`;
+    return normTarget.startsWith(prefix);
+  };
+  const materializeStickerMedia = (bytes: Buffer): Record<string, unknown> => {
+    if (bytes.byteLength === 0) throw new Error('媒体数据为空');
+    if (bytes.byteLength > MEDIA_RESOLVE_MAX_BYTES) throw new Error('媒体文件超过 8 MB');
+    const mimeType = sniffImageMediaType(bytes);
+    if (mimeType === null) throw new Error('不支持的图片格式');
+    const ext = mimeType === 'image/jpeg'
+      ? '.jpg'
+      : mimeType === 'image/gif'
+        ? '.gif'
+        : mimeType === 'image/webp'
+          ? '.webp'
+          : '.png';
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const stickersDir = join(dataDir, 'media', 'stickers');
+    mkdirSync(stickersDir, { recursive: true });
+    const absStickerMediaPath = join(stickersDir, `${sha256}${ext}`);
+    if (!existsSync(absStickerMediaPath)) {
+      writeFileSync(absStickerMediaPath, bytes);
+    }
+    return {
+      ok: true,
+      sha256,
+      mimeType,
+      sizeBytes: bytes.byteLength,
+      path: absStickerMediaPath,
+      mediaUrl: `/api/media/stickers/${sha256}${ext}`,
+      dataBase64: bytes.toString('base64'),
+    };
+  };
+  const resolveAttachmentUrlById = async (attachmentId: string): Promise<string | null> => {
+    const cached = attachmentUrlCache.get(attachmentId);
+    if (cached !== undefined) return cached;
+    const latest = log.latestSeq();
+    if (latest >= 1) {
+      const fromSeq = Math.max(1, latest - 299);
+      for await (const event of log.readRange(fromSeq)) {
+        registerAttachmentUrls(event.data);
+      }
+    }
+    return attachmentUrlCache.get(attachmentId) ?? null;
+  };
+  const extractOwnerIds = (): string[] => {
+    const ids = new Set<string>();
+    const ownerName = config.persona.owner.trim();
+    if (ownerName !== '') ids.add(ownerName);
+    for (const [sid, label] of Object.entries(config.persona.contacts)) {
+      if (typeof label !== 'string' || !isOwnerLabel(label, config.persona.owner)) continue;
+      const parts = sid.split(':');
+      if (parts[1] === 'c2c' && parts.length >= 3) {
+        const id = parts.slice(2).join(':').trim();
+        if (id !== '') ids.add(id);
+      }
+    }
+    return [...ids];
+  };
+  const adapterSpecs = (): AdapterWorkerSpec[] => {
+    const ownerIds = extractOwnerIds();
+    return pluginRuntime.adapters.map((adapter) => {
+      const pluginDataDir = join(dataDir, 'plugin-data', adapter.pluginId);
+      mkdirSync(pluginDataDir, { recursive: true });
+      return {
+        id: adapter.pluginId,
+        version: adapter.version,
+        contentHash: adapter.contentHash,
+        worker: adapter.worker,
+        capabilities: adapter.capabilities,
+        cwd: adapter.rootDir,
+        config: {
+          dataDir: pluginDataDir,
+          ownerIds,
+        },
+      };
+    });
+  };
   let pluginModelInvoker: ((spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>) | null = null;
   const adapterSupervisor = new AdapterSupervisor({
     eventBus: adapterEventBus,
@@ -1371,14 +1476,6 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       if (pluginModelInvoker === null) throw new Error('模型通道未就绪（进程没有可用的 API key）');
       return await pluginModelInvoker(spec, params);
     },
-    /**
-     * `media/store`：插件交字节，宿主落盘并回**宿主相对路径**（`send_media` 认得的那种）。
-     *
-     * 三条纪律：
-     * ① 内容寻址（sha256 作文件名）⇒ 同一张图重复提交天然幂等，不重复占盘；
-     * ② 只落在 `data/media/plugin/<pluginId>/` 之下 ⇒ 插件之间的资产不互相覆盖；
-     * ③ 大小上限 8 MB，超了直接拒绝（不让一个坏插件把盘写满）。
-     */
     onAssetStore: async (spec, params) => {
       const request = params !== null && typeof params === 'object' && !Array.isArray(params)
         ? params as Record<string, unknown>
@@ -1390,7 +1487,21 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       if (bytes.length === 0) throw new Error('media/store 数据为空');
       if (bytes.length > 8 * 1024 * 1024) throw new Error('media/store 超过 8 MB');
       const kind = typeof request['kind'] === 'string' ? request['kind'] : 'image';
-      const ext = kind === 'video' ? 'mp4' : kind === 'voice' ? 'silk' : kind === 'file' ? 'bin' : 'png';
+      const sniffed = kind === 'image' ? sniffImageMediaType(bytes) : null;
+      const mimeType = sniffed ?? (kind === 'video' ? 'video/mp4' : kind === 'voice' ? 'audio/silk' : kind === 'file' ? 'application/octet-stream' : 'image/png');
+      const ext = mimeType === 'image/jpeg'
+        ? 'jpg'
+        : mimeType === 'image/gif'
+          ? 'gif'
+          : mimeType === 'image/webp'
+            ? 'webp'
+            : kind === 'video'
+              ? 'mp4'
+              : kind === 'voice'
+                ? 'silk'
+                : kind === 'file'
+                  ? 'bin'
+                  : 'png';
       const hash = createHash('sha256').update(bytes).digest('hex');
       const dir = join(dataDir, 'media', 'plugin', spec.id);
       const absolute = join(dir, `${hash}.${ext}`);
@@ -1398,7 +1509,63 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         mkdirSync(dir, { recursive: true });
         writeFileSync(absolute, bytes);
       }
-      return { path: `media/plugin/${spec.id}/${hash}.${ext}`, sha256: hash, bytes: bytes.length };
+      const mirrorDir = join(dataDir, 'media', 'plugins', spec.id);
+      const mirrorAbsolute = join(mirrorDir, `${hash}.${ext}`);
+      if (!existsSync(mirrorAbsolute)) {
+        mkdirSync(mirrorDir, { recursive: true });
+        writeFileSync(mirrorAbsolute, bytes);
+      }
+      return {
+        assetId: hash,
+        path: `media/plugin/${spec.id}/${hash}.${ext}`,
+        sha256: hash,
+        bytes: bytes.length,
+        sizeBytes: bytes.length,
+        mimeType,
+        mediaUrl: `/api/media/plugins/${spec.id}/${hash}.${ext}`,
+      };
+    },
+    onAssetResolve: async (spec, params) => {
+      const request = params !== null && typeof params === 'object' && !Array.isArray(params)
+        ? params as Record<string, unknown>
+        : null;
+      if (request === null) throw new Error('media/resolve 参数必须是对象');
+      const attachmentId = typeof request['attachmentId'] === 'string' ? request['attachmentId'].trim() : '';
+      const assetPath = typeof request['assetPath'] === 'string' ? request['assetPath'].trim() : '';
+      if (attachmentId !== '') {
+        const url = await resolveAttachmentUrlById(attachmentId);
+        if (url === null) throw new Error('找不到对应的 attachmentId');
+        const ensured = await ensureAttachment(dataDir, url, { timeoutMs: 8000, compressTimeoutMs: 4000 });
+        if (ensured.outcome !== 'cached' && ensured.outcome !== 'fetched') {
+          throw new Error(ensured.reason ?? '附件下载失败');
+        }
+        const localFile = attachmentPath(dataDir, url);
+        return materializeStickerMedia(readFileSync(localFile));
+      }
+      if (assetPath !== '') {
+        const candidate = isAbsolute(assetPath) ? resolve(assetPath) : resolve(dataDir, assetPath);
+        const allowedRoots = [
+          resolve(dataDir, 'media'),
+          resolve(dataDir, 'images'),
+          resolve(dataDir, 'stickers'),
+          resolve(dataDir, 'plugin-data', spec.id),
+        ];
+        if (!allowedRoots.some((root) => isStrictlyInsideDir(candidate, root))) {
+          throw new Error('assetPath 越界');
+        }
+        if (!existsSync(candidate)) throw new Error('assetPath 不存在');
+        const realCandidate = realpathSync(candidate);
+        const realAllowed = allowedRoots.some((root) => {
+          const realRoot = existsSync(root) ? realpathSync(root) : root;
+          return isStrictlyInsideDir(realCandidate, realRoot);
+        });
+        if (!realAllowed) throw new Error('assetPath 越界');
+        const info = statSync(realCandidate);
+        if (!info.isFile()) throw new Error('assetPath 不是文件');
+        if (info.size > MEDIA_RESOLVE_MAX_BYTES) throw new Error('assetPath 超过 8 MB');
+        return materializeStickerMedia(readFileSync(realCandidate));
+      }
+      throw new Error('media/resolve 需要 attachmentId 或 assetPath');
     },
     onEffectProposal: async (pluginId, proposal) => {
       write(`[适配器] ${pluginId} 提交了 effect proposal（不执行，仅记录）：${JSON.stringify(proposal).slice(0, 1000)}`);
@@ -1407,13 +1574,6 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       write(`[适配器] ${pluginId} 已隔离：${describeError(error)}`);
     },
   });
-  /**
-   * 插件提示行收集器（协议 v2 `prompt/render`，2026-11-06）。
-   *
-   * 只问**启用且声明了 `prompt.inject`** 的适配器；按插件 id 稳定排序 ⇒ 同一组合、
-   * 同一输入永远得到同一段字节（前缀缓存不因"插件启停顺序不同"而漂）。
-   * 任何一个插件超时/报错都只跳过它自己——插件坏了不该让她说不出话。
-   */
   const collectPluginPromptLines = async (
     context: { turn: number; step: number; now: string },
   ): Promise<readonly string[]> => {
@@ -1429,12 +1589,15 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       try {
         const result = await adapterSupervisor.request(adapter.pluginId, 'prompt/render', {
           slot: 'now-layer',
-          maxChars: 90,
-          context,
+          maxChars: 160,
+          turn: context.turn,
+          step: context.step,
+          now: context.now,
         });
-        const text = result !== null && typeof result === 'object' && typeof (result as { text?: unknown }).text === 'string'
+        const rawText = result !== null && typeof result === 'object' && typeof (result as { text?: unknown }).text === 'string'
           ? (result as { text: string }).text.trim()
           : '';
+        const text = [...rawText].slice(0, 160).join('');
         if (text !== '') {
           write(`[插件] ${adapter.pluginId} 注入此刻层：${text}`);
           lines.push(text);
@@ -1475,14 +1638,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     replacePluginHooks(pluginRuntime.hookEntries);
     pluginToolSyncRef.sync?.();
     await mcpPoolRef.pool?.applyDeclarations(currentDeclarations());
-    await adapterSupervisor.apply(pluginRuntime.adapters.map((adapter) => ({
-      id: adapter.pluginId,
-      version: adapter.version,
-      contentHash: adapter.contentHash,
-      worker: adapter.worker,
-      capabilities: adapter.capabilities,
-      cwd: adapter.rootDir,
-    })));
+    await adapterSupervisor.apply(adapterSpecs());
     for (const warning of pluginRuntime.warnings) write(`[插件] ${warning}`);
   });
   const mcpPluginFailure = (serverName: string, category: PluginFailure['category'], message: string): PluginFailure | null => {
@@ -2607,7 +2763,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
               if (pool === null) throw new Error('MCP 池尚未就绪');
               return await pool.callTool(tool.server, tool.tool, args);
             },
-          });
+          }, { replace: true });
         } catch (error) {
           write(`[插件] 工具 ${tool.name} 未注册：${describeError(error)}`);
         }
@@ -3074,6 +3230,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     };
 
   const onChannelMessage = (data: WakeChannel['data']): void => {
+    registerAttachmentUrls(data);
     // 我自己发出去的那条（平台推回来的副本）：不落库、不注册群成员、不计未读。
     // 放在所有分支**之前**：连下面那条关键词判定都不必做——它本来就不是"别人说的话"。
     // 判据是 `channelGate`（唯一一处实现，见 channel/self-message-gate.ts 的文件头）——
@@ -3355,14 +3512,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   }
 
   // ── 起拍 ──
-  await adapterSupervisor.start(pluginRuntime.adapters.map((adapter) => ({
-    id: adapter.pluginId,
-    version: adapter.version,
-    contentHash: adapter.contentHash,
-    worker: adapter.worker,
-    capabilities: adapter.capabilities,
-    cwd: adapter.rootDir,
-  })));
+  await adapterSupervisor.start(adapterSpecs());
   circuitBreaker?.start();
   loop.start();
   // 保活跟着主循环起拍（`start()` 会**先跑一拍**：布防当场就有一次"界面在不在"的读数）

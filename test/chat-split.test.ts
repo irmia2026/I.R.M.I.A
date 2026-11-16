@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
-  SPLIT_MAX_CHARS, SPLIT_MIN_CHARS, charCount, pairsBalanced, softenDashes, splitForChat,
+  SPLIT_COMMA_COMBINED_MAX, SPLIT_MAX_CHARS, SPLIT_MIN_CHARS, charCount, pairsBalanced, softenDashes, splitForChat,
 } from '../src/tools/chat-split.ts';
 
 /** YG 给的正例原文（他平时就是这么说话的） */
@@ -35,14 +35,10 @@ const EXAMPLE =
  * 「想吃热的，汤面，或者炖的烂烂的那种肉」）当时被读成"逗号该留"，现在按新口径拆开。
  */
 const EXAMPLE_SPLIT = [
-  '唉',
-  '这种问题你也问我',
-  '我又不会做饭',
-  '庄园里厨房那摊子',
-  '平时都是别人管的',
-  '真要说的话',
-  '想吃热的',
-  '汤面',
+  '唉，这种问题你也问我',
+  '我又不会做饭，庄园里厨房那摊子',
+  '平时都是别人管的，真要说的话',
+  '想吃热的，汤面',
   '或者炖的烂烂的那种肉',
 ];
 
@@ -91,7 +87,7 @@ describe('分段 · 新规则（摘了就断、不摘就不断）', () => {
     // 线下面的短句形态另有一条用例锁着（「你好。我很好。」整段一条）
     assert.deepEqual(
       splitForChat('我在的，一直都在。你回头喊我一声就行。'),
-      ['我在的', '一直都在', '你回头喊我一声就行'],
+      ['我在的，一直都在', '你回头喊我一声就行'],
     );
   });
 
@@ -107,9 +103,9 @@ describe('分段 · 新规则（摘了就断、不摘就不断）', () => {
 
   test('省略号、分号、波浪号同样不摘也不断', () => {
     const said = '别发虫子啊……真的别，我这边看着呢。';
-    assert.deepEqual(splitForChat(said), ['别发虫子啊……真的别', '我这边看着呢']);
-    assert.deepEqual(splitForChat('这样；那样，我一直记着呢'), ['这样；那样', '我一直记着呢']);
-    assert.deepEqual(splitForChat('好耶～那我们就这么定了，明天见'), ['好耶～那我们就这么定了', '明天见']);
+    assert.deepEqual(splitForChat(said), ['别发虫子啊……真的别，我这边看着呢']);
+    assert.deepEqual(splitForChat('这样；那样，我一直记着呢'), ['这样；那样，我一直记着呢']);
+    assert.deepEqual(splitForChat('好耶～那我们就这么定了，明天见'), ['好耶～那我们就这么定了，明天见']);
   });
 
   test('叹号看句长：短句留着，长句摘掉并断开', () => {
@@ -125,33 +121,39 @@ describe('分段 · 新规则（摘了就断、不摘就不断）', () => {
   });
 
   test('用户的原话（今天日志里的真句）：摘与断是同一件事的两面', () => {
-    // 「诶，修好啦？那你发张图来试试，我这边看着呢。别发虫子啊……真的别。」
     const said = '诶，修好啦？那你发张图来试试，我这边看着呢。别发虫子啊……真的别。';
-    // 逗号全摘 → 每处都断；问号与省略号不摘 → 那两处不断；句号摘 → 断
     assert.deepEqual(
       splitForChat(said),
-      ['诶', '修好啦？那你发张图来试试', '我这边看着呢', '别发虫子啊……真的别'],
+      ['诶，修好啦？那你发张图来试试', '我这边看着呢', '别发虫子啊……真的别'],
     );
     assertSubstringsInOrder(splitForChat(said), said);
   });
 });
 
 describe('分段 · 三条硬规则', () => {
-  test('语气词单发（逗号全断之后，"唉，..."自然就是它自己一条）', () => {
-    assert.deepEqual(splitForChat('嗯，知道了，你先去忙你的吧'), ['嗯', '知道了', '你先去忙你的吧']);
+  test('语气词单发（两短句合并时保留内部逗号，第 3 分句起断开）', () => {
+    assert.deepEqual(splitForChat('嗯，知道了，你先去忙你的吧'), ['嗯，知道了', '你先去忙你的吧']);
     assert.deepEqual(splitForChat('啊？'), ['啊？']);
-    assert.deepEqual(splitForChat('唉，这种问题你也问我什么呀'), ['唉', '这种问题你也问我什么呀']);
+    assert.deepEqual(splitForChat('唉，这种问题你也问我什么呀'), ['唉，这种问题你也问我什么呀']);
   });
 
-  test('逗号全摘全分段：标点不跟着走，段末也不会留下它', () => {
-    assert.deepEqual(splitForChat('庄园里，别人管的，我一直记着'), ['庄园里', '别人管的', '我一直记着']);
-    assert.deepEqual(splitForChat('庄园里，'), ['庄园里，'], '太短（4 字）→ 整段一条，逗号也留着');
-    assert.deepEqual(splitForChat('a,b,c,d,e,f,g,h,i,j,k,l,m')[0], 'a', '半角逗号同样是切点');
+  test('逗号按双分句 ≤24 字合并，超限或第 3 分句断开并摘掉逗号', () => {
+    assert.equal(SPLIT_COMMA_COMBINED_MAX, 24);
+    assert.deepEqual(splitForChat('庄园里，别人管的，我一直记着'), ['庄园里，别人管的', '我一直记着']);
+    assert.deepEqual(splitForChat('庄园里，'), ['庄园里，']);
+    assert.deepEqual(splitForChat('a,b,c,d,e,f,g,h,i,j,k,l,m')[0], 'a');
+    const exact24 = `${'甲'.repeat(11)}，${'乙'.repeat(12)}`;
+    assert.equal(charCount(exact24), 24);
+    assert.deepEqual(splitForChat(exact24), [exact24]);
+    const over24 = `${'甲'.repeat(11)}，${'乙'.repeat(13)}`;
+    assert.equal(charCount(over24), 25);
+    assert.deepEqual(splitForChat(over24), ['甲'.repeat(11), '乙'.repeat(13)]);
+    assert.deepEqual(splitForChat('第一句，第二句，第三句，第四句'), ['第一句，第二句', '第三句，第四句']);
   });
 
   test('换行是断点：她自己分的行就是最准的边界', () => {
-    assert.deepEqual(splitForChat('第一句\n第二句，还有第三句呢'), ['第一句', '第二句', '还有第三句呢']);
-    assert.deepEqual(splitForChat('一\r\n二，三，四，五，六，七，八'), ['一', '二', '三', '四', '五', '六', '七', '八']);
+    assert.deepEqual(splitForChat('第一句\n第二句，还有第三句呢'), ['第一句', '第二句，还有第三句呢']);
+    assert.deepEqual(splitForChat('一\r\n二，三，四，五，六，七，八'), ['一', '二，三', '四，五', '六，七', '八']);
   });
 });
 
@@ -168,16 +170,12 @@ describe('分段 · 顿号不再是切分点', () => {
   test('列举项留在同一条里，逗号照旧断', () => {
     const table: Array<[string, string[]]> = [
       ['时刻、本机、用度、通道、会话', ['时刻、本机、用度、通道、会话']],
-      ['苹果、梨、桃、杏，都摆在摊子上了', ['苹果、梨、桃、杏', '都摆在摊子上了']],
-      // seq 2225：「最常用的还是读、改、跑这三摊」——修之前断成「读」「改」「跑这三摊」
+      ['苹果、梨、桃、杏，都摆在摊子上了，真新鲜呀', ['苹果、梨、桃、杏，都摆在摊子上了', '真新鲜呀']],
       ['数一遍是二十四件，八大类，都列全了\n最常用的还是读、改、跑这三摊',
-        ['数一遍是二十四件', '八大类', '都列全了', '最常用的还是读、改、跑这三摊']],
-      // seq 4600：口吃式的「又、又来」——修之前断成「又」+「又来」
+        ['数一遍是二十四件，八大类', '都列全了', '最常用的还是读、改、跑这三摊']],
       ['又、又来！谁准你一口一个可爱了', ['又、又来！谁准你一口一个可爱了']],
-      // seq 5869：I10、I11 是并列的两条编号，拆开就剩一个孤零零的「I10」
       ['就是你让我等的那两条，I10、I11 的改动',
-        ['就是你让我等的那两条', 'I10、I11 的改动']],
-      // seq 1854：引号里的并列项「在哪、是谁、吃什么」同属一口气
+        ['就是你让我等的那两条，I10、I11 的改动']],
       ['所以你问我"在哪、是谁、吃什么"，我答的是同一个东西',
         ['所以你问我"在哪、是谁、吃什么"', '我答的是同一个东西']],
     ];
@@ -192,8 +190,7 @@ describe('分段 · 顿号不再是切分点', () => {
   });
 
   test('顿号也不会被"段末收尾"削掉：它现在与问号同级（不摘）', () => {
-    // 修之前 `trimTail` 把段末的顿号吃掉，`苹果、梨` 会变成 `苹果` —— 白丢一个标点
-    assert.equal(splitForChat('苹果、梨、桃、杏，都摆在摊子上了')[0], '苹果、梨、桃、杏');
+    assert.equal(splitForChat('苹果、梨、桃、杏。都摆在摊子上了')[0], '苹果、梨、桃、杏');
   });
 });
 
@@ -210,13 +207,11 @@ describe('分段 · 太短不拆（不足 12 字整段一条）', () => {
     assert.equal(charCount(eleven), 11);
     assert.deepEqual(splitForChat(eleven), [eleven]);
 
-    // 12 字：够长了，逗号照旧断
     const twelve = '一二三四五，六七八九十甲';
     assert.equal(charCount(twelve), 12);
-    assert.deepEqual(splitForChat(twelve), ['一二三四五', '六七八九十甲']);
+    assert.deepEqual(splitForChat(twelve), ['一二三四五，六七八九十甲']);
 
-    // 13 字：同上
-    const thirteen = '一二三四五，六七八九十甲乙';
+    const thirteen = '一二三四五。六七八九十甲乙';
     assert.equal(charCount(thirteen), 13);
     assert.deepEqual(splitForChat(thirteen), ['一二三四五', '六七八九十甲乙']);
   });
@@ -283,9 +278,10 @@ describe('分段 · 成对符号保护（内部不切 / 嵌套 / 未闭合保守
   });
 
   test('括号外的逗号照旧断，括号里的不断', () => {
-    // 与上面那组对照：保护的是括号**内部**，出了括号该断还是断
-    const text = '摊子上有（钱袋、草帽、旧银币）三样，他挑了半天';
-    assert.deepEqual(splitForChat(text), ['摊子上有（钱袋、草帽、旧银币）三样', '他挑了半天']);
+    const text = '摊子上有（钱袋、草帽、旧银币）三样，他挑了半天。';
+    assert.deepEqual(splitForChat(text), ['摊子上有（钱袋、草帽、旧银币）三样，他挑了半天']);
+    const longOuter = '摊子上有（钱袋、草帽、旧银币）三样东西摆在那里，他挑了半天也没挑出来';
+    assert.deepEqual(splitForChat(longOuter), ['摊子上有（钱袋、草帽、旧银币）三样东西摆在那里', '他挑了半天也没挑出来']);
   });
 
   test('未闭合就保守：整篇不拆（宁可一次说完，也不切进括号里）', () => {
@@ -358,8 +354,7 @@ describe('分段 · 不切碎英文标识符（server.ts 的教训）', () => {
     // 切完再把它换成随机标点（这里注入 0 = 权重最大的「，」）
     const out = splitForChat(text, { random: () => 0 });
     assert.deepEqual(out, [
-      '说认知的话',
-      '我分三层',
+      '说认知的话，我分三层',
       '第一层是现场，你正在这台机器上改代码',
       '改的是 server.ts',
     ]);

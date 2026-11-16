@@ -1,6 +1,6 @@
 [
   {
-    "name": "meme-photo",
+    "name": "stickers",
     "command": "node",
     "args": ["server.mjs"],
     "requestTimeoutMs": 20000,

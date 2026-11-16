@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../app.dart';
@@ -90,10 +91,17 @@ class PluginViewPage extends StatefulWidget {
 
 class _PluginViewPageState extends State<PluginViewPage> {
   bool loading = true;
+  bool _submitting = false;
   String? error;
   Map<String, dynamic>? doc;
+  final Map<String, String> _query = <String, String>{};
 
-  String get _path => '/api/plugin/${widget.pluginId}/ui/${widget.viewId}';
+  String get _postPath => '/api/plugin/${widget.pluginId}/ui/${widget.viewId}';
+
+  String get _getPath => Uri(
+        path: _postPath,
+        queryParameters: _query.isEmpty ? null : _query,
+      ).toString();
 
   @override
   void initState() {
@@ -107,7 +115,7 @@ class _PluginViewPageState extends State<PluginViewPage> {
       error = null;
     });
     try {
-      final raw = await widget.state.api.get(_path);
+      final raw = await widget.state.api.get(_getPath);
       if (!mounted) return;
       setState(() {
         doc = (raw as Map).cast<String, dynamic>();
@@ -122,6 +130,58 @@ class _PluginViewPageState extends State<PluginViewPage> {
     }
   }
 
+  void _applyQuery(Map<String, String> q) {
+    setState(() {
+      for (final e in q.entries) {
+        if (e.value.isEmpty) {
+          _query.remove(e.key);
+        } else {
+          _query[e.key] = e.value;
+        }
+      }
+    });
+    _load();
+  }
+
+  Future<void> _invokeAction(Map<String, dynamic> payload) async {
+    setState(() => _submitting = true);
+    try {
+      final res = await widget.state.api.post(_postPath, payload);
+      if (!mounted) return;
+      var shouldRefresh = true;
+      if (res is Map) {
+        final msg = res['message'];
+        if (msg is String && msg.trim().isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+        }
+        final nextQuery = res['query'];
+        if (nextQuery is Map) {
+          for (final e in nextQuery.entries) {
+            final k = '${e.key}';
+            final v = '${e.value ?? ''}';
+            if (v.isEmpty) {
+              _query.remove(k);
+            } else {
+              _query[k] = v;
+            }
+          }
+        }
+        if (res['refresh'] == false) {
+          shouldRefresh = false;
+        }
+      }
+      if (shouldRefresh) {
+        await _load();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('操作失败：$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
   List<Map<String, dynamic>> get _blocks =>
       ((doc?['blocks'] as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
 
@@ -133,8 +193,10 @@ class _PluginViewPageState extends State<PluginViewPage> {
           title: widget.title ?? '${doc?['title'] ?? ''}'.ifEmpty('插件页'),
           subtitle: widget.subtitle ?? '来自 ${widget.pluginId}',
           action: IconButton(
-            onPressed: _load,
-            icon: const Icon(Icons.refresh_rounded, size: 18),
+            onPressed: _submitting ? null : _load,
+            icon: _submitting
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.refresh_rounded, size: 18),
             tooltip: '刷新',
           ),
         ),
@@ -155,7 +217,15 @@ class _PluginViewPageState extends State<PluginViewPage> {
                         ),
                       ),
                     )
-                  : PluginViewRenderer(blocks: _blocks, onRefresh: _load),
+                  : PluginViewRenderer(
+                      blocks: _blocks,
+                      apiBaseUrl: widget.state.api.baseUrl,
+                      apiToken: widget.state.api.token,
+                      busy: _submitting,
+                      onRefresh: _load,
+                      onQuery: _applyQuery,
+                      onInvoke: _invokeAction,
+                    ),
         ),
       ],
     );
@@ -167,19 +237,34 @@ extension _StringFallback on String {
 }
 
 class PluginViewRenderer extends StatelessWidget {
-  const PluginViewRenderer({super.key, required this.blocks, required this.onRefresh});
+  const PluginViewRenderer({
+    super.key,
+    required this.blocks,
+    this.apiBaseUrl,
+    this.apiToken,
+    this.busy = false,
+    required this.onRefresh,
+    this.onQuery,
+    this.onInvoke,
+  });
 
   final List<Map<String, dynamic>> blocks;
+  final String? apiBaseUrl;
+  final String? apiToken;
+  final bool busy;
   final VoidCallback onRefresh;
+  final void Function(Map<String, String>)? onQuery;
+  final Future<void> Function(Map<String, dynamic>)? onInvoke;
 
   @override
   Widget build(BuildContext context) {
+    final m = MoodPalette.of(context);
     if (blocks.isEmpty) {
-      return Center(child: Text('这个页面没有内容', style: TextStyle(color: MoodPalette.of(context).muted)));
+      return Center(child: Text('这个页面没有内容', style: TextStyle(color: m.muted)));
     }
     final children = <Widget>[];
     for (final block in blocks) {
-      final widget = _buildBlock(context, block);
+      final widget = _buildBlock(context, m, block);
       if (widget == null) continue;
       if (children.isNotEmpty) children.add(const SizedBox(height: 14));
       children.add(widget);
@@ -190,10 +275,15 @@ class PluginViewRenderer extends StatelessWidget {
     );
   }
 
-  Widget? _buildBlock(BuildContext context, Map<String, dynamic> block) {
+  Widget? _buildBlock(BuildContext context, MoodPalette m, Map<String, dynamic> block) {
     final type = '${block['type'] ?? ''}';
-    final m = MoodPalette.of(context);
     switch (type) {
+      case 'tabs':
+        return _tabs(m, block);
+      case 'grid':
+        return _card(m, _grid(context, m, block));
+      case 'form':
+        return _card(m, _form(block));
       case 'section':
         return _section(m, block);
       case 'hero':
@@ -205,9 +295,7 @@ class PluginViewRenderer extends StatelessWidget {
       case 'progress':
         return _card(m, _progress(m, block));
       case 'list':
-        return _card(m, _list(m, block));
-      case 'grid':
-        return _card(m, _grid(context, m, block));
+        return _card(m, _list(context, m, block));
       case 'table':
         return _card(m, _table(m, block));
       case 'timeline':
@@ -223,7 +311,7 @@ class PluginViewRenderer extends StatelessWidget {
       case 'image':
         return _card(m, _image(m, block));
       case 'actions':
-        return _actions(m, block);
+        return _actions(context, m, block);
       case 'empty':
         return _card(m, _empty(m, block));
       default:
@@ -234,7 +322,7 @@ class PluginViewRenderer extends StatelessWidget {
   Color _tone(MoodPalette m, String? tone) => switch (tone) {
         'ok' => IrmiaTheme.ok,
         'warn' => IrmiaTheme.warn,
-        'danger' => IrmiaTheme.danger,
+        'danger' || 'err' => IrmiaTheme.danger,
         'muted' => m.muted,
         'joy' || 'distress' || 'concern' || 'irritation' || 'warmth' || 'shyness' => m.emotionColor(tone!),
         _ => m.primary,
@@ -254,6 +342,22 @@ class PluginViewRenderer extends StatelessWidget {
 
   List<Map<String, dynamic>> _items(Map<String, dynamic> block) =>
       ((block['items'] as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+
+  List<Map<String, dynamic>> _itemsOf(Map<String, dynamic> block, String key) =>
+      ((block[key] as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+
+  List<String> _stringChips(dynamic raw) {
+    if (raw is! List) return const [];
+    final out = <String>[];
+    for (final entry in raw) {
+      if (entry is String && entry.trim().isNotEmpty) {
+        out.add(entry.trim());
+      } else if (entry is Map && entry['label'] != null) {
+        out.add('${entry['label']}');
+      }
+    }
+    return out;
+  }
 
   Widget _card(MoodPalette m, Widget child) => Container(
         padding: const EdgeInsets.all(18),
@@ -289,6 +393,29 @@ class PluginViewRenderer extends StatelessWidget {
           ],
         ),
       );
+
+  Widget _tabs(MoodPalette m, Map<String, dynamic> block) {
+    final items = _items(block);
+    final active = _str(block, 'active');
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final item in items)
+          ChoiceChip(
+            label: Text(_str(item, 'label')),
+            selected: _str(item, 'id') == active,
+            onSelected: busy
+                ? null
+                : (selected) {
+                    if (selected && onQuery != null) {
+                      onQuery!({'tab': _str(item, 'id')});
+                    }
+                  },
+          ),
+      ],
+    );
+  }
 
   Widget _hero(MoodPalette m, Map<String, dynamic> block) {
     final color = _tone(m, _str(block, 'tone'));
@@ -336,9 +463,6 @@ class PluginViewRenderer extends StatelessWidget {
       ],
     );
   }
-
-  List<Map<String, dynamic>> _itemsOf(Map<String, dynamic> block, String key) =>
-      ((block[key] as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
 
   Widget _pill(MoodPalette m, String label, String value, [String tone = '']) {
     final color = tone.isEmpty ? m.ink : _tone(m, tone);
@@ -506,7 +630,7 @@ class PluginViewRenderer extends StatelessWidget {
     );
   }
 
-  Widget _list(MoodPalette m, Map<String, dynamic> block) {
+  Widget _list(BuildContext context, MoodPalette m, Map<String, dynamic> block) {
     final items = _items(block);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -538,6 +662,18 @@ class PluginViewRenderer extends StatelessWidget {
                           padding: const EdgeInsets.only(top: 2),
                           child: Text(_str(item, 'detail'), style: TextStyle(fontSize: 11.5, color: m.mutedSoft)),
                         ),
+                      if (_itemsOf(item, 'actions').isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              for (final action in _itemsOf(item, 'actions'))
+                                _actionButton(context, m, action, compact: true),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -559,32 +695,33 @@ class PluginViewRenderer extends StatelessWidget {
       children: [
         if (_str(block, 'title').isNotEmpty) _title(m, _str(block, 'title')),
         if (items.isEmpty) Text('没有条目', style: TextStyle(fontSize: 12, color: m.mutedSoft)),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final gap = 12.0;
-            final itemWidth = (constraints.maxWidth - gap * (columns - 1)) / columns;
-            return Wrap(
-              spacing: gap,
-              runSpacing: gap,
-              children: [
-                for (final item in items)
-                  SizedBox(width: itemWidth, child: _gridCard(m, item)),
-              ],
-            );
-          },
-        ),
+        if (items.isNotEmpty)
+          LayoutBuilder(
+            builder: (ctx, constraints) {
+              const gap = 12.0;
+              final itemWidth = (constraints.maxWidth - gap * (columns - 1)) / columns;
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final item in items)
+                    SizedBox(width: itemWidth, child: _gridCard(ctx, m, item)),
+                ],
+              );
+            },
+          ),
       ],
     );
   }
 
-  Widget _gridCard(MoodPalette m, Map<String, dynamic> item) {
+  Widget _gridCard(BuildContext context, MoodPalette m, Map<String, dynamic> item) {
     final color = _tone(m, _str(item, 'tone'));
-    final dots = ((item['dots'] as Map?) ?? const {}).cast<String, dynamic>();
-    final filled = dots.isEmpty ? 0 : _num(dots, 'filled').round();
-    final total = dots.isEmpty ? 0 : _num(dots, 'total').round();
-    final tags = ((item['chips'] as List?) ?? const []).whereType<String>().toList();
+    final image = _str(item, 'image');
+    final dots = item['dots'];
+    final chips = _stringChips(item['chips']);
+    final actions = _itemsOf(item, 'actions');
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: m.chipBg,
         borderRadius: BorderRadius.circular(12),
@@ -593,6 +730,20 @@ class PluginViewRenderer extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (image.isNotEmpty)
+            Container(
+              height: 132,
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: m.track,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: _buildImage(m, image, BoxFit.contain),
+              ),
+            ),
           Row(
             children: [
               Expanded(
@@ -618,49 +769,157 @@ class PluginViewRenderer extends StatelessWidget {
                 ),
             ],
           ),
-          if (total > 0) ...[
-            const SizedBox(height: 8),
+          if (dots is Map) ...[
+            const SizedBox(height: 6),
             Row(
               children: [
-                for (var i = 1; i <= total; i += 1)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: i <= filled ? m.primary : m.track,
-                      ),
+                for (var i = 0; i < ((dots['total'] as num?)?.toInt() ?? 5); i += 1)
+                  Container(
+                    width: 6,
+                    height: 6,
+                    margin: const EdgeInsets.only(right: 4),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: i < ((dots['filled'] as num?)?.toInt() ?? 0) ? color : m.track,
                     ),
                   ),
-                if (_str(item, 'subtitle').isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  Text(_str(item, 'subtitle'), style: TextStyle(fontSize: 11, color: m.muted)),
-                ],
               ],
             ),
-          ] else if (_str(item, 'subtitle').isNotEmpty) ...[
+          ],
+          if (_str(item, 'subtitle').isNotEmpty) ...[
             const SizedBox(height: 6),
             Text(_str(item, 'subtitle'), style: TextStyle(fontSize: 11, color: m.muted)),
           ],
-          if (tags.isNotEmpty) ...[
+          if (chips.isNotEmpty) ...[
             const SizedBox(height: 8),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                for (final chip in chips)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: m.card,
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: m.edge),
+                    ),
+                    child: Text(chip, style: TextStyle(fontSize: 10.5, color: m.muted)),
+                  ),
+              ],
+            ),
+          ],
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 12),
             Wrap(
               spacing: 6,
               runSpacing: 6,
               children: [
-                for (final tag in tags)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: m.track, borderRadius: BorderRadius.circular(999)),
-                    child: Text(tag, style: TextStyle(fontSize: 11, color: m.title)),
-                  ),
+                for (final action in actions)
+                  _actionButton(context, m, action, compact: true),
               ],
             ),
           ],
         ],
       ),
+    );
+  }
+
+  Widget _actionButton(BuildContext context, MoodPalette m, Map<String, dynamic> item, {bool compact = false}) {
+    final kind = _str(item, 'kind');
+    final actionName = _str(item, 'action');
+    final tone = _str(item, 'tone');
+    final enabled = !busy &&
+        (kind == 'refresh' ||
+            (kind == 'query' && onQuery != null) ||
+            (actionName.isNotEmpty && onInvoke != null));
+    final fg = (tone == 'ok' || tone == 'err' || tone == 'danger' || tone == 'warn') ? _tone(m, tone) : null;
+    return FilledButton.tonal(
+      style: FilledButton.styleFrom(
+        visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
+        padding: compact ? const EdgeInsets.symmetric(horizontal: 10, vertical: 6) : null,
+        foregroundColor: fg,
+      ),
+      onPressed: enabled ? () => _handleItemTap(context, item) : null,
+      child: Text(_str(item, 'label'), style: compact ? const TextStyle(fontSize: 12) : null),
+    );
+  }
+
+  void _handleItemTap(BuildContext context, Map<String, dynamic> item) {
+    final kind = _str(item, 'kind');
+    if (kind == 'refresh') {
+      onRefresh();
+      return;
+    }
+    if (kind == 'query') {
+      final raw = item['query'];
+      if (raw is Map && onQuery != null) {
+        onQuery!(raw.map((k, v) => MapEntry('$k', '${v ?? ''}')));
+      }
+      return;
+    }
+    _runAction(context, item);
+  }
+
+  Future<void> _runAction(BuildContext context, Map<String, dynamic> item) async {
+    final confirm = _str(item, 'confirm');
+    if (confirm.isNotEmpty) {
+      final yes = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('确认操作'),
+          content: Text(confirm),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确定')),
+          ],
+        ),
+      );
+      if (yes != true || !context.mounted) return;
+    }
+
+    final promptFields = ((item['promptFields'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+    final params = <String, dynamic>{};
+    if (promptFields.isNotEmpty) {
+      final result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (ctx) => _PromptModal(fields: promptFields, title: _str(item, 'label').ifEmpty('编辑参数')),
+      );
+      if (result == null) return;
+      params.addAll(result);
+    }
+
+    if (onInvoke != null) {
+      await onInvoke!({
+        'action': _str(item, 'action'),
+        ...((item['params'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{}),
+        ...params,
+      });
+    }
+  }
+
+  Widget _form(Map<String, dynamic> block) {
+    return _PluginFormBlock(
+      block: block,
+      busy: busy,
+      onSubmit: (values) {
+        if (_str(block, 'kind') == 'query') {
+          if (onQuery != null) {
+            onQuery!(values.map((k, v) => MapEntry(k, '${v ?? ''}')));
+          }
+          return;
+        }
+        if (onInvoke != null) {
+          onInvoke!({
+            'action': _str(block, 'action'),
+            ...((block['params'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{}),
+            ...values,
+          });
+        }
+      },
     );
   }
 
@@ -867,6 +1126,7 @@ class PluginViewRenderer extends StatelessWidget {
   Widget _image(MoodPalette m, Map<String, dynamic> block) {
     final src = _str(block, 'src');
     final aspect = _num(block, 'aspect', 1.6);
+    final fit = _str(block, 'fit') == 'contain' ? BoxFit.contain : BoxFit.cover;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -875,19 +1135,7 @@ class PluginViewRenderer extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           child: AspectRatio(
             aspectRatio: aspect <= 0 ? 1.6 : aspect,
-            child: src.isEmpty
-                ? ColoredBox(
-                    color: m.track,
-                    child: Center(child: Text('没有图片', style: TextStyle(fontSize: 12, color: m.mutedSoft))),
-                  )
-                : Image.network(
-                    src,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stack) => ColoredBox(
-                      color: m.track,
-                      child: Center(child: Text('加载失败', style: TextStyle(fontSize: 12, color: m.mutedSoft))),
-                    ),
-                  ),
+            child: _buildImage(m, src, fit),
           ),
         ),
         if (_str(block, 'caption').isNotEmpty) ...[
@@ -898,17 +1146,60 @@ class PluginViewRenderer extends StatelessWidget {
     );
   }
 
-  Widget _actions(MoodPalette m, Map<String, dynamic> block) {
+  Widget _buildImage(MoodPalette m, String src, BoxFit fit) {
+    Widget fallback(String text) => ColoredBox(
+          color: m.track,
+          child: Center(child: Text(text, style: TextStyle(fontSize: 12, color: m.mutedSoft))),
+        );
+    if (src.isEmpty) {
+      return fallback('没有图片');
+    }
+    if (src.startsWith('data:image/')) {
+      final comma = src.indexOf(',');
+      if (comma > 0) {
+        try {
+          return Image.memory(
+            base64Decode(src.substring(comma + 1)),
+            fit: fit,
+            gaplessPlayback: true,
+            errorBuilder: (c, e, s) => fallback('加载失败'),
+          );
+        } catch (_) {
+          return fallback('加载失败');
+        }
+      }
+      return fallback('加载失败');
+    }
+    final hasToken = apiToken != null && apiToken!.isNotEmpty;
+    if (src.startsWith('/')) {
+      final fullUrl = '${apiBaseUrl ?? ''}$src';
+      final headers = hasToken ? <String, String>{'Authorization': 'Bearer $apiToken'} : null;
+      return Image.network(
+        fullUrl,
+        headers: headers,
+        fit: fit,
+        gaplessPlayback: true,
+        errorBuilder: (c, e, s) => fallback('加载失败'),
+      );
+    }
+    final isSameOrigin = apiBaseUrl != null && apiBaseUrl!.isNotEmpty && src.startsWith(apiBaseUrl!);
+    final headers = (isSameOrigin && hasToken) ? <String, String>{'Authorization': 'Bearer $apiToken'} : null;
+    return Image.network(
+      src,
+      headers: headers,
+      fit: fit,
+      gaplessPlayback: true,
+      errorBuilder: (c, e, s) => fallback('加载失败'),
+    );
+  }
+
+  Widget _actions(BuildContext context, MoodPalette m, Map<String, dynamic> block) {
     final items = _items(block);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
-        for (final item in items)
-          FilledButton.tonal(
-            onPressed: _str(item, 'kind') == 'refresh' ? onRefresh : null,
-            child: Text(_str(item, 'label')),
-          ),
+        for (final item in items) _actionButton(context, m, item),
       ],
     );
   }
@@ -919,6 +1210,244 @@ class PluginViewRenderer extends StatelessWidget {
           child: Text(_str(block, 'text'), style: TextStyle(fontSize: 12, color: m.mutedSoft)),
         ),
       );
+}
+
+List<Widget> _buildFormControls(
+  BuildContext context,
+  List<Map<String, dynamic>> fields,
+  Map<String, dynamic> values,
+  Map<String, TextEditingController> controllers,
+  void Function(void Function()) update,
+) {
+  final m = MoodPalette.of(context);
+  final out = <Widget>[];
+  for (final f in fields) {
+    final key = '${f['key'] ?? ''}';
+    if (key.isEmpty) continue;
+    final type = '${f['type'] ?? 'text'}';
+    final label = '${f['label'] ?? key}';
+    if (type == 'text') {
+      final ctrl = controllers[key];
+      final multiline = f['multiline'] == true;
+      out.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: TextField(
+            controller: ctrl,
+            maxLines: multiline ? 4 : 1,
+            decoration: InputDecoration(
+              labelText: label,
+              hintText: f['placeholder']?.toString(),
+              isDense: true,
+            ),
+            onChanged: (v) => values[key] = v,
+          ),
+        ),
+      );
+    } else if (type == 'select') {
+      final options = ((f['options'] as List?) ?? const []).map((e) => '$e').toList();
+      final current = values[key]?.toString() ?? (options.isNotEmpty ? options.first : '');
+      out.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: TextStyle(fontSize: 12, color: m.muted)),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final opt in options)
+                    ChoiceChip(
+                      label: Text(opt),
+                      selected: current == opt,
+                      onSelected: (sel) {
+                        if (sel) update(() => values[key] = opt);
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (type == 'slider') {
+      final min = (f['min'] is num) ? (f['min'] as num).toDouble() : 0.0;
+      final max = (f['max'] is num) ? (f['max'] as num).toDouble() : 100.0;
+      final divisions = (f['divisions'] is num) ? (f['divisions'] as num).toInt() : null;
+      final rawVal = values[key];
+      final val = ((rawVal is num) ? rawVal.toDouble() : (double.tryParse('$rawVal') ?? min)).clamp(min, max);
+      out.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('$label：${val.round()}', style: TextStyle(fontSize: 12.5, color: m.ink)),
+              Slider(
+                value: val,
+                min: min,
+                max: max,
+                divisions: divisions,
+                onChanged: (v) => update(() => values[key] = v.round()),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (type == 'switch') {
+      final val = values[key] == true || values[key] == 'true';
+      out.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: Text(label, style: TextStyle(fontSize: 12.5, color: m.ink)),
+            value: val,
+            onChanged: (v) => update(() => values[key] = v),
+          ),
+        ),
+      );
+    }
+  }
+  return out;
+}
+
+class _PromptModal extends StatefulWidget {
+  const _PromptModal({required this.fields, required this.title});
+
+  final List<Map<String, dynamic>> fields;
+  final String title;
+
+  @override
+  State<_PromptModal> createState() => _PromptModalState();
+}
+
+class _PromptModalState extends State<_PromptModal> {
+  final Map<String, dynamic> _values = <String, dynamic>{};
+  final Map<String, TextEditingController> _controllers = <String, TextEditingController>{};
+
+  @override
+  void initState() {
+    super.initState();
+    for (final f in widget.fields) {
+      final key = '${f['key'] ?? ''}';
+      if (key.isEmpty) continue;
+      _values[key] = f['value'];
+      if ('${f['type'] ?? 'text'}' == 'text') {
+        _controllers[key] = TextEditingController(text: '${f['value'] ?? ''}');
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: _buildFormControls(context, widget.fields, _values, _controllers, setState),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(context, Map<String, dynamic>.from(_values)), child: const Text('确定')),
+      ],
+    );
+  }
+}
+
+class _PluginFormBlock extends StatefulWidget {
+  const _PluginFormBlock({
+    required this.block,
+    required this.busy,
+    required this.onSubmit,
+  });
+
+  final Map<String, dynamic> block;
+  final bool busy;
+  final void Function(Map<String, dynamic>) onSubmit;
+
+  @override
+  State<_PluginFormBlock> createState() => _PluginFormBlockState();
+}
+
+class _PluginFormBlockState extends State<_PluginFormBlock> {
+  final Map<String, dynamic> _values = <String, dynamic>{};
+  final Map<String, TextEditingController> _controllers = <String, TextEditingController>{};
+
+  List<Map<String, dynamic>> get _fields =>
+      ((widget.block['fields'] as List?) ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+
+  @override
+  void initState() {
+    super.initState();
+    _syncFields();
+  }
+
+  void _syncFields() {
+    for (final f in _fields) {
+      final key = '${f['key'] ?? ''}';
+      if (key.isEmpty) continue;
+      if (!_values.containsKey(key)) {
+        _values[key] = f['value'];
+      }
+      if ('${f['type'] ?? 'text'}' == 'text' && !_controllers.containsKey(key)) {
+        _controllers[key] = TextEditingController(text: '${f['value'] ?? ''}');
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _PluginFormBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncFields();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = MoodPalette.of(context);
+    final title = '${widget.block['title'] ?? ''}';
+    final submitLabel = '${widget.block['submitLabel'] ?? ''}'.ifEmpty('保存');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (title.isNotEmpty) ...[
+          Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: m.title)),
+          const SizedBox(height: 12),
+        ],
+        ..._buildFormControls(context, _fields, _values, _controllers, setState),
+        FilledButton(
+          onPressed: widget.busy ? null : () => widget.onSubmit(Map<String, dynamic>.from(_values)),
+          child: Text(submitLabel),
+        ),
+      ],
+    );
+  }
 }
 
 class PluginViewsPage extends StatefulWidget {
@@ -1000,8 +1529,8 @@ class _PluginViewsPageState extends State<PluginViewsPage> {
                   child: PluginViewPage(
                     state: widget.state,
                     pluginId: entry.pluginId,
-                    viewId: entry.viewId,
                     title: entry.title,
+                    viewId: entry.viewId,
                     subtitle: entry.subtitle,
                   ),
                 ),

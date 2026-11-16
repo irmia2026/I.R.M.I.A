@@ -46,6 +46,8 @@ import type {
 } from '../ds-client.js';
 import { hasPartialOutput, hasUsableOutput } from './responses.ts';
 import type { SseFrame } from './sse.js';
+
+const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 import type {
   ModelTransport,
   ParseStreamContext,
@@ -756,6 +758,7 @@ async function send(ctx: TransportSendContext, req: TransportRequest): Promise<R
         'content-type': 'application/json',
         authorization: `Bearer ${ctx.apiKey}`,
         accept: req.stream ? 'text/event-stream' : 'application/json',
+        'user-agent': BROWSER_USER_AGENT,
       },
       body: JSON.stringify(req.body),
       signal: ctx.signal,

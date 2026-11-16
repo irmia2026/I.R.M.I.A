@@ -1,7 +1,7 @@
 {
   "apiVersion": 2,
   "id": "linre-affect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engine": {
     "irmia": ">=0.1.0-beta.14"
   },
@@ -30,7 +30,7 @@
         "id": "mood",
         "title": "情绪",
         "icon": "mood",
-        "subtitle": "此刻的状态；数据来自 linre-affect 插件"
+        "subtitle": "此刻的九维心绪、轨迹与调平工具；数据来自 linre-affect 插件"
       }
     ]
   },

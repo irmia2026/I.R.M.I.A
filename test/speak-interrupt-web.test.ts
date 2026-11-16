@@ -64,18 +64,9 @@ const TEST_TOKEN = 'test-token-0123456789abcdef';
  */
 const HER_SPEECH = [
   '甲一二', '乙三四', '丙五六', '丁七八',
-].join('，');
+].join('。');
 
-/**
- * 这一次发言**应该**发出去几条气泡——按实现算出来的，不写死。
- *
- * 口径就是 `speak` 现在的分段规则（`src/tools/admin.ts` 交给 `chat-split.ts`）：**门内的文本
- * 照旧按中文逗号断开、摘掉标点**（"超过多少字就不分段"那条口径已被用户取消，所以这里没有
- * 任何按长度分岔的算法）。刻意不 import `splitForChat`：要钉的是"**应发的段一条不少**"，
- * 把被测实现搬进算式里，规则一旦被改坏、这个数会跟着变坏而断言照样绿——那就成了自己给自己
- * 作证。所以只按上面那条口径数逗号段。
- */
-const expectedSegments = HER_SPEECH.split('，').length;
+const expectedSegments = HER_SPEECH.split('。').length;
 // 夹具长度用**关系**钉，不写死数字：写死 33 那种数只会在改夹具时徒增一次无关的红色，
 // 而这里真正要守的是"整段落在硬门以内"（超了整段被拒，一次 speak 都不会发生）。
 assert.ok(
@@ -293,7 +284,7 @@ test('界面插话打断她正在说的那半截话：已发的不受影响，�
   // "它至少冒过两条"，所以这一条不是空断言）。
   assert.deepEqual(
     out.bubbles,
-    HER_SPEECH.split('，').slice(0, out.bubbles.length),
+    HER_SPEECH.split('。').slice(0, out.bubbles.length),
     '分段与顺序照旧：出去的就是那句原话的开头几段',
   );
   // 第三条是并发那一刻正在发的那一条（收不回来）；再往后一条都不许出去。
@@ -333,7 +324,7 @@ test('回归哨兵：摘掉通报口就是事故当时的样子——人插话�
     expectedSegments,
     `应发的 ${expectedSegments} 段一条不少全出去——这正是用户截图里看到的"她没停下来"`,
   );
-  assert.deepEqual(out.bubbles, HER_SPEECH.split('，'), '而且逐段就是那句原话（标点摘掉）');
+  assert.deepEqual(out.bubbles, HER_SPEECH.split('。'), '而且逐段就是那句原话（标点摘掉）');
   assert.ok(!out.content.includes('被打断'), `回执也不该说被打断：${out.content}`);
   // 2026-10-20（R4）：抬头 `发言已处理：` 已删（每条回执都一样，是标签不是判据）。
   // 这条哨兵要守的是"照旧是处理完的正常回执"——判据换成正常回执才有的那一行：

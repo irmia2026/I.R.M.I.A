@@ -51,6 +51,7 @@
  * 纯类型导入写 `.js`。
  */
 
+import type { ModelRetryConfig } from '../config/config.js';
 import type { DsClient, DsRequest, DsStreamCallbacks, DsStreamResult } from '../model/ds-client.js';
 import { isDsClientError, isReasoningEchoRejection } from '../model/ds-client.ts';
 // **400 飞行记录器**（2026-10-22）：把"被拒的那一发"的现场提炼成一条 internal 事件。
@@ -274,6 +275,8 @@ export function repeatCallReminder(count: RepeatCount): string {
  * 抖动误杀；取更大等于把"再烧三次 10 秒"当默认。
  */
 export const FAILURE_STREAK_MAX = 3;
+
+const ZERO_BYTE_RETRY_DEFAULT: ModelRetryConfig = { maxAttempts: 3, initialDelayMs: 800, maxDelayMs: 15000 };
 
 /**
  * **step 边界那次图片预取最多花多久**（2026-10-21 加，毫秒）。
@@ -530,6 +533,7 @@ export interface AgentLoopDeps {
    * 循环层只负责透传给执行器——循环层不读配置，与 `workspaceRoot` 同一条纪律。
    */
   boundaryRoot?: string | null;
+  modelRetry?: ModelRetryConfig;
   /** 纯内部 timer 轮次的 owner 外发策略；缺省保持历史行为。 */
   outboundPolicy?: ExecutionContext['outboundPolicy'];
   /** 外部取消（shutdown）：透传给模型请求与工具执行 */
@@ -1855,11 +1859,17 @@ export class TurnRunner {
         error, step, wakeEvent, pinnedWake, now, model, softHint,
         request, retriesBefore: retriesBeforeStep,
       });
-      if (rescued === null) {
-        return this.failStep(step, error, { firstStep, startedMs: stepStartedMs, retriesBefore: retriesBeforeStep });
+      if (rescued !== null) {
+        result = rescued.result;
+        request = rescued.request;
+      } else {
+        const retried = await this.zeroByteRetry({ error, step, request });
+        if (retried === null) {
+          return this.failStep(step, error, { firstStep, startedMs: stepStartedMs, retriesBefore: retriesBeforeStep });
+        }
+        result = retried.result;
+        request = retried.request;
       }
-      result = rescued.result;
-      request = rescued.request;
     }
 
     // **失败判据的唯一来源**（客户端合同，见 `DsStreamResult.failure` 的注释）：
@@ -2121,6 +2131,39 @@ export class TurnRunner {
     }, { sync: false });
     if (second !== null || result === null) return null;
     return { result, request: full };
+  }
+
+  private async zeroByteRetry(args: {
+    error: unknown;
+    step: number;
+    request: RenderedRequest;
+  }): Promise<{ result: DsStreamResult; request: RenderedRequest } | null> {
+    const known = isDsClientError(args.error) ? args.error : null;
+    if (known === null || !known.retryable || known.kind === 'empty') return null;
+    const policy = this.deps.modelRetry ?? ZERO_BYTE_RETRY_DEFAULT;
+    let waitedMs = policy.initialDelayMs;
+    for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+      await new Promise<void>(resolve => { setTimeout(resolve, waitedMs); });
+      if (this.deps.signal?.aborted === true) return null;
+      try {
+        const result = await this.deps.ds.stream(
+          toDsRequest(args.request, this.lane, this.deps.signal),
+          this.reasoningProgressReporter(args.step),
+        );
+        this.write('model/zero-byte-retry', {
+          turn: this.turn, step: args.step, kind: known.kind, code: known.code,
+          waitedMs, outcome: 'recovered',
+        }, { sync: false });
+        return { result, request: args.request };
+      } catch {
+        waitedMs = Math.min(waitedMs * 2, policy.maxDelayMs);
+      }
+    }
+    this.write('model/zero-byte-retry', {
+      turn: this.turn, step: args.step, kind: known.kind, code: known.code,
+      waitedMs: policy.initialDelayMs, outcome: 'failed',
+    }, { sync: true });
+    return null;
   }
 
   /**

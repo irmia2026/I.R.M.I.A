@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { EventView } from './api.ts';
 import type { EventSubscriptionHandle, AfterCommitEventBus } from './event-bus.ts';
@@ -17,6 +17,7 @@ export interface AdapterWorkerSpec {
   readonly capabilities: readonly string[];
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  readonly config?: Readonly<Record<string, unknown>>;
 }
 
 export interface AdapterWorkerStatus {
@@ -47,6 +48,7 @@ export interface AdapterSupervisorOptions {
    * `data/media/plugin/<pluginId>/`，只回一个**宿主相对路径**（`send_media` 认得的那种）。
    */
   readonly onAssetStore?: (spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>;
+  readonly onAssetResolve?: (spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>;
   readonly spawn?: typeof spawn;
 }
 
@@ -86,14 +88,36 @@ function safeJson(value: unknown): unknown {
   return output;
 }
 
-/** Public event projection: model-visible events only, with transport/secrets removed. */
+function sha256Hex(input: string): string {
+  return createHash('sha256').update(input, 'utf8').digest('hex');
+}
+
+function sanitizeEventData(data: unknown): unknown {
+  if (!isRecord(data) || !Array.isArray(data['attachments'])) return safeJson(data);
+  const sanitizedAttachments = data['attachments']
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .map((entry) => {
+      const type = typeof entry['type'] === 'string' ? entry['type'] : 'unknown';
+      const name = typeof entry['name'] === 'string' && entry['name'] !== '' ? entry['name'] : undefined;
+      const text = typeof entry['text'] === 'string' && entry['text'] !== '' ? entry['text'] : undefined;
+      const rawUrl = typeof entry['url'] === 'string' ? entry['url'].trim() : '';
+      return {
+        type,
+        ...(name === undefined ? {} : { name }),
+        ...(text === undefined ? {} : { text }),
+        ...(rawUrl === '' ? {} : { attachmentId: sha256Hex(rawUrl) }),
+      };
+    });
+  return safeJson({ ...data, attachments: sanitizedAttachments });
+}
+
 export function adapterEventView(event: EventView<unknown>): EventView<unknown> | null {
-  if (event.visibility !== 'model') return null;
+  if (event.visibility !== 'model' && event.type !== 'channel/message') return null;
   return {
     seq: event.seq,
     ts: event.ts,
     type: event.type,
-    data: safeJson(event.data),
+    data: sanitizeEventData(event.data),
     visibility: 'model',
     ...(event.origin === undefined ? {} : { origin: event.origin }),
     ...(event.correlation === undefined ? {} : { correlation: event.correlation }),
@@ -108,6 +132,7 @@ export class AdapterSupervisor {
   private readonly onFailure: ((pluginId: string, error: unknown) => void) | undefined;
   private readonly onModelRequest: ((spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>) | undefined;
   private readonly onAssetStore: ((spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>) | undefined;
+  private readonly onAssetResolve: ((spec: AdapterWorkerSpec, params: unknown) => Promise<unknown>) | undefined;
   private readonly spawnProcess: typeof spawn;
   private readonly onEventAppend?: AdapterSupervisorOptions['onEventAppend'];
 
@@ -123,6 +148,7 @@ export class AdapterSupervisor {
     this.onFailure = options.onFailure;
     this.onModelRequest = options.onModelRequest;
     this.onAssetStore = options.onAssetStore;
+    this.onAssetResolve = options.onAssetResolve;
     this.onEventAppend = options.onEventAppend;
     this.spawnProcess = options.spawn ?? spawn;
   }
@@ -213,6 +239,7 @@ export class AdapterSupervisor {
         protocol: 'linre.adapter.v2',
         adapter: { id: spec.id, version: spec.version },
         capabilities: spec.capabilities,
+        ...(spec.config === undefined ? {} : { config: spec.config }),
       }, this.handshakeTimeoutMs);
       state.status = { id: spec.id, worker: basename(workerPath), state: 'ready' };
       state.subscription = this.eventBus.subscribeWithHandle({
@@ -338,6 +365,25 @@ export class AdapterSupervisor {
       const handler = this.onAssetStore;
       if (handler === undefined) {
         reply({ error: { code: -32001, message: 'media/store 未启用' } });
+        return;
+      }
+      void (async () => {
+        try {
+          reply({ result: await handler(state.spec, message.params) });
+        } catch (error) {
+          reply({ error: { code: -32002, message: errorText(error) } });
+        }
+      })();
+      return;
+    }
+    if (message.method === 'media/resolve') {
+      if (!state.spec.capabilities.includes('asset.resolve')) {
+        reply({ error: { code: -32003, message: 'media/resolve 需要能力 asset.resolve' } });
+        return;
+      }
+      const handler = this.onAssetResolve;
+      if (handler === undefined) {
+        reply({ error: { code: -32001, message: 'media/resolve 未启用' } });
         return;
       }
       void (async () => {

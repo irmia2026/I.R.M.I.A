@@ -161,9 +161,9 @@ describe('① 全量回传：历史里有几条，请求里就有几条（v73 �
     assert.equal(b, a);
   });
 
-  test('RENDER_VERSION 递到 86（v84 三处指路；v85 自述补 @ 语法与"标记串算 1 字"；v86 read_channel 的 ids 名单）', () => {
-    assert.equal(RENDER_VERSION, '86');
-    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '86');
+  test('RENDER_VERSION 递到 87', () => {
+    assert.equal(RENDER_VERSION, '87');
+    assert.equal(render(baseInput(logOfSteps(['x']))).context.renderVersion, '87');
   });
 
   test('缺省口径 = 只按总字符截（300,000）+ 区外照旧全传（用例不另抄一份数）', () => {

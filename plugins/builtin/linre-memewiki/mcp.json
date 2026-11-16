@@ -1,0 +1,11 @@
+[
+  {
+    "name": "memewiki",
+    "command": "node",
+    "args": ["server.mjs"],
+    "desc": "梗百科本地词库查询（6792+ 热梗/黑话/缩写）、随机抽梗与向 cnmeme.wiki 提交词条反馈。",
+    "requestTimeoutMs": 30000,
+    "maxInFlight": 4,
+    "toolsCache": false
+  }
+]

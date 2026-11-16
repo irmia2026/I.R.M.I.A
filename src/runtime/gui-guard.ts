@@ -432,13 +432,18 @@ export const GUI_PROBE_SCRIPT = [
 
 /**
  * 拉起脚本：**已确立的那条形状，一字不改**。
- * `-PassThru` 拿到的 pid 就是界面自己（这条形状没有 cmd 壳）；默认不重定向。
+ * `-PassThru` 拿到的 pid 就是界面自己（这条形状没有 cmd 壳）。
+ * 输出**必须**重定向到文件：本脚本的 stdout 是 `spawnSync` 的管道，powershell 一退出管道
+ * 就关，界面继承了那个句柄，写第一行日志就会崩（0xc000041d / flutter_windows.dll）。
+ * 落点用 `%TEMP%`：`%LOCALAPPDATA%\Irmia` 根目录对后端进程是 EPERM（与 `server.json` 同一个）。
  */
 export const GUI_LAUNCH_SCRIPT = [
   '$exe = $env:IRMIA_GUI_GUARD_EXE',
   '$dir = $env:IRMIA_GUI_GUARD_DIR',
+  "$out = Join-Path $env:TEMP 'irmia-gui-stdout.log'",
+  "$err = Join-Path $env:TEMP 'irmia-gui-stderr.log'",
   'try {',
-  '  $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru -ErrorAction Stop',
+  '  $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru -ErrorAction Stop -RedirectStandardOutput $out -RedirectStandardError $err',
   "  Write-Output ('PID=' + $p.Id)",
   '} catch {',
   "  Write-Output ('ERR=' + $_.Exception.GetType().FullName + ' :: ' + $_.Exception.Message)",

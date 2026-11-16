@@ -2133,7 +2133,7 @@ import { estimateTokens } from '../tools/registry.ts';
 //      在框外印（框里是"别人说的话"，名单是框架给的查询结果），并写明"填进 speak 正文的哪里"。
 //
 //      请求体为什么变：**参数进 `tools` 那段**（缓存前缀）。加一个参数就是加字节 ⇒ 必须递增。
-export const RENDER_VERSION = '86';
+export const RENDER_VERSION = '87';
 
 // ──────────────── MCP 常驻索引那一段：唯一来源是日志里的快照（v46） ────────────────
 
@@ -5421,7 +5421,7 @@ export function enforceReasoningEchoIntegrity(
   /** 被组认领的 reasoning item 下标（其余的就是孤儿） */
   const claimed = new Set<number>();
   for (const group of groups) {
-    const emptyReasoning = group.reasoning.filter(entry => entry.text === '');
+    const emptyReasoning = group.reasoning.filter(entry => entry.text.trim() === '');
     if (emptyReasoning.length > 0) {
       for (const index of group.items) dropItem[index] = true;
       repair.dropped.push({
@@ -5970,11 +5970,12 @@ function renderEvents(
             // enforce 不会去补回它、也不会因为空正文把整组判成 half-state（见 AssistantGroup）
             group.omittedReasoning = (group.omittedReasoning ?? 0) + 1;
           } else {
-            group.reasoning.push({ seq: e.seq, text: echoable.get(e.seq) ?? '' });
+            const echoText = echoable.get(e.seq) ?? '';
+            group.reasoning.push({ seq: e.seq, text: echoText.trim() === '' ? '' : echoText });
           }
         }
         const text = echoes.get(e.seq);
-        if (text !== undefined) push({ type: 'reasoning', content: [{ type: 'reasoning_text', text }] }, group);
+        if (text !== undefined && text.trim() !== '') push({ type: 'reasoning', content: [{ type: 'reasoning_text', text }] }, group);
         break;
       }
       case 'tool/call': {
@@ -6536,8 +6537,7 @@ export function wakeTitle(e: AppEvent, timerPayloads?: Map<string, unknown>): st
  * 但要有产出）。两句各管一件事，而且它**不是常驻前缀**（只出现在此类唤醒的那一条可见历史上），
  * 所以这一版不会动任何一个"没有心跳唤醒"的轮次的字节。
  */
-const HEARTBEAT_IDLE_APPEND = '（没人找你。这段时间是你自己的：想做事就做一件，想跟他说句话也行。'
-  + '做完记得留下点东西——一句话、一条记录都行。）';
+const HEARTBEAT_IDLE_APPEND = '（没人找你，这段时间归你自己：真有好玩的发现或自然想说的话再开口，不做例行报平安。）';
 
 export function renderWake(
   e: AppEvent,
@@ -6570,9 +6570,7 @@ export function renderWake(
     case 'wake/heartbeat': {
       const minutes = Math.floor(e.data.quietSeconds / 60);
       const quiet = minutes < 1 ? `${e.data.quietSeconds} 秒` : `${minutes} 分钟`;
-      // 后半句是 v53 附上的（`HEARTBEAT_IDLE_APPEND`）：这一拍没人找她，所以把"这段时间归你"
-      // 说出来。**只这一类唤醒有**——定时器唤醒与她自己的 `wait` 都不加（见那个常量的注释）。
-      return `[system] 已安静 ${quiet}。（心跳自省：无事发生是常态，看一眼待办与意图，没事就接着睡）`
+      return `[system] 已安静 ${quiet}。（心跳自省：扫一眼待办与 \`插件：\` 此刻状态，可顺手做 1–3 步轻量好奇检查、处理私事或记一笔，也可以安静待着）`
         + HEARTBEAT_IDLE_APPEND;
     }
     case 'wake/manual': {

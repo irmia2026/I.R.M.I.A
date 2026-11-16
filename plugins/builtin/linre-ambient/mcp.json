@@ -1,0 +1,11 @@
+[
+  {
+    "name": "ambient",
+    "command": "node",
+    "args": ["server.mjs"],
+    "desc": "轻量查看本机此刻环境：前台与应用窗口、键鼠空闲时长、近期下载/桌面新文件、磁盘可用空间。",
+    "requestTimeoutMs": 10000,
+    "maxInFlight": 2,
+    "toolsCache": false
+  }
+]

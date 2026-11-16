@@ -1,0 +1,38 @@
+{
+  "apiVersion": 2,
+  "id": "linre-ambient",
+  "version": "0.1.0",
+  "engine": {
+    "irmia": ">=0.1.0-beta.14"
+  },
+  "contributions": {
+    "skills": [
+      "skills"
+    ],
+    "mcp": "mcp.json",
+    "tools": "tools.json",
+    "events": {
+      "namespace": "linre-ambient"
+    },
+    "adapters": [
+      {
+        "worker": "adapter-worker.mjs",
+        "apiVersion": 2,
+        "capabilities": [
+          "event.observe",
+          "prompt.inject",
+          "ui.api"
+        ]
+      }
+    ],
+    "views": [
+      {
+        "id": "ambient",
+        "title": "环境感知",
+        "icon": "spark",
+        "subtitle": "本机窗口、键鼠空闲、近期新文件与磁盘轻量脉搏"
+      }
+    ]
+  },
+  "permissions": []
+}

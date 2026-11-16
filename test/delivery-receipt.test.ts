@@ -29,6 +29,7 @@ import {
   deliveredToSid,
   SENT_CREDENTIAL_NOTE,
   setSleepForTest,
+  SPEAK_TEXT_MAX,
   SPEAK_TEXT_SUGGESTED_MAX,
   type ReplyOutcome,
 } from '../src/tools/admin.ts';
@@ -190,7 +191,7 @@ test('speak 成功（正文 ≤25 字）：`发送成功` + 指回聊天记录�
     channel: 'qq-official', chatType: 'group', person: 'OPENID_A', chatId: 'G1',
     text: '结果出来了吗', messageId: 'm1', msgSeq: 1,
   });
-  const said = '长任务跑完了，共 42 个文件';
+  const said = '长任务跑完了。共 42 个文件';
   assert.ok([...said].length <= SPEAK_TEXT_SUGGESTED_MAX, '夹具前提：正文 ≤25 字');
   const out = await rig.speak({ text: said });
   assert.equal(out.isError, undefined, out.content);
@@ -211,7 +212,7 @@ test('speak 成功（正文 ≤25 字）：`发送成功` + 指回聊天记录�
   assert.ok(lines[1]?.includes('（我）'), `要逐字点出「（我）」：\n${lines[1]}`);
   assert.ok(lines[1]?.includes(SID), `要给会话坐标才对得上：\n${lines[1]}`);
   // ③ 送出的是哪一句：锚点引的是**实际出站的字节**（切分之后的那些段拼起来）
-  assert.equal(rig.posted.length, 2, '这一段被切成两条气泡发出去（逗号处断开）');
+  assert.equal(rig.posted.length, 2, '这一段被切成两条气泡发出去（句号处断开）');
   const outbound = rig.posted.join('');
   assert.equal(outbound, '长任务跑完了共 42 个文件', '出站字节 = 逗号摘掉后的两段拼起来');
 
@@ -226,33 +227,23 @@ test('speak 成功（正文 ≤25 字）：`发送成功` + 指回聊天记录�
     `原话在 read_channel 里读得回来（回执不再回显，但事实有去处）：\n${view.content}`);
 });
 
-test('speak 的 25/26 边界：25 字成功；26 字被硬门拒绝（"超25字还能成功"这一态已不存在）', async (t) => {
+test('speak 的 40/41 边界：40 字成功；41 字被硬门拒绝', async (t) => {
   useNoSleep(t);
-  /**
-   * **2026-11-02 用户把 `speak` 硬门从 40 收到 25**，于是"成功但超过建议线"这个区间消失了：
-   * v74 那条 `成功，但超25字限制（N 字）` 是**不可达的死代码**，已从 `admin.ts` 删掉。
-   *
-   * 这条用例现在钉的就是这条边界的两侧——不是"两态"，是"过 / 不过"：
-   *   · 25 字 ⇒ 成功（回执 = `发送成功` + v84 那行指回聊天记录）；
-   *   · 26 字 ⇒ **一个字都不发**，走硬门的三条出路文案。
-   */
-  const rig25 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const exact = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX);
-  assert.equal([...exact].length, 25);
-  const out25 = await rig25.speak({ text: exact });
-  assert.deepEqual(out25.content.split('\n').filter(line => line !== ''),
-    ['- 发送成功', SPEAK_ECHO_LINE], out25.content);
-  assert.equal(rig25.posted.length > 0, true, '25 字必须真的发出去');
+  const rig40 = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  const exact = '啊'.repeat(SPEAK_TEXT_MAX);
+  assert.equal([...exact].length, 40);
+  const out40 = await rig40.speak({ text: exact });
+  assert.deepEqual(out40.content.split('\n').filter(line => line !== ''),
+    ['- 发送成功', SPEAK_ECHO_LINE], out40.content);
+  assert.equal(rig40.posted.length > 0, true, '40 字必须真的发出去');
 
-  // 26 字 ⇒ 硬门拒绝（正文两个字：中文一个字算 1，不是字节）
-  const rig26 = await makeRig(t, { outcome: { ok: true, status: 200 } });
-  const over = '啊'.repeat(SPEAK_TEXT_SUGGESTED_MAX + 1);
-  const out26 = await rig26.speak({ text: over });
-  assert.equal(out26.isError, true, `26 字必须被硬门拒绝：${out26.content}`);
-  assert.match(out26.content, /超过 speak 的上限（一次至多 25 字）/u, out26.content);
-  assert.equal(out26.content.includes('成功，但超'), false,
-    '这条分支已删（不可达）——回执里不许再出现"成功但超限"');
-  assert.equal(rig26.posted.length, 0, '硬门在进 speak 之前，一段都不发');
+  const rig41 = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  const over = '啊'.repeat(SPEAK_TEXT_MAX + 1);
+  const out41 = await rig41.speak({ text: over });
+  assert.equal(out41.isError, true, `41 字必须被硬门拒绝：${out41.content}`);
+  assert.match(out41.content, /超过 speak 的上限（一次至多 40 字）/u, out41.content);
+  assert.equal(out41.content.includes('成功，但超'), false);
+  assert.equal(rig41.posted.length, 0, '硬门在进 speak 之前，一段都不发');
 });
 
 // ──────────────────────────────── ② speak：失败 ────────────────────────────────
@@ -291,7 +282,7 @@ test('speak 半路失败：`失败，已发出 1/2 条；<原因>`（一条信�
       { ok: false, reason: 'HTTP 400 code=40034105 主动消息失败, 无权限' },
     ],
   });
-  const out = await rig.speak({ text: '长任务跑完了，共 42 个文件' });
+  const out = await rig.speak({ text: '长任务跑完了。共 42 个文件' });
   assert.equal(out.isError, undefined, out.content);
 
   assert.deepEqual(out.content.split('\n').filter(line => line !== ''),
@@ -356,32 +347,25 @@ test('report 成功：回执**固定** `发送成功`——report 没有 25 字�
     `她 report 的那一篇要读得回来：\n${view.content}`);
 });
 
-test('speak 的 25 字线**没有被顺手改坏**：40 字（旧门内、现门外）必须被硬门拒绝，一个字不发', async (t) => {
+test('speak 的 40 字硬门：40 字通过，41 字与 250 字均被拒', async (t) => {
   useNoSleep(t);
-  // 25/26 的边界由上面那条用例钉着；这里补"旧 40 字时代能成功、现在必须被拒"这一侧——
-  // 防止哪天有人把 SPEAK_TEXT_MAX 悄悄改回 40 而没人发现。
-  /**
-   * 2026-11-02 用户把硬门 40 → 25 之后：
-   *   · 40 字 ⇒ **被拒**（旧口径下它是"能成功的最长一句"，那已经过期）；
-   *   · 250 字 ⇒ 同样被拒。
-   * 两条都不许出现"成功"字样、都不许发出任何一段。
-   *
-   * ⚠ 验收里那种"speak 250 字 ⇒ 仍是 `成功，但超25字限制（250 字）`"现在**双重不可能**：
-   * 250 字先被 25 字硬门拒掉，而"成功但超限"这条分支本身也已经删了（不可达死代码）。
-   */
   const rig40 = await makeRig(t, { outcome: { ok: true, status: 200 } });
   const out40 = await rig40.speak({ text: '啊'.repeat(40) });
-  assert.equal(out40.isError, true, `40 字必须被 25 字硬门拒绝：${out40.content}`);
-  assert.match(out40.content, /超过 speak 的上限（一次至多 25 字）/u, out40.content);
-  assert.equal(out40.content.includes('成功'), false, '没发出去就不许有"成功"字样');
-  assert.equal(rig40.posted.length, 0, '硬门在进 speak 之前，一段都不发');
+  assert.equal(out40.isError, undefined, out40.content);
+  assert.equal(rig40.posted.length, 1);
+
+  const rig41 = await makeRig(t, { outcome: { ok: true, status: 200 } });
+  const out41 = await rig41.speak({ text: '啊'.repeat(41) });
+  assert.equal(out41.isError, true);
+  assert.match(out41.content, /超过 speak 的上限（一次至多 40 字）/u, out41.content);
+  assert.equal(rig41.posted.length, 0);
 
   const rig250 = await makeRig(t, { outcome: { ok: true, status: 200 } });
   const out250 = await rig250.speak({ text: '啊'.repeat(250) });
-  assert.equal(out250.isError, true, `250 字必须走硬门（不是成功回执）：${out250.content}`);
-  assert.match(out250.content, /超过 speak 的上限（一次至多 25 字）/u, out250.content);
-  assert.equal(out250.content.includes('成功，但超'), false, '没发出去就不许有"成功"字样');
-  assert.equal(rig250.posted.length, 0, '硬门在进 speak 之前，一段都不发');
+  assert.equal(out250.isError, true);
+  assert.match(out250.content, /超过 speak 的上限（一次至多 40 字）/u, out250.content);
+  assert.equal(out250.content.includes('成功，但超'), false);
+  assert.equal(rig250.posted.length, 0);
 });
 
 test('report 失败：与 speak 同一句 `失败，<原因>`（中文、能判断下一步）', async (t) => {
