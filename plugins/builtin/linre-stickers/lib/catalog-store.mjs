@@ -8,6 +8,7 @@ import { normalizeEmotion } from './picker.mjs';
 
 export const DEFAULT_SETTINGS = Object.freeze({
   autoSteal: true,
+  onlyStickerTagged: true,
   autoApproveOwner: false,
   cooldownSec: 180,
   fallbackAfterSpeaks: 5,
@@ -51,6 +52,7 @@ export function normalizeSettings(raw) {
   const maxPending = Number(src.maxPending);
   return {
     autoSteal: src.autoSteal !== undefined ? Boolean(src.autoSteal) : DEFAULT_SETTINGS.autoSteal,
+    onlyStickerTagged: src.onlyStickerTagged !== undefined ? Boolean(src.onlyStickerTagged) : DEFAULT_SETTINGS.onlyStickerTagged,
     autoApproveOwner: src.autoApproveOwner !== undefined ? Boolean(src.autoApproveOwner) : DEFAULT_SETTINGS.autoApproveOwner,
     cooldownSec: Number.isFinite(cooldownSec) ? Math.max(10, Math.min(3600, Math.round(cooldownSec))) : DEFAULT_SETTINGS.cooldownSec,
     fallbackAfterSpeaks: Number.isFinite(fallbackAfterSpeaks) ? Math.max(1, Math.min(50, Math.round(fallbackAfterSpeaks))) : DEFAULT_SETTINGS.fallbackAfterSpeaks,

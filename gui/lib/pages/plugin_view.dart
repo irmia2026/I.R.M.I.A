@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../app.dart';
@@ -262,16 +263,15 @@ class PluginViewRenderer extends StatelessWidget {
     if (blocks.isEmpty) {
       return Center(child: Text('这个页面没有内容', style: TextStyle(color: m.muted)));
     }
-    final children = <Widget>[];
-    for (final block in blocks) {
-      final widget = _buildBlock(context, m, block);
-      if (widget == null) continue;
-      if (children.isNotEmpty) children.add(const SizedBox(height: 14));
-      children.add(widget);
-    }
-    return ListView(
+    final visibleBlocks = <Map<String, dynamic>>[
+      for (final block in blocks)
+        if ('${block['type'] ?? ''}'.isNotEmpty) block,
+    ];
+    return ListView.separated(
       padding: const EdgeInsets.fromLTRB(18, 6, 18, 28),
-      children: children,
+      itemCount: visibleBlocks.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 14),
+      itemBuilder: (context, index) => _buildBlock(context, m, visibleBlocks[index]) ?? const SizedBox.shrink(),
     );
   }
 
@@ -409,7 +409,7 @@ class PluginViewRenderer extends StatelessWidget {
                 ? null
                 : (selected) {
                     if (selected && onQuery != null) {
-                      onQuery!({'tab': _str(item, 'id')});
+                      onQuery!({'tab': _str(item, 'id'), 'page': ''});
                     }
                   },
           ),
@@ -656,11 +656,11 @@ class PluginViewRenderer extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(_str(item, 'label'), style: TextStyle(fontSize: 12.5, color: m.ink)),
-                      if (_str(item, 'detail').isNotEmpty)
+                      Text(_str(item, 'label').ifEmpty(_str(item, 'title')), style: TextStyle(fontSize: 12.5, color: m.ink)),
+                      if (_str(item, 'detail').ifEmpty(_str(item, 'subtitle')).isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
-                          child: Text(_str(item, 'detail'), style: TextStyle(fontSize: 11.5, color: m.mutedSoft)),
+                          child: Text(_str(item, 'detail').ifEmpty(_str(item, 'subtitle')), style: TextStyle(fontSize: 11.5, color: m.mutedSoft)),
                         ),
                       if (_itemsOf(item, 'actions').isNotEmpty)
                         Padding(
@@ -677,8 +677,8 @@ class PluginViewRenderer extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (_str(item, 'trailing').isNotEmpty)
-                  Text(_str(item, 'trailing'), style: TextStyle(fontSize: 12, color: m.muted)),
+                if (_str(item, 'trailing').ifEmpty(_str(item, 'badge')).isNotEmpty)
+                  Text(_str(item, 'trailing').ifEmpty(_str(item, 'badge')), style: TextStyle(fontSize: 12, color: m.muted)),
               ],
             ),
           ),
@@ -704,8 +704,11 @@ class PluginViewRenderer extends StatelessWidget {
                 spacing: gap,
                 runSpacing: gap,
                 children: [
-                  for (final item in items)
-                    SizedBox(width: itemWidth, child: _gridCard(ctx, m, item)),
+                  for (var idx = 0; idx < items.length; idx += 1)
+                    RepaintBoundary(
+                      key: ValueKey<String>(_str(items[idx], 'id').ifEmpty('${_str(items[idx], 'image')}#$idx')),
+                      child: SizedBox(width: itemWidth, child: _gridCard(ctx, m, items[idx])),
+                    ),
                 ],
               );
             },
@@ -741,7 +744,15 @@ class PluginViewRenderer extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: _buildImage(m, image, BoxFit.contain),
+                child: _buildImage(
+                  m,
+                  image,
+                  BoxFit.contain,
+                  cacheWidth: 320,
+                  pauseGifUntilHover: true,
+                  animatedHint: item['animated'] == true,
+                  previewTitle: _str(item, 'title'),
+                ),
               ),
             ),
           Row(
@@ -1146,50 +1157,24 @@ class PluginViewRenderer extends StatelessWidget {
     );
   }
 
-  Widget _buildImage(MoodPalette m, String src, BoxFit fit) {
-    Widget fallback(String text) => ColoredBox(
-          color: m.track,
-          child: Center(child: Text(text, style: TextStyle(fontSize: 12, color: m.mutedSoft))),
-        );
-    if (src.isEmpty) {
-      return fallback('没有图片');
-    }
-    if (src.startsWith('data:image/')) {
-      final comma = src.indexOf(',');
-      if (comma > 0) {
-        try {
-          return Image.memory(
-            base64Decode(src.substring(comma + 1)),
-            fit: fit,
-            gaplessPlayback: true,
-            errorBuilder: (c, e, s) => fallback('加载失败'),
-          );
-        } catch (_) {
-          return fallback('加载失败');
-        }
-      }
-      return fallback('加载失败');
-    }
-    final hasToken = apiToken != null && apiToken!.isNotEmpty;
-    if (src.startsWith('/')) {
-      final fullUrl = '${apiBaseUrl ?? ''}$src';
-      final headers = hasToken ? <String, String>{'Authorization': 'Bearer $apiToken'} : null;
-      return Image.network(
-        fullUrl,
-        headers: headers,
-        fit: fit,
-        gaplessPlayback: true,
-        errorBuilder: (c, e, s) => fallback('加载失败'),
-      );
-    }
-    final isSameOrigin = apiBaseUrl != null && apiBaseUrl!.isNotEmpty && src.startsWith(apiBaseUrl!);
-    final headers = (isSameOrigin && hasToken) ? <String, String>{'Authorization': 'Bearer $apiToken'} : null;
-    return Image.network(
-      src,
-      headers: headers,
+  Widget _buildImage(
+    MoodPalette m,
+    String src,
+    BoxFit fit, {
+    int? cacheWidth,
+    bool pauseGifUntilHover = false,
+    bool animatedHint = false,
+    String previewTitle = '',
+  }) {
+    return _SmartPluginImage(
+      src: src,
       fit: fit,
-      gaplessPlayback: true,
-      errorBuilder: (c, e, s) => fallback('加载失败'),
+      apiBaseUrl: apiBaseUrl,
+      apiToken: apiToken,
+      cacheWidth: cacheWidth,
+      pauseGifUntilHover: pauseGifUntilHover,
+      animatedHint: animatedHint,
+      previewTitle: previewTitle,
     );
   }
 
@@ -1204,12 +1189,379 @@ class PluginViewRenderer extends StatelessWidget {
     );
   }
 
-  Widget _empty(MoodPalette m, Map<String, dynamic> block) => Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Text(_str(block, 'text'), style: TextStyle(fontSize: 12, color: m.mutedSoft)),
+  Widget _empty(MoodPalette m, Map<String, dynamic> block) {
+    final mainText = _str(block, 'text').ifEmpty(_str(block, 'title'));
+    final subText = _str(block, 'text').isEmpty ? _str(block, 'subtitle') : '';
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(mainText, style: TextStyle(fontSize: 12.5, color: m.muted)),
+            if (subText.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(subText, style: TextStyle(fontSize: 11.5, color: m.mutedSoft)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SmartPluginImage extends StatefulWidget {
+  const _SmartPluginImage({
+    required this.src,
+    required this.fit,
+    this.apiBaseUrl,
+    this.apiToken,
+    this.cacheWidth,
+    this.pauseGifUntilHover = false,
+    this.animatedHint = false,
+    this.previewTitle = '',
+  });
+
+  final String src;
+  final BoxFit fit;
+  final String? apiBaseUrl;
+  final String? apiToken;
+  final int? cacheWidth;
+  final bool pauseGifUntilHover;
+  final bool animatedHint;
+  final String previewTitle;
+
+  @override
+  State<_SmartPluginImage> createState() => _SmartPluginImageState();
+}
+
+class _SmartPluginImageState extends State<_SmartPluginImage> {
+  ImageProvider<Object>? _provider;
+  ImageStream? _stream;
+  ImageStreamListener? _listener;
+  ImageInfo? _firstFrame;
+  bool _failed = false;
+  bool _hovered = false;
+
+  bool get _isGif {
+    if (widget.animatedHint) return true;
+    final lower = widget.src.toLowerCase();
+    if (lower.startsWith('data:image/gif')) return true;
+    final qIdx = lower.indexOf('?');
+    final clean = qIdx >= 0 ? lower.substring(0, qIdx) : lower;
+    return clean.endsWith('.gif');
+  }
+
+  bool get _useStaticFirstFrame => widget.pauseGifUntilHover && _isGif;
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildProvider();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_useStaticFirstFrame && _firstFrame == null && !_failed && _listener == null) {
+      _resolveFirstFrame();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _SmartPluginImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.src != widget.src ||
+        oldWidget.apiBaseUrl != widget.apiBaseUrl ||
+        oldWidget.apiToken != widget.apiToken ||
+        oldWidget.cacheWidth != widget.cacheWidth ||
+        oldWidget.animatedHint != widget.animatedHint ||
+        oldWidget.pauseGifUntilHover != widget.pauseGifUntilHover) {
+      _stopStream();
+      _disposeFirstFrame();
+      _failed = false;
+      _hovered = false;
+      _rebuildProvider();
+      if (_useStaticFirstFrame) {
+        _resolveFirstFrame();
+      }
+    }
+  }
+
+  void _rebuildProvider() {
+    final src = widget.src;
+    if (src.isEmpty) {
+      _provider = null;
+      return;
+    }
+    ImageProvider<Object>? base;
+    if (src.startsWith('data:image/')) {
+      final comma = src.indexOf(',');
+      if (comma > 0) {
+        try {
+          final Uint8List bytes = base64Decode(src.substring(comma + 1));
+          base = MemoryImage(bytes);
+        } catch (_) {
+          _failed = true;
+          _provider = null;
+          return;
+        }
+      } else {
+        _failed = true;
+        _provider = null;
+        return;
+      }
+    } else {
+      final hasToken = widget.apiToken != null && widget.apiToken!.isNotEmpty;
+      if (src.startsWith('/')) {
+        final fullUrl = '${widget.apiBaseUrl ?? ''}$src';
+        final headers = hasToken ? <String, String>{'Authorization': 'Bearer ${widget.apiToken}'} : null;
+        base = NetworkImage(fullUrl, headers: headers);
+      } else {
+        final isSameOrigin = widget.apiBaseUrl != null && widget.apiBaseUrl!.isNotEmpty && src.startsWith(widget.apiBaseUrl!);
+        final headers = (isSameOrigin && hasToken) ? <String, String>{'Authorization': 'Bearer ${widget.apiToken}'} : null;
+        base = NetworkImage(src, headers: headers);
+      }
+    }
+    _provider = widget.cacheWidth != null ? ResizeImage.resizeIfNeeded(widget.cacheWidth, null, base) : base;
+  }
+
+  void _resolveFirstFrame() {
+    _stopStream();
+    final provider = _provider;
+    if (provider == null) return;
+    final stream = provider.resolve(createLocalImageConfiguration(context));
+    _stream = stream;
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (ImageInfo info, bool syncCall) {
+        final cloned = info.clone();
+        if (!mounted) {
+          cloned.dispose();
+          return;
+        }
+        final prev = _firstFrame;
+        _firstFrame = cloned;
+        prev?.dispose();
+        _failed = false;
+        if (syncCall) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_stream == stream && _listener == listener) {
+              stream.removeListener(listener);
+              _listener = null;
+            }
+          });
+        } else {
+          stream.removeListener(listener);
+          if (_listener == listener) _listener = null;
+          setState(() {});
+        }
+      },
+      onError: (Object error, StackTrace? stackTrace) {
+        if (!mounted) return;
+        if (_listener == listener) {
+          stream.removeListener(listener);
+          _listener = null;
+        }
+        if (!_failed) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _failed = true);
+          });
+        }
+      },
+    );
+    _listener = listener;
+    stream.addListener(listener);
+  }
+
+  void _stopStream() {
+    if (_stream != null && _listener != null) {
+      _stream!.removeListener(_listener!);
+    }
+    _listener = null;
+    _stream = null;
+  }
+
+  void _disposeFirstFrame() {
+    _firstFrame?.dispose();
+    _firstFrame = null;
+  }
+
+  @override
+  void dispose() {
+    _stopStream();
+    _disposeFirstFrame();
+    super.dispose();
+  }
+
+  void _openPreview(BuildContext context) {
+    if (widget.src.isEmpty) return;
+    final m = MoodPalette.of(context);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: m.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 560),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.previewTitle.ifEmpty('原图预览'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: m.title),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Flexible(
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 200, maxHeight: 440),
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: m.track,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: _SmartPluginImage(
+                        src: widget.src,
+                        fit: BoxFit.contain,
+                        apiBaseUrl: widget.apiBaseUrl,
+                        apiToken: widget.apiToken,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = MoodPalette.of(context);
+    Widget fallback(String text) => ColoredBox(
+          color: m.track,
+          child: Center(child: Text(text, style: TextStyle(fontSize: 12, color: m.mutedSoft))),
+        );
+    if (widget.src.isEmpty) return fallback('没有图片');
+    final provider = _provider;
+    if (_failed || provider == null) return fallback('加载失败');
+
+    if (!_useStaticFirstFrame) {
+      final img = Image(
+        image: provider,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.low,
+        errorBuilder: (c, e, s) => fallback('加载失败'),
+      );
+      if (!widget.pauseGifUntilHover) return img;
+      return MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => _openPreview(context),
+          child: img,
         ),
       );
+    }
+
+    Widget content;
+    if (_hovered) {
+      content = Image(
+        image: provider,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.low,
+        frameBuilder: (ctx, child, frame, syncLoaded) {
+          if (frame == null && _firstFrame != null) {
+            return SizedBox.expand(
+              child: RawImage(
+                image: _firstFrame!.image,
+                scale: _firstFrame!.scale,
+                fit: widget.fit,
+                filterQuality: FilterQuality.low,
+              ),
+            );
+          }
+          return SizedBox.expand(child: child);
+        },
+        errorBuilder: (c, e, s) => fallback('加载失败'),
+      );
+    } else if (_firstFrame != null) {
+      content = SizedBox.expand(
+        child: RawImage(
+          image: _firstFrame!.image,
+          scale: _firstFrame!.scale,
+          fit: widget.fit,
+          filterQuality: FilterQuality.low,
+        ),
+      );
+    } else {
+      content = ColoredBox(
+        color: m.track,
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2, color: m.mutedSoft),
+          ),
+        ),
+      );
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: () => _openPreview(context),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            content,
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: (_hovered ? m.primary : Colors.black).withValues(alpha: _hovered ? 0.85 : 0.58),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  _hovered ? 'GIF 播放中' : 'GIF',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 List<Widget> _buildFormControls(

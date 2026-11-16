@@ -2418,23 +2418,53 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
         : null;
       if (request === null) throw new Error('model/generate 参数必须是对象');
       const lane = request['lane'] === 'heavy' ? 'heavy' : 'light';
-      const input = typeof request['input'] === 'string' ? request['input'] : '';
-      if (input === '') throw new Error('model/generate 缺少 input');
-      if (input.length > 65_536) throw new Error('model/generate input 超过 64 KiB');
+      const inputStr = typeof request['input'] === 'string' && request['input'] !== ''
+        ? request['input']
+        : (typeof request['prompt'] === 'string' ? request['prompt'] : '');
+      if (inputStr === '') throw new Error('model/generate 缺少 input');
+      if (inputStr.length > 65_536) throw new Error('model/generate input 超过 64 KiB');
+      const rawImages = Array.isArray(request['images']) ? request['images'] : [];
+      const imageParts: Array<{ type: 'input_image'; image_url: string }> = [];
+      for (const entry of rawImages.slice(0, 4)) {
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const imgRec = entry as Record<string, unknown>;
+        const directUrl = typeof imgRec['imageUrl'] === 'string' ? imgRec['imageUrl'].trim() : '';
+        if (directUrl.startsWith('data:image/') && directUrl.length <= 2_500_000) {
+          imageParts.push({ type: 'input_image', image_url: directUrl });
+          continue;
+        }
+        const mime = typeof imgRec['mimeType'] === 'string' && imgRec['mimeType'].startsWith('image/')
+          ? imgRec['mimeType']
+          : 'image/png';
+        const b64 = typeof imgRec['dataBase64'] === 'string' ? imgRec['dataBase64'].trim() : '';
+        if (b64 !== '' && b64.length <= 2_500_000) {
+          imageParts.push({ type: 'input_image', image_url: `data:${mime};base64,${b64}` });
+        }
+      }
+      const dsInput = imageParts.length > 0
+        ? [{ role: 'user' as const, content: [{ type: 'input_text' as const, text: inputStr }, ...imageParts] }]
+        : inputStr;
       const instructions = typeof request['instructions'] === 'string' ? request['instructions'] : undefined;
       if (instructions !== undefined && instructions.length > 8_192) throw new Error('model/generate instructions 超过 8192 字');
       const text = request['text'];
-      const reasoning = request['reasoning'];
+      const reasoning = request['reasoning'] !== undefined && typeof request['reasoning'] === 'object' && request['reasoning'] !== null
+        ? request['reasoning']
+        : (lane === 'light' ? { effort: 'low' } : undefined);
+      const maxTokensRaw = request['maxOutputTokens'] ?? request['maxTokens'];
+      const maxOutputTokens = typeof maxTokensRaw === 'number' && Number.isFinite(maxTokensRaw) && maxTokensRaw > 0
+        ? Math.min(4_096, Math.trunc(maxTokensRaw))
+        : undefined;
       const timeoutRaw = request['timeoutMs'];
       const timeoutMs = typeof timeoutRaw === 'number' && Number.isFinite(timeoutRaw) && timeoutRaw > 0
         ? Math.min(30_000, Math.trunc(timeoutRaw))
         : 10_000;
       const response = await ds.generate({
         lane,
-        input,
+        input: dsInput,
         ...(instructions === undefined ? {} : { instructions }),
         ...(text !== undefined && typeof text === 'object' && text !== null ? { text } : {}),
-        ...(reasoning !== undefined && typeof reasoning === 'object' && reasoning !== null ? { reasoning } : {}),
+        ...(reasoning === undefined ? {} : { reasoning }),
+        ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
         timeoutMs,
       } as Parameters<DsClient['generate']>[0]);
       const responseText = response.outputItems

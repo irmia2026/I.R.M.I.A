@@ -101,10 +101,12 @@ function sanitizeEventData(data: unknown): unknown {
       const name = typeof entry['name'] === 'string' && entry['name'] !== '' ? entry['name'] : undefined;
       const text = typeof entry['text'] === 'string' && entry['text'] !== '' ? entry['text'] : undefined;
       const rawUrl = typeof entry['url'] === 'string' ? entry['url'].trim() : '';
+      const isSticker = entry['isSticker'] === true;
       return {
         type,
         ...(name === undefined ? {} : { name }),
         ...(text === undefined ? {} : { text }),
+        ...(isSticker ? { isSticker: true } : {}),
         ...(rawUrl === '' ? {} : { attachmentId: sha256Hex(rawUrl) }),
       };
     });

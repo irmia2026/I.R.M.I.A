@@ -563,7 +563,7 @@ export interface WakeChannel extends EventEnvelope<'wake/channel', {
   msgSeq: number;
   /** 平台原始附件描述（图片/文件等，文本已剥离） */
   /** `text`：平台对这条附件的**转写**（目前只有语音的 `asr_refer_text`）；只作可读化，不是她"听到的" */
-  attachments?: Array<{ type: string; url?: string; name?: string; text?: string }>;
+  attachments?: Array<{ type: string; url?: string; name?: string; text?: string; isSticker?: boolean }>;
   /**
    * 这条是不是 @/提到 了她（适配器给得出就填，给不出就不填）。
    *
@@ -607,7 +607,7 @@ export interface ChannelMessage extends EventEnvelope<'channel/message', {
   text: string;
   messageId: string;
   msgSeq: number;
-  attachments?: Array<{ type: string; url?: string; name?: string }>;
+  attachments?: Array<{ type: string; url?: string; name?: string; isSticker?: boolean }>;
   /** 这条是不是 @/提到 了她。群里的 @ 与普通发言要能分开（适配器给得出就填） */
   mentionsMe?: boolean;
 }> {}

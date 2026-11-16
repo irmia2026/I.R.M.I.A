@@ -22,8 +22,9 @@ const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 const VLM_MIN_GAP_MS = Number.isFinite(Number(process.env.LINRE_STICKERS_VLM_GAP_MS))
   ? Math.max(0, Number(process.env.LINRE_STICKERS_VLM_GAP_MS))
   : 3000;
-const VLM_TIMEOUT_MS = 6000;
+const VLM_TIMEOUT_MS = 12000;
 const MAX_STEAL_BASE64_BYTES = 1_500_000;
+const PAGE_SIZE = 24;
 
 let dataDir = resolvePluginDataDir();
 let catalog = createEmptyCatalog();
@@ -124,15 +125,18 @@ async function classifyWithVlm(mimeType, dataBase64, hintName = '') {
   if (waitMs > 0) await sleep(waitMs);
   lastVlmCallMs = Date.now();
   try {
+    const prompt = buildVlmPrompt(hintName);
     const res = await callHost(
       'model/generate',
       {
         lane: 'light',
-        prompt: buildVlmPrompt(hintName),
+        input: prompt,
+        prompt,
         images: [{ mimeType, dataBase64 }],
         maxTokens: 300,
+        timeoutMs: VLM_TIMEOUT_MS,
       },
-      VLM_TIMEOUT_MS,
+      VLM_TIMEOUT_MS + 1500,
     );
     const rawText = typeof res === 'string'
       ? res
@@ -140,15 +144,19 @@ async function classifyWithVlm(mimeType, dataBase64, hintName = '') {
     const parsed = parseVlmJson(rawText);
     if (!parsed) {
       stats.vlmFailures += 1;
-      return { ok: false, isSticker: true, emotion: '无语', tags: ['待分类'], caption: hintName || '未识别表情', intensity: 3, confidence: 0.3 };
+      return { ok: false, isSticker: false };
     }
-    if (parsed.isSticker === false) {
+    if (parsed.isSticker !== true) {
       return { ok: true, isSticker: false };
     }
     const tags = Array.isArray(parsed.tags)
-      ? parsed.tags.filter((t) => typeof t === 'string' && t.trim() !== '').map((t) => t.trim().slice(0, 24)).slice(0, 10)
+      ? parsed.tags
+          .filter((t) => typeof t === 'string' && t.trim() !== '' && t.trim() !== '待分类')
+          .map((t) => t.trim().slice(0, 24))
+          .slice(0, 10)
       : [];
     const emotion = normalizeEmotion(parsed.emotion, '开心');
+    const finalTags = tags.length > 0 ? tags : [emotion];
     const caption = typeof parsed.caption === 'string' && parsed.caption.trim() !== ''
       ? parsed.caption.trim().slice(0, 80)
       : (hintName || emotion);
@@ -158,14 +166,14 @@ async function classifyWithVlm(mimeType, dataBase64, hintName = '') {
       ok: true,
       isSticker: true,
       emotion,
-      tags: tags.length > 0 ? tags : [emotion],
+      tags: finalTags,
       caption,
       intensity: Number.isFinite(intensityNum) ? Math.max(1, Math.min(5, Math.round(intensityNum))) : 3,
       confidence: Number.isFinite(confidenceNum) ? Math.max(0, Math.min(1, confidenceNum)) : 0.85,
     };
   } catch {
     stats.vlmFailures += 1;
-    return { ok: false, isSticker: true, emotion: '无语', tags: ['待分类'], caption: hintName || '未识别表情', intensity: 3, confidence: 0.3 };
+    return { ok: false, isSticker: false };
   }
 }
 
@@ -236,8 +244,8 @@ async function processStealJob(job) {
   }
 
   const vlm = await classifyWithVlm(info.mimeType, b64, job.name);
-  if (vlm.isSticker === false) {
-    stats.nonStickerSkipped += 1;
+  if (!vlm.ok || vlm.isSticker !== true || !Array.isArray(vlm.tags) || vlm.tags.length === 0) {
+    if (vlm.ok) stats.nonStickerSkipped += 1;
     return;
   }
 
@@ -384,20 +392,24 @@ function observe(event) {
     const sourcePerson = String(data.senderId ?? data.userId ?? data.authorId ?? data.fromId ?? '');
     const sourceNickname = String(data.senderName ?? data.nickname ?? data.authorName ?? data.senderNickname ?? '');
     const isOwner = Boolean(data.isOwner) || (sourcePerson !== '' && ownerIds.has(sourcePerson));
+    const requireStickerTag = catalog.settings.onlyStickerTagged !== false;
     for (const att of attachments) {
       if (!att || typeof att !== 'object') continue;
       const attType = typeof att.type === 'string' ? att.type.toLowerCase() : '';
       const attachmentId = typeof att.attachmentId === 'string' ? att.attachmentId.trim() : '';
-      if (attachmentId !== '' && (attType === 'image' || attType.startsWith('image/'))) {
-        enqueueStealJob({
+      if (attachmentId === '' || !(attType === 'image' || attType.startsWith('image/'))) continue;
+      if (requireStickerTag && att.isSticker !== true) {
+        stats.nonStickerSkipped += 1;
+        continue;
+      }
+      enqueueStealJob({
           attachmentId,
           name: typeof att.name === 'string' ? att.name : '',
           sourceChatId,
           sourcePerson,
           sourceNickname,
-          isOwner,
-        });
-      }
+        isOwner,
+      });
     }
   }
 }
@@ -468,6 +480,53 @@ function buildView() {
   };
 }
 
+function isGifItem(item) {
+  if (!item || typeof item !== 'object') return false;
+  if (typeof item.mimeType === 'string' && item.mimeType.toLowerCase() === 'image/gif') return true;
+  const src = String(item.mediaUrl || item.path || '').toLowerCase();
+  return src.endsWith('.gif');
+}
+
+function paginateItems(items, rawPage) {
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const parsed = Number.parseInt(String(rawPage ?? '1'), 10);
+  const page = Number.isFinite(parsed) ? Math.max(1, Math.min(totalPages, parsed)) : 1;
+  const start = (page - 1) * PAGE_SIZE;
+  return {
+    page,
+    total,
+    totalPages,
+    slice: items.slice(start, start + PAGE_SIZE),
+  };
+}
+
+function buildPaginationBlock(baseQuery, pageInfo) {
+  if (pageInfo.totalPages <= 1) return null;
+  const items = [];
+  if (pageInfo.page > 1) {
+    items.push({
+      label: '上一页',
+      kind: 'query',
+      query: { ...baseQuery, page: String(pageInfo.page - 1) },
+    });
+  }
+  items.push({
+    label: `第 ${pageInfo.page} / ${pageInfo.totalPages} 页（共 ${pageInfo.total} 张）`,
+    tone: 'muted',
+    kind: 'query',
+    query: { ...baseQuery, page: String(pageInfo.page) },
+  });
+  if (pageInfo.page < pageInfo.totalPages) {
+    items.push({
+      label: '下一页',
+      kind: 'query',
+      query: { ...baseQuery, page: String(pageInfo.page + 1) },
+    });
+  }
+  return { type: 'actions', items };
+}
+
 function buildSchema(query = {}) {
   syncFromDisk();
   const pendingItems = catalog.items.filter((x) => x.status === 'pending');
@@ -502,31 +561,45 @@ function buildSchema(query = {}) {
   ];
 
   if (activeTab === 'pending') {
-    blocks.push({
-      type: 'actions',
-      items: [
-        { label: '全部通过待审', tone: 'ok', kind: 'post', action: 'approve_all_pending' },
-        { label: '清空待审（不拉黑）', tone: 'warn', kind: 'post', action: 'clear_pending', confirm: '确定清空所有待审核表情包（不会加入黑名单）？' },
-        {
-          label: '从本地目录导入',
-          kind: 'post',
-          action: 'import_dir',
-          promptFields: [
-            { key: 'dirPath', label: '本地图片目录路径', type: 'text', value: '' },
-            { key: 'autoApprove', label: '直接入库免审', type: 'switch', value: true },
-          ],
-        },
+    const untaggedCount = pendingItems.filter((x) => !Array.isArray(x.tags) || x.tags.length === 0 || (x.tags.length === 1 && x.tags[0] === '待分类')).length;
+    const actionItems = [
+      { label: '全部通过待审', tone: 'ok', kind: 'post', action: 'approve_all_pending' },
+      { label: '清空待审（不拉黑）', tone: 'warn', kind: 'post', action: 'clear_pending', confirm: '确定清空所有待审核表情包（不会加入黑名单）？' },
+    ];
+    if (untaggedCount > 0) {
+      actionItems.push({
+        label: `清理未分类项 (${untaggedCount})`,
+        tone: 'warn',
+        kind: 'post',
+        action: 'clean_untagged_pending',
+        confirm: `确定移除 ${untaggedCount} 张无有效表情包标签的待审图片？`,
+      });
+    }
+    actionItems.push({
+      label: '从本地目录导入',
+      kind: 'post',
+      action: 'import_dir',
+      promptFields: [
+        { key: 'dirPath', label: '本地图片目录路径', type: 'text', value: '' },
+        { key: 'autoApprove', label: '直接入库免审', type: 'switch', value: true },
       ],
     });
+    blocks.push({ type: 'actions', items: actionItems });
     if (pendingItems.length === 0) {
-      blocks.push({ type: 'empty', title: '暂无待审核表情包', subtitle: '群聊收到的新图片或手工推荐的图片会出现在这里。' });
+      blocks.push({ type: 'empty', text: '暂无待审核表情包（群聊收到的带表情包标签图片会出现在这里）' });
     } else {
+      const pageInfo = paginateItems(pendingItems, query.page);
+      const pager = buildPaginationBlock({ tab: 'pending' }, pageInfo);
+      if (pager) blocks.push(pager);
       blocks.push({
         type: 'grid',
-        title: `待审核队列 (${pendingItems.length})`,
-        items: pendingItems.map((item) => ({
+        title: pageInfo.totalPages > 1
+          ? `待审核队列 (${pendingItems.length} 张 · 第 ${pageInfo.page}/${pageInfo.totalPages} 页 · 悬停播 GIF)`
+          : `待审核队列 (${pendingItems.length} 张 · 悬停播 GIF)`,
+        items: pageInfo.slice.map((item) => ({
           id: item.id,
           image: item.mediaUrl || item.path,
+          animated: isGifItem(item),
           title: item.caption || item.id,
           badge: item.emotion || '无语',
           tone: 'warn',
@@ -541,28 +614,35 @@ function buildSchema(query = {}) {
           ],
         })),
       });
+      if (pager) blocks.push(pager);
     }
   } else if (activeTab === 'approved') {
     const filterButtons = [
-      { label: '全部', tone: emotionFilter === '' ? 'primary' : 'muted', kind: 'query', query: { tab: 'approved', emotion: '' } },
+      { label: '全部', tone: emotionFilter === '' ? 'primary' : 'muted', kind: 'query', query: { tab: 'approved', emotion: '', page: '1' } },
       ...EMOTIONS.map((em) => ({
         label: em,
         tone: emotionFilter === em ? 'primary' : 'muted',
         kind: 'query',
-        query: { tab: 'approved', emotion: em },
+        query: { tab: 'approved', emotion: em, page: '1' },
       })),
     ];
     blocks.push({ type: 'actions', items: filterButtons });
     const filtered = emotionFilter ? approvedItems.filter((x) => x.emotion === emotionFilter) : approvedItems;
     if (filtered.length === 0) {
-      blocks.push({ type: 'empty', title: '暂无已入库表情包', subtitle: emotionFilter ? `当前「${emotionFilter}」分类下没有表情包。` : '请先在待审核区通过图片或导入本地目录。' });
+      blocks.push({ type: 'empty', text: emotionFilter ? `当前「${emotionFilter}」分类下没有表情包。` : '暂无已入库表情包，请先在待审核区通过图片或导入本地目录。' });
     } else {
+      const pageInfo = paginateItems(filtered, query.page);
+      const pager = buildPaginationBlock({ tab: 'approved', emotion: emotionFilter }, pageInfo);
+      if (pager) blocks.push(pager);
       blocks.push({
         type: 'grid',
-        title: `已入库图库 (${filtered.length})`,
-        items: filtered.map((item) => ({
+        title: pageInfo.totalPages > 1
+          ? `已入库图库 (${filtered.length} 张 · 第 ${pageInfo.page}/${pageInfo.totalPages} 页 · 悬停播 GIF)`
+          : `已入库图库 (${filtered.length} 张 · 悬停播 GIF)`,
+        items: pageInfo.slice.map((item) => ({
           id: item.id,
           image: item.mediaUrl || item.path,
+          animated: isGifItem(item),
           title: item.caption || item.id,
           badge: item.emotion || '开心',
           tone: 'ok',
@@ -576,6 +656,7 @@ function buildSchema(query = {}) {
           ],
         })),
       });
+      if (pager) blocks.push(pager);
     }
   } else if (activeTab === 'blocked') {
     blocks.push({
@@ -585,15 +666,15 @@ function buildSchema(query = {}) {
       ],
     });
     if (catalog.blocked.length === 0) {
-      blocks.push({ type: 'empty', title: '黑名单为空', subtitle: '被拒绝或删除拉黑的图片哈希会记录在此，避免再次被自动偷取。' });
+      blocks.push({ type: 'empty', text: '黑名单为空（被拒绝或删除拉黑的图片哈希会记录在此，避免再次被自动偷取）' });
     } else {
       blocks.push({
         type: 'list',
         title: `已拉黑哈希 (${catalog.blocked.length})`,
         items: catalog.blocked.map((entry) => ({
-          title: entry.sha256.slice(0, 16),
-          subtitle: `fp64: ${entry.fp64 || '-'} · ${entry.reason || '已拉黑'} · ${entry.blockedAt || ''}`,
-          badge: '已拉黑',
+          label: entry.sha256.slice(0, 16),
+          detail: `fp64: ${entry.fp64 || '-'} · ${entry.reason || '已拉黑'} · ${entry.blockedAt || ''}`,
+          trailing: '已拉黑',
           tone: 'err',
           actions: [
             { label: '解除拉黑', tone: 'ok', kind: 'post', action: 'unblock', params: { sha256: entry.sha256 } },
@@ -610,7 +691,8 @@ function buildSchema(query = {}) {
       submitLabel: '保存设置',
       fields: [
         { key: 'autoSteal', label: '开启自动偷图', type: 'switch', value: Boolean(catalog.settings.autoSteal) },
-        { key: 'autoApproveOwner', label: '主人发的图免审直接入库', type: 'switch', value: Boolean(catalog.settings.autoApproveOwner) },
+        { key: 'onlyStickerTagged', label: '仅收录有表情包标签的图片（过滤普通截图与照片）', type: 'switch', value: catalog.settings.onlyStickerTagged !== false },
+        { key: 'autoApproveOwner', label: '主人发的表情包免审直接入库', type: 'switch', value: Boolean(catalog.settings.autoApproveOwner) },
         { key: 'cooldownSec', label: '同图冷却时间（秒）', type: 'slider', min: 10, max: 1800, value: Number(catalog.settings.cooldownSec) || 180 },
         { key: 'fallbackAfterSpeaks', label: '连聊纯文字几轮后兜底配图', type: 'slider', min: 1, max: 20, value: Number(catalog.settings.fallbackAfterSpeaks) || 5 },
         { key: 'maxPending', label: '待审核池上限', type: 'slider', min: 20, max: 500, value: Number(catalog.settings.maxPending) || 200 },
@@ -658,6 +740,18 @@ async function invokeUi(params) {
     return { ok: true, refresh: true, message: `已清空 ${removed} 张待审表情` };
   }
 
+  if (action === 'clean_untagged_pending') {
+    const before = catalog.items.length;
+    catalog.items = catalog.items.filter((x) => {
+      if (x.status !== 'pending') return true;
+      const hasValidTag = Array.isArray(x.tags) && x.tags.some((t) => typeof t === 'string' && t.trim() !== '' && t.trim() !== '待分类');
+      return hasValidTag;
+    });
+    const removed = before - catalog.items.length;
+    persistCatalog();
+    return { ok: true, refresh: true, message: `已清理 ${removed} 张无有效标签的待审图片` };
+  }
+
   if (action === 'clear_blocked') {
     const count = catalog.blocked.length;
     catalog.blocked = [];
@@ -677,6 +771,7 @@ async function invokeUi(params) {
   if (action === 'save_settings') {
     catalog.settings = normalizeSettings({
       autoSteal: params.autoSteal ?? catalog.settings.autoSteal,
+      onlyStickerTagged: params.onlyStickerTagged ?? catalog.settings.onlyStickerTagged,
       autoApproveOwner: params.autoApproveOwner ?? catalog.settings.autoApproveOwner,
       cooldownSec: params.cooldownSec ?? catalog.settings.cooldownSec,
       fallbackAfterSpeaks: params.fallbackAfterSpeaks ?? catalog.settings.fallbackAfterSpeaks,
@@ -937,4 +1032,4 @@ input.on('line', (line) => {
 });
 
 input.on('close', () => process.exit(0));
-process.stderr.write(`[${PLUGIN_ID}] worker v0.2.0 started\n`);
+process.stderr.write(`[${PLUGIN_ID}] worker v0.2.2 started\n`);

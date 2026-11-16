@@ -419,27 +419,31 @@ export class QqAccessToken {
 // ──────────────────────────────── 事件解析 ────────────────────────────────
 
 /** 附件：官方字段是 url / filename / content_type，这里做归一化（name 与 filename 都收） */
+function isQqOfficialEmojiUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  return lower.includes('vip.qq.com/club/item/parcel') || lower.includes('gxh.vip.qq.com');
+}
+
 function readAttachments(source: Record<string, unknown>): WakeChannel['data']['attachments'] {
   const raw = source['attachments'];
   if (!Array.isArray(raw)) return undefined;
-  const out: Array<{ type: string; url?: string; name?: string; text?: string }> = [];
+  const out: Array<{ type: string; url?: string; name?: string; text?: string; isSticker?: boolean }> = [];
   for (const item of raw) {
     const record = asRecord(item);
     if (record === null) continue;
     const type = readString(record, 'content_type') || readString(record, 'type') || 'unknown';
-    // 语音优先给 WAV 那条链（2026-10-03，官方文档确证）：url 是 SILK 原始文件（她打不开），
-    // voice_wav_url 是平台转好的 WAV（文档原话："语音消息 SILK 等转换后的 WAV 文件 URL"）。
-    // 拿不到才退回 url——宁可给原始文件，也别什么都不给。
     const wav = readString(record, 'voice_wav_url');
-    const raw = readString(record, 'url');
-    const url = type === 'voice' && wav !== '' ? wav : raw;
+    const rawUrl = readString(record, 'url');
+    const url = type === 'voice' && wav !== '' ? wav : rawUrl;
     const name = readString(record, 'filename') || readString(record, 'name');
     const transcript = readString(record, 'asr_refer_text');
+    const isSticker = (type === 'image' || type.startsWith('image/')) && url !== '' && isQqOfficialEmojiUrl(url);
     out.push({
       type,
       ...(url === '' ? {} : { url }),
       ...(name === '' ? {} : { name }),
       ...(transcript === '' ? {} : { text: transcript }),
+      ...(isSticker ? { isSticker: true } : {}),
     });
   }
   return out.length === 0 ? undefined : out;

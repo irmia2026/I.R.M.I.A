@@ -428,26 +428,59 @@ const ATTACHMENT_SEGMENTS: readonly string[] = ['image', 'file', 'video', 'recor
  * 于是"这是不是一张图"这个判定交给 `isImageAttachment`（两种形态都认），
  * 它只认形态、不认来源，两条通道因此走同一个判据。
  */
+export function isOneBotStickerSegment(segment: OneBotSegment): boolean {
+  const segType = segment.type.toLowerCase();
+  if (segType === 'mface' || segType === 'marketface') return true;
+  if (segType !== 'image') return false;
+  const subTypeRaw = (segment.data['sub_type'] ?? segment.data['subType'] ?? '').trim();
+  if (subTypeRaw === '1') return true;
+  if (subTypeRaw !== '' && Number(subTypeRaw) === 1) return true;
+  const summary = (segment.data['summary'] ?? '').trim();
+  if (summary !== '' && (summary.includes('表情') || /emoji|sticker/iu.test(summary))) return true;
+  if ((segment.data['emoji_id'] ?? '').trim() !== '' || (segment.data['emoji_package_id'] ?? '').trim() !== '') return true;
+  const imgType = (segment.data['image_type'] ?? segment.data['imageType'] ?? '').trim().toLowerCase();
+  if (imgType === 'emoji' || imgType === 'sticker' || imgType === 'face' || imgType === 'meme') return true;
+  const urlLower = (segment.data['url'] ?? segment.data['file'] ?? '').toLowerCase();
+  return urlLower.includes('vip.qq.com/club/item/parcel') || urlLower.includes('gxh.vip.qq.com');
+}
+
+function resolveStoreEmojiUrl(data: Record<string, string>): string {
+  for (const key of ['url', 'cdnurl', 'cdn_url', 'raw_url', 'origin_url', 'original_url', 'thumb', 'thumb_url']) {
+    const val = (data[key] ?? '').trim();
+    if (isFetchableAttachmentUrl(val)) return val;
+  }
+  return '';
+}
+
 function attachmentsOf(segments: readonly OneBotSegment[]): WakeChannel['data']['attachments'] {
-  const out: Array<{ type: string; url?: string; name?: string; text?: string }> = [];
+  const out: Array<{ type: string; url?: string; name?: string; text?: string; isSticker?: boolean }> = [];
   for (const segment of segments) {
+    const segType = segment.type.toLowerCase();
+    if (segType === 'mface' || segType === 'marketface') {
+      const storeUrl = resolveStoreEmojiUrl(segment.data);
+      if (storeUrl === '') continue;
+      const summaryName = (segment.data['summary'] ?? segment.data['key'] ?? '').trim();
+      out.push({
+        type: 'image',
+        url: storeUrl,
+        ...(summaryName === '' ? {} : { name: summaryName }),
+        isSticker: true,
+      });
+      continue;
+    }
     if (!ATTACHMENT_SEGMENTS.includes(segment.type)) continue;
     const rawUrl = segment.data['url'] ?? '';
     const file = segment.data['file'] ?? '';
-    // image 段的 url 常常缺席而 file 只是协议端那边的本地文件名：只把**真取得到东西**的
-    // 地址当 URL 收下（http(s) / file / data），不然模型会拿到一个点不开的假地址。
     const url = rawUrl !== '' ? rawUrl : (isFetchableAttachmentUrl(file) ? file : '');
     const name = segment.data['name'] ?? file;
-    // 语音转写：协议端若在 `record` 段里给了文字（部分实现带 `text` 字段），原样带上——
-    // 平台已经替她把这句听成字了，丢掉等于"她少一种听懂的方式"（官方通道的 `asr_refer_text` 同理）。
-    // **未核实**：SnowLuma / NapCat 是否真的下发这个字段（本机没有任何语音事件样本）；
-    // 有就带上，没有这条线是空的、不会伪造。
     const transcript = segment.data['text'] ?? '';
+    const isSticker = isOneBotStickerSegment(segment);
     out.push({
       type: segment.type,
       ...(url === '' ? {} : { url }),
       ...(name === '' ? {} : { name }),
       ...(transcript === '' ? {} : { text: transcript }),
+      ...(isSticker ? { isSticker: true } : {}),
     });
   }
   return out.length === 0 ? undefined : out;
@@ -1587,7 +1620,7 @@ export class OneBotChannel implements ChannelAdapter {
    * 为什么必须缓存：同一条被连续引用时（"你描述这张"→"再说说"），没缓存就每条都去
    * `get_msg` 一次。**空结果也缓存**（那条本来就没有图），否则每次都要白跑一趟。
    */
-  private readonly quotedMediaCache = new Map<string, string[]>();
+  private readonly quotedMediaCache = new Map<string, Array<{ url: string; isSticker: boolean }>>();
   /** 发出去的消息 id 记多少条（窗口） */
   private static readonly SENT_ID_WINDOW = 512;
 
@@ -1679,27 +1712,30 @@ export class OneBotChannel implements ChannelAdapter {
     const matched = /\[引用 #([^\]\s]+)\]/u.exec(data.text ?? '');
     const id = matched?.[1] ?? '';
     if (id === '') return;
-    let urls = this.quotedMediaCache.get(id);
-    if (urls === undefined) {
-      urls = await this.fetchImageUrlsOf(id);
-      this.quotedMediaCache.set(id, urls);
+    let entries = this.quotedMediaCache.get(id);
+    if (entries === undefined) {
+      entries = await this.fetchQuotedImagesOf(id);
+      this.quotedMediaCache.set(id, entries);
       if (this.quotedMediaCache.size > OneBotChannel.QUOTED_MEDIA_WINDOW) {
         const oldest = this.quotedMediaCache.keys().next().value;
         if (oldest !== undefined) this.quotedMediaCache.delete(oldest);
       }
     }
-    if (urls.length === 0) return;
+    if (entries.length === 0) return;
     const existing = data.attachments ?? [];
     const known = new Set(existing.map((attachment) => attachment.url ?? ''));
-    const extra = urls
-      .filter((url) => !known.has(url))
-      .map((url) => ({ type: 'image', url }));
+    const extra = entries
+      .filter((entry) => !known.has(entry.url))
+      .map((entry) => ({
+        type: 'image',
+        url: entry.url,
+        ...(entry.isSticker ? { isSticker: true } : {}),
+      }));
     if (extra.length === 0) return;
     data.attachments = [...existing, ...extra];
   }
 
-  /** `get_msg` → 那张（或那几张）图的地址；任何一步不成就空数组。 */
-  private async fetchImageUrlsOf(id: string): Promise<string[]> {
+  private async fetchQuotedImagesOf(id: string): Promise<Array<{ url: string; isSticker: boolean }>> {
     const numeric = Number(id);
     const result = await this.client.call('get_msg', {
       message_id: Number.isFinite(numeric) ? numeric : id,
@@ -1708,10 +1744,19 @@ export class OneBotChannel implements ChannelAdapter {
       this.log.info(`[OneBot] 引用的那条取不回来（message_id=${id}）：${result.reason}`);
       return [];
     }
-    return toSegments(result.data?.['message'])
-      .filter((segment) => segment.type === 'image')
-      .map((segment) => segment.data['url'] ?? '')
-      .filter((url) => url !== '');
+    const out: Array<{ url: string; isSticker: boolean }> = [];
+    for (const segment of toSegments(result.data?.['message'])) {
+      const segType = segment.type.toLowerCase();
+      if (segType === 'mface' || segType === 'marketface') {
+        const storeUrl = resolveStoreEmojiUrl(segment.data);
+        if (storeUrl !== '') out.push({ url: storeUrl, isSticker: true });
+        continue;
+      }
+      if (segType !== 'image') continue;
+      const url = segment.data['url'] ?? '';
+      if (url !== '') out.push({ url, isSticker: isOneBotStickerSegment(segment) });
+    }
+    return out;
   }
 
   /**

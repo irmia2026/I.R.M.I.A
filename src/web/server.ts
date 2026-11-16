@@ -4613,10 +4613,24 @@ class WebServerImpl implements WebServer {
       throw new HttpError(413, 'media-too-large', `媒体文件超过 ${Math.floor(MEDIA_MAX_BYTES / 1024 / 1024)}MB`);
     }
     const type = MEDIA_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
+    const etag = `"${size.toString(16)}-${Math.trunc(mtime.getTime()).toString(16)}"`;
+    const isContentAddressed = rel.startsWith('stickers/') || rel.startsWith('plugins/') || rel.startsWith('plugin/');
+    const cacheControl = isContentAddressed ? 'private, max-age=86400, immutable' : 'private, max-age=300';
+    const ifNoneMatch = req.headers['if-none-match'];
+    if (typeof ifNoneMatch === 'string' && ifNoneMatch.trim() === etag) {
+      res.writeHead(304, {
+        'cache-control': cacheControl,
+        etag,
+        'last-modified': mtime.toUTCString(),
+      });
+      res.end();
+      return;
+    }
     res.writeHead(200, {
       'content-type': type,
       'content-length': String(size),
-      'cache-control': 'private, max-age=300',
+      'cache-control': cacheControl,
+      etag,
       'last-modified': mtime.toUTCString(),
       'x-content-type-options': 'nosniff',
     });

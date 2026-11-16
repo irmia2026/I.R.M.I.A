@@ -10,6 +10,7 @@ import { deflateSync } from 'node:zlib';
 
 import { AfterCommitEventBus } from '../src/adapter/event-bus.ts';
 import { AdapterSupervisor } from '../src/adapter/supervisor.ts';
+import { isOneBotStickerSegment, mapEventToWakeChannel } from '../src/channel/onebot.ts';
 import { hamming64, inspectImageBuffer, isDuplicateOrBlocked } from '../plugins/builtin/linre-stickers/lib/image-fp.mjs';
 import { keywordsOf, pickSticker, renderStickerLine } from '../plugins/builtin/linre-stickers/lib/picker.mjs';
 
@@ -335,7 +336,7 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
   const nonStickerPath = join(rootDir, 'nonSticker.png');
   writeFileSync(nonStickerPath, nonSticker);
 
-  const vlmMode = { nextNonSticker: false };
+  const vlmMode = { nextNonSticker: false, nextError: false };
 
   const harness = createWorkerHarness({ IRMIA_DATA_DIR: rootDir }, async (method, params) => {
     if (method === 'media/resolve') {
@@ -364,6 +365,9 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
       return { ok: false };
     }
     if (method === 'model/generate') {
+      if (vlmMode.nextError) {
+        throw new Error('simulated VLM failure');
+      }
       if (vlmMode.nextNonSticker) {
         return {
           text: JSON.stringify({
@@ -411,13 +415,48 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
 
     harness.notify('events/observe', {
       event: {
+        type: 'channel/message',
+        data: {
+          text: '普通群照片',
+          chatId: 'group-100',
+          senderId: 'user-199',
+          senderName: '路人',
+          attachments: [{ type: 'image', name: 'photo.jpg', attachmentId: 'att-plain-photo' }],
+        },
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(
+      harness.hostCalls.some((c) => c.method === 'media/resolve' && c.params?.attachmentId === 'att-plain-photo'),
+      false,
+    );
+
+    vlmMode.nextError = true;
+    harness.notify('events/observe', {
+      event: {
+        type: 'channel/message',
+        data: {
+          text: 'VLM异常时不能兜底收待分类',
+          chatId: 'group-100',
+          senderId: 'user-198',
+          senderName: '路人乙',
+          attachments: [{ type: 'image', name: 'err.png', isSticker: true, attachmentId: 'att-non-sticker' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 140));
+    vlmMode.nextError = false;
+
+    harness.notify('events/observe', {
+      event: {
         type: 'wake/channel',
         data: {
           text: '看看这张图',
           chatId: 'group-100',
           senderId: 'user-200',
           senderName: '群友甲',
-          attachments: [{ type: 'image/png', name: 'cat.png', attachmentId: 'att-sticker-a' }],
+          attachments: [{ type: 'image/png', name: 'cat.png', isSticker: true, attachmentId: 'att-sticker-a' }],
         },
       },
     });
@@ -429,11 +468,11 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
       event: {
         type: 'channel/message',
         data: {
-          text: '代码截图',
+          text: '代码截图伪装成表情',
           chatId: 'group-100',
           senderId: 'user-201',
           senderName: '群友乙',
-          attachments: [{ type: 'image', name: 'code.png', attachmentId: 'att-non-sticker' }],
+          attachments: [{ type: 'image', name: 'code.png', isSticker: true, attachmentId: 'att-non-sticker' }],
         },
       },
     });
@@ -525,7 +564,7 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
         type: 'wake/channel',
         data: {
           text: '再发一次被拉黑的图',
-          attachments: [{ type: 'image/png', name: 'cat.png', attachmentId: 'att-sticker-a' }],
+          attachments: [{ type: 'image/png', name: 'cat.png', isSticker: true, attachmentId: 'att-sticker-a' }],
         },
       },
     });
@@ -607,6 +646,69 @@ test('end-to-end auto-steal, VLM classification, GUI review, blacklist, edit_ite
     assert.equal(clearBlockedRes.ok, true);
     const blockedUi = await harness.request('ui/handle', { path: '/ui/stickers', query: { tab: 'blocked' } });
     assert.equal(blockedUi.blocks.some((b) => b.type === 'empty'), true);
+  } finally {
+    await harness.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('OneBot sticker-tag detection, supervisor forwarding, and 24-per-page GIF UI schema', async () => {
+  assert.equal(isOneBotStickerSegment({ type: 'image', data: { sub_type: '0', summary: '[图片]', url: 'https://a.test/1.jpg' } }), false);
+  assert.equal(isOneBotStickerSegment({ type: 'image', data: { sub_type: '1', summary: '[动画表情]', url: 'https://a.test/2.gif' } }), true);
+  assert.equal(isOneBotStickerSegment({ type: 'image', data: { sub_type: '0', summary: '[商城表情]', url: 'https://a.test/3.png' } }), true);
+  assert.equal(isOneBotStickerSegment({ type: 'mface', data: { url: 'https://gxh.vip.qq.com/a.gif', summary: '[开心]' } }), true);
+
+  const mapped = mapEventToWakeChannel({
+    post_type: 'message',
+    message_type: 'private',
+    self_id: 10001,
+    user_id: 20002,
+    message_id: 888,
+    message: [
+      { type: 'image', data: { url: 'https://a.test/plain.jpg', file: 'plain.jpg', sub_type: 0, summary: '[图片]' } },
+      { type: 'image', data: { url: 'https://a.test/meme.gif', file: 'meme.gif', sub_type: 1, summary: '[动画表情]' } },
+      { type: 'mface', data: { url: 'https://gxh.vip.qq.com/store.gif', summary: '[点赞]' } },
+    ],
+  });
+  assert.equal(mapped?.attachments?.length, 3);
+  assert.equal(mapped?.attachments?.[0]?.isSticker, undefined);
+  assert.equal(mapped?.attachments?.[1]?.isSticker, true);
+  assert.equal(mapped?.attachments?.[2]?.isSticker, true);
+
+  const rootDir = mkdtempSync(join(tmpdir(), 'linre-stickers-page-'));
+  const pluginDataDir = join(rootDir, 'plugin-data', 'linre-stickers');
+  mkdirSync(pluginDataDir, { recursive: true });
+  const seedItems = [];
+  for (let i = 0; i < 30; i += 1) {
+    const p = join(rootDir, `s-${i}.${i % 2 === 0 ? 'gif' : 'png'}`);
+    writeFileSync(p, makePatternPng(64, 64, i % 4));
+    seedItems.push({
+      id: `seed-${i}`,
+      sha256: `${i}`.padStart(64, 'a'),
+      fp64: `${i}`.padStart(16, '1'),
+      path: p,
+      mediaUrl: `/api/media/stickers/s-${i}.${i % 2 === 0 ? 'gif' : 'png'}`,
+      mimeType: i % 2 === 0 ? 'image/gif' : 'image/png',
+      sizeBytes: 1024,
+      status: 'approved',
+      emotion: '开心',
+      tags: ['测试'],
+      caption: `测试图${i}`,
+      intensity: 3,
+    });
+  }
+  writeFileSync(join(pluginDataDir, 'catalog.json'), JSON.stringify({ version: 2, items: seedItems, blocked: [], settings: {} }));
+  const harness = createWorkerHarness({ IRMIA_DATA_DIR: rootDir });
+  try {
+    await harness.request('initialize', { config: { dataDir: pluginDataDir } });
+    const page1 = await harness.request('ui/handle', { path: '/ui/stickers', query: { tab: 'approved', page: '1' } });
+    const grid1 = page1.blocks.find((b) => b.type === 'grid');
+    assert.equal(grid1.items.length, 24);
+    assert.equal(grid1.items[0].animated, true);
+    assert.equal(grid1.items[1].animated, false);
+    const page2 = await harness.request('ui/handle', { path: '/ui/stickers', query: { tab: 'approved', page: '2' } });
+    const grid2 = page2.blocks.find((b) => b.type === 'grid');
+    assert.equal(grid2.items.length, 6);
   } finally {
     await harness.close();
     rmSync(rootDir, { recursive: true, force: true });
