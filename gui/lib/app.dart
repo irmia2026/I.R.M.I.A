@@ -347,6 +347,13 @@ PageEntry? pageEntryById(String id) {
 
 class _IrmiaAppState extends State<IrmiaApp> {
   late final AppState state;
+  late final ThemeData _lightTheme = IrmiaTheme.light();
+  late final ThemeData _darkTheme = IrmiaTheme.dark();
+  late ({ThemeMode mode, String title}) _appearance;
+  late final Widget _home = ListenableBuilder(
+    listenable: state,
+    builder: _buildHome,
+  );
 
   /// 托盘的 toast 落点。
   ///
@@ -389,6 +396,8 @@ class _IrmiaAppState extends State<IrmiaApp> {
       // （假时钟里等一条真 socket 会挂住不返回）。见 `instances.dart` 的 InstanceHost.offline。
       instances: InstanceHost.real(),
     );
+    _appearance = _materialAppearance;
+    state.addListener(_syncMaterialAppearance);
     // **不在这里决定画哪一态**：凭据按实例分文件存，而"我是哪个实例"只有服务端知道。
     // 所以先空手问一次（bootstrap），拿回实例标识与 `code` 之后才知道该弹"设置密码"还是"登录"。
     unawaited(state.bootstrap());
@@ -463,6 +472,15 @@ class _IrmiaAppState extends State<IrmiaApp> {
     stringsOverrideState.addListener(_syncTrayLanguage);
   }
 
+  ({ThemeMode mode, String title}) get _materialAppearance =>
+      (mode: state.themeMode, title: herNameOrFallback(state.herName));
+
+  void _syncMaterialAppearance() {
+    // 状态更新只重建当前页面。仅主题或窗口标题变化才更新 MaterialApp。
+    final next = _materialAppearance;
+    if (next != _appearance) setState(() => _appearance = next);
+  }
+
   /// 状态一变就把她的名字同步给托盘（真正的判断在 [IrmiaTray.setDisplayName] 里）
   void _syncTrayName() => unawaited(IrmiaTray.instance.setDisplayName(state.herDisplayName));
 
@@ -499,6 +517,7 @@ class _IrmiaAppState extends State<IrmiaApp> {
     state.removeListener(_syncTrayName);
     state.removeListener(_syncTrayPending);
     state.removeListener(_syncTrayUpdate);
+    state.removeListener(_syncMaterialAppearance);
     state.dispose();
     super.dispose();
   }
@@ -598,94 +617,82 @@ class _IrmiaAppState extends State<IrmiaApp> {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: state,
-      builder: (context, _) {
-        // 语言一变就重建 `MaterialApp`（**不重启**）：locale、Material 自带文案、
-        // 以及 [IrmiaStrings] 那一层的内容一起换。`ValueListenableBuilder` 在值没变时
-        // 不重建——"选一个已经选中的语言"不会白重建一整棵树。
-        //
-        // 2026-10-21 起这个 listene 换成"语言 **或** 文案覆盖层"（[Listenable.merge]）：
-        // 设置页那颗「重新载入文案」改的是 [stringsOverrideState]，语言一个字都没动，
-        // 但屏幕上的字必须跟着换——只监听语言的话按下去什么都不会发生。
-        return ListenableBuilder(
-          listenable: _stringsSources,
-          builder: (context, __) {
-            final language = effectiveLanguage.value;
-            final strings = resolveStrings(language);
-            return MaterialApp(
-              // 托盘的 toast 落点（见 [_navigatorKey]）：托盘回调没有 context，用它取一条
-              navigatorKey: _navigatorKey,
-              // 窗口标题 = **她的名字**（读不到时回退成产品名，见 her_name.dart 的口径）。
-              // 产品名 `Irmia Agent Framework` 是另一件事：它在自绘标题栏与 C++ runner 里，
-              // 与她叫什么无关，所以这里不跟它走。
-              //
-              // 实测（2026-10-03，release 版跑起来用 GetWindowText 读原生标题）：Windows 上这一行
-              // **到不了原生窗口标题**——标题是 main.dart 的 `WindowOptions(title: …)`（产品名）
-              // 定的，一直显示 `Irmia Agent Framework`。所以改这里不会动到产品名，也不会像按下
-              // 开关那样换掉标题；它是"这个应用对外自称什么"的声明位（别的平台/无障碍会读它），
-              // 放着与她的名字一致是对的，但不能拿它当"窗口标题跟配置走"的证据。
-              title: herNameOrFallback(state.herName),
-              debugShowCheckedModeBanner: false,
-              theme: IrmiaTheme.light(),
-              darkTheme: IrmiaTheme.dark(),
-              themeMode: state.themeMode,
-              // ── i18n 的两条线（分工见 i18n/app_strings.dart 顶部）──
-              //   · locale + 三个 delegate —— 管 **Material 自己那层文案**（文本框的
-              //     剪切/复制/粘贴菜单、滚动条与对话框的无障碍标签、数字日期格式）。
-              //     不装它，中文界面里那排菜单永远是英文（现状，2026-10-17 盘点）。
-              //   · [IrmiaStrings]（在 builder 里）—— 管**我们自己的文案**，
-              //     页面用 `IrmiaStrings.of(context)` 取。
-              locale: strings.locale,
-              localizationsDelegates: const [
-                GlobalMaterialLocalizations.delegate,
-                GlobalWidgetsLocalizations.delegate,
-                GlobalCupertinoLocalizations.delegate,
-              ],
-              supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
-              // 自绘标题栏画在所有页面之上（含那道门）：窗口已经没有系统标题栏，
-              // 这条既是标题也是唯一的拖动区（docs/gui-revision.md ①）。
-              builder: (context, child) => IrmiaStrings(
-                strings: strings,
-                child: Column(
-                  children: [
-                    const IrmiaTitleBar(),
-                    Expanded(child: child ?? const SizedBox.shrink()),
-                  ],
-                ),
+    return ValueListenableBuilder<WinVisibility>(
+      valueListenable: WinTrace.instance.visibilityChanges,
+      builder: (context, visibility, child) => TickerMode(
+        enabled: visibility == WinVisibility.visible,
+        child: child!,
+      ),
+      child: ListenableBuilder(
+        // 语言或文案覆盖变化时一起更新 locale 和 IrmiaStrings，保留页面状态。
+        listenable: _stringsSources,
+        builder: (context, _) {
+          final language = effectiveLanguage.value;
+          final strings = resolveStrings(language);
+          return MaterialApp(
+            // 托盘的 toast 落点（见 [_navigatorKey]）：托盘回调没有 context，用它取一条
+            navigatorKey: _navigatorKey,
+            // 窗口标题 = **她的名字**（读不到时回退成产品名，见 her_name.dart 的口径）。
+            // 产品名 `Irmia Agent Framework` 是另一件事：它在自绘标题栏与 C++ runner 里，
+            // 与她叫什么无关，所以这里不跟它走。
+            //
+            // 实测（2026-10-03，release 版跑起来用 GetWindowText 读原生标题）：Windows 上这一行
+            // **到不了原生窗口标题**——标题是 main.dart 的 `WindowOptions(title: …)`（产品名）
+            // 定的，一直显示 `Irmia Agent Framework`。所以改这里不会动到产品名，也不会像按下
+            // 开关那样换掉标题；它是"这个应用对外自称什么"的声明位（别的平台/无障碍会读它），
+            // 放着与她的名字一致是对的，但不能拿它当"窗口标题跟配置走"的证据。
+            title: _appearance.title,
+            debugShowCheckedModeBanner: false,
+            theme: _lightTheme,
+            darkTheme: _darkTheme,
+            themeMode: _appearance.mode,
+            // ── i18n 的两条线（分工见 i18n/app_strings.dart 顶部）──
+            //   · locale + 三个 delegate —— 管 **Material 自己那层文案**（文本框的
+            //     剪切/复制/粘贴菜单、滚动条与对话框的无障碍标签、数字日期格式）。
+            //     不装它，中文界面里那排菜单永远是英文（现状，2026-10-17 盘点）。
+            //   · [IrmiaStrings]（在 builder 里）—— 管**我们自己的文案**，
+            //     页面用 `IrmiaStrings.of(context)` 取。
+            locale: strings.locale,
+            localizationsDelegates: const [
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
+            // 自绘标题栏画在所有页面之上（含那道门）：窗口已经没有系统标题栏，
+            // 这条既是标题也是唯一的拖动区（docs/gui-revision.md ①）。
+            builder: (context, child) => IrmiaStrings(
+              strings: strings,
+              child: Column(
+                children: [
+                  const IrmiaTitleBar(),
+                  Expanded(child: child ?? const SizedBox.shrink()),
+                ],
               ),
-              // 门与壳的切换只看 `ready`：它由 bootstrap/登录/设密码/401 自愈四处共同维护，
-              // 不在 build 里再算一遍判据（两处判据必然漂移，而漂移的表现就是"白屏"）。
-              home: state.ready
-                  // 四层宿主包住整壳，从外到内：
-                  //   · OnboardingHost —— 首次启动引导（一次性的，判据见 onboarding.dart）；
-                  //   · PasswordPromptHost —— 「该设密码了」的首次提示（只对凭老凭据进门的人弹，
-                  //     见 password_prompt.dart：不弹的话那条老路会一直能用，密码就没人设了）；
-                  //   · MentionPromptHost —— 「她怎么被称呼」的首次提示；
-                  //   · AskCardHost —— 她此刻在问的那张卡（每次都来）；
-                  //   · GrantInboxHost —— 右下角那摞待批卡（每次都来，但它**不抢焦点**）。
-                  // 引导放最外层：它是"第一次用的人"最先该看到的东西，而它读的现状（人格种子、
-                  // 密钥、通道）全都要先有会话凭据——所以它也只能在那道门之后（见 onboarding.dart 顶部）。
-                  // 待批卡放在**最内层**（只包住壳）：它不该压住引导、设密码那些必须走完的流程，
-                  // 也不该压住她问的那张卡（AskCardHost 是模态，优先级更高）。
-                  ? OnboardingHost(
-                      state: state,
-                      child: PasswordPromptHost(
-                        state: state,
-                        child: MentionPromptHost(
-                          state: state,
-                          child: AskCardHost(
-                            state: state,
-                            child: GrantInboxHost(state: state, child: HomeShell(state: state)),
-                          ),
-                        ),
-                      ),
-                    )
-                  : AuthGate(state: state),
-            );
-          },
-        );
-      },
+            ),
+            home: _home,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildHome(BuildContext context, Widget? child) {
+    // 门与壳的切换只看 ready，由 bootstrap、登录、设密码和 401 自愈共同维护。
+    if (!state.ready) return AuthGate(state: state);
+    // 引导和密码提示包在外面，待批卡包在最里面，避免盖住必须处理的流程。
+    return OnboardingHost(
+      state: state,
+      child: PasswordPromptHost(
+        state: state,
+        child: MentionPromptHost(
+          state: state,
+          child: AskCardHost(
+            state: state,
+            child: GrantInboxHost(state: state, child: HomeShell(state: state)),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -3226,7 +3233,7 @@ class AppState extends ChangeNotifier {
         previousReview != needsReview ||
         previousAskTotal != askTotal ||
         // **按值比，不按引用**：`ask.cards` 每次解析都会新建一个 List，用 `identical`
-        // 的话这里恒为 true ⇒ 250ms 快档里每一拍都通知一次，整棵 MaterialApp 跟着重建
+        // 的话这里恒为 true ⇒ 250ms 快档里每一拍都通知一次，主界面跟着重建
         // （每秒 4 次）。`AskCardData` 的 `==` 是逐字段的值相等（见它的实现）。
         !listEquals(previousAsks, askCards);
   }
@@ -3442,7 +3449,7 @@ class AskCardData {
   ///
   /// 为什么要它：`_readDashboard` 判"这一读有没有变化"时比的是「上一份卡」与「这一份卡」。
   /// `ask.cards` 每次从 JSON 解析都会新建一个 List，引用永远不同——用 `identical` 比的话
-  /// 每一拍都算"变了"，250ms 快档里就是每秒 4 次 `notifyListeners`、整棵 `MaterialApp` 重建。
+  /// 每一拍都算"变了"，250ms 快档里就是每秒 4 次 `notifyListeners`、主界面重建。
   /// 值相等之后，同一份数据喂两遍只通知一次（见 `test/brand_status_test.dart`）。
   @override
   bool operator ==(Object other) =>

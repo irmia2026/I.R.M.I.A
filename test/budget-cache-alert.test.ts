@@ -29,6 +29,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import { summarizeEvent } from '../src/cli.ts';
+import { rmSync } from 'node:fs';
+import { EventLog } from '../src/log/event-log.ts';
 import type { AppEvent } from '../src/log/types.js';
 import { estimatePrefixHitOf, type ContextBreakdown, type ContextSectionFact } from '../src/model/context-audit.ts';
 import { REASONING_ECHO_POLICY } from '../src/model/render.ts';
@@ -44,6 +46,7 @@ import {
   missRatioBandOf,
   planCacheAlert,
   planCacheAlerts,
+  planCacheAlertsFromLog,
 } from '../src/runtime/cache-alert.ts';
 import { checkCacheMiss, checkEchoPressure } from '../src/runtime/doctor.ts';
 import {
@@ -53,6 +56,7 @@ import {
   planEchoPressure,
   readEchoPressure,
 } from '../src/runtime/reasoning-echo-pressure.ts';
+import { tempDirSync } from './helpers/temp-dirs.ts';
 
 const LEGACY_ECHO_POLICY = { maxTotalChars: 300_000, outOfRegion: 'keep' } as const;
 const readLegacyEchoPressure = (events: readonly AppEvent[]) => readEchoPressure(events, LEGACY_ECHO_POLICY);
@@ -113,6 +117,66 @@ function consumed(args: {
         : { context: contextOf({ renderVersion: args.renderVersion, headHash: args.headHash }) })),
   }, 'internal', args.ts);
 }
+
+test('缓存告警增量读数与完整历史相同，含时钟回拨与迟到的旧轮调用', async (t) => {
+  const directory = tempDirSync('irmia-cache-alert-journal-');
+  const log = await EventLog.open(directory, { shardMaxBytes: 2048, indexStride: 4 });
+  t.after(() => {
+    log.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const events: AppEvent[] = [];
+  const append = (value: AppEvent): void => {
+    const row = { ...value, seq: log.nextSeq() };
+    log.append(row, { sync: false });
+    events.push(row);
+  };
+  const expected = (nowMs: number, respectDedupe = true) => planCacheAlerts({ events, nowMs, respectDedupe });
+  const verify = async (nowMs: number, respectDedupe = true): Promise<void> => {
+    assert.deepEqual(await planCacheAlertsFromLog(log, nowMs, respectDedupe), expected(nowMs, respectDedupe));
+  };
+  for (let turn = 1; turn <= 28; turn += 1) {
+    append(consumed({
+      turn,
+      ts: at(OUT_OF_BASELINE + turn),
+      model: 'alpha',
+      hit: 95,
+      miss: 5,
+      context: contextOf({}),
+    }));
+  }
+  for (let turn = 29; turn <= 56; turn += 1) {
+    append(consumed({
+      turn,
+      ts: at(80 - turn),
+      model: 'alpha',
+      hit: 0,
+      miss: 100,
+      context: contextOf({ headHash: `turn-${turn}` }),
+    }));
+  }
+  append(event('model/reasoning-echo', {
+    kind: 'reasoning_echo_prune',
+    dropped: [{ why: 'maxTotalChars' }],
+  }, 'internal', NOW));
+  append(consumed({ turn: 0, ts: NOW, lane: 'light', model: 'beta', hit: 85, miss: 15 }));
+  await verify(NOW_MS);
+  await verify(NOW_MS - 2 * 3_600_000);
+  await verify(NOW_MS);
+
+  // 回到老 turn 并用新时戳重新进入基线，旧调用的累计仍须算入。
+  append(consumed({ turn: 2, ts: NOW, model: 'alpha', hit: 70, miss: 30, context: contextOf({}) }));
+  await verify(NOW_MS);
+
+  // 相邻读者之间写入新模型样本和告警，前一个调用的水位仍由它自己的请求决定。
+  const earlierExpected = expected(NOW_MS, false);
+  const earlier = planCacheAlertsFromLog(log, NOW_MS, false);
+  append(consumed({ turn: 57, ts: NOW, model: 'beta', hit: 0, miss: 100, context: contextOf({}) }));
+  append(event('budget/cache-alert', { lane: 'heavy', renderVersion: 'unknown', missRatioBand: 10 }, 'internal', NOW));
+  const later = planCacheAlertsFromLog(log, NOW_MS, true);
+  assert.deepEqual(await earlier, earlierExpected);
+  assert.deepEqual(await later, expected(NOW_MS));
+});
 
 /**
  * 一份完整的 `context` 段事实（`budget/consumed.context` 的形状）。

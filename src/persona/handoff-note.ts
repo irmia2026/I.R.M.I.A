@@ -300,6 +300,12 @@ const WAKE_TYPES = new Set<string>([
   'wake/heartbeat', 'wake/intention', 'wake/job',
 ]);
 
+/** 交接笔记同时读取旧计时器载荷与工具调用，以还原正文和配对。 */
+export const HANDOFF_EVENT_TYPES = [
+  ...WAKE_TYPES, 'wake/channel', 'message/user', 'message/assistant',
+  'timer/set', 'timer/cancelled', 'tool/call', 'tool/result',
+] as const;
+
 /**
  * 收录事件 → 条目（保持输入的时间正序）。
  *

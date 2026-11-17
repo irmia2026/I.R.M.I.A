@@ -410,7 +410,8 @@ async function restoreProjection(ctx: Ctx, eventLog: EventLog): Promise<Projecti
  */
 async function settleChildTurns(ctx: Ctx, state: State): Promise<void> {
   const open = new Map<string, { callId: string; turn: number }>();
-  for await (const event of state.log.readAll()) {
+  const types = new Set(['turn/start', 'turn/end']);
+  for await (const event of state.log.readRange(1, { types })) {
     const callId = event.parentCallId;
     if (callId === undefined) continue;
     if (event.type === 'turn/start') {
@@ -551,7 +552,7 @@ function settleOpenTools(ctx: Ctx, state: State, turnHint: number): void {
  */
 async function claimedCountsOf(eventLog: EventLog, turn: number): Promise<Map<number, number>> {
   const counts = new Map<number, number>();
-  for await (const event of eventLog.readRange(1)) {
+  for await (const event of eventLog.readRange(1, { types: new Set(['input/claimed']) })) {
     if (event.type !== 'input/claimed' || event.data.turn !== turn) continue;
     event.data.wakeSeqs.forEach((wakeSeq, i) => {
       counts.set(wakeSeq, event.data.claimCounts[i] ?? 0);

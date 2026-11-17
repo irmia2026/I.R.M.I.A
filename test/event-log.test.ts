@@ -14,6 +14,7 @@ import { performance } from 'node:perf_hooks';
 import test, { type TestContext } from 'node:test';
 import { EventLog, writeShardLine, type EventLogOpenOptions } from '../src/log/event-log.ts';
 import type { AppEvent } from '../src/log/types.ts';
+import { allEventsOf, snapshotSizeOf } from '../src/state/event-snapshot.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
 const FIRST_SHARD = '000000000001.jsonl';
@@ -120,6 +121,66 @@ test('nextSeq 重启后从日志最大 seq + 1 接续', async (t) => {
   assert.equal(second.nextSeq(), 3);
   assert.equal(second.nextSeq(), 4);
   second.close();
+});
+
+test('按类型和序号范围读取支持分片、空洞、缓冲和重开', async (t) => {
+  const fx = setup(t);
+  const options = { shardMaxBytes: 560, indexStride: 2 };
+  const log = await fx.open(options);
+  for (const seq of [1, 2, 4, 5, 7, 8, 9]) {
+    const event = makeEvent(seq);
+    if (seq % 2 === 0) {
+      log.append({ ...event, type: 'wake/manual', data: { note: '测试' } } as AppEvent, { sync: false });
+    } else {
+      log.append(event, { sync: false });
+    }
+  }
+  const range = { throughSeq: 8, typePrefixes: ['wake/'] };
+  const expected = [4, 8];
+  assert.deepEqual((await collect(log.readRange(3, range))).map((event) => event.seq), expected);
+  assert.ok(log.shardFiles.length > 1);
+  const bytes = log.shardFiles.reduce((sum, name) => sum + statSync(fx.pathOf(name)).size, 0);
+  assert.equal(log.sizeBytes(), bytes);
+  log.close();
+
+  const reopened = await fx.open(options);
+  assert.equal(reopened.sizeBytes(), bytes);
+  assert.deepEqual((await collect(reopened.readRange(3, range))).map((event) => event.seq), expected);
+  assert.deepEqual(await collect(reopened.readRange(1, { types: new Set(['message/assistant']) })), []);
+});
+
+test('全量读取超过快照内存预算后仍返回历史，且释放缓存', async (t) => {
+  const fx = setup(t);
+  const log = await fx.open();
+  log.append(makeEvent(1), { sync: false });
+  assert.equal((await allEventsOf(log)).length, 1);
+  assert.equal(snapshotSizeOf(log), 1);
+
+  const large = { ...makeEvent(2), data: { text: '汉'.repeat(3_000_000), source: 'human' } } as AppEvent;
+  log.append(large, { sync: false });
+  assert.ok(log.sizeBytes() > 8 * 1024 * 1024);
+  assert.deepEqual((await allEventsOf(log)).map((event) => event.seq), [1, 2]);
+  assert.equal(snapshotSizeOf(log), 0);
+});
+
+test('快照增量读取中断后重试，已读取的前缀只提交一次', async (t) => {
+  const fx = setup(t);
+  const log = await fx.open();
+  log.append(makeEvent(1), { sync: false });
+  await allEventsOf(log);
+  log.append(makeEvent(2), { sync: false });
+  log.append(makeEvent(3), { sync: false });
+  const readRange = log.readRange.bind(log);
+  log.readRange = async function* (fromSeq, options) {
+    for await (const event of readRange(fromSeq, options)) {
+      yield event;
+      throw new Error('simulated read failure');
+    }
+  };
+  await assert.rejects(allEventsOf(log), /simulated read failure/);
+  assert.equal(snapshotSizeOf(log), 1);
+  log.readRange = readRange;
+  assert.deepEqual((await allEventsOf(log)).map((event) => event.seq), [1, 2, 3]);
 });
 
 test('写 10000 条：逐条读回内容一致、seq 无重复且严格递增', async (t) => {

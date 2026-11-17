@@ -2,7 +2,6 @@ import { prepareAffectStep } from '../affect/adapter.ts';
 import { chooseCandidates,shouldAppraise } from '../affect/triage.ts';
 import { evaluateCandidate } from '../affect/evaluator.ts';
 import { hasAppraised } from '../affect/engine.ts';
-import { allEventsOf } from '../state/event-snapshot.ts';
 import type { StickerRuntime } from '../stickers/runtime.ts';
 import { replyUrlForWake } from '../tools/admin.ts';
 /**
@@ -51,7 +50,7 @@ import type { AppEvent, BudgetLayer, CompactionWarningTier, PendingInput, Projec
 import type { RuntimeRestart, RuntimeRestartPrevious } from '../log/types.js';
 import { isImageAttachment, isTopLevelEvent, defaultVisibility } from '../log/types.ts';
 // 申请单那一套（她发起 → 待批 → 用户点 → 框架执行）：唯一实现在 `grant/mcp-grant.ts`
-import { settleGrants } from '../grant/mcp-grant.ts';
+import { GrantIntakeHistory, settleGrants } from '../grant/mcp-grant.ts';
 import {
   contextImageAdmission,
   contextImageSkipText,
@@ -75,9 +74,7 @@ import {
   type AppConfig,
 } from '../config/config.ts';
 import type { PersonaAssets } from '../persona/loader.js';
-// 增量事件快照（`allEventsOf` 的门面）：step 边界的拾取**必须**先拿当前视图再判幂等
-// （见 `settleGrantsAtStep` 的注释；这一份与 `mcpIndexSync` 用的是同一个按日志实例的缓存）
-import { readAllEvents } from '../state/event-snapshot.ts';
+import { readEventTypes } from '../state/event-snapshot.ts';
 import { applyOne, finalizePressure, wakeSourceOf } from '../state/fold.ts';
 import { saveProjectionCache } from '../state/projection-cache.ts';
 import { writeSnapshot } from '../state/snapshot.ts';
@@ -85,9 +82,9 @@ import { runTurn, isHeartbeatTurn, compactionCoveredUpToSeq, handoffOptionsOf, m
 // 回投能力的唯一判据在 tools/admin（speak 第三路用它）：这里读同一个函数，
 // 免得「提示词告诉她能发」与「实际能不能发」变成两套口径。
 import {
-  channelRenderOf, collectSessions as collectSessionsFromLog, normalizeSid, parseAliases, parseMemberAliases,
-  resolveNameForSid, resolvePersonNameFromTables, sidOf,
-  upsertSession as upsertSessionInto, type SessionAlias as KnownSessionAlias, type SessionEntry as KnownSession,
+  applySessionEvent, channelRenderOf, normalizeSid, parseAliases, parseMemberAliases,
+  resolveNameForSid, resolvePersonNameFromTables, SESSION_EVENT_TYPES, sidOf, sortSessions,
+  type SessionAlias as KnownSessionAlias, type SessionEntry as KnownSession,
 } from '../channel/sessions.ts';
 import type { ChannelMessageView, ChannelSpoken, ContextImageFact } from '../tools/admin.js';
 import {
@@ -116,7 +113,7 @@ import {
   cacheAlertConsoleLine,
   cacheAlertPayloadOf,
   cacheAlertWakeNote,
-  planCacheAlerts,
+  planCacheAlertsFromLog,
   type CacheAlertReading,
 } from './cache-alert.ts';
 import {
@@ -125,7 +122,7 @@ import {
   planEchoPressure,
   readEchoPressure,
 } from './reasoning-echo-pressure.ts';
-import { RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, skillIndexOf, wakeTitle } from '../model/render.ts';
+import { REASONING_ECHO_POLICY, RENDER_VERSION, lastCompactionReading, lastMaintenanceWindowAt, localHourOf, maintenanceWindowOf, mcpIndexOf, skillIndexOf, wakeTitle } from '../model/render.ts';
 // 只借一个**类型**（`import type` 在运行时被擦掉）：循环要知道"热更刚刚发生了什么"，
 // 而那份账的形状归 watcher（它是唯一生产者）。这不引入运行时依赖，也不让循环认识 watcher。
 import type { ConfigReloadOutcome } from '../config/watcher.js';
@@ -318,6 +315,22 @@ function contextEventFilter(event: AppEvent): boolean {
   if (!isTopLevelEvent(event)) return false;
   return !isFrameworkCommandEvent(event);
 }
+
+const LOOP_FACT_TYPES = new Set([
+  'mcp/index', 'skill/index', 'compaction/summary', 'compaction/decision', 'turn/start',
+  'grant/requested', 'grant/resolved',
+]);
+const CHANNEL_FACT_TYPES = new Set([
+  'wake/channel', 'channel/message', 'channel/read', 'channel/topic', 'speak/sent',
+  'injection/flagged', 'injection/noted',
+]);
+const STARTUP_RESTORE_TYPES = new Set([
+  'alarm/sent', 'budget/topped-up', 'budget/exhausted',
+  'budget/resumed', 'input/claimed', 'input/requeued', 'human/asked', 'human/answered',
+  'turn/start', 'turn/end', 'skill/installed', 'session/start', 'session/end', 'runtime/restart',
+]);
+const STARTUP_FACT_TYPES = new Set([...CHANNEL_FACT_TYPES, ...SESSION_EVENT_TYPES, ...STARTUP_RESTORE_TYPES]);
+type GroupMemberBackfill = Parameters<GroupMemberBook['backfill']>[0][number];
 
 /**
  * 压缩之后那条唤醒的**正文**（逐字进 `wake/manual.note`，2026-10-09）。
@@ -1964,18 +1977,15 @@ export class RealLoop {
    */
   private skillTrustSeq = 0;
 
-  /**
-   * **本拍读过的事件快照**（`mcpIndexSync` 每拍全量读一次日志，顺手留在这里）。
-   *
-   * 谁用它：`settleGrants`（判"这张申请单拾取过没有"）。它**不能 await**——拾取必须在
-   * 同一拍的同步段里跑完（那两条事件里有一条是给人的卡）；而 `EventLog` 没有同步的
-   * "读全量"（只有逐条 `get(seq)`，组不出"哪些 id 出现过"这份账）。
-   * ⇒ 复用同一拍已经付过的那一次读，而不是为它再读一遍盘。
-   *
-   * 纪律：**只读**。它是快照，写入点仍然是日志（`appendSync`）——就地改它等于让
-   * "本拍的事件"与"盘上的事件"漂开，而后面按它判重的那几处会一起被骗。
-   */
-  private eventView: readonly AppEvent[] = [];
+  private loopFactsSeq = 0;
+  private readonly latestIndexEvents = new Map<string, AppEvent>();
+  private readonly turnStarts = new Map<number, number>();
+  private readonly grantHistory = new GrantIntakeHistory();
+  private coveredSeq = 0;
+  private compactionReading = lastCompactionReading([]);
+  private maintenanceAt: number | null = null;
+  private warningState = compactionWarningStateOf([]);
+  private organizeTrace = selfOrganizeTraceOf([]);
 
   /**
    * **本轮的维护窗口信号**（2026-10-11）：轮首算一次，deps 那一格整轮原样转手。
@@ -2055,17 +2065,10 @@ export class RealLoop {
    * 它的内容不在她眼前，重投它只会造出"一条已经被折掉的通报又插回请求中间"
    * （2026-10-10 现场：`miss=37884`，判据写在 `settleHumanSuspension` 的注释里）。
    *
-   * 素材是 `mcpIndexSync` 每拍已经读过的那一份 `eventView`（本拍看到的事件快照），
-   * 所以这里**不再读一遍盘**——而且这个判据**只在这一处被问**。
+   * 取本拍已同步的最大覆盖序号。
    */
   private coveredPointOf(): number {
-    let covered = 0;
-    for (const event of this.eventView) {
-      if (event.type === 'compaction/summary' && event.data.coveredUpToSeq > covered) {
-        covered = event.data.coveredUpToSeq;
-      }
-    }
-    return covered;
+    return this.coveredSeq;
   }
 
   /**
@@ -2074,13 +2077,10 @@ export class RealLoop {
    * v50 用它把"重投"分成两类，见 `settleHumanSuspension` 的判据：
    *   · `wake.seq < 该轮 turn/start` ⇒ 这条输入**是上一拍就已经递到她眼前的**（当轮输入）；
    *   · 其余 ⇒ 它是**本轮进行中才插进来的**（`claimInterruption`），从头到尾还没被递过。
-   * 素材同样是本拍那份 `eventView`（不额外读盘）。
+   * 运行期按轮号记录首次开始的序号。
    */
   private turnStartSeqOf(turn: number): number {
-    for (const event of this.eventView) {
-      if (event.type === 'turn/start' && event.data.turn === turn) return event.seq;
-    }
-    return 0;
+    return this.turnStarts.get(turn) ?? 0;
   }
 
   /**
@@ -2784,7 +2784,7 @@ export class RealLoop {
     await this.prewarmRecentAttachments({ stage: 'tick' });
     // 会话簿与未读：同样放在 busy 之前。她正忙时新来的群消息照样得计入未读——那一轮结束后
     // 她看到的清单要是还停在开跑前的数字，等于每次忙完都少看到几条。
-    this.foldChannelEvents();
+    await this.foldChannelEvents();
     // 她问出去、一直没人答的提问（design §6.1）：到点落一条「未批准、未拒绝」的事实。
     // 放在 busy 之前是刻意的——她正在跑的那个长 turn 里，这条事实也要及时出现在她的上下文里
     // （agent-loop 每一步都重新对齐日志），而不是等她忙完才补上。
@@ -2883,7 +2883,7 @@ export class RealLoop {
       // 会话簿增量（v32）：扫到水位为止，把两种通道事件与已读位都并进去。放在这里而不是
       // 只挑本批的 wakeEvents——见 sessionBook 字段上的注释（只记账的那些永远不会被认领）。
       // 它同时保证了"本批 she 要看的未读"已经算进去（这批之前的事件早在那几拍就并过了）。
-      this.foldChannelEvents();
+      await this.foldChannelEvents();
       // 回投目标绑定到本批：仅当这批里确实有通道消息时才拥有回投地址（M9）
       this.wakeChannelData = lastChannelWake(wakeEvents);
       // 注入判定（v32）：**在本轮之前**跑完并落事件——渲染层是纯函数，它只能读事件；
@@ -2902,9 +2902,7 @@ export class RealLoop {
       // 位置在"输入已经认领、turn 号还没分配"那一段之后——它读的是日志里的既有事实
       // （上一条 `compaction/decision` 与投影里的空拍数），而不是本轮还没发生的事。
       //
-      // 为什么不放在 `prepareTurn` 更前面：`this.eventView` 是 `mcpIndexSync` 每拍定下的那份
-      // **本拍事件快照**（上面那一行已经跑过），放在这之后读到的才是"本拍照旧的事实"，
-      // 也才不必自己再全量读一遍日志（那是一次真实的磁盘往返）。
+      // 本拍已增量同步维护窗口所需的事实。
       this.maintenanceWindowNow = this.maintenanceWindowFor();
       let reason: TurnEndReason;
       // 慢拍刻度（BUG-4）：先把上一轮的读数清掉，再量这一轮。**存的是"这一轮"**，
@@ -2912,13 +2910,17 @@ export class RealLoop {
       this.lastTurnTiming = null;
       this.lastTurnMs = 0;
       const turnStartedAt = Date.now();
+      const turnStartCursor = this.deps.log.latestSeq();
       try {
         reason = await runTurn(this.agentDeps(wakeEvents), wakeEvents);
       } finally {
         if (this.deps.stickerRuntime !== undefined) {
-          const events = await allEventsOf(this.deps.log);
-          const turnStart = [...events].reverse().find((event) => event.type === 'turn/start');
-          if (turnStart !== undefined && turnStart.type === 'turn/start') {
+          const events = await readEventTypes(this.deps.log, ['turn/start', 'tool/result'], undefined, turnStartCursor + 1);
+          let turnStart: Extract<AppEvent, { type: 'turn/start' }> | undefined;
+          for (const event of events) {
+            if (event.type === 'turn/start') turnStart = event;
+          }
+          if (turnStart !== undefined) {
             const turn = turnStart.data.turn;
             const wake = this.wakeChannelData;
             try {
@@ -3249,7 +3251,7 @@ export class RealLoop {
    *   ② **凌晨**：`localHourOf(deps.now(), timezone)` ——与此刻层 `时刻：` 那一行**同一把尺子**
    *      （同一个 `Intl` 口径），"现在几点"与"现在是凌晨"不会各说一套。
    *   ③ **长时间空拍**：`projection.idleTicks`（每命中一拍心跳 +1，任何外部事件到达即归零）。
-   *   ④ **上一次窗口是什么时候**：`lastMaintenanceWindowAt(this.eventView)`——从日志里读回来，
+   *   ④ **上一次窗口是什么时候**：从增量状态取上次窗口时间，
    *      不是记在内存里（重启后内存那份就没了，而那道 6 小时的闸恰恰要跨重启成立）。
    *
    * ## 它不是每拍都算（一次都不多算）
@@ -3269,7 +3271,7 @@ export class RealLoop {
       if (!Number.isFinite(nowMs)) return null;
       const local = localHourOf(now.toISOString(), this.deps.timezone);
       // 压缩那一条的两个数：**读上一条 `compaction/decision`**（同源，见方法头 ①）
-      const reading = lastCompactionReading(this.eventView);
+      const reading = this.compactionReading;
       const idle = this.deps.projection.idleTicks;
 
       return maintenanceWindowOf({
@@ -3278,7 +3280,7 @@ export class RealLoop {
         localHour: local?.hour ?? null,
         localDay: local?.day ?? null,
         idleTicks: typeof idle === 'number' && Number.isFinite(idle) ? idle : null,
-        lastWindowAtMs: lastMaintenanceWindowAt(this.eventView),
+        lastWindowAtMs: this.maintenanceAt,
       }, nowMs);
     } catch {
       // 提示算不出来就**当没有窗口**（不抛）：它与 `usageAlert` / `machineLine` 同一条纪律——
@@ -3287,28 +3289,46 @@ export class RealLoop {
     }
   }
 
-  async mcpIndexSync(): Promise<string> {    // ── **共用那份增量快照，不自己再 `readAll()` 一遍**（2026-10-10 修） ──
-    //
-    // 这条路径原来每一拍都 `for await (…) log.readAll()` 把**全量**日志折进一个**新数组**。
-    // 实测代价（`_research/probe-tick-churn.mts`，7.4 万条 / 59 MB）：
-    // **单次 98.4 MB 堆增量 / 500 ms**；而 `pollMs = 1000`（`:910`）⇒ tick **每秒一次**
-    // ⇒ 每秒白造 ~98 MB 垃圾。连打 10 拍堆就到 459 MB（探针里还没有并发）。
-    //
-    // 为什么这会要命：V8 **把堆还给 `heapUsed`、不还给系统**
-    // （`_research/probe-v8-retention.mjs`：持有 ~600 MB 再全释放 + GC ⇒ heapUsed 4 MB、
-    // **RSS 仍是 1174 MB**）。于是每秒一次的 98 MB churn 把 **RSS 高水位**一路顶上去
-    // —— 真实事故：带上限 512 MB 的那一轮 **167 秒就 OOM**（当时日志里只有 225 条事件、
-    // 0.1 MB，事件本身完全解释不了那 1.8 GB）。
-    //
-    // 修法是**只有一份**：`state/event-snapshot.ts` 按 `EventLog` 实例缓存已 parse 的全量事件、
-    // 之后只读 `latestSeq()` 之后的增量。单拍成本从 98.4 MB/500 ms 降到"几条新事件"。
-    // `web/server.ts` 那八条只读端点读的是**同一个函数**（那份缓存是 2026-10-10 早先为它们加的）。
-    const events = await allEventsOf(this.deps.log);
-    // 这一份**留给同一拍后面的人用**（`settleGrants`）：它必须在同步段里跑完，不能自己再读一遍
-    // 全量日志（那是一次真实的磁盘往返，而这里每拍已经付过一次了）。
-    // 它只是"本拍看到的事件快照"——写入点仍然是日志，这里**只读**，谁也不许就地改它。
-    this.eventView = events;
-    const point = mcpIndexOf(events);
+  /** Retain only the facts the loop uses, advancing the cursor after each applied event. */
+  private async syncLoopFacts(): Promise<void> {
+    const log = this.deps.log;
+    const throughSeq = log.latestSeq();
+    if (throughSeq <= this.loopFactsSeq) return;
+    const options = { throughSeq, types: LOOP_FACT_TYPES, typePrefixes: ['wake/'] };
+    for await (const event of log.readRange(this.loopFactsSeq + 1, options)) {
+      if (event.seq <= this.loopFactsSeq) continue;
+      switch (event.type) {
+        case 'compaction/summary':
+          if (event.data.coveredUpToSeq > this.coveredSeq) this.coveredSeq = event.data.coveredUpToSeq;
+          this.latestIndexEvents.set(event.type, event);
+          break;
+        case 'mcp/index':
+        case 'skill/index':
+          this.latestIndexEvents.set(event.type, event);
+          break;
+        case 'turn/start':
+          if (!this.turnStarts.has(event.data.turn)) this.turnStarts.set(event.data.turn, event.seq);
+          break;
+        case 'grant/requested':
+        case 'grant/resolved':
+          this.grantHistory.apply(event);
+          break;
+        case 'compaction/decision':
+          this.compactionReading = lastCompactionReading([event]);
+          this.maintenanceAt = lastMaintenanceWindowAt([event]) ?? this.maintenanceAt;
+          this.warningState = compactionWarningStateOf(compactionWarningRowsOf([event]), this.warningState);
+          break;
+        default:
+          this.organizeTrace = selfOrganizeTraceOf([event], this.organizeTrace);
+      }
+      this.loopFactsSeq = event.seq;
+    }
+    this.loopFactsSeq = Math.max(this.loopFactsSeq, throughSeq);
+  }
+
+  async mcpIndexSync(): Promise<string> {
+    await this.syncLoopFacts();
+    const point = mcpIndexOf([...this.latestIndexEvents.values()]);
     const version = RENDER_VERSION;
     // 插件组合摘要**只读一次**：判据、重建原因、记下的水位必须是同一个值
     // （宿主那一格是活引用，两次调用之间可能已经变过）。
@@ -3415,12 +3435,13 @@ export class RealLoop {
    *      `skill/installed`，所以除了这一格没有任何别的判据能发现它变了）。
    *
    * ⚠ 它**必须排在 `mcpIndexSync` 之后**（两个调用点都是这样：`warmUp` 与 `tickOnce` 的轮首）：
-   * 事件快照 `eventView` 由那条先跑时读下，这里只读它、不再自己读一遍盘。
+   * MCP 同步已更新最近的索引快照与压缩点。
    *
    * 返回"这一拍定下的文本"，便于测试直接断言（生产调用点不需要它）。
    */
   async skillIndexSync(): Promise<string> {
-    const point = skillIndexOf(this.eventView);
+    const indexEvents = [...this.latestIndexEvents.values()];
+    const point = skillIndexOf(indexEvents);
     const version = RENDER_VERSION;
     // 与 `mcpIndexSync` 的 `stale` 同形，另加插件 Skill 根版本：根变化必须在下一拍重建
     const stale = point.seq === 0
@@ -3444,10 +3465,12 @@ export class RealLoop {
     // 为什么是**增量**而不是 `setTrustEvents(全量)`：归集点可能很密（"空索引"那种退化形状下
     // 每一拍都走得到这条判据），全量重折是 O(事件数)；而信任事件很稀疏，折过一次之后大多数拍
     // 一个新事件都没有。`skillTrustSeq` 记"折到哪一条了"。
-    for (const event of this.eventView) {
-      if (event.seq <= this.skillTrustSeq) continue;
-      this.skills?.applyTrustEvent(event);
-      this.skillTrustSeq = event.seq;
+    const trustThrough = this.loopFactsSeq;
+    if (trustThrough > this.skillTrustSeq) {
+      for (const event of await readEventTypes(this.deps.log, ['skill/installed'], trustThrough, this.skillTrustSeq + 1)) {
+        this.skills?.applyTrustEvent(event);
+      }
+      this.skillTrustSeq = trustThrough;
     }
 
     const catalog = this.skills?.catalog() ?? null;
@@ -3460,7 +3483,7 @@ export class RealLoop {
     // 快照早于最后一次压缩 / 插件技能根换代），而其中几条即使文本一字未变也**必须**写一条
     // ——它记的是"我现在归集到了这次压缩之后"，少了它下一拍还会判过期。
     const snapshot = writeSkillIndexSnapshot({
-      events: this.eventView,
+      events: indexEvents,
       catalog,
       write: (data) => this.appendSync('skill/index', data, 'internal'),
     });
@@ -3607,13 +3630,7 @@ export class RealLoop {
    * ## 为什么判在**一轮收尾之后**
    *
    * 两条判据的原料都是**这一轮刚写的事件**（`budget/consumed`、`model/reasoning-echo`）——
-   * 判早了（`prepareTurn` 段、或 `eventView` 那份本拍开头的快照）就看不到"刚刚这一轮多贵/多满"，
-   * 永远慢一轮。所以这里**现读一次全量快照**（`allEventsOf` 是按日志实例缓存的增量快照：
-   * 没有新事件时零 IO、零 parse，见 `state/event-snapshot.ts` 的文件头），
-   * 而不是拿 `this.eventView` 那份旧快照。
-   *
-   * 两条判据**共用这一份快照与一次过滤**：前兆那条吃的是"渲染看见的那一份"
-   * （`contextEventFilter` 之后——子代理链的事件不在父请求里，混进来会把字符数算大）。
+   * 轮末同步刚落库的成本事件。缓存告警维护近期样本和基线，思维链前兆在设置字符上限时评估。
    *
    * ## 五条刻意不做的
    *
@@ -3628,50 +3645,16 @@ export class RealLoop {
    *     `echoPressureAlreadyReported`，都从日志里数，重启照样成立）。
    */
   private async handleCostAlerts(): Promise<void> {
-    const raw = await allEventsOf(this.deps.log);
     const nowMs = this.deps.now().getTime();
-    /** 渲染看见的那一份（前兆判据用它；理由见方法头） */
-    const rendered = raw.filter(contextEventFilter);
-
-    // ⓪ 前兆：思维链回传压力
-    const pressure = readEchoPressure(rendered);
-    const pressureVerdict = planEchoPressure(pressure, { nowMs, events: raw, respectDedupe: true });
-    let woke = false;
-    if (pressureVerdict.fired) {
-      const cap = pressure.cap ?? 0;
-      this.appendSync('model/reasoning-echo', {
-        // 这两格是事件信封上既有字段（`prune` / `fallback` 也写它们）。压力这条不针对某一步，
-        // 取本轮最后一步的读数最贴近"现在"——`readEchoPressure` 就是按这个口径给的。
-        turn: pressure.turn,
-        step: pressure.step,
-        kind: 'reasoning_echo_pressure',
-        pressure: {
-          echoChars: pressure.echoChars,
-          keptChars: pressure.keptChars,
-          cap,
-          ratio: Math.round(pressureVerdict.ratio * 10_000) / 10_000,
-          evicted: pressure.evictedThisTurn,
-          droppedGroups: pressure.droppedGroups,
-          droppedChars: pressure.droppedChars,
-          band: pressureVerdict.band,
-        },
-      }, 'internal');
-      this.write(echoPressureConsoleLine(pressure, pressureVerdict.ratio));
-      this.appendSync(
-        'wake/manual',
-        { note: echoPressureWakeNote(pressure, pressureVerdict.ratio), via: 'system' },
-        'model',
-      );
-      this.write('[成本] 已发一次真唤醒（via=system，前兆：思维链回传压力）');
-      woke = true;
-    }
+    const verdicts = await planCacheAlertsFromLog(this.deps.log, nowMs, true);
+    const woke = REASONING_ECHO_POLICY.maxTotalChars !== null && await this.handleEchoPressure(nowMs);
 
     // ① 结果：最近 20 轮的未命中率
     // 两条 lane 分开算、**一趟扫完**（`planCacheAlerts`）：`light` 的正常未命中率与 `heavy`
     // 不是一个数（前者样本少、前缀短），合成一条会被 `heavy` 的大额掩盖，
     // 而"哪条 lane 在烧钱"正是要回答的第一件事。
     const firedMiss: CacheAlertReading[] = [];
-    for (const verdict of planCacheAlerts({ events: raw, nowMs, respectDedupe: true })) {
+    for (const verdict of verdicts) {
       const reading = verdict.reading;
       if (!verdict.fired || reading === null) continue;
       firedMiss.push(reading);
@@ -3687,6 +3670,34 @@ export class RealLoop {
     const worst = firedMiss.reduce((a, b) => (b.missRatio > a.missRatio ? b : a));
     this.appendSync('wake/manual', { note: cacheAlertWakeNote(worst), via: 'system' }, 'model');
     this.write(`[成本] 已发一次真唤醒（via=system，${worst.lane}）`);
+  }
+
+  private async handleEchoPressure(nowMs: number): Promise<boolean> {
+    const raw = await readEventTypes(this.deps.log, [
+      'compaction/summary', 'message/reasoning', 'turn/start', 'turn/end', 'step/start', 'model/reasoning-echo',
+    ]);
+    const pressure = readEchoPressure(raw.filter(contextEventFilter));
+    const verdict = planEchoPressure(pressure, { nowMs, events: raw, respectDedupe: true });
+    if (!verdict.fired) return false;
+    this.appendSync('model/reasoning-echo', {
+      turn: pressure.turn,
+      step: pressure.step,
+      kind: 'reasoning_echo_pressure',
+      pressure: {
+        echoChars: pressure.echoChars,
+        keptChars: pressure.keptChars,
+        cap: pressure.cap ?? 0,
+        ratio: Math.round(verdict.ratio * 10_000) / 10_000,
+        evicted: pressure.evictedThisTurn,
+        droppedGroups: pressure.droppedGroups,
+        droppedChars: pressure.droppedChars,
+        band: verdict.band,
+      },
+    }, 'internal');
+    this.write(echoPressureConsoleLine(pressure, verdict.ratio));
+    this.appendSync('wake/manual', { note: echoPressureWakeNote(pressure, verdict.ratio), via: 'system' }, 'model');
+    this.write('[成本] 已发一次真唤醒（via=system，前兆：思维链回传压力）');
+    return true;
   }
 
   // ──────────────────────────── 压缩**前**的预警（2026-10-15） ────────────────────────────
@@ -3725,7 +3736,7 @@ export class RealLoop {
    *   · **同一档报过就永久不再报**（判据里**没有时钟**；上一版的 `cooldownMs` 已废弃、恒为 0）；
    *   · **压缩（`wrote`）或历史回落到阈值 50% 以下 ⇒ 分档状态归零**，下个周期重新可报。
    *
-   * 状态**从日志里读**（`compactionWarningStateOf(compactionWarningRowsOf(eventView))`，
+   * 状态随新增压缩事件更新（`compactionWarningStateOf`，
    * 不是进程内存、也不是"队列里还有没有"）：重启之后那面旗必须照样成立，否则每次重启都会补一条。
    * 也正因如此它天然不刷屏、**不需要第二道时间闸**（与此刻层那道 6 小时的
    * `MAINTENANCE_MIN_GAP_HOURS` 是两件事，本批不动那一条）。
@@ -3783,7 +3794,7 @@ export class RealLoop {
    *     下一次跨 80% 再提醒——旧档位不会跨压缩活下去（**那正是"永久静默"换个形状回来**）。
    */
   private compactionWarningState(): { lastTier: CompactionWarningTier; lastAtMs: number | null } {
-    return compactionWarningStateOf(compactionWarningRowsOf(this.eventView));
+    return this.warningState;
   }
 
   // ──────────────────────── 空拍 · 自我整理提醒（2026-10-20） ────────────────────────
@@ -3812,7 +3823,7 @@ export class RealLoop {
    * （现网 93% 的拍都是 1），按它判这条提醒等于永远不响——实测与理由见那个纯模块的文件头。
    */
   private remindSelfOrganizeIfDue(): void {
-    const plan = planSelfOrganizeReminder(selfOrganizeTraceOf(this.eventView));
+    const plan = planSelfOrganizeReminder(this.organizeTrace);
     if (!plan.fired) return;
     // 第 1 次与第 2 次的正文不同（第二次要说清"这是最后一次"）：分派只有这一处
     this.appendSync('wake/manual', {
@@ -4508,19 +4519,16 @@ export class RealLoop {
    *   • 把投影里台面上还没答复的提问喂给它（判"同一件事只问一次"要用）；
    *   • 把"写事件"接到 `appendSync` 上——**可见性一律走 schema 表**（同 agent-loop 那条纪律）。
    *
-   * ⚠ **`events` 必须是"现在"的视图**：幂等判据（`seen`）就是它。两个调用点各给各的：
-   *   · `tickOnce`（每拍）给 `eventView`——那是这一拍开头 `mcpIndexSync` 读下的快照；
-   *   · `agent-loop` 的 step 边界给 `settleGrantsAtStep` 现读的那一份（turn 运行期间
-   *     `eventView` 不会自己更新，拿旧的判会把同一张单子再挂一张卡）。
+   * 一拍开始和步骤边界都会同步申请单事件，拾取使用同步后的去重记录。
    *
    * 它**不异步、不 await**：整件事是"读几个小文件 + 写两条事件"，与 `settleHumanAsks`
    * 同一个量级；而它必须在**任何输入被认领之前**跑完（那两条事件的一部分就是给人的卡）。
    * 需要 await 的那一层（读日志）在外面：`settleGrantsAtStep`。
    */
-  private settleGrants(events: readonly AppEvent[] = this.eventView): void {
+  private settleGrants(): void {
     const result = settleGrants({
       dataDir: this.deps.dataDir,
-      events,
+      history: this.grantHistory,
       openAsks: this.deps.projection.humanAsks.map((ask) => ({
         seq: ask.seq, question: ask.question, at: ask.at, expiredAt: ask.expiredAt,
       })),
@@ -4547,23 +4555,14 @@ export class RealLoop {
   /**
    * **step 边界的拾取入口**（循环层经 `agentDeps.settleGrantsStep` 调它一次/步；2026-10-21）。
    *
-   * ──────────────────── 为什么必须"先新读一遍事件" ────────────────────
-   * `settleGrants` 的幂等判据是"`grant/requested{id}` 在不在事件里"（`seen`）。tick 那条路用的
-   * 是 `this.eventView`——**这一拍开头**（`mcpIndexSync`）读下的快照，turn 运行期间它不会自己
-   * 更新（`mcpIndexSync` 还没跑下一拍）。于是第一步拾取写下的 `grant/requested` 不在那份快照
-   * 里；第二步若还拿它去判，`seen` 就会说"没拾取过" ⇒ **同一个 id 再挂一张 `human/asked`**
-   * （界面上就是重复卡）。⇒ 这里显式 `await readAllEvents(this.deps.log)` 再传进去。
-   *
-   * 代价说明：`readAllEvents` 读的是 `state/event-snapshot.ts` 按日志实例缓存的**增量快照**
-   * （与 `mcpIndexSync` 用的是同一个缓存）——新写入的几条事件是一次增量读，
-   * 不是每步全量扫盘（那件事的代价见 `event-snapshot.ts` 的文件头）。
+   * 步骤边界先同步新增申请单记录，避免同一个 id 再挂一张卡。
    *
    * 失败降级：读日志/写事件抛了就只留一行诊断，**这一轮照常跑**（下一拍补拾取）。
    */
   private async settleGrantsAtStep(): Promise<void> {
     try {
-      const events = await readAllEvents(this.deps.log);
-      this.settleGrants(events);
+      await this.syncLoopFacts();
+      this.settleGrants();
     } catch (err) {
       this.write(
         `[申请单] step 边界拾取失败（这一轮照常跑，下一拍补）：`
@@ -4960,63 +4959,53 @@ export class RealLoop {
     }
   }
 
-  /** 从日志重建四样跨重启的东西：告警限流窗口（M3-10）、人工加注累计（M3-5）、技能信任表（§4.19）与 turn 号 */
+  /** Restore the session book and startup facts without holding historical message payloads. */
   private async warmUp(): Promise<void> {
+    const started = performance.now();
+    const log = this.deps.log;
+    const throughSeq = log.latestSeq();
     const events: AppEvent[] = [];
-    for await (const event of this.deps.log.readAll()) events.push(event);
-    this.notifier.restore(events);
-    // 会话簿：从两种通道事件（叫她的 / 只记账的）与已读位折叠——
-    // warmUp 本来就要读全量日志，顺手算，零额外扫描。
-    this.sessionBook = collectSessionsFromLog(events);
-    this.channelBookSeq = this.deps.projection.lastSeq;
-    // **群成员回填**（2026-10-07 补上那道空档）：`collectSessionsFromLog` 只折会话簿，而运行期
-    // 那趟 `foldChannelEvents` 还负责 `registerGroupMembers`（群成员自动档案）。游标一前移，
-    // **重启前**到达的那些群 @ 就再也没人折——那些人永远进不了档案，她问"甲是谁"时框架只能
-    // 给一串 openid。这里把那段已落盘的事件**只做"成员登记"这一件事**。
-    //
-    // 为什么不是那两种看起来能用的补法（前一个代理实测过，别再试）：
-    //   · 把游标留在 0、让下一拍重折一遍 ⇒ 会话簿的条数与未读是**累加**出来的（applyChannelMessage
-    //     在旧值上加），从 0 重折必然翻倍（实测 5 条变 10 条，channel-wire 两条用例红）。
-    //     这条回填**一个字都不碰** `sessionBook` / `channelBookSeq` / `channel/read` 口径。
-    //   · 在 warmUp 里直接补跑 `registerGroupMembers` ⇒ 那条路会给历史发言人**发占位号**
-    //     （群友A、群友B…），而那个名字是持久的（落盘、`personNameOf` 优先读它），于是往后
-    //     每一次引用这个人都带着一个"她其实没跟她打过交道"的占位名——那是污染。
-    //     回填走的是 `GroupMemberBook.backfill`：**只登记平台给的事实**（id ↔ 昵称、在哪个群
-    //     见过），没昵称就留空名，绝不编名字。
-    //
-    // 两条通道都适用：判据与运行期同源（`backfillGroupMembers` 读的就是 `mentionsMe`），
-    // 官方那条给 `username`、OneBot 那条给 `sender.card`/`nickname`；平台没给就如实留空。
-    const backfilled = this.backfillGroupMembers(events);
-    if (backfilled !== null) {
-      backfilled.save();
-      this.write(`[群成员] 回填重启前攒下的人：${backfilled.size} 条（只登记平台给的事实，不发占位号）`);
-    }
-    // 注入预警与话题也在这趟全量读里补齐（内存表重启后是空的，而事件还在盘上）：
-    // 预警必须能贴回它那条消息，话题必须能在清单上缀出来——两样都不现扫日志。
-    for (const event of events) {
-      if (event.type === 'injection/flagged') {
-        this.flaggedNotes.set(event.data.messageId, {
-          note: noteForFlagged(event.data), by: event.data.by,
-          reason: event.data.reason, quotes: event.data.quotes,
-        });
-      } else if (event.type === 'injection/noted') {
-        this.notedMessageIds.add(event.data.messageId);
-      } else if (event.type === 'channel/topic' && event.data.topic.trim() !== '') {
-        this.channelTopics.set(event.data.sid, event.data.topic);
-        this.topicSeq.set(event.data.sid, event.data.toSeq);
+    const sessions = new Map<string, KnownSession>();
+    const groupMembers = new Map<string, GroupMemberBackfill>();
+    const contacts = new Map(Object.entries(this.deps.config.persona.contacts));
+    const { sessions: aliases, members: memberAliases } = this.readAliasTables();
+    let spokeBatch: AppEvent[] = [];
+    for await (const event of log.readRange(1, { throughSeq, types: STARTUP_FACT_TYPES })) {
+      if (STARTUP_RESTORE_TYPES.has(event.type)) events.push(event);
+      applySessionEvent(sessions, event);
+      this.applyChannelFact(event);
+      const calling = groupMemberCandidateOf(event, this.deps.selfMessages);
+      if (calling !== null) {
+        const data = calling.data;
+        if (!resolvePersonNameFromTables(data.person, contacts, aliases, memberAliases)) {
+          groupMembers.set(data.person, {
+            openid: data.person, groupSid: sidOf(data.channel, data.chatType, data.chatId),
+            ...(data.nickname ? { nickname: data.nickname } : {}),
+            at: event.ts,
+          });
+        }
+      }
+      if (event.type === 'speak/sent' || ((event.type === 'wake/channel' || event.type === 'channel/message')
+        && event.data.chatType !== 'c2c' && mentionedInMessage(event.data))) {
+        spokeBatch.push(event);
+        if (spokeBatch.length >= 1024) {
+          this.foldSpokeAndMentionInto(spokeBatch);
+          spokeBatch = [];
+        }
       }
     }
-    // **她说过话 / 有人叫过她**（v66，v67 加频次的素材）：与上面那份话题同一条路——warmUp 本来
-    // 就在读全量日志，顺手折，零额外扫描。前两格取**最大值**、第三格按**事件序号水位**去重，
-    // 所以与运行期那条增量折点重复折叠也无害（重启时新实例的水位从 -1 起，warmUp 照样把全量
-    // 日志折一遍；而 `channelBookSeq` 若从低位起，下一拍重折同一批事件也不会算两遍）。
-    this.foldSpokeAndMentionInto(events);
-    // 人审挂起的重建（design §4.21）：答复常常是在实例停机期间写下的（CLI answer 与
-    // review resolve 同一条纪律：两个进程各自 nextSeq 必然撞号），所以冷启动必须能从日志
-    // 还原出「哪个 turn 挂着、它认领了哪些输入」，否则那些输入永远回不了队列。
-    const lastSeq = events.length === 0 ? 0 : events[events.length - 1]!.seq;
-    this.humanCursor = lastSeq;
-    const hanging = scanSuspension(events);
+    this.foldSpokeAndMentionInto(spokeBatch);
+    this.notifier.restore(events);
+    this.sessionBook = sortSessions(sessions);
+    this.channelBookSeq = throughSeq;
+    const backfilled = this.backfillGroupMembers([...groupMembers.values()]);
+    if (backfilled !== null) {
+      backfilled.save();
+      this.write('[群成员] 已回填历史群成员 ' + backfilled.size + ' 条');
+    }
+
+    this.humanCursor = throughSeq;
+    const hanging = scanSuspension(events, (seq) => seq <= throughSeq ? log.get(seq) ?? undefined : undefined);
     if (hanging.waiting !== null) {
       this.suspension = { ...hanging.waiting, answeredAt: null };
       this.write(`[人审] 重启时仍有挂起：turn ${hanging.waiting.turn} 等「${hanging.waiting.question}」（${hanging.waiting.wakeSeqs.length} 条输入待重入）`);
@@ -5051,6 +5040,7 @@ export class RealLoop {
     await this.backfillResolvedAlarms(events, pausedAtStartup);
     // 信任门的真相源是日志：重启后谁被确认过必须原样重建，否则已生效的 skill 会集体掉出 catalog
     this.skills?.setTrustEvents(events);
+    this.skillTrustSeq = throughSeq;
     for (const event of events) {
       if (event.type === 'turn/start' && event.data.turn >= this.nextTurn) this.nextTurn = event.data.turn + 1;
     }
@@ -5069,12 +5059,13 @@ export class RealLoop {
     // 而那条 `wake/manual` 与其它唤醒同一条路（`applyOne` 折进共享投影 ⇒ 本拍认领 ⇒ 起 turn），
     // 所以它必须落在 `tickOnce` **认领输入之前**的那一段里——预热正好是那一段。
     this.announceRestart(events);
+    this.write(`[启动] 循环预热 ${Math.round(performance.now() - started)} ms`);
   }
 
   /**
    * 本进程起来时：落一条 `runtime/restart` 留痕，**异常退出后**再叫醒她一次。
    *
-   * `events` 是 `warmUp` 已经读进内存的那一份全量事件（不再读第二遍盘）。
+   * `events` 包括预热阶段恢复的会话起止和重启记录。
    *
    * ──────────────────────────── 判据（唯一一处） ────────────────────────────
    *
@@ -5661,6 +5652,7 @@ export class RealLoop {
       // 不是对她说的话——少了这一刀，打错的 `/clear` 会在下一个 turn 的历史里当成一条
       // user 消息出现在她眼前，她就得去猜"用户是不是想清空什么"（B1 写明不许发生的事）。
       eventFilter: contextEventFilter,
+      useCompactedEventHistory: true,
       // 大结果外置（§4.12）：阈值与预览长度走 blob-store 的默认口径（估算 8k token / 2k 字符）
       blobOffload: { dataDir: d.dataDir },
       // **这里曾经接回复必要性门**（`necessityGate: …` → `gateAdmits`）：2026-10-05 拆掉了。
@@ -6596,58 +6588,36 @@ export class RealLoop {
    * 幂等：同一批事件折两遍，第二遍 `backfill` 返回 false ⇒ 不写盘，档案字节不变。
    * 返回 null = 这趟日志里一个"在群里叫过她的人"都没有（**不建档案、不碰盘**，与惰性建同一条纪律）。
    */
-  private backfillGroupMembers(events: readonly AppEvent[]): GroupMemberBook | null {
-    // 同一个人可能在多个群里叫过她：一趟日志里按 openid 只留**最后**提到的那条（昵称最新、
-    // 群归属是最后见到的那个群）。`backfill` 本身对重复条目是幂等的（补缺不覆盖），
-    // 这里去重只是让"一批就是一批"这件事在调用点上看得出来。
-    const byOpenid = new Map<string, { openid: string; groupSid: string; nickname?: string; at: string }>();
-    for (const event of events) {
-      const calling = groupMemberCandidateOf(event, this.deps.selfMessages);
-      if (calling === null) continue;
-      const data = calling.data;
-      // 与运行期同一条判据：已经有名字的人（用户、她认过的别名）**不进档案**
-      if (this.humanSourceNameOf(data.person)) continue;
-      byOpenid.set(data.person, {
-        openid: data.person,
-        groupSid: sidOf(data.channel, data.chatType, data.chatId),
-        ...(data.nickname === undefined || data.nickname === '' ? {} : { nickname: data.nickname }),
-        at: event.ts,
-      });
-    }
-    if (byOpenid.size === 0) return null;
+  private backfillGroupMembers(entries: readonly GroupMemberBackfill[]): GroupMemberBook | null {
+    if (entries.length === 0) return null;
     this.groupMembers ??= new GroupMemberBook(this.deps.dataDir);
     this.groupMembers.refresh();
-    // 没改动（第二次启动、或那些人早就在档案里）就不写盘：档案的字节不该因为"又启动了一次"而变
-    return this.groupMembers.backfill([...byOpenid.values()]) ? this.groupMembers : null;
+    return this.groupMembers.backfill(entries) ? this.groupMembers : null;
   }
 
-  private foldChannelEvents(): void {
+  private applyChannelFact(event: AppEvent): void {
+    if (event.type === 'channel/topic' && event.data.topic.trim() !== '') {
+      this.channelTopics.set(event.data.sid, event.data.topic);
+      this.topicSeq.set(event.data.sid, event.data.toSeq);
+    } else if (event.type === 'injection/flagged') {
+      this.flaggedNotes.set(event.data.messageId, {
+        note: noteForFlagged(event.data), by: event.data.by,
+        reason: event.data.reason, quotes: event.data.quotes,
+      });
+    } else if (event.type === 'injection/noted') {
+      this.notedMessageIds.add(event.data.messageId);
+    }
+  }
+
+  private async foldChannelEvents(): Promise<void> {
     const lastSeq = this.deps.projection.lastSeq;
     if (lastSeq <= this.channelBookSeq) return;
     const fresh: AppEvent[] = [];
-    for (let seq = this.channelBookSeq + 1; seq <= lastSeq; seq += 1) {
-      const event = this.deps.log.get(seq);
-      if (event === null) continue; // 崩溃留下的空洞：跳过，不猜
-      fresh.push(event);
-      if (event.type === 'channel/topic') {
-        // 话题只留最近一条：清单那一行只缀得下一句，历史话题在日志里（可复盘）
-        if (event.data.topic.trim() !== '') {
-          this.channelTopics.set(event.data.sid, event.data.topic);
-          this.topicSeq.set(event.data.sid, event.data.toSeq);
-        }
-        continue;
-      }
-      if (event.type === 'injection/flagged') {
-        this.flaggedNotes.set(event.data.messageId, {
-          note: noteForFlagged(event.data), by: event.data.by,
-          reason: event.data.reason, quotes: event.data.quotes,
-        });
-        continue;
-      }
-      if (event.type === 'injection/noted') {
-        this.notedMessageIds.add(event.data.messageId);
-        continue;
-      }
+    let sessions: Map<string, KnownSession> | undefined;
+    const range = { throughSeq: lastSeq, types: CHANNEL_FACT_TYPES };
+    for await (const event of this.deps.log.readRange(this.channelBookSeq + 1, range)) fresh.push(event);
+    for (const event of fresh) {
+      this.applyChannelFact(event);
       if (event.type !== 'wake/channel' && event.type !== 'channel/message' && event.type !== 'channel/read') continue;
       // 这一轮叫她的那条消息（群里被提及/@）：`read_channel` 靠它知道"这个会话必须照给"
       //（v28 之后她手里只有通知、没有正文，而那条又是 wake/channel、不计入未读——见 admin.ts）
@@ -6659,13 +6629,15 @@ export class RealLoop {
           messageId: event.data.messageId,
         };
       }
-      this.sessionBook = upsertSessionInto(this.sessionBook, event);
+      sessions ??= new Map(this.sessionBook.map((entry) => [entry.sid, entry]));
+      applySessionEvent(sessions, event);
       // 群成员自动注册（2026-10-04 用户的口径）：**发生过 @/提及**的群消息里，把发言人
       // 本身、以及被 @ 到的人都记进档案——"见过谁"就是这么攒出来的。QQ 官方没有查成员的
       // 接口（要内邀白名单），所以只能靠消息事件。**这一趟也是它唯一的入口**（warmUp 只折
       // 会话簿，所以那里的游标留在 0，让下一拍把历史补折一遍——见 warmUp 那段注释）。
       this.registerGroupMembers(event);
     }
+    if (sessions !== undefined) this.sessionBook = sortSessions(sessions);
     if (this.groupMembersDirty) {
       this.groupMembers?.save();
       this.groupMembersDirty = false;

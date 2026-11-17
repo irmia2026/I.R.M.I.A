@@ -177,9 +177,10 @@ void main() {
     StickerFilePicker? picker,
     double height = 1100,
     Size size = const Size(1280, 1100),
+    double devicePixelRatio = 1,
   }) async {
-    tester.view.physicalSize = size;
-    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = size * devicePixelRatio;
+    tester.view.devicePixelRatio = devicePixelRatio;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(MaterialApp(
       theme: IrmiaTheme.light(),
@@ -239,6 +240,19 @@ void main() {
     expect(find.byKey(const ValueKey('sticker-refresh')), findsOneWidget);
     expect(find.text('表情包'), findsOneWidget, reason: '标题在左侧栏');
     expect(find.text('全部'), findsOneWidget, reason: '库模式默认显示全部');
+  });
+
+  testWidgets('缩略图按显示像素解码并保留原图比例', (tester) async {
+    items = [entry('one', 'approved', ['开心'])];
+    await pumpPanel(tester, devicePixelRatio: 2);
+    final preview = tester.widget<Image>(find.byKey(const ValueKey('sticker-image-one')));
+    final image = preview.image as ResizeImage;
+    expect(image.imageProvider, isA<NetworkImage>());
+    expect(image.width, 336);
+    expect(image.height, 336);
+    expect(image.policy, ResizeImagePolicy.fit);
+    expect(image.allowUpscaling, isFalse);
+    expect(preview.fit, BoxFit.cover);
   });
 
   testWidgets('左侧标签改走服务端筛选：只重取右栏，不改库存', (tester) async {

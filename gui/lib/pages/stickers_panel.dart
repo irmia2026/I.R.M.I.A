@@ -482,7 +482,14 @@ class _StickersPanelState extends State<StickersPanel> {
           width: 420,
           child: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Center(child: Image.memory(file.bytes, width: 180, height: 180, fit: BoxFit.contain)),
+              Center(
+                child: Image(
+                  image: _stickerPreview(MemoryImage(file.bytes), edge: 180),
+                  width: 180,
+                  height: 180,
+                  fit: BoxFit.contain,
+                ),
+              ),
               const SizedBox(height: 12),
               Text('${entry['tags']?.join(' / ') ?? ''}'),
               Text('${s.stickerIntensityLabel}: ${s.stickerIntensity('${entry['intensity']}')}'),
@@ -1189,6 +1196,16 @@ class _StickersPanelState extends State<StickersPanel> {
         Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in entries) _card(entry)]),
       ]);
 
+  ImageProvider _stickerPreview(ImageProvider source, {required int edge}) {
+    final pixels = (edge * MediaQuery.devicePixelRatioOf(context)).ceil();
+    return ResizeImage(
+      source,
+      width: pixels,
+      height: pixels,
+      policy: ResizeImagePolicy.fit,
+    );
+  }
+
   Widget _card(Map<String, dynamic> entry, {bool selectable = false}) {
     final s = IrmiaStrings.of(context);
     final id = '${entry['id']}';
@@ -1220,10 +1237,17 @@ class _StickersPanelState extends State<StickersPanel> {
         ]),
         ClipRRect(
           borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            '${widget.state.api.baseUrl}${entry['imageUrl']}',
+          child: Image(
+            image: _stickerPreview(
+              NetworkImage(
+                '${widget.state.api.baseUrl}${entry['imageUrl']}',
+                headers: widget.state.api.token == null
+                    ? null
+                    : {'Authorization': 'Bearer ${widget.state.api.token}'},
+              ),
+              edge: 168,
+            ),
             key: ValueKey('sticker-image-$id'),
-            headers: widget.state.api.token == null ? null : {'Authorization': 'Bearer ${widget.state.api.token}'},
             height: 104,
             width: 168,
             fit: BoxFit.cover,

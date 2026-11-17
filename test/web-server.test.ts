@@ -24,7 +24,7 @@
 import assert from 'node:assert/strict';
 import { createHash, scryptSync } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -51,7 +51,7 @@ import { TimerStore } from '../src/wake/timer-store.ts';
 import { AUTH_FILE_NAME, SCRYPT_PARAMS, UI_TOKEN_FILE, readLegacyToken } from '../src/web/auth.ts';
 import { WebhookSecretStore } from '../src/web/webhook-secret.ts';
 import {
-  CONFIRM_PHRASES, DASHBOARD_EVENT_WINDOW, buildPersonaFiles, instanceIdOf, parseRestartTrace, restartCommandLine,
+  CONFIRM_PHRASES, DASHBOARD_EVENT_WINDOW, buildBudgetView, buildDashboard, buildPersonaFiles, instanceIdOf, parseRestartTrace, restartCommandLine,
   restartNote,
   startWebServer,
   type WebServer,
@@ -476,6 +476,49 @@ test('SSE：凭 Last-Event-ID 补拉，然后实时广播新事件', async (t) =
   assert.equal(payload.type, 'review/resolved');
 });
 
+test('SSE：补发遇到写缓冲背压时暂停，drain 后按序补齐实时事件', async (t) => {
+  const fx = await setup(t);
+  for (let i = 0; i < 3; i++) fx.append('wake/manual', { note: String(i) });
+  let slow: ServerResponse | undefined;
+  const writes: number[] = [];
+  fx.server.server.prependListener('request', (req, res) => {
+    if (slow !== undefined || req.url !== '/api/events/stream') return;
+    slow = res;
+    const write = res.write.bind(res);
+    res.write = ((...args: Parameters<typeof res.write>) => {
+      const ok = write(...args);
+      const seq = typeof args[0] === 'string' ? /^id: (\d+)$/mu.exec(args[0]) : null;
+      if (seq === null) return ok;
+      writes.push(Number(seq[1]));
+      return writes.length === 1 ? false : ok;
+    }) as typeof res.write;
+  });
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const authorization = `Bearer ${TEST_TOKEN}`;
+  const response = await fetch(`${fx.base}/api/events/stream`, {
+    headers: { authorization, 'last-event-id': '1' }, signal: controller.signal,
+  });
+  assert.deepEqual(writes, [2]);
+  assert.ok(slow);
+
+  fx.append('wake/manual', { note: '实时' });
+  // 新连接触发一次同步 pump，把实时事件推进到已广播水位。
+  const other = await fetch(`${fx.base}/api/events/stream`, {
+    headers: { authorization }, signal: controller.signal,
+  });
+  assert.equal(other.status, 200);
+  fx.append('wake/manual', { note: '快连接继续读' });
+  const fastFrames = await readFrames(other.body!.getReader(), 1);
+  assert.match(fastFrames[0]!, /^id: 5$/mu);
+  assert.deepEqual(writes, [2], '慢连接在 drain 前不得收到任何额外写入');
+
+  slow.emit('drain');
+  const frames = await readFrames(response.body!.getReader(), 4);
+  assert.deepEqual(writes, [2, 3, 4, 5]);
+  assert.deepEqual(frames.map((frame) => /^id: (\d+)$/mu.exec(frame)?.[1]), ['2', '3', '4', '5']);
+});
+
 async function readFrames(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   want: number,
@@ -546,6 +589,29 @@ test('GET /api/stats/dashboard：六态状态机与磁贴（有待确认时进 n
   const fresh = await setup(t);
   const freshBody = (await call(fresh, '/api/stats/dashboard')).body as { empty: boolean };
   assert.equal(freshBody.empty, true, '没有任何事件时是空态');
+});
+
+test('总览保留原始窗口边界，增量刷新与完整事件窗口一致', async (t) => {
+  const fx = await setup(t);
+  fx.append('budget/consumed', {
+    turn: 1, step: 1, lane: 'heavy', model: 'test',
+    inputTokens: 100, outputTokens: 5, cacheHitTokens: 80, cacheMissTokens: 20,
+    durationMs: 20, retryCount: 0, finishReason: 'completed', tokensTodayAccum: 25,
+  });
+  for (let i = 0; i < DASHBOARD_EVENT_WINDOW - 1; i++) {
+    fx.log.append({ seq: fx.log.nextSeq(), ts: fx.now().toISOString(), type: 'message/user',
+      data: { text: `message ${i}`, source: 'human' }, visibility: 'model' } as AppEvent, { sync: false });
+  }
+  for (let i = 0; i < 2; i++) {
+    const events = (await fx.readAll()).slice(-DASHBOARD_EVENT_WINDOW);
+    const expected = buildDashboard({
+      projection: fx.projection, events, now: fx.now(), dataDir: fx.dataDir, personaRoot: fx.personaRoot,
+    });
+    const actual = await call(fx, '/api/stats/dashboard');
+    assert.equal(actual.status, 200);
+    assert.deepEqual(actual.body, JSON.parse(JSON.stringify(expected)));
+    fx.append('message/user', { text: 'new event', source: 'human' });
+  }
 });
 
 // ──────────────── 申请单："她刚写完、还没被拾取"那一段窗口（2026-10-21 修的双重拼接） ────────────────
@@ -707,6 +773,40 @@ test('GET /api/budget：today 与 7d 两条时间口径', async (t) => {
 
   const bad = await call(fx, '/api/budget?range=30d');
   assert.equal(bad.status, 400);
+});
+
+test('GET /api/budget：并发请求共用补齐，增量统计与全量折叠一致', async (t) => {
+  const fx = await setup(t);
+  const readRange = fx.log.readRange.bind(fx.log);
+  const starts: number[] = [];
+  fx.log.readRange = (fromSeq, options) => {
+    starts.push(fromSeq);
+    return readRange(fromSeq, options);
+  };
+  const check = async (): Promise<void> => {
+    const expected = buildBudgetView({
+      dataDir: fx.dataDir, config: fx.config, events: await fx.readAll(), now: fx.now(), range: '7d',
+    });
+    const responses = await Promise.all([call(fx, '/api/budget?range=7d'), call(fx, '/api/budget?range=7d')]);
+    for (const response of responses) assert.deepEqual(response.body, expected);
+  };
+
+  fx.append('budget/topped-up', { layer: 'daily', addedTokens: 10_000, by: 'human' });
+  for (let turn = 1; turn <= 22; turn++) fx.append('budget/consumed', { ...consumedData(), turn });
+  await check();
+  assert.deepEqual(starts, [1]);
+  const nextSeq = fx.log.latestSeq() + 1;
+
+  fx.advance(86_400_000);
+  fx.append('budget/rollover', { date: fx.now().toISOString().slice(0, 10) });
+  fx.append('turn/start', { turn: 23 });
+  fx.append('step/start', { turn: 23, step: 1, lane: 'heavy' });
+  fx.append('tool/call', { turn: 23, step: 1, callId: 'x', name: 'read_file', arguments: '{}', sideEffect: 'read' });
+  fx.append('budget/consumed', { ...consumedData(), turn: 23 });
+  fx.append('turn/end', { turn: 23, reason: { kind: 'completed' } });
+  await check();
+  await check();
+  assert.deepEqual(starts, [1, nextSeq]);
 });
 
 test('GET /api/persona/files|file|history：文件树、正文与演化时间线', async (t) => {
@@ -2544,6 +2644,26 @@ test('GET /api/framework-notes：配到「已恢复」的旧告警不再按当�
   assert.equal(original['level'], 'critical', '等级字段照旧原样给（不许改事实），降级与否是渲染的事');
   assert.match(String(original['reason']), /已恢复/u, '卡上要说得清它是被哪一条恢复通知销掉的');
   assert.match(String(original['reason']), new RegExp(`seq ${recovered.seq}`, 'u'));
+});
+
+test('GET /api/framework-notes：超出显示窗口的告警仍保留恢复配对顺序', async (t) => {
+  const fx = await setup(t);
+  const alarm = { fingerprint: 'fp', level: 'warn', title: '待恢复', key: 'one' };
+  fx.append('alarm/sent', alarm);
+  for (let i = 0; i < 100; i++) fx.append('alarm/sent', { ...alarm, key: 'other' });
+  const visible = fx.append('alarm/sent', alarm);
+  const current = async (): Promise<Record<string, unknown> | undefined> => {
+    const view = (await call(fx, '/api/framework-notes?limit=3')).body as { notes: Array<Record<string, unknown>> };
+    return view.notes.find((note) => note['seq'] === visible.seq);
+  };
+
+  assert.equal((await current())?.['historical'], undefined);
+  fx.append('alarm/sent', { ...alarm, recovered: true });
+  const stillPending = await current();
+  assert.ok(stillPending);
+  assert.equal(stillPending['historical'], undefined);
+  fx.append('alarm/sent', { ...alarm, recovered: true });
+  assert.equal((await current())?.['historical'], true);
 });
 
 test('GET /api/framework-notes：没配到「已恢复」的告警照旧留着（别把还没好的事说成好了）', async (t) => {

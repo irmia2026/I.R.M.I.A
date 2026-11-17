@@ -683,57 +683,51 @@ export interface SettleGrantsResult {
  *
  * 返回的这一份只用于诊断与测试（生产调用点不需要它）。
  */
+export class GrantIntakeHistory {
+  readonly firstAskById = new Map<string, number>();
+  readonly openByKey = new Map<string, string>();
+  readonly bouncedHashes = new Map<string, string>();
+
+  apply(event: AppEvent): void {
+    if (event.type === 'grant/requested') {
+      if (!this.firstAskById.has(event.data.id)) this.firstAskById.set(event.data.id, event.data.askSeq);
+      this.openByKey.set(`${event.data.kind}|${event.data.name}`, event.data.id);
+    } else if (event.type === 'grant/resolved') {
+      this.bouncedHashes.set(event.data.id, event.data.contentHash);
+      const key = `${event.data.kind}|${event.data.name}`;
+      if (this.openByKey.get(key) === event.data.id) this.openByKey.delete(key);
+    }
+  }
+}
+
 export function settleGrants(input: {
   dataDir: string;
-  events: readonly AppEvent[];
   /** 台面上还没答复的 `human/asked`（投影里的那一份；判"同一件事只问一次"用） */
   openAsks: readonly { seq: number; question: string; at: string; expiredAt: string | null }[];
   /** 事件写入通道（调用方保证 `sync: true`）。返回新事件的 seq */
   write: (type: string, data: unknown) => number;
   /** 这一拍是第几个 turn（`human/asked.turn` 那一格；没有 turn 时给 0） */
   turn: number;
-}): SettleGrantsResult {
-  const seen = new Set<string>();
+} & ({ events: readonly AppEvent[] } | { history: GrantIntakeHistory })): SettleGrantsResult {
+  const history = 'history' in input ? input.history : new GrantIntakeHistory();
+  if ('events' in input) {
+    for (const event of input.events) history.apply(event);
+  }
   /** 还没答复的申请单：`kind|name` → id（判"同一件事只问一次"） */
   const openByKey = new Map<string, string>();
-  /**
-   * 已经被**框架退回**过的单子：`id` → 那一份被退回内容的指纹（`grant/resolved.contentHash`）。
-   *
-   * 为什么需要这一格（2026-10-21）：退单**不写** `grant/requested`，所以上面的 `seen` 对它
-   * 永远为假 ⇒ 同一份坏单每一拍都被再退一次。实测 `add-playwright-mcp` 在
-   * 17:40:09–17:40:42 被连写 **33 条** `grant/resolved`（同一份内容、33 拍）。
-   * 判据与收单那条同一条纪律：**靠事件状态**，不靠内存记账（进程重启之后照样成立）。
-   *
-   * 比的是**内容指纹**而不是 id：她真把单子改好了（内容变了），下一拍照样重新判
-   * ——"同 id 同内容"才跳过，"同 id"本身不是黑名单。
-   */
-  const bouncedHashes = new Map<string, string>();
-  for (const event of input.events) {
-    if (event.type === 'grant/requested') {
-      seen.add(event.data.id);
-      openByKey.set(`${event.data.kind}|${event.data.name}`, event.data.id);
-    } else if (event.type === 'grant/resolved') {
-      bouncedHashes.set(event.data.id, event.data.contentHash);
-      const key = `${event.data.kind}|${event.data.name}`;
-      if (openByKey.get(key) === event.data.id) openByKey.delete(key);
-    }
-  }
   // 台面上还挂着的（那一条 `human/asked` 还在投影里）才算"未决"——答复过/超时出队的都要放掉
-  for (const [key, id] of [...openByKey]) {
-    const event = input.events.find(
-      (item): item is GrantRequested => item.type === 'grant/requested' && item.data.id === id,
-    );
-    const stillOpen = event !== undefined
-      && input.openAsks.some((ask) => ask.seq === event.data.askSeq);
-    if (!stillOpen) openByKey.delete(key);
+  const openAsks = new Set(input.openAsks.map((ask) => ask.seq));
+  for (const [key, id] of history.openByKey) {
+    const askSeq = history.firstAskById.get(id);
+    if (askSeq !== undefined && openAsks.has(askSeq)) openByKey.set(key, id);
   }
 
   const result: SettleGrantsResult = { raised: [], bounced: [], open: [...openByKey.values()] };
 
   for (const id of grantIdsOnDisk(input.dataDir)) {
-    if (seen.has(id)) continue;
+    if (history.firstAskById.has(id)) continue;
     const raw = readGrantRaw(input.dataDir, id);
-    const alreadyBounced = bouncedHashes.get(id);
+    const alreadyBounced = history.bouncedHashes.get(id);
     // ⑤ **同一份内容退过就跳过**：这一句对"坏文件 / 读不动"那一支是唯一判据（它没有 request
     // 可算指纹），对"合法但重复"那一支是提前量——那一支的指纹要解析之后才拿得到，见下面。
     if (alreadyBounced !== undefined && alreadyBounced === raw.hash) continue;

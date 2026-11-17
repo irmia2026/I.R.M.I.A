@@ -143,6 +143,8 @@ String frameworkNoticeLabel(String via, {AppStrings strings = const ZhStrings()}
 
 enum _ItemKind { text, tool, channel, mention, boundary, injection, webhook }
 
+enum _EventChange { unchanged, updated, appended }
+
 /// 会话流里的一条：文本气泡、**一次工具调用**、**一条从消息适配器进来的消息**，
 /// 或**一处上下文分界**（人工 reset / 系统压缩）。
 ///
@@ -352,9 +354,6 @@ class ChatPageState extends State<ChatPage> {
   /// 那几条卡会整张消失（判过的事不该在界面上凭空不见）。
   final _flaggedByMessage = <String, ({String reason, List<String> quotes, String by})>{};
 
-  /// sid → light 给出的话题结论（`channel/topic` 折出来的）。**不上屏**：它属于提及卡上那一行
-  /// （"那边在聊什么"）。后到的结论也能补上——卡在读这张表，`setState` 一来就重画。
-  final _topicBySid = <String, String>{};
   final scroll = ScrollController();
   final input = TextEditingController();
   final inputFocus = FocusNode();
@@ -839,9 +838,14 @@ class ChatPageState extends State<ChatPage> {
         // "离底部还有多远"就跟着变大——那时候再量，一个本来贴在底部的人会被误判成
         // "他往上翻了"（于是第一次来新内容就不再跟随了）。所以这一读必须在前面。
         final wasAtBottom = _atBottomNow();
-        final added = _consume(event);
+        final hadEarlier = _hasEarlier;
+        final change = _consume(event);
         if (!mounted) return;
-        setState(() {});
+        // 进度由 thinkingNow 单独更新。只有可见内容或历史边界变化才重建聊天页。
+        if (change != _EventChange.unchanged || hadEarlier != _hasEarlier) {
+          setState(() {});
+        }
+        final added = change == _EventChange.appended;
         // **不自动滚动**（用户 2026-10-16 ①）：她说话、回执原地更新、工具卡片刷新，
         // 一律不许把视图拽到底——人正在往回看的时候被拽走，正是他要修的那件事。
         // 新内容到达这件事改由「跳到最新」那颗按钮说（不在底部时亮一个小点，见 [_onScroll]）。
@@ -918,8 +922,8 @@ class ChatPageState extends State<ChatPage> {
 
   /// 事件 → 流里的一条（与 Web chat.js 同一张映射表；镜像与过程不上屏）。
   ///
-  /// 返回 true 表示**新增了一条**——回执是原地更新已有块的，不该把正在看的人拽到末尾。
-  bool _consume(Map<String, dynamic> event) {
+  /// 区分新增条目与原地更新。新增条目可以跟随末尾，回执与补充说明留在原处。
+  _EventChange _consume(Map<String, dynamic> event) {
     // 事件处理器里取文案：**不登记依赖**（read 而不是 of）。这些字是"发生过的事"
     // 的记录，落进 items 之后就不再跟着语言变——与她的发言正文同一档。
     final s = IrmiaStrings.read(context);
@@ -932,7 +936,7 @@ class ChatPageState extends State<ChatPage> {
       // 出现了两次。工具块靠"同一 callId 不立第二块"自保，别的条目没有这层保护——
       // 历史那一份与流里那一份（或翻页接缝）会各画一遍。闸门放在最前面：
       // 连游标都不必再更新，那条早就记过了。
-      if (!_seenSeqs.add(value)) return false;
+      if (!_seenSeqs.add(value)) return _EventChange.unchanged;
       // 断线补拉的锚点（见 [_lastEventSeq]）：每条事件都记、只增不减
       if (_lastEventSeq == null || value > _lastEventSeq!) _lastEventSeq = value;
       if (_earliestSeq == null || value < _earliestSeq!) _earliestSeq = value;
@@ -940,16 +944,16 @@ class ChatPageState extends State<ChatPage> {
     final data = (event['data'] as Map?)?.cast<String, dynamic>() ?? const {};
     // 子代理自己的活动不进主对话流：事件带 `agentId`（parentCallId 是它的归属键，
     // 但主代理自己的调用没有 agentId）。子代理页有独立时间线；主聊天只看主代理。
-    if ((event['agentId']?.toString() ?? '').trim().isNotEmpty) return false;
+    if ((event['agentId']?.toString() ?? '').trim().isNotEmpty) return _EventChange.unchanged;
     final ts = event['ts']?.toString();
     switch (event['type']) {
       case 'message/assistant':
         final text = (data['text']?.toString() ?? '').trim();
-        if (text.isEmpty) return false;
+        if (text.isEmpty) return _EventChange.unchanged;
         _sink.add(_BubbleItem.text(side: 'her', text: text, ts: ts));
-        return true;
+        return _EventChange.appended;
       case 'message/user':
-        return false; // 唤醒输入的渲染镜像，不上屏
+        return _EventChange.unchanged; // 唤醒输入的渲染镜像，不上屏
       case 'wake/manual': {
         final note = (data['note']?.toString() ?? '').trim();
         // **判据只有这一处：`via` 有值 = 框架通报**——框架替他做的那个动作留下的通报
@@ -970,7 +974,7 @@ class ChatPageState extends State<ChatPage> {
             detail: note.isEmpty ? null : note,
             ts: ts,
           ));
-          return true;
+          return _EventChange.appended;
         }
         // 空 note = 界面上按了「立即唤醒」：那是**框架的动作**，不是谁说的话 → 走提醒卡（靠右）。
         // 有 note = 用户在输入框里打的话 → 仍是他自己的右侧气泡：人说的话才用气泡。
@@ -983,14 +987,14 @@ class ChatPageState extends State<ChatPage> {
             detail: person.isEmpty ? null : s.fromWho(person),
             ts: ts,
           ));
-          return true;
+          return _EventChange.appended;
         }
         final mine = _BubbleItem.text(side: 'me', text: note, ts: ts);
         // 乐观渲染去重：你刚发的那句话已上屏，wake 回显是同一句话。
         // 只跟**这次要落的那一份**比：往上翻历史时拿屏上的气泡去比，会把一句老话误删。
-        if (_sink.any((e) => e.side == 'me' && e.text == mine.text)) return false;
+        if (_sink.any((e) => e.side == 'me' && e.text == mine.text)) return _EventChange.unchanged;
         _sink.add(mine);
-        return true;
+        return _EventChange.appended;
       }
       case 'wake/webhook': {
         // 外部 Ingress 投递：没有会话与发送者，不能伪装成 user 气泡。
@@ -1003,7 +1007,7 @@ class ChatPageState extends State<ChatPage> {
             : (message.isNotEmpty ? message : (kind.isNotEmpty ? kind : s.tagWebhook));
         final detail = title.isNotEmpty && message.isNotEmpty ? message : null;
         _sink.add(_BubbleItem.webhook(text: headline, detail: detail, ts: ts));
-        return true;
+        return _EventChange.appended;
       }
       case 'wake/channel': {
         // 通道消息**不是她的气泡**：它是外面递进来的一条输入，靠右、成卡片（修订清单 ⑬）。
@@ -1022,7 +1026,7 @@ class ChatPageState extends State<ChatPage> {
             mentionSid: _BubbleItem.sidOfRaw(data),
             ts: ts,
           ));
-          return true;
+          return _EventChange.appended;
         }
         _sink.add(_BubbleItem.channel(
           text: data['text']?.toString() ?? '',
@@ -1032,7 +1036,7 @@ class ChatPageState extends State<ChatPage> {
           mentionsMe: data['mentionsMe'] == true,
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'channel/topic': {
         // light 给出的话题结论：缀在**它自己那一次**的提及卡上。**不上屏**——它属于那张卡的一行，
@@ -1045,18 +1049,18 @@ class ChatPageState extends State<ChatPage> {
         final sid = data['sid']?.toString() ?? '';
         final topic = (data['topic']?.toString() ?? '').trim();
         if (sid != '' && topic != '') {
-          _topicBySid[sid] = topic;
           // 归**最近那一张**提及卡：真实链路上话题就是它触发的那次概括写下来的（紧跟在被叫
           // 那一条之后）。同一张卡后来的新结论覆盖旧的（那是同一个"当时"）；而**更早的卡不动**
           // ——它们各自有自己那一次的话题，或者就没有（用户 2026-10-02 报过"旧卡片也变了"）。
           for (var i = items.length - 1; i >= 0; i -= 1) {
             final candidate = items[i];
             if (candidate.kind != _ItemKind.mention || candidate.mentionSid != sid) continue;
+            if (candidate.topic == topic) break;
             candidate.topic = topic;
-            break;
+            return _EventChange.updated;
           }
         }
-        return false;
+        return _EventChange.unchanged;
       }
       case 'compaction/summary': {
         // 上下文的一处分界（修订清单 ⑮）。**位置天然正确**：它就是流里那两条事件之间的一条，
@@ -1067,7 +1071,7 @@ class ChatPageState extends State<ChatPage> {
           detail: manual ? s.contextClearedHereDetail : s.contextCompactedHereDetail,
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'injection/flagged': {
         // 判定结论（谁判的、凭什么、引了哪几句）——**不上屏**，只记进内存表。
@@ -1075,7 +1079,7 @@ class ChatPageState extends State<ChatPage> {
         // 那之前落库的示警事件只有给她的 `note`；没有这张表，那几条卡会**整张消失**
         // （判过的事不该在界面上凭空不见）。示警那条优先用自己的字段，缺了才回退到这里。
         final messageId = data['messageId']?.toString() ?? '';
-        if (messageId.isEmpty) return false;
+        if (messageId.isEmpty) return _EventChange.unchanged;
         final rawQuotes = data['quotes'];
         _flaggedByMessage[messageId] = (
           reason: (data['reason']?.toString() ?? '').trim(),
@@ -1084,7 +1088,7 @@ class ChatPageState extends State<ChatPage> {
               : const <String>[],
           by: data['by']?.toString() ?? '',
         );
-        return false;
+        return _EventChange.unchanged;
       }
       case 'injection/noted': {
         // 框架对某条外部消息给出的判定（v25；2026-10-02 改成"给人看的那一半"）。
@@ -1106,7 +1110,7 @@ class ChatPageState extends State<ChatPage> {
             ? rawQuotes.map((quote) => '$quote'.trim()).where((quote) => quote.isNotEmpty).toList()
             : const <String>[];
         final quotes = own.isNotEmpty ? own : (fallback?.quotes ?? const <String>[]);
-        if (reason.isEmpty && quotes.isEmpty) return false;
+        if (reason.isEmpty && quotes.isEmpty) return _EventChange.unchanged;
         final who = (data['who']?.toString() ?? '').trim();
         final person = (data['person']?.toString() ?? '').trim();
         final where = (data['chatType']?.toString() ?? '') == 'c2c'
@@ -1122,21 +1126,25 @@ class ChatPageState extends State<ChatPage> {
           by,
         ].join(' · ');
         _sink.add(_BubbleItem.injection(text: reason, detail: source, ts: ts, quotes: quotes));
-        return true;
+        return _EventChange.appended;
       }
       case 'tool/call': {
         // 她动了什么手：一个块，不是一行。call 与 result 是两条事件，人看到的是一件事。
         final name = (data['name']?.toString() ?? '').trim();
-        if (name.isEmpty) return false;
+        if (name.isEmpty) return _EventChange.unchanged;
         final callId = data['callId']?.toString();
         // 同一个 callId 只该有一个块。往上翻历史时会撞上"回执先到、调用后到"：
         // 孤立回执已经按下面的兜底立过一个块（名字只能是「tool」，回执里没有 name），
         // 现在把真名字与参数补上去，而不是再立一块。
         final existing = _findToolBlock(callId);
         if (existing != null) {
-          if (existing.toolName == null || existing.toolName == 'tool') existing.toolName = name;
+          final oldName = existing.toolName;
+          final oldArgs = existing.toolArgs;
+          if (oldName == null || oldName == 'tool') existing.toolName = name;
           existing.toolArgs ??= data['arguments']?.toString();
-          return false;
+          return oldName != existing.toolName || oldArgs != existing.toolArgs
+              ? _EventChange.updated
+              : _EventChange.unchanged;
         }
         _sink.add(_BubbleItem.tool(
           callId: callId,
@@ -1144,7 +1152,7 @@ class ChatPageState extends State<ChatPage> {
           toolArgs: data['arguments']?.toString(),
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'tool/result': {
         // 回执**原地**更新那个块——不新起一行，否则工具一多就散成一堆碎行
@@ -1171,7 +1179,7 @@ class ChatPageState extends State<ChatPage> {
         block.toolResult = sanitizeToolOutput(content.isEmpty ? (errMessage ?? '') : content);
         final ms = data['durationMs'];
         block.toolDurationMs = ms is num ? ms.toInt() : null;
-        return false;
+        return _EventChange.updated;
       }
       case 'wake/timer': {
         // 「人类可能希望关注的信息」（用户 ⑬）：是哪个定时器、原定几点。两者都缺就不写。
@@ -1183,7 +1191,7 @@ class ChatPageState extends State<ChatPage> {
           detail: [if (id.isNotEmpty) id, if (at.isNotEmpty) s.scheduledAt(at)].join(' · '),
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'wake/intention': {
         // 意图的正文就是这条提醒的全部意义——不摆出来，人只看到"意图唤醒"四个字
@@ -1194,7 +1202,7 @@ class ChatPageState extends State<ChatPage> {
           detail: content.isEmpty ? null : content,
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'wake/job': {
         final id = (data['jobId']?.toString() ?? '').trim();
@@ -1204,19 +1212,19 @@ class ChatPageState extends State<ChatPage> {
           detail: id.isEmpty ? null : id,
           ts: ts,
         ));
-        return true;
+        return _EventChange.appended;
       }
       case 'wake/heartbeat':
-        return false; // 心跳不打扰
+        return _EventChange.unchanged; // 心跳不打扰
       case 'human/answered':
         _sink.add(_BubbleItem.text(side: 'sys', text: s.humanReplyRecorded, ts: ts));
-        return true;
+        return _EventChange.appended;
       case 'review/resolved':
         final ok = data['outcome'] == 'succeeded';
         _sink.add(_BubbleItem.text(side: 'sys', text: ok ? s.markedOk : s.markedFailed, ts: ts));
-        return true;
+        return _EventChange.appended;
       default:
-        return false;
+        return _EventChange.unchanged;
     }
   }
 
