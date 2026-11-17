@@ -2,9 +2,12 @@
 # assigned while suspended, before plugin code can create an untracked child.
 param([Parameter(Mandatory = $true)][string]$Payload)
 $ErrorActionPreference = 'Stop'
+$diagnostics = $env:IRMIA_PLUGIN_JOB_DIAGNOSTICS -eq '1'
+if ($diagnostics) { [Console]::Error.WriteLine('Python job: PowerShell started') }
 try {
   $spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
   $exe = (Get-Command -Name ([string]$spec.file) -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  if ($diagnostics) { [Console]::Error.WriteLine('Python job: resolved ' + $exe) }
   Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -74,6 +77,7 @@ public static class IrmiaPluginJob {
   }
 
   public static int Run(string executable, string[] arguments) {
+    bool diagnostics = Environment.GetEnvironmentVariable("IRMIA_PLUGIN_JOB_DIAGNOSTICS") == "1";
     IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
     if (job == IntPtr.Zero) throw new Win32Exception();
     ProcessInfo process = new ProcessInfo();
@@ -94,9 +98,11 @@ public static class IrmiaPluginJob {
       // already-filtered environment and protocol pipes.
       if (!CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, true, 0x08000004,
         IntPtr.Zero, null, ref startup, out process)) throw new Win32Exception();
+      if (diagnostics) Console.Error.WriteLine("Python job: created " + process.ProcessId);
       if (!AssignProcessToJobObject(job, process.Process)) throw new Win32Exception();
       assigned = true;
       if (ResumeThread(process.Thread) == 0xffffffff) throw new Win32Exception();
+      if (diagnostics) Console.Error.WriteLine("Python job: resumed child");
       if (WaitForSingleObject(process.Process, 0xffffffff) != 0) throw new Win32Exception();
       uint code;
       if (!GetExitCodeProcess(process.Process, out code)) throw new Win32Exception();
@@ -112,6 +118,7 @@ public static class IrmiaPluginJob {
   }
 }
 '@
+  if ($diagnostics) { [Console]::Error.WriteLine('Python job: launcher compiled') }
   exit [IrmiaPluginJob]::Run($exe, [string[]]$spec.args)
 } catch {
   [Console]::Error.WriteLine('Python process job failed: ' + $_.Exception.Message)
