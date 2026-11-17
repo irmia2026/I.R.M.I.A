@@ -5,10 +5,15 @@ $ErrorActionPreference = 'Stop'
 $diagnostics = $env:IRMIA_PLUGIN_JOB_DIAGNOSTICS -eq '1'
 if ($diagnostics) { [Console]::Error.WriteLine('Python job: PowerShell started') }
 try {
-  $spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)) | ConvertFrom-Json
-  $exe = (Get-Command -Name ([string]$spec.file) -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  # The host already located and probed the executable. Each encoded field is
+  # an argv string, delimited by NUL, which cannot appear in a Windows argument.
+  $spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload)).Split([char]0)
+  $exe = $spec[0]
+  if ($spec.Length -lt 2 -or -not [IO.Path]::IsPathRooted($exe) -or -not [IO.File]::Exists($exe)) {
+    throw 'The Python launcher requires an existing executable and its arguments.'
+  }
   if ($diagnostics) { [Console]::Error.WriteLine('Python job: resolved ' + $exe) }
-  Add-Type -TypeDefinition @'
+  Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -119,7 +124,7 @@ public static class IrmiaPluginJob {
 }
 '@
   if ($diagnostics) { [Console]::Error.WriteLine('Python job: launcher compiled') }
-  exit [IrmiaPluginJob]::Run($exe, [string[]]$spec.args)
+  exit [IrmiaPluginJob]::Run($exe, [string[]]($spec[1..($spec.Length - 1)]))
 } catch {
   [Console]::Error.WriteLine('Python process job failed: ' + $_.Exception.Message)
   exit 1

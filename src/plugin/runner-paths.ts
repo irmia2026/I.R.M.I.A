@@ -14,7 +14,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BUNDLED_NODE_REL } from '../runtime/restart-chain.ts';
@@ -59,19 +59,23 @@ export function resolvePythonExecutable(): string {
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
-let pythonProbe: { binary: string; available: boolean; detail: string } | null = null;
+type PythonProbe = { binary: string; detail: string } & (
+  { available: true; executable: string } | { available: false }
+);
+let pythonProbe: PythonProbe | null = null;
 
 /**
  * Python 可用性探测（**只探一次**：安装期与运行期读同一个结论）。
  *
- * 探的是"能不能被宿主这样拉起"：`-I` 隔离模式 + `-u` 无缓冲，与真实启动形状一致。
+ * 记录实际解释器的绝对路径，后续进程从各自工作目录启动时使用同一个解释器。
  */
-export function probePython(binary = resolvePythonExecutable()): { available: boolean; detail: string; binary: string } {
+export function probePython(binary = resolvePythonExecutable()): PythonProbe {
   if (pythonProbe !== null && pythonProbe.binary === binary) return pythonProbe;
-  let available = false;
+  let executable: string | null = null;
   let detail = '';
   try {
-    const result = spawnSync(binary, ['-I', '-c', 'import sys; sys.stdout.write(sys.version.split()[0])'], {
+    const result = spawnSync(binary, ['-I', '-c',
+      'import json, sys; print(json.dumps({"version": sys.version.split()[0], "executable": sys.executable}))'], {
       encoding: 'utf8',
       timeout: 10_000,
       windowsHide: true,
@@ -80,13 +84,19 @@ export function probePython(binary = resolvePythonExecutable()): { available: bo
     if (result.error !== undefined && result.error !== null) detail = result.error.message;
     else if (result.status !== 0) detail = (result.stderr ?? '').trim() || `退出码 ${String(result.status)}`;
     else {
-      available = true;
-      detail = (result.stdout ?? '').trim();
+      const facts = JSON.parse((result.stdout ?? '').trim()) as { executable?: unknown; version?: unknown };
+      if (typeof facts.executable === 'string' && isAbsolute(facts.executable) && typeof facts.version === 'string') {
+        executable = facts.executable;
+        detail = facts.version;
+      } else {
+        detail = 'Python 未报告有效的解释器路径';
+      }
     }
   } catch (error) {
     detail = error instanceof Error ? error.message : String(error);
   }
-  pythonProbe = { binary, available, detail };
+  pythonProbe = executable === null ? { binary, available: false, detail }
+    : { binary, available: true, detail, executable };
   return pythonProbe;
 }
 

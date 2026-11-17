@@ -50,6 +50,7 @@ jobs:
           test/mcp-client.test.ts
           test/plugin-runtime-node.test.ts
           test/plugin-runtime-python.test.ts
+          test/plugin-runtime-safety.test.ts
           test/subagent-deps.test.ts
           test/fs-tools.test.ts
           test/media-poster.test.ts
@@ -82,8 +83,8 @@ jobs:
       - name: Install the verified Flutter SDK
         run: |
           archive="$RUNNER_TEMP/flutter.tar.xz"
-          curl -fSL --retry 3 --connect-timeout 15 --max-time 240 \
-            https://storage.googleapis.com/flutter_infra_release/flutter/stable/linux/flutter_linux_3.35.4-stable.tar.xz -o "$archive"
+          curl -fsSL --retry 3 --connect-timeout 15 --max-time 240 \
+            https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.35.4-stable.tar.xz -o "$archive"
           echo "151c75539aa1c01b874954d7b6e0006a622a3f12c76fd7f1fcafad27e6a2d68a  $archive" | sha256sum -c -
           tar -xJf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"

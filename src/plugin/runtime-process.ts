@@ -164,16 +164,8 @@ export class PluginProcess {
   /** 起进程 → 等 ready → 发 activate。任一步失败都会杀掉进程并 throw。 */
   async start(): Promise<void> {
     if (this.child !== null) throw new Error('插件进程已经起过；重启用 stop() + 新的实例');
-    const { runtime } = this.target;
-    if (runtime.type === 'python') {
-      const probe = probePython(this.options.pythonPath ?? resolvePythonExecutable());
-      if (!probe.available) {
-        throw new PluginRpcError(PLUGIN_RPC_ERRORS.internalError,
-          `Python 运行时不可用（${probe.binary}：${probe.detail}）。Python 插件需要宿主机上装 Python 3.9+，或设 IRMIA_PYTHON 指到解释器`, 'crash');
-      }
-    }
-    this.state = 'starting';
     const command = this.buildCommand();
+    this.state = 'starting';
     const child = spawnManagedProcess(command.file, command.args, {
       cwd: this.target.rootDir,
       windowsHide: true,
@@ -277,13 +269,18 @@ export class PluginProcess {
       args.push(nodeRunnerPath(), entry);
       return { file, args };
     }
-    const file = this.options.pythonPath ?? resolvePythonExecutable();
+    const probe = probePython(this.options.pythonPath ?? resolvePythonExecutable());
+    if (!probe.available) {
+      throw new PluginRpcError(PLUGIN_RPC_ERRORS.internalError,
+        `Python 运行时不可用（${probe.binary}：${probe.detail}）。Python 插件需要宿主机上装 Python 3.9+，或设 IRMIA_PYTHON 指到解释器`, 'crash');
+    }
+    const file = probe.executable;
     // -B must be a flag: -I ignores PYTHONDONTWRITEBYTECODE from the environment.
     const args = ['-I', '-X', 'utf8', '-B', '-u', pythonRunnerPath(), entry];
     if (process.platform !== 'win32') return { file, args };
     const powershell = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     return { file: powershell, args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      join(pluginRunnerRoot(), 'windows-job.ps1'), '-Payload', Buffer.from(JSON.stringify({ file, args }), 'utf8').toString('base64')] };
+      join(pluginRunnerRoot(), 'windows-job.ps1'), '-Payload', Buffer.from([file, ...args].join('\0'), 'utf8').toString('base64')] };
   }
 
   private attach(child: ChildProcess): void {
