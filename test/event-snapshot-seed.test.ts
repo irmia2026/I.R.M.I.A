@@ -42,6 +42,7 @@ import { defaultVisibility, isTopLevelEvent } from '../src/log/types.ts';
 import type { DsClient, DsRequest, DsStreamResult } from '../src/model/ds-client.ts';
 import { runTurn, TurnRunner, type AgentLoopDeps, type AgentLoopPersona } from '../src/runtime/agent-loop.ts';
 import { isFrameworkCommandEvent } from '../src/runtime/slash-commands.ts';
+import { readTurnEventHistory } from '../src/runtime/turn-event-history.ts';
 import { allEventsOf } from '../src/state/event-snapshot.ts';
 import { applyOne, fold } from '../src/state/fold.ts';
 import { ToolRegistry } from '../src/tools/registry.ts';
@@ -374,13 +375,17 @@ test('边界·半行自愈之后：播种看到的仍是自愈后的那一份', 
 
 // ──────────────────────────────── ⑤ 边界：compaction/summary 之后 ────────────────────────────────
 
-test('边界·compaction/summary 之后：快照与请求字节都相同（遮蔽点一致）', async (t) => {
+test('压缩视图释放旧正文并保留跨遮蔽点的依赖，请求字节与完整历史一致', async (t) => {
   const rig = await makeRig(t);
+  rig.append('human/asked', { turn: 0, source: 'agent', question: '仍在等待答复', context: '' });
+  rig.append('timer/set', { timerId: 'crossing-timer', at: NOW, payload: { note: '较早的定时器载荷' } });
+  rig.append('message/reasoning', { text: '早期思维链正文' });
   seedHistory(rig);
   // 压完之后又长出来的历史
-  rig.append('wake/manual', { note: '压完之后的第一次唤醒' });
+  rig.append('wake/timer', { timerId: 'crossing-timer' });
   rig.append('turn/start', { turn: 2 });
   rig.append('message/assistant', { text: '压完之后说的话。', toolCalls: [] });
+  rig.append('message/user', { text: '这段后续消息达到自动交接的规模。'.repeat(3000) });
   rig.append('turn/end', { turn: 2, reason: { kind: 'completed' }, spoke: true });
   // 改前那一刻的快照＝readAll() 过一遍 eventFilter（改前 syncEvents 就是这么装的）
   const legacy = (await rig.readAll()).filter(productionFilter);
@@ -400,6 +405,7 @@ test('边界·compaction/summary 之后：快照与请求字节都相同（遮�
   const depsOf = (log: EventLog, projection: Projection, ds: DsClient): AgentLoopDeps => ({
     log, ds, registry: new ToolRegistry(), projection, persona: PERSONA,
     now: () => NOW, timezone: TIMEZONE, workspaceRoot: rig.dir, eventFilter: productionFilter,
+    compaction: { thresholdTokens: 100, budgetTokens: 1024 },
   });
   const appendWake = (log: EventLog, projection: Projection): AppEvent => {
     const event = {
@@ -419,12 +425,62 @@ test('边界·compaction/summary 之后：快照与请求字节都相同（遮�
   primeAsLegacy(runnerA, legacy);
   await runnerA.run();
   const modelB = fakeModel([{ text: '压完之后的一句话。' }]);
-  const runnerB = new TurnRunner(depsOf(logB, projectionB, modelB.ds), [wakeB]);
+  const runnerB = new TurnRunner({
+    ...depsOf(logB, projectionB, modelB.ds),
+    useCompactedEventHistory: true,
+  }, [wakeB]);
   await runnerB.run();
   assert.equal(JSON.stringify(modelB.requests[0]), JSON.stringify(modelA.requests[0]), '压缩之后请求体逐字节相同');
   // 早期历史确实被遮蔽（不是"两边都没压"这种假等价）
   const body = JSON.stringify(modelB.requests[0]);
   assert.ok(body.includes('交接笔记'), '摘要必须在请求里（遮蔽点的替代品）');
+  assert.ok(body.includes('仍在等待答复'), '遮蔽之前的未答复提问仍然可见');
+  assert.ok(body.includes('较早的定时器载荷'), '遮蔽之后的定时器唤醒可读取旧载荷');
+  assert.ok(!eventsOf(runnerB).some((event) => event.seq === 3), '不持有已遮蔽的正文');
+  const summariesA = (await drain(logA)).filter((event) => event.type === 'compaction/summary');
+  const summariesB = (await drain(logB)).filter((event) => event.type === 'compaction/summary');
+  assert.equal(summariesA.length, 2, '公开路径必须确实新写一份自动交接');
+  assert.deepEqual(summariesB, summariesA, '交接全文和覆盖点与完整历史逐字相同');
+});
+
+test('压缩视图增量同步，并发读取同步到各自请求的水位', async (t) => {
+  const rig = await makeRig(t);
+  const earlierStep = rig.append('step/start', { turn: 1, step: 1 });
+  const lastStep = rig.append('step/start', { turn: 1, step: 2 });
+  const old = rig.append('message/user', { text: '第一片中的旧正文' });
+  const first = await readTurnEventHistory(rig.log, productionFilter);
+  assert.deepEqual(first.events.map((event) => event.seq), [earlierStep.seq, lastStep.seq, old.seq]);
+
+  const summary = rig.append('compaction/summary', { coveredUpToSeq: old.seq, summary: '已总结' });
+  const earlierReader = readTurnEventHistory(rig.log, productionFilter);
+  const late = rig.append('message/user', { text: '在读取中到达' });
+  const laterReader = readTurnEventHistory(rig.log, productionFilter);
+  const [earlier, later] = await Promise.all([earlierReader, laterReader]);
+  assert.equal(earlier.throughSeq, summary.seq);
+  assert.deepEqual(earlier.events.map((event) => event.seq), [lastStep.seq, summary.seq]);
+  assert.equal(later.throughSeq, late.seq);
+  assert.deepEqual(later.events.map((event) => event.seq), [lastStep.seq, summary.seq, late.seq]);
+  assert.equal(later.coveredSeq, old.seq);
+});
+
+test('压缩视图保留最高轮号、最近轮首和上一步之前的轮首', async (t) => {
+  const rig = await makeRig(t);
+  const highest = rig.append('turn/start', { turn: 100 });
+  rig.append('turn/start', { turn: 8 });
+  const beforeStep = rig.append('turn/start', { turn: 9 });
+  const step = rig.append('step/start', { turn: 9, step: 1 });
+  const latest = rig.append('turn/start', { turn: 10 });
+  const end = rig.append('turn/end', { turn: 10, reason: { kind: 'completed' }, spoke: false });
+  const summary = rig.append('compaction/summary', { coveredUpToSeq: end.seq, summary: '已总结' });
+  const compact = await readTurnEventHistory(rig.log, productionFilter);
+  assert.deepEqual(compact.events.map((event) => event.seq),
+    [highest.seq, beforeStep.seq, step.seq, latest.seq, end.seq, summary.seq]);
+
+  const followingStep = rig.append('step/start', { turn: 10, step: 1 });
+  const followingSummary = rig.append('compaction/summary', { coveredUpToSeq: followingStep.seq, summary: '再次整理' });
+  const advanced = await readTurnEventHistory(rig.log, productionFilter);
+  assert.deepEqual(advanced.events.map((event) => event.seq),
+    [highest.seq, latest.seq, end.seq, summary.seq, followingStep.seq, followingSummary.seq]);
 });
 
 // ──────────────────────────────── ⑥ 边界：读完之后新到的事件 ────────────────────────────────

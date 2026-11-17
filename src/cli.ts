@@ -1196,12 +1196,27 @@ export function buildBudgetReport(input: {
   events: readonly AppEvent[];
   limitSource: BudgetReport['limitSource'];
 }): BudgetReport {
-  const projection = fold(input.events);
+  return buildBudgetReportFromProjection({
+    dataDir: input.dataDir,
+    budget: input.budget,
+    limitSource: input.limitSource,
+    projection: fold(input.events),
+    topUps: foldTopUps(input.events),
+  });
+}
+
+export function buildBudgetReportFromProjection(input: {
+  dataDir: string;
+  budget: BudgetConfig;
+  projection: Projection;
+  topUps: TopUpTotals;
+  limitSource: BudgetReport['limitSource'];
+}): BudgetReport {
   const guard = new BudgetGuard(input.budget);
-  guard.setTopUps(foldTopUps(input.events));
+  guard.setTopUps(input.topUps);
   const softRatio = pickSoftRatio(input.budget.softRatio);
 
-  const layers = guard.statuses(projection).map((status) => {
+  const layers = guard.statuses(input.projection).map((status) => {
     const softLimit = status.limit * softRatio;
     return {
       layer: status.layer,
@@ -1215,7 +1230,7 @@ export function buildBudgetReport(input: {
     };
   });
 
-  const b = projection.budget;
+  const b = input.projection.budget;
   const cacheTotal = b.cacheHitToday + b.cacheMissToday;
   return {
     dataDir: input.dataDir,

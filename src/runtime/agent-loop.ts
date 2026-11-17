@@ -44,8 +44,6 @@ import type { PreparedAffect } from '../affect/types.js';
  * - 大工具结果外置 blob（§4.12）已接：`blobOffload` 配上后，超阈值的结果先写
  *   `data/blobs/`（内容寻址），事件的 content 只留头部预览 + `contentRef`。
  *   不配则全文入日志（默认口径，M2 的最小宿主行为不变）。
- * - 事件快照按 render 的契约持有全量事件；长日志下的内存有界化（快照起点 + 分片）
- *   与上下文压缩（§4.13 遮蔽点）同批做，M2 不做。
  * - `budget/consumed.retryCount` 恒为 0：成功路径没有重试计数通道（DsClient 只把 attempts
  *   挂在外抛错误上），M3 接 onRetry 回填。
  *
@@ -82,13 +80,13 @@ import { defaultVisibility, type ContextImageChosen } from '../log/types.ts';
 // 「这一轮为什么没开口」的判定与摘录只此一处（纯函数，读侧 CLI 共用同一份）
 import { idleReasonFromText } from '../log/idle-reason.ts';
 import {
-  DEFAULT_HANDOFF_BUDGET_TOKENS, DEFAULT_HANDOFF_FOLD_TOKENS,
+  DEFAULT_HANDOFF_BUDGET_TOKENS, DEFAULT_HANDOFF_FOLD_TOKENS, HANDOFF_EVENT_TYPES,
   estimateHistoryTokens, estimateMaskedTokens, mechanicalSummaryText,
   renderHandoffNote, type HandoffOptions,
 } from '../persona/handoff-note.ts';
 import { applyOne, wakeSourceOf } from '../state/fold.ts';
-// 全量事件快照（进程级只此一份）：轮首播种的事件源，见 TurnRunner.syncEvents
-import { allEventsOf } from '../state/event-snapshot.ts';
+import { allEventsOf, readEventTypes } from '../state/event-snapshot.ts';
+import { readTurnEventHistory } from './turn-event-history.ts';
 // 毒消息保护的阈值与崩溃恢复共用一处：同一条输入反复认领仍没跑完就进死信
 //（recover.ts 的 settleClaimedInputs 也用它）——两处各写一个数，迟早会分岔。
 import { offloadIfLarge, type BlobOffloadOptions } from '../state/blob-store.ts';
@@ -869,6 +867,8 @@ export interface AgentLoopDeps {
    * `replay` 用同一条判据重建，所以重建结果与当时仍然逐字节一致。
    */
   eventFilter?: (event: AppEvent) => boolean;
+  /** 内置主循环的稳定上下文范围，可以在轮首跳过已压缩的历史正文。 */
+  useCompactedEventHistory?: boolean;
   /**
    * 子代理 turn 链归属标记（schema §1 `parentCallId`）：本 TurnRunner 写下的每条事件都带上它。
    * 顶层不传 → 事件里不出现该字段（零成本保持既有事件形状与字节序）。
@@ -1371,20 +1371,17 @@ export class TurnRunner {
   /**
    * 日志快照：render 的唯一事件来源，每个 step 前与日志增量对齐。
    *
-   * `readonly` 只锁**这个引用**（数组本身还要 push 增量）；轮首的内容由 {@link syncEvents}
-   * 从宿主的进程级快照播种进来——见那里的注释（改前是每轮从 seq 1 重读整份日志）。
+   * 轮首取一份独立的事件引用数组，轮内只追加本轮的新事件。
    */
-  private readonly events: AppEvent[] = [];
+  private events: AppEvent[] = [];
   /** 轮首播种做过没有（每轮一个新 runner ⇒ 每轮一次；理由与代价见 {@link syncEvents}） */
   private eventsSeeded = false;
   /**
-   * 播种源（`state/event-snapshot` 那份全量快照）**读到哪条 seq**。
-   *
-   * 为什么不直接拿 `events` 的末条当游标：`eventFilter` 会丢事件（子代理隔离、指令不进上下文），
-   * 被丢在尾部的那几条就会让游标停在它们**之前** ⇒ 下一拍重读（幂等，但等于白读一遍）。
-   * 游标必须取"播种源读到哪"与"快照末条 seq"里的大者。
+   * 已读到的日志序号。视图末条事件可能更早，因为过滤可以跳过尾部事件。
    */
   private eventsSeededUpTo = 0;
+  /** 已遮蔽的历史正文只在实际生成新交接笔记时按需读取。 */
+  private eventsOmittedThroughSeq = 0;
   private turn = 0;
   private step = 0;
   private spoke = false;
@@ -2248,13 +2245,26 @@ export class TurnRunner {
     const covered = decision.coveredUpToSeq ?? 0;
     // `deps.compaction` 在这里必非空：结论能走到 `wrote`，只可能是 `compactionDecision` 里
     // `cfg !== null` 那一支——类型系统看不出这层关系（它只看见一个属性），所以这里断言。
-    const note = renderHandoffNote(this.events, handoffOptionsOf(this.deps.compaction!));
+    let handoffEvents: readonly AppEvent[] = this.events;
+    const filter = this.deps.eventFilter;
+    if (this.eventsOmittedThroughSeq > 0 && filter !== undefined) {
+      const old = await readEventTypes(this.log, HANDOFF_EVENT_TYPES, this.eventsOmittedThroughSeq);
+      handoffEvents = [
+        ...old.filter(filter),
+        ...this.events.filter((event) => event.seq > this.eventsOmittedThroughSeq),
+      ];
+    }
+    const note = renderHandoffNote(handoffEvents, handoffOptionsOf(this.deps.compaction!));
     const summary = note.text.trim() === ''
       ? mechanicalSummaryText(countMaskedEvents(this.events, priorCovered, covered))
       : note.text;
 
     this.write('compaction/summary', { coveredUpToSeq: covered, summary }, { sync: true });
     this.log.flush();
+    if (this.deps.useCompactedEventHistory === true && this.deps.eventFilter !== undefined) {
+      // 即使没有下一轮，也释放进程视图中这次刚遮蔽的正文。
+      await readTurnEventHistory(this.log, this.deps.eventFilter).catch(() => {});
+    }
     return decision;
   }
 
@@ -3213,70 +3223,32 @@ export class TurnRunner {
   // ── 日志快照 ──
 
   /**
-   * 把 lastSeq 之后的事件增量补进快照。render 的输入必须逐条来自日志，不接受内存态拼装。
-   *
-   * ═══════════ 轮首那一读：从「重放整份日志」改成「接宿主的全量快照」 ═══════════
-   *
-   * **改前**（2026-10-21 之前）：新 runner 的 `events` 是空的 ⇒ 第一次调用把 `from` 定成 1
-   * ⇒ **整份日志从头重读一遍**。而 `runTurn` 每轮新建一个 TurnRunner（{@link runTurn}），
-   * 于是"每轮重放整份事件日志"。真日志副本实测（`_research/_replaycost-bench.mts`，
-   * 19.2 万条 / 150.1 MB，数字与复算方式都在那份脚本里）：
-   *
-   *   · 一轮 2 step 就是 6 次 syncEvents（`1 + 2×2 + 1`：`runInner` 1 次、每 step 2 次
-   *     （`runStep` 与它后面的 `humanSuspension`）、`maybeCompact` 1 次），**只有第一次真读盘**；
-   *   · 那一次读 **192,881 条 / 150.1 MB / 1.2~1.4 s**（多次实测 1.15~1.44 s，机器状态差）
-   *     （其中 IO+切行 699~785 ms、JSON.parse+信封校验 312~584 ms）；
-   *   · 读出来的这 192,881 条与**上一轮快照逐条相同（100.0%）**——这一读纯属浪费；
-   *   · 按 9k 条/天增长，一个月后这一读就是 ~10 s/轮（外加每轮 ~90 MB 的解析垃圾）。
-   *
-   * **改后**：轮首只**播种一次**，源是 `state/event-snapshot.ts` 的进程级全量快照
-   * （{@link allEventsOf}）——那一份本来就由 `real-loop.mcpIndexSync` 每拍维护、给界面八条
-   * 只读端点共用（那条"全量事件只有一份，谁都不许自己再 readAll 一遍"的纪律见该文件头）。
-   * 于是整份日志**一个进程只读一遍**，每轮只付一次"引用数组拷贝"（19.2 万条 ≈ 7.5 ms）+
-   * 一遍 `eventFilter`（≈ 19.9 ms），之后照旧只补增量。同一份副本上同一件事：
-   * **1.38 s → 29.8 ms**（re-read 0 条）；每轮新增堆也从 ~213 MB 降到 2.1 MB（`--expose-gc` 实测）。
-   *
-   * 三条不许动的语义：
-   *   · **拷数组，不共享数组**：播种进来的是**同一个事件对象**（事件是只读的，见 event-snapshot
-   *     的纪律：`web/server.ts` 与 `real-loop` 早就共用它们了），但 `this.events` 这个**数组**
-   *     必须是 runner 自己的——下面还要往里 push。共享数组会让本 runner 的增量把进程级快照写脏
-   *     （同一条事件出现两次，且下一轮读到的"全量"是假的）。
-   *   · **`eventFilter` 照旧过**：子代理的隔离视图（`parentCallId === callId`）与主循环的两刀
-   *     （顶层事件、指令不进上下文）都在这把刀上。播种走同一条路，隔离语义一个字节不变，
-   *     游标另记（见 {@link eventsSeededUpTo}：被丢在尾部的事件不能让游标倒退）。
-   *   · **失败就整份重来**：播种途中抛错（日志被关、坏行）时把这一轮已 push 的撤掉、标志复位
-   *     ——否则"半份播种 + 满游标"会静默漏事件，那是最难查的那类错。
+   * 内置主循环从共享的压缩视图播种。每轮维护自己的事件序列，按日志序号补齐增量。
+   * 自定义调用方可给任意过滤规则。轮内游标包含过滤掉的序号。
    */
   private async syncEvents(): Promise<void> {
+    const filter = this.deps.eventFilter;
     if (!this.eventsSeeded) {
-      const seed = await allEventsOf(this.log);
-      const filter = this.deps.eventFilter;
-      const before = this.events.length;
-      this.eventsSeeded = true;
-      try {
-        for (const event of seed) {
-          if (filter !== undefined && !filter(event)) continue;
-          this.events.push(event);
-        }
-        this.eventsSeededUpTo = seed.length === 0 ? 0 : seed[seed.length - 1]!.seq;
-      } catch (error) {
-        // 撤到播种前：宁可下一拍重播一遍，也不许留一份"少了中间几条"的快照
-        this.events.length = before;
-        this.eventsSeeded = false;
-        this.eventsSeededUpTo = 0;
-        throw error;
+      if (this.deps.useCompactedEventHistory === true && filter !== undefined) {
+        const seed = await readTurnEventHistory(this.log, filter);
+        this.events = seed.events;
+        this.eventsSeededUpTo = seed.throughSeq;
+        this.eventsOmittedThroughSeq = seed.coveredSeq;
+      } else if (filter === undefined) {
+        const seed = await allEventsOf(this.log);
+        for (const event of seed) this.events.push(event);
+        this.eventsSeededUpTo = seed.at(-1)?.seq ?? 0;
       }
+      this.eventsSeeded = true;
     }
-    const last = this.events[this.events.length - 1];
-    // 两侧取大（过滤会丢事件，见 eventsSeededUpTo）；空日志与空快照时它仍是 1
-    const from = Math.max(last?.seq ?? 0, this.eventsSeededUpTo) + 1;
-    for await (const event of this.log.readRange(from)) {
-      if (last !== undefined && event.seq <= last.seq) continue;
-      // 隔离过滤（子代理）：被挡掉的事件不进快照，于是 render 看到的就是「从空事件序列起」那一份。
-      // 它在 seq 上是跳跃的，但 render 只要求按 seq 升序（不要求连续）。
-      if (this.deps.eventFilter !== undefined && !this.deps.eventFilter(event)) continue;
-      this.events.push(event);
+    const throughSeq = this.log.latestSeq();
+    if (throughSeq <= this.eventsSeededUpTo) return;
+    const batch: AppEvent[] = [];
+    for await (const event of this.log.readRange(this.eventsSeededUpTo + 1, { throughSeq })) {
+      if (filter === undefined || filter(event)) batch.push(event);
     }
+    for (const event of batch) this.events.push(event);
+    this.eventsSeededUpTo = throughSeq;
   }
 
   /**

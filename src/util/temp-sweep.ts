@@ -16,7 +16,7 @@
  *   ③ **非占用才碰**：先 `rename` 试探——目录被当成工作目录、或里面的文件被独占打开时，
  *      Windows 的 rename 会失败；失败就跳过（`skippedInUse`），不跟活人抢东西。
  *   ④ **默认只报不删**：`IRMIA_TEMP_SWEEP=off|dry|on`，缺省 `dry` —— 第一版上线只看账本。
- *      `dry` 的 `rename` 是"试探完立刻改回来"，一个字节都不删。
+ *      `dry` 只读取目录和文件元数据，包括统计大小。仅 `on` 模式用 rename 探测占用。
  *
  * 调用点（都在装配层，不在这个模块里）：
  *   · 启动时一次（`main.ts`）；
@@ -25,7 +25,8 @@
  * 只依赖 node: 标准库；不读配置、不写台账——账本（日志与 `temp/swept` 事件）由调用点落。
  */
 
-import { lstat, readdir, rename, rm } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { lstat, opendir, readdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -97,7 +98,7 @@ export interface TempSweepReport {
   root: string;
   /** 前缀命中的条目数（含还不算老的） */
   scanned: number;
-  /** 够老、前缀命中的候选：`dry` 下 = "将删"的个数，`on` 下 = 尝试删的个数 */
+  /** 够老、前缀命中的候选数。on 模式会尝试删除。 */
   candidates: number;
   /** 候选的字节数（目录按递归求和） */
   bytes: number;
@@ -105,9 +106,9 @@ export interface TempSweepReport {
   deleted: number;
   /** 前缀命中但还不够老的个数（只计数，便于判断"阈值是不是太松"） */
   skippedYoung: number;
-  /** `rename` 试探失败（判定为占用）而跳过的个数 */
+  /** on 模式中 rename 失败而跳过的个数 */
   skippedInUse: number;
-  /** 删/改回失败的个数 */
+  /** 删除失败的个数 */
   failures: number;
   /** 候选超过 {@link TEMP_SWEEP_MAX_ENTRIES} ⇒ 这一轮没扫完 */
   truncated: boolean;
@@ -169,10 +170,10 @@ export function formatTempSweepLine(report: TempSweepReport): string {
   const scanNote = report.truncated ? `，本轮只扫了前 ${TEMP_SWEEP_MAX_ENTRIES} 个候选` : '';
   const skipNote = report.skippedInUse > 0 ? `，占用跳过 ${report.skippedInUse} 个` : '';
   const failNote = report.failures > 0 ? `，失败 ${report.failures} 个` : '';
-  const tail = `${report.root}（白名单前缀、够老、非占用）${scanNote}${skipNote}${failNote}`;
+  const tail = `${report.root}（白名单前缀、够老）${scanNote}${skipNote}${failNote}`;
   if (report.error !== '') return `[临时目录] 扫不动 ${report.root}：${report.error}`;
   return report.mode === 'dry'
-    ? `[临时目录] dry-run：将删 ${report.candidates} 个 / 共 ${size} —— ${tail}`
+    ? `[临时目录] dry-run：候选 ${report.candidates} 个 / 共 ${size} —— ${tail}`
     : `[临时目录] 已删 ${report.deleted} 个 / 共 ${size} —— ${tail}`;
 }
 
@@ -197,66 +198,54 @@ export async function runTempSweep(options: TempSweepOptions = {}): Promise<Temp
   // `off` 连目录都不读（"关掉了"就该真的是零动作，别拿一次 readdir 当"没删"）
   if (mode === 'off') return report;
 
-  let names: string[];
   try {
-    names = await readdir(root);
-  } catch (err) {
-    report.error = toMessage(err);
-    return report;
-  }
+    // 删除会改变目录项，因此清理模式先抓取名单。只读模式可以流式扫描。
+    const entries = mode === 'dry' ? await opendir(root) : await readdir(root);
+    let probeSeq = 0;
+    for await (const entry of entries) {
+      const name = typeof entry === 'string' ? entry : entry.name;
+      const rule = tempSweepRuleFor(name, rules);
+      if (rule === null) continue;
+      report.scanned += 1;
 
-  let probeSeq = 0;
-  for (const name of names) {
-    const rule = tempSweepRuleFor(name, rules);
-    if (rule === null) continue;
-    report.scanned += 1;
-
-    const path = join(root, name);
-    let stat;
-    try {
-      stat = await lstat(path);
-    } catch {
-      continue; // 刚被别的进程删掉/改名的：不是我们的候选
-    }
-    const ageMs = now() - stat.mtimeMs;
-    if (ageMs <= rule.minAgeMs) {
-      report.skippedYoung += 1;
-      continue;
-    }
-    if (report.candidates >= maxEntries) {
-      report.truncated = true;
-      break;
-    }
-    report.candidates += 1;
-    report.bytes += await sizeOf(path);
-
-    // ③ 非占用试探：rename 成功 = 没人在用；失败 = 跳过（**绝不对失败的那个动手**）
-    probeSeq += 1;
-    const probe = `${path}.sweep-${process.pid}-${probeSeq}`;
-    try {
-      await rename(path, probe);
-    } catch {
-      report.skippedInUse += 1;
-      continue;
-    }
-
-    if (mode === 'dry') {
-      // 只报了"会删"，那就立刻改回去：dry 一个字节都不许删
+      const path = join(root, name);
+      let stat;
       try {
-        await rename(probe, path);
+        stat = await lstat(path);
+      } catch {
+        continue; // 刚被别的进程删掉/改名的：不是我们的候选
+      }
+      const ageMs = now() - stat.mtimeMs;
+      if (ageMs <= rule.minAgeMs) {
+        report.skippedYoung += 1;
+        continue;
+      }
+      if (report.candidates >= maxEntries) {
+        report.truncated = true;
+        break;
+      }
+      report.candidates += 1;
+      report.bytes += await sizeOf(path, stat);
+      if (mode === 'dry') continue;
+
+      // 只有真正清理时才用 rename 探测占用。
+      const probe = `${path}.sweep-${process.pid}-${++probeSeq}`;
+      try {
+        await rename(path, probe);
+      } catch {
+        report.skippedInUse += 1;
+        continue;
+      }
+      try {
+        await rm(probe, { recursive: true, force: true, maxRetries: 2 });
+        report.deleted += 1;
       } catch (err) {
         report.failures += 1;
-        report.error = `${report.error === '' ? '' : `${report.error}；`}改回失败：${toMessage(err)}`;
+        report.error = `${report.error === '' ? '' : `${report.error}；`}删除失败：${toMessage(err)}`;
       }
-      continue;
     }
-    try {
-      await rm(probe, { recursive: true, force: true, maxRetries: 2 });
-      report.deleted += 1;
-    } catch (err) {
-      report.failures += 1;
-      report.error = `${report.error === '' ? '' : `${report.error}；`}删除失败：${toMessage(err)}`;
-    }
+  } catch (err) {
+    report.error = `${report.error === '' ? '' : `${report.error}；`}${toMessage(err)}`;
   }
   return report;
 }
@@ -351,9 +340,10 @@ export async function runStartupTempSweep(options: StartupTempSweepOptions): Pro
 }
 
 /** 递归求字节数（只统计**不跟随符号链接**；读不动就按 0 算——它是账，不是判据） */
-async function sizeOf(path: string): Promise<number> {  let stat;
+async function sizeOf(path: string, knownStat?: Stats): Promise<number> {
+  let stat;
   try {
-    stat = await lstat(path);
+    stat = knownStat ?? await lstat(path);
   } catch {
     return 0;
   }

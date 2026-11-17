@@ -899,7 +899,7 @@ describe('M7-6 记忆整理端到端（定时任务 → 整理而非普通 turn�
     assert.equal(swept.data.root, 'C:\\fake-temp');
     assert.equal(swept.data.candidates, 2);
     assert.equal(swept.data.deleted, 0, 'dry 档一个字节都不许删');
-    assert.ok(lines.some(line => line.includes('将删 2 个')), `当场也要看得见：\n${lines.join('\n')}`);
+    assert.ok(lines.some(line => line.includes('候选 2 个')), `当场也要看得见：\n${lines.join('\n')}`);
   });
 });
 

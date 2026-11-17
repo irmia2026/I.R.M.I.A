@@ -123,7 +123,8 @@
  * 三个形状都**不写钱**（本仓库的铁律，见文件头第一段），且都**必须带模型名**。
  */
 
-import type { AppEvent, CacheAlertPayload, CacheAlertContributor, ModelLane } from '../log/types.js';
+import type { EventLog } from '../log/event-log.js';
+import type { AppEvent, BudgetConsumed, CacheAlertPayload, CacheAlertContributor, ModelLane } from '../log/types.js';
 import type { ContextBreakdown } from '../model/context-audit.js';
 import { estimatePrefixHitOf } from '../model/context-audit.ts';
 import { formatCompact, formatPercent } from '../format/units.ts';
@@ -255,15 +256,10 @@ interface LaneBucket {
   retries: number;
   calls: number;
   reasoningCalls: number;
-  /**
-   * 这一档里**每一笔**的命中量与输入量（原样，不聚合）。
-   *
-   * 只服务 `cacheCaliberOf` 的两条判据：ⓐ Σhit===0、ⓑ "非零 hit 恒为同一个常数且与输入规模
-   * 无关"。条目数与 `calls` 相同（一笔一拍一条），量级是"一次调用"，不会把 20 万条事件撑成
-   * 两个大数组。
-   */
-  hits: number[];
-  inputs: number[];
+  positiveHits: number;
+  /** 大于零表示所有非零命中量都相同，-1 表示至少有两种。 */
+  fixedHit: number;
+  maxInput: number;
   /** 这一档里出现过的 `context.renderVersion`（按出现顺序去重，最后一次写入的是"最新"） */
   renderVersions: string[];
   /** 这一档里出现过的 `context.history.headHash`（历史前段被改写的直接证据） */
@@ -277,7 +273,8 @@ interface LaneBucket {
 function emptyBucket(key: string, seq: number, model: string): LaneBucket {
   return {
     key, model, hit: 0, miss: 0, input: 0, output: 0, retries: 0, calls: 0, reasoningCalls: 0,
-    hits: [], inputs: [], renderVersions: [], historyHeads: [], lastSeq: seq, tsMs: null,
+    positiveHits: 0, fixedHit: 0, maxInput: 0,
+    renderVersions: [], historyHeads: [], lastSeq: seq, tsMs: null,
   };
 }
 
@@ -298,6 +295,56 @@ function addDistinct(list: string[], value: string | undefined): void {
   if (!list.includes(value)) list.push(value);
 }
 
+type LaneBuckets = Record<ModelLane, Map<string, LaneBucket>>;
+const CACHE_ALERT_LANES = ['heavy', 'light'] as const;
+
+function emptyLanes(): LaneBuckets {
+  return { heavy: new Map(), light: new Map() };
+}
+
+function budgetModelOf(data: BudgetConsumed['data']): string {
+  return typeof data.model === 'string' && data.model !== '' ? data.model : 'unknown';
+}
+
+function belongsToCacheLane(event: AppEvent): event is BudgetConsumed {
+  return event.type === 'budget/consumed' && event.parentCallId === undefined
+    && (event.data.lane === 'heavy' || event.data.lane === 'light');
+}
+
+function sortedBuckets(map: Map<string, LaneBucket>): LaneBucket[] {
+  return [...map.values()].sort((a, b) => a.lastSeq - b.lastSeq);
+}
+
+function addBudgetCall(map: Map<string, LaneBucket>, event: BudgetConsumed): LaneBucket {
+  const d = event.data;
+  const model = budgetModelOf(d);
+  const key = `${bucketKeyOf(d, event.seq)}|${model}`;
+  const bucket = map.get(key) ?? emptyBucket(key, event.seq, model);
+  const input = Number.isFinite(d.inputTokens) ? Math.max(0, d.inputTokens) : 0;
+  const hit = Number.isFinite(d.cacheHitTokens) ? Math.max(0, Math.min(d.cacheHitTokens, input)) : 0;
+  bucket.hit += hit;
+  bucket.miss += Number.isFinite(d.cacheMissTokens) ? Math.max(0, d.cacheMissTokens) : 0;
+  bucket.input += input;
+  bucket.output += Number.isFinite(d.outputTokens) ? Math.max(0, d.outputTokens) : 0;
+  bucket.retries += Number.isFinite(d.retryCount) ? Math.max(0, d.retryCount) : 0;
+  bucket.calls += 1;
+  bucket.maxInput = Math.max(bucket.maxInput, input);
+  if (hit > 0) {
+    if (bucket.positiveHits === 0) bucket.fixedHit = hit;
+    else if (hit !== bucket.fixedHit) bucket.fixedHit = -1;
+    bucket.positiveHits += 1;
+  }
+  bucket.reasoningCalls += (Number.isFinite(d.reasoningTokens) ? (d.reasoningTokens ?? 0) : 0) > 0 ? 1 : 0;
+  addDistinct(bucket.renderVersions, d.context?.renderVersion);
+  addDistinct(bucket.historyHeads, d.context?.history?.headHash);
+  if (event.seq >= bucket.lastSeq) {
+    bucket.lastSeq = event.seq;
+    bucket.tsMs = tsMsOf(event.ts);
+  }
+  map.set(key, bucket);
+  return bucket;
+}
+
 /**
  * 把事件流折成"**两条 lane 各自**的每一档样本"（各按 `lastSeq` 升序）。**一趟遍历出两条 lane**
  * ——不是洁癖：`web/server.ts` 的总览页**每十秒**被拉一次（`buildDashboard` 的注释），
@@ -314,45 +361,11 @@ function addDistinct(list: string[], value: string | undefined): void {
  *   · **桶按 `lane|model` 分**（2026-10-26，文件头 ①）：同一轮里换了模型就是两个桶。
  */
 function collectLanes(events: readonly AppEvent[]): Record<ModelLane, LaneBucket[]> {
-  const maps: Record<ModelLane, Map<string, LaneBucket>> = {
-    heavy: new Map<string, LaneBucket>(),
-    light: new Map<string, LaneBucket>(),
-  };
+  const maps = emptyLanes();
   for (const event of events) {
-    if (event.type !== 'budget/consumed') continue;
-    if (event.parentCallId !== undefined) continue;
-    const d = event.data;
-    const byKey = maps[d.lane];
-    if (byKey === undefined) continue;
-    // 模型是**桶的一部分**（文件头 ①）：换模型即换一本账，新旧模型不许混进同一个窗口。
-    // 老日志缺 `model` 的按 `'unknown'` 归（不猜成某一档；它们自成一桶，混不进任何真模型）。
-    const model = typeof d.model === 'string' && d.model !== '' ? d.model : 'unknown';
-    const key = `${bucketKeyOf(d, event.seq)}|${model}`;
-    const bucket = byKey.get(key) ?? emptyBucket(key, event.seq, model);
-    const input = Number.isFinite(d.inputTokens) ? Math.max(0, d.inputTokens) : 0;
-    const hit = Number.isFinite(d.cacheHitTokens) ? Math.max(0, Math.min(d.cacheHitTokens, input)) : 0;
-    const miss = Number.isFinite(d.cacheMissTokens) ? Math.max(0, d.cacheMissTokens) : 0;
-    const output = Number.isFinite(d.outputTokens) ? Math.max(0, d.outputTokens) : 0;
-    bucket.hit += hit;
-    bucket.miss += miss;
-    bucket.input += input;
-    bucket.output += output;
-    bucket.retries += Number.isFinite(d.retryCount) ? Math.max(0, d.retryCount) : 0;
-    bucket.calls += 1;
-    bucket.hits.push(hit);
-    bucket.inputs.push(input);
-    bucket.reasoningCalls += (Number.isFinite(d.reasoningTokens) ? (d.reasoningTokens ?? 0) : 0) > 0 ? 1 : 0;
-    addDistinct(bucket.renderVersions, d.context?.renderVersion);
-    addDistinct(bucket.historyHeads, d.context?.history?.headHash);
-    if (event.seq >= bucket.lastSeq) {
-      bucket.lastSeq = event.seq;
-      bucket.tsMs = tsMsOf(event.ts);
-    }
-    byKey.set(key, bucket);
+    if (belongsToCacheLane(event)) addBudgetCall(maps[event.data.lane], event);
   }
-  const sorted = (map: Map<string, LaneBucket>): LaneBucket[] =>
-    [...map.values()].sort((a, b) => a.lastSeq - b.lastSeq);
-  return { heavy: sorted(maps.heavy), light: sorted(maps.light) };
+  return { heavy: sortedBuckets(maps.heavy), light: sortedBuckets(maps.light) };
 }
 
 /** 一对 (命中, 未命中) 的未命中率；分母为 0 ⇒ null（算不出来，不拿 0 冒充） */
@@ -386,12 +399,11 @@ export function cacheCaliberOf(window: readonly LaneBucket[]): CacheCaliber {
   if (!(inputTotal > 0)) return 'reported';
   const hitTotal = window.reduce((sum, bucket) => sum + bucket.hit, 0);
   if (hitTotal === 0) return 'zero-hit';
-  const nonzero = window.flatMap(bucket => bucket.hits).filter(hit => hit > 0);
-  if (nonzero.length < 2) return 'reported';
-  const fixed = nonzero[0];
-  if (fixed === undefined) return 'reported';
-  if (!nonzero.every(hit => hit === fixed)) return 'reported';
-  const maxInput = Math.max(...window.flatMap(bucket => bucket.inputs));
+  const nonzero = window.filter(bucket => bucket.positiveHits > 0);
+  if (nonzero.reduce((sum, bucket) => sum + bucket.positiveHits, 0) < 2) return 'reported';
+  const fixed = nonzero[0]?.fixedHit ?? -1;
+  if (fixed <= 0 || !nonzero.every(bucket => bucket.fixedHit === fixed)) return 'reported';
+  const maxInput = Math.max(...window.map(bucket => bucket.maxInput));
   // 常数命中量连最大一拍输入的四分之一都不到 ⇒ 它不是"这段前缀命中了"，是端点报的一个死数
   if (!(fixed * 4 <= maxInput)) return 'reported';
   return 'fixed-hit';
@@ -401,6 +413,21 @@ export function cacheCaliberOf(window: readonly LaneBucket[]): CacheCaliber {
 interface EstimatedSample {
   hit: number;
   miss: number;
+}
+
+function addEstimate(
+  out: Map<string, EstimatedSample>,
+  key: string,
+  tokens: number,
+  previous: ContextBreakdown | null,
+  context: ContextBreakdown,
+): void {
+  const input = Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
+  const hit = previous === null ? 0 : Math.min(input, Math.max(0, estimatePrefixHitOf(previous, context)));
+  const sample = out.get(key) ?? { hit: 0, miss: 0 };
+  sample.hit += hit;
+  sample.miss += Math.max(0, input - hit);
+  out.set(key, sample);
 }
 
 /**
@@ -429,24 +456,18 @@ export function estimateByBucketOf(input: {
     if (event.parentCallId !== undefined) continue;
     const d = event.data;
     if (d.lane !== input.lane) continue;
-    const model = typeof d.model === 'string' && d.model !== '' ? d.model : 'unknown';
+    const model = budgetModelOf(d);
     if (model !== input.model) continue;
     const context = d.context;
     if (context === undefined) continue;
-    const at = Number.isFinite(d.inputTokens) ? Math.max(0, d.inputTokens) : 0;
-    const estimated = previous === null ? 0 : Math.min(at, Math.max(0, estimatePrefixHitOf(previous, context)));
+    addEstimate(out, `${bucketKeyOf(d, event.seq)}|${model}`, d.inputTokens, previous, context);
     previous = context;
-    const key = `${bucketKeyOf(d, event.seq)}|${model}`;
-    const sample = out.get(key) ?? { hit: 0, miss: 0 };
-    sample.hit += estimated;
-    sample.miss += Math.max(0, at - estimated);
-    out.set(key, sample);
   }
   return out;
 }
 
 /** 一档在某一口径下的 (hit, miss)：供方原值，或自算值（自算缺这一档 ⇒ 全按未命中，保守） */
-function hitMissOf(bucket: LaneBucket, estimates: Map<string, EstimatedSample> | null): EstimatedSample {
+function hitMissOf(bucket: LaneBucket, estimates: ReadonlyMap<string, EstimatedSample> | null): EstimatedSample {
   if (estimates === null) return { hit: bucket.hit, miss: bucket.miss };
   const sample = estimates.get(bucket.key);
   if (sample === undefined) return { hit: 0, miss: bucket.input };
@@ -544,16 +565,19 @@ function round4(value: number): number {
  *   · 边界取 `(窗口前一条的 lastSeq, 窗口末条的 lastSeq]`——与 `budget/consumed` 的口径同源
  *     （窗口是"最近 20 档"，而这一条就是那 20 档之间的账）。
  */
+function isEviction(event: AppEvent): boolean {
+  return event.type === 'model/reasoning-echo' && event.data.kind === 'reasoning_echo_prune'
+    && (event.data.dropped ?? []).some(entry => entry.why === 'maxTotalChars');
+}
+
 function evictedInWindow(
   events: readonly AppEvent[],
   fromSeqExclusive: number,
   toSeqInclusive: number,
 ): boolean {
   for (const event of events) {
-    if (event.type !== 'model/reasoning-echo') continue;
-    if (event.data.kind !== 'reasoning_echo_prune') continue;
     if (event.seq <= fromSeqExclusive || event.seq > toSeqInclusive) continue;
-    if ((event.data.dropped ?? []).some(entry => entry.why === 'maxTotalChars')) return true;
+    if (isEviction(event)) return true;
   }
   return false;
 }
@@ -616,7 +640,7 @@ export function topContributorOf(
  */
 export function planCacheAlert(signals: CacheAlertSignals): CacheAlertVerdict {
   const { events, lane, nowMs, respectDedupe } = signals;
-  return verdictOf(lane, collectLanes(events)[lane], events, nowMs, respectDedupe);
+  return verdictOf(lane, collectLanes(events)[lane], eventEvidence(events, lane), nowMs, respectDedupe);
 }
 
 /**
@@ -632,8 +656,176 @@ export function planCacheAlerts(input: {
   respectDedupe: boolean;
 }): CacheAlertVerdict[] {
   const lanes = collectLanes(input.events);
-  return (['heavy', 'light'] as const).map(lane =>
-    verdictOf(lane, lanes[lane], input.events, input.nowMs, input.respectDedupe));
+  return CACHE_ALERT_LANES.map(lane =>
+    verdictOf(lane, lanes[lane], eventEvidence(input.events, lane), input.nowMs, input.respectDedupe));
+}
+
+type CacheAlertKey = Pick<CacheAlertPayload, 'lane' | 'renderVersion' | 'missRatioBand'>;
+
+interface CacheAlertEvidence {
+  evicted(fromSeq: number, toSeq: number): boolean;
+  estimates(model: string): ReadonlyMap<string, EstimatedSample>;
+  alreadyReported(reading: CacheAlertKey, nowMs: number): boolean;
+}
+
+function eventEvidence(events: readonly AppEvent[], lane: ModelLane): CacheAlertEvidence {
+  return {
+    evicted: (fromSeq, toSeq) => evictedInWindow(events, fromSeq, toSeq),
+    estimates: (model) => estimateByBucketOf({ events, lane, model }),
+    alreadyReported: (reading, nowMs) => alreadyReported(events, reading, nowMs),
+  };
+}
+
+const CACHE_ALERT_EVENT_TYPES = new Set(['budget/consumed', 'budget/cache-alert', 'model/reasoning-echo']);
+
+interface ModelEstimates {
+  previous: ContextBreakdown | null;
+  samples: Map<string, EstimatedSample>;
+  error?: unknown;
+}
+
+function alertKeyOf(alert: CacheAlertKey): string {
+  return JSON.stringify([alert.lane, alert.renderVersion, alert.missRatioBand]);
+}
+
+/**
+ * 一份日志的运行期读数。每日基线按最后一拍时间判，窗口按 seq 判；
+ * 模型沉寂超一天时也要保留其最近档和上一拍上下文，供以后切回。
+ */
+class CacheAlertJournal {
+  private throughSeq = 0;
+  private lanes = emptyLanes();
+  private estimates: Record<ModelLane, Map<string, ModelEstimates>> = { heavy: new Map(), light: new Map() };
+  private reportedAt = new Map<string, number>();
+  private largestTurn: Record<ModelLane, Map<string, number>> = { heavy: new Map(), light: new Map() };
+  private lastEviction = 0;
+  private evictionAtLastCall = { heavy: 0, light: 0 };
+  private prunedAt: number | null = null;
+  private pending: Promise<void> = Promise.resolve();
+
+  plan(log: EventLog, nowMs: number, respectDedupe: boolean): Promise<CacheAlertVerdict[]> {
+    const throughSeq = log.latestSeq();
+    const result = this.pending.then(async () => {
+      if (this.prunedAt !== null && (!(nowMs >= this.prunedAt))) this.reset();
+      if (!(await this.sync(log, throughSeq))) {
+        // 一条迟到的调用可能重新打开已经裁过的旧 turn 档。
+        this.reset();
+        await this.sync(log, throughSeq);
+      }
+      return CACHE_ALERT_LANES.map((lane) => verdictOf(
+        lane, this.keepRelevant(lane, nowMs), this.evidence(lane), nowMs, respectDedupe,
+      ));
+    });
+    this.pending = result.then(() => {}, () => {});
+    return result;
+  }
+
+  private reset(): void {
+    this.throughSeq = 0;
+    this.lanes = emptyLanes();
+    this.estimates = { heavy: new Map(), light: new Map() };
+    this.reportedAt.clear();
+    this.largestTurn.heavy.clear();
+    this.largestTurn.light.clear();
+    this.lastEviction = 0;
+    this.evictionAtLastCall = { heavy: 0, light: 0 };
+    this.prunedAt = null;
+  }
+
+  private async sync(log: EventLog, throughSeq: number): Promise<boolean> {
+    if (throughSeq <= this.throughSeq) return true;
+    for await (const event of log.readRange(this.throughSeq + 1, { throughSeq, types: CACHE_ALERT_EVENT_TYPES })) {
+      if (belongsToCacheLane(event)) {
+        const { lane, turn, context, inputTokens } = event.data;
+        const model = budgetModelOf(event.data);
+        const key = `${bucketKeyOf(event.data, event.seq)}|${model}`;
+        const largest = this.largestTurn[lane].get(model) ?? 0;
+        if (this.prunedAt !== null && turn > 0 && turn <= largest && !this.lanes[lane].has(key)) {
+          return false;
+        }
+        if (turn > largest) this.largestTurn[lane].set(model, turn);
+        addBudgetCall(this.lanes[lane], event);
+        this.evictionAtLastCall[lane] = this.lastEviction;
+        if (context !== undefined) {
+          const estimate: ModelEstimates = this.estimates[lane].get(model) ?? { previous: null, samples: new Map() };
+          if (estimate.error === undefined) {
+            try {
+              addEstimate(estimate.samples, key, inputTokens, estimate.previous, context);
+              estimate.previous = context;
+            } catch (error) {
+              // 缺字段的老收据，只有在原判据需要自算时才会报错。
+              estimate.error = error;
+            }
+          }
+          this.estimates[lane].set(model, estimate);
+        }
+      } else if (event.type === 'budget/cache-alert') {
+        const at = tsMsOf(event.ts);
+        if (at !== null) {
+          const key = alertKeyOf(event.data);
+          this.reportedAt.set(key, Math.max(at, this.reportedAt.get(key) ?? Number.NEGATIVE_INFINITY));
+        }
+      } else if (isEviction(event)) {
+        this.lastEviction = event.seq;
+      }
+      this.throughSeq = event.seq;
+    }
+    this.throughSeq = throughSeq;
+    return true;
+  }
+
+  private keepRelevant(lane: ModelLane, nowMs: number): LaneBucket[] {
+    const sorted = sortedBuckets(this.lanes[lane]);
+    if (!Number.isFinite(nowMs)) return sorted;
+    const floorMs = nowMs - CACHE_ALERT_BASELINE_HOURS * 3_600_000;
+    const counts = new Map<string, number>();
+    const kept: LaneBucket[] = [];
+    for (const bucket of sorted.reverse()) {
+      const count = (counts.get(bucket.model) ?? 0) + 1;
+      counts.set(bucket.model, count);
+      // 多留一档：它的 seq 是驱逐归因窗口的左边界。
+      if (count <= CACHE_ALERT_WINDOW_TURNS + 1 || (bucket.tsMs !== null && bucket.tsMs >= floorMs)) {
+        kept.push(bucket);
+      } else {
+        this.lanes[lane].delete(bucket.key);
+        this.estimates[lane].get(bucket.model)?.samples.delete(bucket.key);
+        this.prunedAt = nowMs;
+      }
+    }
+    return kept.reverse();
+  }
+
+  private evidence(lane: ModelLane): CacheAlertEvidence {
+    return {
+      // 上界恒是该 lane 最后一条调用；它之后的驱逐留给下一次调用。
+      evicted: (fromSeq) => this.evictionAtLastCall[lane] > fromSeq,
+      estimates: (model) => {
+        const estimate = this.estimates[lane].get(model);
+        if (estimate?.error !== undefined) throw estimate.error;
+        return estimate?.samples ?? new Map();
+      },
+      alreadyReported: (reading, nowMs) => {
+        const at = this.reportedAt.get(alertKeyOf(reading));
+        return at !== undefined && !(at < nowMs - CACHE_ALERT_DEDUPE_HOURS * 3_600_000);
+      },
+    };
+  }
+}
+
+const cacheAlertJournals = new WeakMap<EventLog, CacheAlertJournal>();
+
+/** 从日志增量维护缓存告警所需的读数。 */
+export function planCacheAlertsFromLog(
+  log: EventLog,
+  nowMs: number,
+  respectDedupe: boolean,
+): Promise<CacheAlertVerdict[]> {
+  let journal = cacheAlertJournals.get(log);
+  if (journal === undefined) {
+    journal = new CacheAlertJournal();
+    cacheAlertJournals.set(log, journal);
+  }
+  return journal.plan(log, nowMs, respectDedupe);
 }
 
 /**
@@ -649,7 +841,7 @@ export function planCacheAlerts(input: {
 function verdictOf(
   lane: ModelLane,
   all: LaneBucket[],
-  events: readonly AppEvent[],
+  evidence: CacheAlertEvidence,
   nowMs: number,
   respectDedupe: boolean,
 ): CacheAlertVerdict {
@@ -668,7 +860,7 @@ function verdictOf(
   const windowPrevSeq = modelBuckets.length > window.length
     ? (modelBuckets[modelBuckets.length - window.length - 1]?.lastSeq ?? 0)
     : 0;
-  const evicted = evictedInWindow(events, windowPrevSeq, windowLastSeq);
+  const evicted = evidence.evicted(windowPrevSeq, windowLastSeq);
 
   // 基线段：**窗口之前**、**同一模型**、且落在 `nowMs` 往前 24 小时内的那些档（文件头 ③）
   const windowFirstSeq = window[0]?.lastSeq ?? 0;
@@ -692,7 +884,7 @@ function verdictOf(
   const windowCalls = sum(window, bucket => bucket.calls);
   const caliber: CacheCaliber = cacheCaliberOf(window);
   const estimates = caliber !== 'reported' && windowCalls >= CACHE_ALERT_MIN_TURNS
-    ? estimateByBucketOf({ events, lane, model })
+    ? evidence.estimates(model)
     : null;
 
   const windowSamples = window.map(bucket => hitMissOf(bucket, estimates));
@@ -758,7 +950,7 @@ function verdictOf(
   if (!ratioOutweighsBaseline(ratio, baselineMedian)) {
     return { fired: false, why: 'below-baseline', reading };
   }
-  if (respectDedupe && alreadyReported(events, reading, nowMs)) {
+  if (respectDedupe && evidence.alreadyReported(reading, nowMs)) {
     return { fired: false, why: 'duplicate', reading };
   }
   return { fired: true, why: 'fired', reading };

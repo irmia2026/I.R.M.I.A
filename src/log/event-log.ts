@@ -67,6 +67,7 @@ export const DEFAULT_INDEX_STRIDE = 1000;
 const SCAN_CHUNK_BYTES = 1 << 20;
 /** 随机访问的读取块：一次读满整个检查点区间（1000 条 ≈ 200KB），避免多次 readSync */
 const READ_CHUNK_BYTES = 1 << 18;
+const MAX_READ_FDS = 32;
 /** 缓冲兜底上限：调用方长期不 flush 时自动落盘，避免内存无界 */
 const BUFFER_FLUSH_BYTES = 8 * 1024 * 1024;
 const SHARD_NAME_RE = /^(\d{12})\.jsonl$/;
@@ -88,6 +89,7 @@ const MAX_REPAIRS_PER_SHARD = 8;
 interface Checkpoint {
   seq: number;
   offset: number;
+  lineIndex: number;
 }
 
 interface Shard {
@@ -100,11 +102,21 @@ interface Shard {
   /** 已写入事件条数 */
   lines: number;
   readonly checkpoints: Checkpoint[];
+  readonly types: Map<string, string>;
+  /** Canonical type references in line order, used to skip parsing irrelevant payloads. */
+  readonly eventTypes: string[];
 }
 
 interface LogLine {
   seq: number;
+  type: string;
   line: string;
+}
+
+export interface ReadRangeOptions {
+  throughSeq?: number;
+  types?: ReadonlySet<string>;
+  typePrefixes?: readonly string[];
 }
 
 function shardFileName(startSeq: number): string {
@@ -326,6 +338,8 @@ function scanShard(
 ): ShardScanResult {
   const size = statSync(path).size;
   const checkpoints: Checkpoint[] = [];
+  const types = new Map<string, string>();
+  const eventTypes: string[] = [];
   /** 本次已收下的 seq：重扫前要撤掉，否则会与自己撞"重复 seq" */
   const accepted: number[] = [];
   let lines = 0;
@@ -353,8 +367,9 @@ function scanShard(
     }
     seen.add(envelope.seq);
     accepted.push(envelope.seq);
+    rememberType(types, eventTypes, envelope.type);
     // 每 stride 条一个检查点，检查点必须落在行首，get() 才能从它开始顺序扫
-    if (lines % stride === 0) checkpoints.push({ seq: envelope.seq, offset: lineStart });
+    if (lines % stride === 0) checkpoints.push({ seq: envelope.seq, offset: lineStart, lineIndex: lines });
     if (firstSeq === null) firstSeq = envelope.seq;
     lines += 1;
     lastSeq = envelope.seq;
@@ -426,7 +441,7 @@ function scanShard(
         closeSync(truncateFd);
       }
       return {
-        shard: { file, path, startSeq, bytes: end, lines, checkpoints },
+        shard: { file, path, startSeq, bytes: end, lines, checkpoints, types, eventTypes },
         lastSeq,
         firstSeq,
         repaired: true,
@@ -436,12 +451,18 @@ function scanShard(
   }
 
   return {
-    shard: { file, path, startSeq, bytes: end, lines, checkpoints },
+    shard: { file, path, startSeq, bytes: end, lines, checkpoints, types, eventTypes },
     lastSeq,
     firstSeq,
     repaired: false,
     truncatedBytes: 0,
   };
+}
+
+function rememberType(types: Map<string, string>, eventTypes: string[], type: string): void {
+  const canonical = types.get(type);
+  if (canonical === undefined) types.set(type, type);
+  eventTypes.push(canonical ?? type);
 }
 
 // ──────────────────────────────── 写：一行一次、失败即回滚 ────────────────────────────────
@@ -518,6 +539,7 @@ export class EventLog {
   private lastAppendedSeq: number;
   private buffer: LogLine[] = [];
   private bufferBytes = 0;
+  private writtenBytes: number;
 
   private constructor(
     dir: string,
@@ -531,6 +553,7 @@ export class EventLog {
     this.shardMaxBytes = shardMaxBytes;
     this.indexStride = indexStride;
     this.shards = shards;
+    this.writtenBytes = shards.reduce((bytes, shard) => bytes + shard.bytes, 0);
     this.repair = repair;
     this.allocatedSeq = maxSeq;
     this.lastAppendedSeq = maxSeq;
@@ -606,6 +629,11 @@ export class EventLog {
     return this.lastAppendedSeq;
   }
 
+  /** Serialized bytes of the current log, including pending appends. */
+  sizeBytes(): number {
+    return this.writtenBytes + this.bufferBytes;
+  }
+
   /** 未落盘的缓冲条数 */
   get bufferedCount(): number {
     return this.buffer.length;
@@ -637,7 +665,7 @@ export class EventLog {
       throw new Error(`事件无法序列化为 JSON：${event.type}`, { cause });
     }
 
-    const entry: LogLine = { seq, line: `${json}\n` };
+    const entry: LogLine = { seq, type: event.type, line: `${json}\n` };
     if (options.sync) {
       // 承诺类：先把观测类缓冲落盘，保证文件内行序恒等于 seq 升序，再单独 fsync 本条。
       // 返回时该事件已在磁盘上，"写入后才允许改变外部世界"由此成立。
@@ -718,28 +746,34 @@ export class EventLog {
     this.flushBuffer();
     for (const shard of this.shards) {
       if (shard.lines === 0) continue;
-      yield* this.readShardLines(shard, 0);
+      yield* this.readShardLines(shard, null);
     }
   }
 
   /** 从 fromSeq 起流式读取：定位到分片与检查点后顺序扫，不从头全读 */
-  async *readRange(fromSeq: number): AsyncIterableIterator<AppEvent> {
+  async *readRange(fromSeq: number, options?: ReadRangeOptions): AsyncIterableIterator<AppEvent> {
     this.assertOpen();
     if (!Number.isInteger(fromSeq) || fromSeq < 1) {
       throw new Error(`readRange 的 fromSeq 必须是 >= 1 的整数，收到 ${fromSeq}`);
     }
     this.flushBuffer();
+    const throughSeq = options?.throughSeq;
+    const types = options?.types;
+    const prefixes = options?.typePrefixes;
+    const matchesType = types === undefined && prefixes === undefined
+      ? undefined
+      : (type: string) => types?.has(type) === true || prefixes?.some((prefix) => type.startsWith(prefix)) === true;
+    if (fromSeq > this.lastAppendedSeq || (throughSeq !== undefined && throughSeq < fromSeq)) return;
 
     const start = Math.max(this.shardIndexFor(fromSeq), 0);
     for (let i = start; i < this.shards.length; i++) {
       const shard = this.shards[i]!;
       if (shard.lines === 0) continue;
-      let offset = 0;
-      if (i === start) {
-        const checkpoint = lastCheckpointAtOrBefore(shard.checkpoints, fromSeq);
-        offset = checkpoint === null ? 0 : checkpoint.offset;
-      }
-      for await (const event of this.readShardLines(shard, offset)) {
+      if (throughSeq !== undefined && shard.startSeq > throughSeq) break;
+      if (matchesType !== undefined && ![...shard.types.keys()].some(matchesType)) continue;
+      const checkpoint = i === start ? lastCheckpointAtOrBefore(shard.checkpoints, fromSeq) : null;
+      for await (const event of this.readShardLines(shard, checkpoint, matchesType)) {
+        if (throughSeq !== undefined && event.seq > throughSeq) return;
         if (event.seq >= fromSeq) yield event;
       }
     }
@@ -807,7 +841,7 @@ export class EventLog {
     }
     const checkpointed = shard.lines % this.indexStride === 0;
     if (checkpointed) {
-      shard.checkpoints.push({ seq: entry.seq, offset: shard.bytes });
+      shard.checkpoints.push({ seq: entry.seq, offset: shard.bytes, lineIndex: shard.lines });
     }
     try {
       // `shard.bytes` 恒等于活动分片文件的字节数（本类只有一个写者），所以它就是回滚点
@@ -821,6 +855,8 @@ export class EventLog {
     }
     shard.bytes += bytes;
     shard.lines += 1;
+    rememberType(shard.types, shard.eventTypes, entry.type);
+    this.writtenBytes += bytes;
   }
 
   private rotate(nextSeq: number): Shard {
@@ -853,7 +889,7 @@ export class EventLog {
 
   private makeShard(startSeq: number): Shard {
     const file = shardFileName(startSeq);
-    return { file, path: join(this.dir, file), startSeq, bytes: 0, lines: 0, checkpoints: [] };
+    return { file, path: join(this.dir, file), startSeq, bytes: 0, lines: 0, checkpoints: [], types: new Map(), eventTypes: [] };
   }
 
   /** 用 O_EXCL 创建：分片文件名必须唯一，撞名说明分片被外部改写 */
@@ -874,7 +910,11 @@ export class EventLog {
 
   // ──────────────────────────────── 读路径 ────────────────────────────────
 
-  private async *readShardLines(shard: Shard, fromOffset: number): AsyncGenerator<AppEvent> {
+  private async *readShardLines(
+    shard: Shard, checkpoint: Checkpoint | null, matchesType?: (type: string) => boolean,
+  ): AsyncGenerator<AppEvent> {
+    const fromOffset = checkpoint?.offset ?? 0;
+    let lineIndex = checkpoint?.lineIndex ?? 0;
     const size = shard.bytes;
     if (fromOffset >= size) return;
     const stream = createReadStream(shard.path, { start: fromOffset, end: size - 1 });
@@ -882,6 +922,7 @@ export class EventLog {
     try {
       for await (const line of lines) {
         if (line.length === 0) continue;
+        if (matchesType !== undefined && !matchesType(shard.eventTypes[lineIndex++]!)) continue;
         yield parseEnvelope(line, `${shard.file} 流式读取`) as AppEvent;
       }
     } finally {
@@ -892,7 +933,16 @@ export class EventLog {
 
   private fdForRead(path: string): number {
     const cached = this.readFds.get(path);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      this.readFds.delete(path);
+      this.readFds.set(path, cached);
+      return cached;
+    }
+    if (this.readFds.size >= MAX_READ_FDS) {
+      const oldest = this.readFds.entries().next().value!;
+      closeSync(oldest[1]);
+      this.readFds.delete(oldest[0]);
+    }
     const fd = openSync(path, 'r');
     this.readFds.set(path, fd);
     return fd;

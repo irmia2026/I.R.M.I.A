@@ -704,6 +704,25 @@ void main() {
   });
 
   group('进度行：节流与不移位', () {
+    testWidgets('后台事件和思考进度只更新对应区域', (tester) async {
+      final api = await bootChat(tester, history: [herBubble(1, '你好')]);
+      final composer = find.byKey(const ValueKey('chat-composer-field'));
+      final before = tester.widget(composer);
+
+      await api.emit('budget/consumed');
+      await tester.pump();
+      expect(tester.widget(composer), same(before));
+
+      await api.emit('turn/start', <String, dynamic>{'turn': 1});
+      await _settle(tester);
+      expect(find.textContaining('思考中'), findsOneWidget);
+      expect(tester.widget(composer), same(before));
+
+      await api.emit('message/assistant', <String, dynamic>{'text': '新消息'});
+      await tester.pump();
+      expect(find.text('新消息'), findsOneWidget);
+    });
+
     testWidgets('节流：一帧内 30 条推理只放行少数几次，且字数最终不漏', (tester) async {
       final api = await bootChat(tester);
       await api.emit('turn/start', <String, dynamic>{'turn': 1});

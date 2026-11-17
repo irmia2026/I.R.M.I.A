@@ -276,9 +276,11 @@ export interface SelfOrganizeTrace {
  * 顺序：`events` 按 seq 升序（`eventView` 与 `log.readAll()` 都是这个顺序），所以
  * "最后一条"就是"最新的那条"。
  */
-export function selfOrganizeTraceOf(events: readonly AppEvent[]): SelfOrganizeTrace {
-  let idleBeats = 0;
-  let remindedCount = 0;
+export function selfOrganizeTraceOf(
+  events: readonly AppEvent[], previous?: SelfOrganizeTrace,
+): SelfOrganizeTrace {
+  let idleBeats = previous?.idleBeats ?? 0;
+  let remindedCount: number = previous?.remindedCount ?? 0;
   for (const event of events) {
     if (event.type === 'wake/heartbeat') {
       idleBeats += 1;
