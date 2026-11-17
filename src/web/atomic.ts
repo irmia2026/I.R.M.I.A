@@ -12,6 +12,7 @@
  * 这种幂等重放完全安全的写入是划算的：把偶发失败原样抛给界面，人会以为"这个功能坏了"。
  */
 
+import { randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -32,11 +33,11 @@ export function sleepSync(ms: number): void {
  * Windows 的 `MoveFileEx(REPLACE_EXISTING)` 在目标文件正被另一个重命名打开时会回 EPERM，
  * 而那个窗口比想象的长（杀软、索引器都会掺一脚）。
  */
-export function writeFileAtomicSync(path: string, text: string): void {
+export function writeFileAtomicSync(path: string, text: string, mode?: number): void {
   atomicWriteSeq += 1;
-  const tmp = `${path}.tmp.${process.pid}.${atomicWriteSeq}`;
+  const tmp = `${path}.tmp.${process.pid}.${mode === undefined ? atomicWriteSeq : randomUUID()}`;
   mkdirSync(dirname(path), { recursive: true });
-  const fd = openSync(tmp, 'w');
+  const fd = mode === undefined ? openSync(tmp, 'w') : openSync(tmp, 'wx', mode);
   try {
     writeSync(fd, text);
     fsyncSync(fd);

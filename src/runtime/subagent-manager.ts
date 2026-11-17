@@ -39,7 +39,7 @@ import { resolveAuthorizedProject, scopeToolToRoots } from './subagent-workspace
 import { SubagentSkillRuntime } from './subagent-skills.ts';
 import { createScopedPwshTool } from './subagent-shell.ts';
 import { createCodeTool } from './subagent-code.ts';
-import { createScreenshotTool } from './subagent-screenshot.ts';
+import { createScreenshotTool, hasLinuxScreenshotSession } from './subagent-screenshot.ts';
 import { SubagentMcpRuntime, type SubagentMcpOptions } from './subagent-mcp.ts';
 
 export type SubagentProfileId = 'general' | 'researcher' | 'worker' | 'scribe';
@@ -454,7 +454,7 @@ export class SubagentManager {
     await new SubagentPackageInstaller({dataDir: this.deps.dataDir}).install(profileId);
     const profile = this.profiles.get(profileId);
     if (profile !== null) {
-      if ((profile.requires?.pythonModules?.length ?? 0) > 0
+      if (process.platform === 'win32' && (profile.requires?.pythonModules?.length ?? 0) > 0
         && !existsSync(join(this.deps.dataDir, 'tools', 'python', 'python.exe'))
         && this.deps.ensurePython !== undefined) {
         try { await this.deps.ensurePython(); } catch { /* healthcheck 会如实报缺 */ }
@@ -933,7 +933,7 @@ export class SubagentManager {
     // worker 专用 codegraph 工具：只在有项目根时注入（没有项目就没有可索引的东西）。
     // 条件与 shell 同一个会话事实（session.projectRoot），不是“猜 profile 应该有什么”。
     const codePythonPath = this.deps.codePythonPath
-      ?? (existsSync(join(this.deps.dataDir, 'tools', 'python', 'python.exe'))
+      ?? (process.platform === 'win32' && existsSync(join(this.deps.dataDir, 'tools', 'python', 'python.exe'))
         ? join(this.deps.dataDir, 'tools', 'python', 'python.exe')
         : undefined);
     const codeTool = forkHead === null && profile.id === 'worker' && session.projectRoot !== undefined
@@ -945,6 +945,7 @@ export class SubagentManager {
       }) : null;
     // worker 专用 screenshot：只写会话 workspace，**没有 projectRoot 也能用**（纯设计任务）。
     const screenshotTool = forkHead === null && profile.id === 'worker'
+      && (process.platform === 'win32' || hasLinuxScreenshotSession() || this.deps.screenshotRunner !== undefined)
       ? createScreenshotTool({
         profileId: profile.id, workspace, agentId, emit: runtimeEmit,
         ...(this.deps.screenshotRunner === undefined ? {} : {runner: this.deps.screenshotRunner}),

@@ -15,6 +15,8 @@ export interface StickerEntry {
   sha256: string;
   /** 64-bit dHash, 16 lowercase hex; absent for legacy entries until backfilled. */
   phash?: string;
+  /** Pillow-rendered dHash, stored alongside legacy Windows hashes. */
+  phashPillow?: string;
   addedAt: string;
   rejectedAt?: string;
   tagSource: StickerTagSource;

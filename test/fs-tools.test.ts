@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
@@ -57,28 +57,13 @@ interface Harness {
   probes(): number;
 }
 
-/**
- * 假依赖管理器的探测路由：**测试要的是"路由到哪个可执行文件"，
- * 版本号用不到**（工具首行写的是探测认定的那个命令）。
- * 非 Windows 上 fake-deps-exe 真能跑（见 ensureFakeEngineScript），
- * Windows 上退回真实探测——那时"有引擎"的用例会显式跳过。
- */
 const FAKE_DEP_EXE = 'fake-deps-exe';
 
-let fakeEnginePath: string | null = null;
-
-/**
- * 造一个真能跑的假引擎脚本（POSIX）。为什么不用"指向一个不存在的文件"：
- * 那样 `spawn` 会 ENOENT，而"引擎可用"这条路径根本没被走到——
- * 用例会以"未返回结果"失败，看起来像实现坏了。假引擎必须在盘上、真能执行。
- */
-async function ensureFakeEngineScript(): Promise<void> {
-  if (process.platform === 'win32' || fakeEnginePath !== null) return;
-  const root = await tempDir('irmia-fake-engine-');
-  const path = join(root, 'fake-deps-exe');
-  await writeFile(path, '#!/bin/sh\nprintf "ripgrep 15.1.0 (fake)\\n"\n', 'utf8');
-  await chmod(path, 0o755);
-  fakeEnginePath = path;
+function fakeRipgrep(output: string) {
+  return async (_command: string, args: string[]) => ({
+    code: 0, stdout: args.includes('--version') ? 'ripgrep 15.1.0\n' : output,
+    stderr: '', failed: false, timedOut: false,
+  });
 }
 
 /**
@@ -122,7 +107,7 @@ function makeFakeDeps(
       return result.timedOut || result.code !== 0 ? null : { version: 'fake', path: FAKE_DEP_EXE };
     }
     if (name !== 'rg') return null;
-    const command = fakeEnginePath ?? 'rg';
+    const command = 'rg';
     const real = await runProcessDefault(command, args, { timeoutMs: 5000 });
     return real.code === 0 && /ripgrep/u.test(real.stdout) ? { version: 'fake', path: command } : null;
   };
@@ -728,23 +713,19 @@ describe('grep（条件注册）', () => {
   });
 
   it('有引擎时调用它并标注 engine（解析与形状都不变）', async () => {
-    await ensureFakeEngineScript();
-    if (fakeEnginePath === null) return; // Windows：没有可执行的假引擎，跳过（本机真装 rg 时由下面的用例覆盖）
     await withHarness(async (h) => {
-      await writeFile(join(h.root, 'a.ts'), 'const a = 1;\n// TODO fix\nconst b = 2;\n', 'utf8');
       const res = await h.tool('grep').handler({ pattern: 'TODO', context: 1 }, h.ctx);
       assert.match(res.content, /^engine: ripgrep/u);
       assert.match(res.content, /a\.ts:2:4/u);
       // 上下文行与匹配行同形：前一行带行号管道符，命中行带冒号
       assert.match(res.content, /1\| const a = 1;/u);
       assert.match(res.content, /2: \/\/ TODO fix/u);
-    });
+    }, { everythingPath: null }, { runProcess: fakeRipgrep('a.ts\u00001-const a = 1;\na.ts\u00002:// TODO fix\n') });
   });
 
   // Windows 上假引擎跑不起来（本仓库的开发机就是 Windows），这条用例退回真实 rg；
   // 它锁的是**解析形状**（--null 输出、上下文行、列号重算），与引擎真假无关
   it('本机真装 rg 时：解析形状与上面一致', async () => {
-    if (fakeEnginePath !== null) return; // 已经由假引擎覆盖过
     if (!await detectRipgrep()) return;
     await withHarness(async (h) => {
       await writeFile(join(h.root, 'a.ts'), 'const a = 1;\n// TODO fix\nconst b = 2;\n', 'utf8');
@@ -760,39 +741,33 @@ describe('grep（条件注册）', () => {
       await writeFile(join(h.root, 'a.txt'), 'hit\n', 'utf8');
       // rg 显式禁用（不探），es 自动探测且本机没有（一次探测）
       assert.equal(h.has('grep'), false);
-      assert.equal(h.has('find'), false);
+      assert.equal(h.has('find'), process.platform === 'linux');
       assert.equal(h.probes(), 1, '两件工具只该付一次探测（禁用的那件连探都不探）');
     }, { ripgrepPath: null });
   });
 
   it('非法正则被拒绝', async () => {
-    await ensureFakeEngineScript();
-    if (fakeEnginePath === null) return;
     await withHarness(async (h) => {
       const res = await h.tool('grep').handler({ pattern: '([' }, h.ctx);
       assert.equal(res.isError, true);
       assert.equal(res.error?.code, FS_ERROR_CODES.INVALID_ARGS);
-    });
+    }, { everythingPath: null }, { runProcess: fakeRipgrep('') });
   });
 
   it('max_results 截断并提示', async () => {
-    await ensureFakeEngineScript();
-    if (fakeEnginePath === null) return;
+    const hits = Array.from({ length: 20 }, (_, i) => `a.txt\u0000${i + 1}:hit\n`).join('');
     await withHarness(async (h) => {
-      await writeFile(join(h.root, 'a.txt'), Array.from({ length: 20 }, () => 'hit').join('\n'), 'utf8');
       const res = await h.tool('grep').handler({ pattern: 'hit', max_results: 3 }, h.ctx);
       assert.match(res.content, /\[已达上限 3/u);
-    });
+    }, { everythingPath: null }, { runProcess: fakeRipgrep(hits) });
   });
 
-  it('搜索范围越界被拒绝', async () => {
-    await ensureFakeEngineScript();
-    if (fakeEnginePath === null) return;
+  it('搜索路径不存在时返回路径错误', async () => {
     await withHarness(async (h) => {
-      const res = await h.tool('grep').handler({ pattern: 'x', path: '../' }, h.ctx);
+      const res = await h.tool('grep').handler({ pattern: 'x', path: 'missing' }, h.ctx);
       assert.equal(res.isError, true);
-      assert.equal(res.error?.code, FS_ERROR_CODES.PATH_DENIED);
-    });
+      assert.equal(res.error?.code, FS_ERROR_CODES.NOT_FOUND);
+    }, { everythingPath: null }, { runProcess: fakeRipgrep('') });
   });
 
   /**
@@ -849,7 +824,7 @@ describe('grep（条件注册）', () => {
 describe('find（条件注册）', () => {
   it('探测不到 es.exe 时**根本不注册**（旧实现里它永远在，且每次都 fallback）', async () => {
     await withHarness(async (h) => {
-      assert.equal(h.has('find'), false, '没有 es.exe 就不该有这件工具');
+      assert.equal(h.has('find'), process.platform === 'linux');
       // 同一台机器上其余工具一件都不能少：条件注册只针对这一件
       for (const name of ['safe_read', 'safe_edit']) {
         assert.equal(h.has(name), true, `${name} 不该被连坐`);
@@ -1881,18 +1856,16 @@ function stubDeps(available: { rg: boolean; es: boolean }): DepsManager {
 }
 
 describe('fsTools 注册', () => {
-  it('两个引擎都没有时注册五件（grep 与 find 都不在，read_blob 已砍），且三属性符合 design.md §4.18', async () => {
+  it('没有外部搜索引擎时保留基础文件工具和 Linux 内置 find', async () => {
     const table = new Map<string, ToolDefinition>();
-    // 显式注入"两个引擎都没有"的结论：这条用例要在**任意一台机器上**给出同一份清单
     const list = await fsTools(
       { register: (tool) => table.set(tool.name, tool) },
       { deps: stubDeps({ rg: false, es: false }) },
     );
-    // v42：`list_dir` 删掉之后常驻八件 → 七件；v64 再砍 `read_blob` ⇒ 六件（这里没装引擎，所以是五件）
     // （件数是**缓存前缀**的一部分：名单与顺序都被这条钉着，改动必须是有意的）
     assert.deepEqual(
       list.map((tool) => tool.name),
-      ['safe_read', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
+      ['safe_read', ...(process.platform === 'linux' ? ['find'] : []), 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
     );
 
     const expected: Record<string, [string, string, number]> = {
@@ -1932,7 +1905,7 @@ describe('fsTools 注册', () => {
     }
   });
 
-  it('只有 rg 时是六件：条件注册是逐件的，不互相连坐', async () => {
+  it('只有 rg 时按平台决定是否提供本机目录搜索', async () => {
     const table = new Map<string, ToolDefinition>();
     const list = await fsTools(
       { register: (tool) => table.set(tool.name, tool) },
@@ -1940,7 +1913,8 @@ describe('fsTools 注册', () => {
     );
     assert.deepEqual(
       list.map((tool) => tool.name),
-      ['safe_read', 'grep', 'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
+      ['safe_read', 'grep', ...(process.platform === 'linux' ? ['find'] : []),
+        'safe_edit', 'safe_write', 'safe_rollback', 'multi_edit'],
     );
   });
 
@@ -1954,9 +1928,9 @@ describe('fsTools 注册', () => {
     // 装配期还会打一条"路径别名指向哪"（P1）——这里只关心**条件注册**那两条，
     // 所以按内容筛，而不是按条数（条数会随装配期多说一句实话而变化）
     const missing = notes.filter((line) => /未注册/u.test(line));
-    assert.equal(missing.length, 2, `应当两条告知（rg 与 es 各一条），实际 ${JSON.stringify(notes)}`);
+    assert.equal(missing.length, process.platform === 'linux' ? 1 : 2);
     assert.match(missing[0] ?? '', /grep 未注册/u);
-    assert.match(missing[1] ?? '', /find 未注册/u);
+    assert.match(notes.join('\n'), process.platform === 'linux' ? /find 已注册/u : /find 未注册/u);
   });
 
   it('enableDestructive=false 时只注册只读工具（M4-4 的注册层前提）', async () => {

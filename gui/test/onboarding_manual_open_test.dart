@@ -207,7 +207,8 @@ void main() {
     final guide = find.byKey(const ValueKey('overview-config-guide'));
     expect(guide, findsOneWidget);
     expect(find.text(const ZhStrings().overviewConfigGuide), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, '重启前后端'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '重启前后端'),
+        Platform.isLinux ? findsNothing : findsOneWidget);
     expect(find.text(kOnboardingTitle), findsNothing, reason: '没点之前不该自己冒出来');
 
     await tester.tap(guide);

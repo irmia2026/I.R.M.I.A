@@ -3979,6 +3979,9 @@ class WebServerImpl implements WebServer {
       this.sendAuthError(res, 401, 'unauthorized', '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。');
       return;
     }
+    if (process.platform === 'linux' && process.env['IRMIA_SYSTEMD_MANAGED'] === '1') {
+      throw new HttpError(409, 'supervised-instance', '此实例由 systemd 管理，请用 systemctl stop irmia-agent 停止。');
+    }
     const via = viaLogout
       ? '刚刚注销的那张会话票'
       : (verdict.ok && verdict.via === 'legacy-token' ? '旧共享 token' : '有效会话');
@@ -5107,7 +5110,8 @@ class WebServerImpl implements WebServer {
       return;
     }
 
-    const before = (await host.status()).state;
+    const previous = await host.status();
+    const before = previous.state;
     let after: ManagedServiceStatus;
     let changed = false;
     let note: string;
@@ -5129,7 +5133,12 @@ class WebServerImpl implements WebServer {
           note = `当前状态：${PROTOCOL_STATE_TEXT[after.state] ?? after.state}`;
         }
       } else {
-        if (before === 'stopped' || before === 'not-installed') {
+        const externalLinux = process.platform === 'linux'
+          && previous.report.process.running && previous.report.process.managed === 'unmanaged';
+        if (externalLinux) {
+          after = previous;
+          note = '协议端由外部程序启动，请用该程序的停机方式。';
+        } else if (before === 'stopped' || before === 'not-installed') {
           // 已经没在跑就别再去调 stop()：服务层的 stop() 会把状态改写成 "stopped"，
           // 那会把 `not-installed` 这条**给人指路的诊断**（"先去下载"）一起抹掉。
           after = await host.status();
@@ -5700,6 +5709,7 @@ class WebServerImpl implements WebServer {
       kind: savedKind,
       dir: savedDir,
       autoStart: savedAutoStart,
+      oneClickInstallSupported: process.platform === 'win32',
       configSource: saved.fromDisk ? 'disk' : 'memory',
       // ② 运行期
       attached: host !== undefined,
@@ -6995,6 +7005,12 @@ class WebServerImpl implements WebServer {
         return;
       }
       case 'restart': {
+        if (process.platform !== 'win32') {
+          throw new HttpError(501, 'restart-not-supported',
+            process.platform === 'linux'
+              ? '由 systemd 管理的实例请运行 systemctl restart irmia-agent；前台实例请重新启动进程。'
+              : '请通过启动此实例的程序重启后端。');
+        }
         // 运行情况页那颗按钮（原来这里是"立即唤醒"，用户 2026-10-04 说那个没用了，改成重启）。
         //
         // ── **排他：同一时刻只允许一个拉起器在飞**（2026-10-11 加，判据只此一处）────────
@@ -10129,13 +10145,8 @@ private async frameworkNotesView(url: URL): Promise<Record<string, unknown>> {
  */
 function isUnderDir(child: string, dir: string): boolean {
   if (dir.trim() === '') return false;
-  const normalize = (p: string): string => {
-    const abs = resolve(p).replace(/[\\/]+$/u, '');
-    return process.platform === 'win32' ? abs.toLowerCase() : abs;
-  };
-  const c = normalize(child);
-  const d = normalize(dir);
-  return c === d || c.startsWith(`${d}\\`) || c.startsWith(`${d}/`);
+  const path = relative(resolve(dir), resolve(child));
+  return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
 }
 
 /**

@@ -7,7 +7,7 @@
   "private": true,
   "engines": { "node": ">=22" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-runtime-assets.mjs",
     "start": "node dist/main.js",
     "cli": "node dist/cli.js",
     "test": "node --test --test-concurrency=2 --experimental-strip-types \"test/*.test.ts\""

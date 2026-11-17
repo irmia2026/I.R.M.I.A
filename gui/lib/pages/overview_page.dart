@@ -5,6 +5,7 @@
 // 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
 // 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -255,7 +256,7 @@ class _OverviewPageState extends State<OverviewPage> {
                   _HeroCard(
                     state: widget.state,
                     stats: stats,
-                    onRestart: _restart,
+                    onRestart: Platform.isLinux ? null : _restart,
                     onConfigGuide: _openConfigGuide,
                     onGoto: _goto,
                   ),
@@ -292,7 +293,7 @@ class _OverviewPageState extends State<OverviewPage> {
                   ),
                   const SizedBox(height: 18),
                   _SectionTitle(IrmiaStrings.of(context).overviewSectionRecent),
-                  _RecentList(stats: stats, onWake: () => unawaited(_restart())),
+                  _RecentList(stats: stats, onWake: Platform.isLinux ? null : () => unawaited(_restart())),
                 ],
               ],
             ),
@@ -577,7 +578,7 @@ class _HeroCard extends StatelessWidget {
   });
   final AppState state;
   final Map<String, dynamic>? stats;
-  final Future<void> Function() onRestart;
+  final Future<void> Function()? onRestart;
 
   /// 「配置引导」：打开首次引导卡（`OnboardingHost` 那张），可随时关掉
   final VoidCallback onConfigGuide;
@@ -659,11 +660,13 @@ class _HeroCard extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: Space.x2),
-              FilledButton(
-                onPressed: () => unawaited(onRestart()),
-                child: Text(IrmiaStrings.of(context).trayRestart),
-              ),
+              if (onRestart case final restart?) ...[
+                const SizedBox(width: Space.x2),
+                FilledButton(
+                  onPressed: () => unawaited(restart()),
+                  child: Text(IrmiaStrings.of(context).trayRestart),
+                ),
+              ],
             ],
           ),
         ],
@@ -2649,7 +2652,7 @@ class _RecentList extends StatelessWidget {
   const _RecentList({required this.stats, required this.onWake});
 
   final Map<String, dynamic>? stats;
-  final VoidCallback onWake;
+  final VoidCallback? onWake;
 
   @override
   Widget build(BuildContext context) {

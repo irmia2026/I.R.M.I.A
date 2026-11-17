@@ -11,8 +11,9 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { writePillowImage } from '../media/pillow.ts';
 
 export const GIF_MATRIX_VERSION = 'v2';
 export const GIF_MATRIX_TOP_TEXT = '框架自动采样的gif动图表情，下为帧序列：';
@@ -37,8 +38,15 @@ export function gifMatrixPath(dataDir: string, key: string): string {
 /** 只认 GIF 字节头；扩展名与声明都不可信。 */
 export function isGifFile(path: string): boolean {
   try {
-    const bytes = readFileSync(path).subarray(0, 6);
-    return bytes.toString('ascii') === 'GIF87a' || bytes.toString('ascii') === 'GIF89a';
+    const fd = openSync(path, 'r');
+    try {
+      const bytes = Buffer.alloc(6);
+      if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
+      const header = bytes.toString('ascii');
+      return header === 'GIF87a' || header === 'GIF89a';
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return false;
   }
@@ -80,6 +88,15 @@ export async function ensureGifMatrix(
   const timeoutMs = options.timeoutMs ?? 20_000;
   const maxFrames = Math.max(2, Math.min(48, options.maxFrames ?? 24));
   const targetFrames = Math.max(2, Math.min(maxFrames, options.targetFrames ?? 12));
+  if (process.platform === 'linux') {
+    const result = await writePillowImage('gif', source, dest,
+      [String(Math.trunc(maxFrames)), String(Math.trunc(targetFrames)), GIF_MATRIX_TOP_TEXT],
+      timeoutMs, file => verifyJpeg(file).ok);
+    if ('error' in result) return { ok: false, reason: result.error };
+    const info = result.value as { static?: boolean; frames: number; selected: number; intervalMs: number };
+    return info.static === true ? { ok: false, reason: '单帧 GIF，无需转换' }
+      : { ok: true, path: dest, frames: info.frames, selected: info.selected, intervalMs: info.intervalMs };
+  }
   const b64Script = (text: string): string => Buffer.from(text, 'utf16le').toString('base64');
   const b64Path = (text: string): string => Buffer.from(text, 'utf8').toString('base64');
   const script = [

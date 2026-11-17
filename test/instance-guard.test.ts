@@ -295,12 +295,15 @@ test('④ 第二个**真进程**：启动被拒、退出码 1、文案是人话�
 
   const probe = spawnSync(
     process.execPath,
-    ['--experimental-strip-types', join(process.cwd(), 'src', 'main.ts')],
+    ['--experimental-strip-types', join(process.cwd(), 'src', 'main.ts'), '--config', dir],
     {
       encoding: 'utf8',
       timeout: 120_000,
       // 数据目录指到临时目录：一个字节都不碰真 data/
-      env: { ...process.env, IRMIA_DATA_DIR: dir },
+      env: {
+        ...process.env, IRMIA_DATA_DIR: dir, IRMIA_GUI_GUARD: 'off',
+        APPDATA: join(dir, 'app-data'), LOCALAPPDATA: join(dir, 'local-app-data'),
+      },
     },
   );
   const output = `${probe.stdout ?? ''}${probe.stderr ?? ''}`;

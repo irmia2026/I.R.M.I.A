@@ -18,10 +18,10 @@
  *     与"不整包停"的裁决相反）——它按自己的冷却重启。
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 
-import { killProcessTree } from '../process/kill-tree.ts';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { utf8ConsoleEnv } from '../util/bytes-text.ts';
 import {
   PLUGIN_HOST_METHODS, PLUGIN_NOTIFICATIONS, PLUGIN_PROTOCOL_VERSION, PLUGIN_RPC_ERRORS, PluginRpcError,
@@ -137,7 +137,6 @@ export class PluginProcess {
   private exited = false;
   private stderrRest = '';
   private spawnError: string | null = null;
-  private processGroup: number | null = null;
   private stderrWindowStarted = 0;
   private stderrWindowBytes = 0;
   private stderrWindowLines = 0;
@@ -175,10 +174,9 @@ export class PluginProcess {
     }
     this.state = 'starting';
     const command = this.buildCommand();
-    const child = spawn(command.file, command.args, {
+    const child = spawnManagedProcess(command.file, command.args, {
       cwd: this.target.rootDir,
       windowsHide: true,
-      detached: runtime.type === 'python' && process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...pluginProcessEnv(process.env, this.options.env),
@@ -189,7 +187,6 @@ export class PluginProcess {
       },
     });
     this.child = child;
-    if (runtime.type === 'python' && process.platform !== 'win32') this.processGroup = child.pid ?? null;
     this.attach(child);
 
     try {
@@ -261,14 +258,7 @@ export class PluginProcess {
   private killNow(reason: string): void {
     if (this.child === null) return;
     this.requestedReason = reason;
-    this.killGroup();
     killProcessTree(this.child, { forceTree: true });
-  }
-
-  private killGroup(): void {
-    // Only the PGID created by our detached spawn is ever targeted.
-    if (this.processGroup === null) return;
-    try { process.kill(-this.processGroup, 'SIGKILL'); } catch { /* group already empty */ }
   }
 
   private buildCommand(): { file: string; args: string[] } {
@@ -529,8 +519,6 @@ export class PluginProcess {
 
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.exited) return;
-    this.killGroup();
-    this.processGroup = null;
     this.flushStderrDrops();
     this.exited = true;
     const requested = this.requestedReason !== null;

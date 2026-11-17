@@ -16,7 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { defaultConfig } from '../src/config/config.ts';
@@ -34,6 +34,11 @@ import { startWebServer, type WebServer } from '../src/web/server.ts';
 import { tempDirSync } from './helpers/temp-dirs.ts';
 
 const NOW = (): Date => new Date('2026-10-26T10:00:00.000Z');
+const root = process.platform === 'win32' ? 'D:\\agent' : '/tmp/验收 实例';
+const dataDir = join(root, 'data');
+const otherDataDir = join(root, 'instances', 'qa-a');
+const installRoot = join(root, 'app');
+const mainEntry = join(installRoot, 'dist', 'main.js');
 
 /** 一份"另一台实例"的条目（用来看"别人的条目有没有被弄丢"） */
 function 别人那条(overrides: Partial<InstanceRecord> = {}): InstanceRecord {
@@ -112,12 +117,12 @@ test('② upsert 新增：字段齐全，name 用候选（空则目录末段）�
     path,
     id: '127.0.0.1:7788#9d1a89b00db1365b',
     name: '伊尔弥亚',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 58888,
     nodeExe: 'D:\\agent\\tools\\node\\node.exe',
-    entry: 'D:\\agent\\app\\dist\\main.js',
+    entry: mainEntry,
     isDefault: true,
     now: NOW,
     out: (line) => lines.push(line),
@@ -141,7 +146,7 @@ test('② upsert 新增：字段齐全，name 用候选（空则目录末段）�
     path,
     id: '127.0.0.1:7789#ffff',
     name: '   ',
-    dataDir: 'D:\\agent\\instances\\qa-a',
+    dataDir: otherDataDir,
     host: '127.0.0.1',
     port: 7789,
     pid: 1,
@@ -152,7 +157,7 @@ test('② upsert 新增：字段齐全，name 用候选（空则目录末段）�
   });
   assert.equal(other!.name, 'qa-a', '取不到名字就用数据目录末段');
   assert.equal(other!.nameSource, 'dir', '空名字 ⇒ 一定是目录末段（不用调用方说）');
-  assert.equal(fallbackInstanceName('D:\\agent\\data\\'), 'data');
+  assert.equal(fallbackInstanceName(dataDir + sep), 'data');
 });
 
 test('②b upsert 已有：**不覆盖 name / createdAt / isDefault**，只更新 pid/port/时刻', () => {
@@ -162,7 +167,7 @@ test('②b upsert 已有：**不覆盖 name / createdAt / isDefault**，只更�
     path,
     id: '127.0.0.1:7788#hash',
     name: '伊尔弥亚',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 111,
@@ -176,7 +181,7 @@ test('②b upsert 已有：**不覆盖 name / createdAt / isDefault**，只更�
     path,
     id: '127.0.0.1:7790#hash',
     name: '别的名字',
-    dataDir: 'D:\\agent\\data\\',
+    dataDir: dataDir + sep,
     host: '127.0.0.1',
     port: 7790,
     pid: 222,
@@ -208,7 +213,7 @@ test('②c 只写自己那条：预置别人的条目，upsert 之后别人一�
     path,
     id: '127.0.0.1:7788#mine',
     name: '我的',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 999,
@@ -233,7 +238,7 @@ test('②d 坏文件：upsert 先把它改名成 `.bad` 留证据，再按空表
     path,
     id: '127.0.0.1:7788#mine',
     name: '我的',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 7,
@@ -261,7 +266,7 @@ test('②e 陈旧锁：上一个持有者死了（mtime 很老）⇒ 直接接�
     path,
     id: '127.0.0.1:7788#mine',
     name: '我的',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 7,
@@ -285,7 +290,7 @@ test('③ 退出：pid 清 0（条目还在）；pid 换用户了两个字节都
     path,
     id: '127.0.0.1:7788#mine',
     name: '我的',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 777,
@@ -296,25 +301,25 @@ test('③ 退出：pid 清 0（条目还在）；pid 换用户了两个字节都
   });
 
   // 就绪时刻：pid 是自己才写
-  markInstanceReady({ path, dataDir: 'D:\\agent\\data', pid: 777, now: () => new Date('2026-10-26T10:00:30.000Z') });
-  const ready = read(path).instances.find((item) => item.dataDir === 'D:\\agent\\data')!;
+  markInstanceReady({ path, dataDir, pid: 777, now: () => new Date('2026-10-26T10:00:30.000Z') });
+  const ready = read(path).instances.find((item) => item.dataDir === dataDir)!;
   assert.equal(ready.lastReadyAt, '2026-10-26T10:00:30.000Z');
-  markInstanceReady({ path, dataDir: 'D:\\agent\\data', pid: 888, now: () => new Date('2026-10-26T11:00:00.000Z') });
-  assert.equal(read(path).instances.find((item) => item.dataDir === 'D:\\agent\\data')!.lastReadyAt,
+  markInstanceReady({ path, dataDir, pid: 888, now: () => new Date('2026-10-26T11:00:00.000Z') });
+  assert.equal(read(path).instances.find((item) => item.dataDir === dataDir)!.lastReadyAt,
     '2026-10-26T10:00:30.000Z', 'pid 不是自己就不许拿旧时刻盖上去');
 
   // 别人的 pid 不同 ⇒ 清 0 这一下不许生效
-  assert.equal(markInstanceStopped({ path, dataDir: 'D:\\agent\\data', pid: 999 }), false);
-  assert.equal(read(path).instances.find((item) => item.dataDir === 'D:\\agent\\data')!.pid, 777);
+  assert.equal(markInstanceStopped({ path, dataDir, pid: 999 }), false);
+  assert.equal(read(path).instances.find((item) => item.dataDir === dataDir)!.pid, 777);
 
   // 自己那份 ⇒ pid 清 0，条目还在，别人的那条照旧
   const lines: string[] = [];
   assert.equal(markInstanceStopped({
-    path, dataDir: 'D:\\agent\\data', pid: 777, out: (line) => lines.push(line),
+    path, dataDir, pid: 777, out: (line) => lines.push(line),
   }), true);
   const file = read(path);
   assert.equal(file.instances.length, 2, '退出**不删条目**（它是"这台机器上有过哪些实例"的记忆）');
-  assert.equal(file.instances.find((item) => item.dataDir === 'D:\\agent\\data')!.pid, 0);
+  assert.equal(file.instances.find((item) => item.dataDir === dataDir)!.pid, 0);
   assert.equal(file.instances[0]!.pid, 4321, '别人的 pid 不许被清');
 });
 
@@ -394,9 +399,9 @@ test('④c 名字③（用户口径）：**都没有** ⇒ 目录末段（nameSo
   const record = upsertRunningInstance({
     path,
     id: '127.0.0.1:7788#namedir',
-    name: fallbackInstanceName('D:\\agent\\data'), // 调用方解不出名字时就是这么传的
+    name: fallbackInstanceName(dataDir), // 调用方解不出名字时就是这么传的
     nameSource: 'dir',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 11,
@@ -407,8 +412,8 @@ test('④c 名字③（用户口径）：**都没有** ⇒ 目录末段（nameSo
   });
   assert.equal(record!.name, 'data', '认不出名字 ⇒ 目录末段');
   assert.equal(record!.nameSource, 'dir');
-  assert.equal(fallbackInstanceName('D:\\agent\\data\\'), 'data');
-  assert.equal(fallbackInstanceName('D:\\agent\\instances\\qa-a'), 'qa-a');
+  assert.equal(fallbackInstanceName(dataDir + sep), 'data');
+  assert.equal(fallbackInstanceName(otherDataDir), 'qa-a');
 });
 
 test('④d 名字④（用户口径）：已有 **manual** 名字不被启动覆盖（连 nameSource 都不改）', () => {
@@ -418,14 +423,14 @@ test('④d 名字④（用户口径）：已有 **manual** 名字不被启动覆
     id: '127.0.0.1:7788#manual',
     name: '用户给起的名字',
     nameSource: 'manual',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
   })]);
   const after = upsertRunningInstance({
     path,
     id: '127.0.0.1:7788#manual',
     name: '伊尔弥亚', // 这一次 IDENTITY 解出来了：也不许盖掉人工改过的
     nameSource: 'identity',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 22,
@@ -439,7 +444,7 @@ test('④d 名字④（用户口径）：已有 **manual** 名字不被启动覆
   // 第三次、第四次启动（连"目录末段"都不给）照样不动
   upsertRunningInstance({
     path, id: '127.0.0.1:7788#manual', name: 'data', nameSource: 'dir',
-    dataDir: 'D:\\agent\\data', host: '127.0.0.1', port: 7788, pid: 33,
+    dataDir, host: '127.0.0.1', port: 7788, pid: 33,
     nodeExe: 'n', entry: 'e', isDefault: true, now: NOW,
   });
   const file = read(path);
@@ -454,7 +459,7 @@ test('④e 名字⑤（用户口径）：旧条目 name=目录末段且有更好
   seed(path, [别人那条({
     id: '127.0.0.1:7788#upgrade',
     name: 'data',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
   })]);
   const lines: string[] = [];
   const first = upsertRunningInstance({
@@ -462,7 +467,7 @@ test('④e 名字⑤（用户口径）：旧条目 name=目录末段且有更好
     id: '127.0.0.1:7788#upgrade',
     name: '伊尔弥亚',
     nameSource: 'identity',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 44,
@@ -483,7 +488,7 @@ test('④e 名字⑤（用户口径）：旧条目 name=目录末段且有更好
     id: '127.0.0.1:7788#upgrade',
     name: '新名字',
     nameSource: 'identity',
-    dataDir: 'D:\\agent\\data',
+    dataDir,
     host: '127.0.0.1',
     port: 7788,
     pid: 55,
@@ -499,13 +504,13 @@ test('④e 名字⑤（用户口径）：旧条目 name=目录末段且有更好
   // 反面：旧条目 name=目录末段、但这一次也解不出名字 ⇒ 名字不动，只把来源补成 dir
   const dir2 = tempDirSync('irmia-instances-name-keepdir-');
   const path2 = join(dir2, INSTANCES_FILE_NAME);
-  seed(path2, [别人那条({ id: '127.0.0.1:7790#keep', name: 'qa-a', dataDir: 'D:\\agent\\instances\\qa-a' })]);
+  seed(path2, [别人那条({ id: '127.0.0.1:7790#keep', name: 'qa-a', dataDir: otherDataDir })]);
   const kept = upsertRunningInstance({
     path: path2,
     id: '127.0.0.1:7790#keep',
     name: 'qa-a',
     nameSource: 'dir',
-    dataDir: 'D:\\agent\\instances\\qa-a',
+    dataDir: otherDataDir,
     host: '127.0.0.1',
     port: 7790,
     pid: 66,
@@ -517,23 +522,23 @@ test('④e 名字⑤（用户口径）：旧条目 name=目录末段且有更好
   assert.equal(kept!.name, 'qa-a', '没有更好的名字就保持目录末段');
   assert.equal(kept!.nameSource, 'dir', '老条目缺的那一格补成事实');
   // nameSourceOf 的反推：老条目（没有这一格）按"名字是不是目录末段"判
-  assert.equal(nameSourceOf({ name: 'data', dataDir: 'D:\\agent\\data' }), 'dir');
-  assert.equal(nameSourceOf({ name: '伊尔弥亚', dataDir: 'D:\\agent\\data' }), 'identity');
-  assert.equal(nameSourceOf({ name: 'data', dataDir: 'D:\\agent\\data', nameSource: 'manual' }), 'manual');
+  assert.equal(nameSourceOf({ name: 'data', dataDir: dataDir }), 'dir');
+  assert.equal(nameSourceOf({ name: '伊尔弥亚', dataDir: dataDir }), 'identity');
+  assert.equal(nameSourceOf({ name: 'data', dataDir, nameSource: 'manual' }), 'manual');
 });
 
 test('④f 默认实例：安装根 config.json 写的那个 dataDir（本机现场）⇒ true', () => {
   // 本机部署形状：程序装在 `<安装根>\app`、数据在 `<数据根>\data`（config.json 里显式写着）
-  const entry = 'D:\\agent\\app\\dist\\main.js';
-  assert.equal(defaultDataDirOf({ entry, configDataDir: 'D:\\agent\\data' }), 'D:\\agent\\data');
-  assert.equal(isDefaultDataDir({ entry, dataDir: 'D:\\agent\\data', configDataDir: 'D:\\agent\\data' }), true);
-  // 大小写/尾部分隔符写法不同仍是同一个目录
-  assert.equal(isDefaultDataDir({ entry, dataDir: 'd:\\agent\\data\\', configDataDir: 'D:\\agent\\data' }), true);
+  const entry = mainEntry;
+  assert.equal(defaultDataDirOf({ entry, configDataDir: dataDir }), dataDir);
+  assert.equal(isDefaultDataDir({ entry, dataDir, configDataDir: dataDir }), true);
+  // 尾部分隔符不改变路径，大小写按平台处理。
+  assert.equal(isDefaultDataDir({ entry, dataDir: dataDir.toUpperCase() + sep, configDataDir: dataDir }), process.platform === 'win32');
   // 另起的实例（--data-dir 指向别处）⇒ 不是默认
-  assert.equal(isDefaultDataDir({ entry, dataDir: 'D:\\agent\\instances\\qa-a', configDataDir: 'D:\\agent\\data' }), false);
+  assert.equal(isDefaultDataDir({ entry, dataDir: otherDataDir, configDataDir: dataDir }), false);
   // 出厂布局：config 没写 dataDir ⇒ `<install>/data`
-  assert.equal(defaultDataDirOf({ entry, configDataDir: null }), join('D:\\agent\\app', 'data'));
-  assert.equal(isDefaultDataDir({ entry, dataDir: join('D:\\agent\\app', 'data'), configDataDir: null }), true);
+  assert.equal(defaultDataDirOf({ entry, configDataDir: null }), join(installRoot, 'data'));
+  assert.equal(isDefaultDataDir({ entry, dataDir: join(installRoot, 'data'), configDataDir: null }), true);
   // 判不出来 ⇒ 不给"默认"这个身份
   assert.equal(isDefaultDataDir({ entry: '', dataDir: 'D:\\x', configDataDir: null }), false);
 });

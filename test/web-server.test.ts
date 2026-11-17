@@ -2117,6 +2117,7 @@ function fakeDepsManager(
   input: { download?: Buffer; failDownload?: string } = {},
 ): DepsManager {
   return new DepsManager({
+    platform: 'win32',
     dataDir,
     probe: async (name) => {
       const exe = findExecutableInDir(
@@ -2699,7 +2700,7 @@ test('GET /api/framework-notes：没配到「已恢复」的告警照旧留着�
   assert.equal(bySeq.get(orphanRecovery.seq)?.['level'], 'info', '恢复通知的等级照旧是 info');
 });
 
-test('POST /api/commands/restart：带了盘上不存在的界面路径 ⇒ 当场拒绝，且事件里留下这次请求的值', async (t) => {
+test('POST /api/commands/restart：带了盘上不存在的界面路径 ⇒ 当场拒绝，且事件里留下这次请求的值', { skip: process.platform !== 'win32' }, async (t) => {
   const fx = await setup(t);
   // 用户 2026-10-05：「点了按钮没有任何日志痕迹，无法判断请求有没有带界面路径」。
   // 现在这条拒绝也是**有痕**的：事件里带着 guiExe 的值与"盘上不存在"这个事实。
@@ -2726,7 +2727,7 @@ test('POST /api/commands/restart：带了盘上不存在的界面路径 ⇒ 当�
   );
 });
 
-test('POST /api/commands/restart：已经有一个拉起器在飞 ⇒ 409 + 人话，且第二个一个字节都不动', async (t) => {
+test('POST /api/commands/restart：已经有一个拉起器在飞 ⇒ 409 + 人话，且第二个一个字节都不动', { skip: process.platform !== 'win32' }, async (t) => {
   const fx = await setup(t);
   // 用户 2026-10-11（判据与成因见 `docs/gui-guard.md` §5.2 成因 ②）：`chooseRestartPath` 只保证
   // "**一次**请求内部"三条路互斥；**两次**请求（连点两下 / 两个界面窗口各点一下）会各拉一个
@@ -2760,7 +2761,7 @@ test('POST /api/commands/restart：已经有一个拉起器在飞 ⇒ 409 + 人�
   assert.equal(existsSync(join(fx.dataDir, 'restart-worker.log')), false, '自重启那层同样一个都没起');
 });
 
-test('POST /api/commands/restart：拉起器干完了（留痕有 [结束]）或窗口过期 ⇒ 当场放行', async (t) => {
+test('POST /api/commands/restart：拉起器干完了（留痕有 [结束]）或窗口过期 ⇒ 当场放行', { skip: process.platform !== 'win32' }, async (t) => {
   // 排他**不是**一道"点过就锁死"的闸：解除的两条路都是实话——证据（它写了 `[结束]`）与时限。
   const fx = await setup(t);
   const armed = fx.server as unknown as { restartInFlightUntil: number; restartInFlightTraceSize: number };

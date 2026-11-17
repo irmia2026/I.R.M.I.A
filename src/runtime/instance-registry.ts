@@ -55,12 +55,13 @@
  * 界面判活走 `GET /api/instance`（真的问一句），端口文件是留给旧逻辑/拉起器的那一档。
  */
 
-import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { sleepSync, writeFileAtomicSync } from '../web/atomic.ts';
 // 路径比较（大小写 / 分隔符 / 尾部空格点的归一）只有一处实现：见 `tools/boundary.ts` 的文件头
 import { comparisonKey } from '../tools/boundary.ts';
+import { linuxRuntimeDirectory, linuxStateDirectory } from './linux-desktop-paths.ts';
 
 /** 文件名（界面那一半在 `gui/lib/instances.dart` 里按同一个名字读） */
 export const INSTANCES_FILE_NAME = 'instances.json';
@@ -95,6 +96,7 @@ export interface InstanceRecord {
   nodeExe: string;
   /** 入口脚本的绝对路径（`process.argv[1]`；界面的工作目录按它推安装根） */
   entry: string;
+  configPath?: string;
   createdAt: string;
   /** 最近一次 bind 成功的时刻 */
   lastStartedAt: string;
@@ -134,6 +136,10 @@ export function instancesFilePath(
   env: Record<string, string | undefined> = process.env,
   platform: string = process.platform,
 ): string | null {
+  if (platform === 'linux') {
+    const state = linuxStateDirectory(env);
+    return state === null || linuxRuntimeDirectory(env) === null ? null : join(state, INSTANCES_FILE_NAME);
+  }
   if (platform !== 'win32') return null;
   const appData = (env['APPDATA'] ?? '').trim();
   if (appData === '') return null;
@@ -171,6 +177,7 @@ function parseRecord(raw: unknown): InstanceRecord | null {
     pid: Math.max(0, number('pid')),
     nodeExe: text('nodeExe').trim(),
     entry: text('entry').trim(),
+    ...(text('configPath').trim() === '' ? {} : { configPath: text('configPath') }),
     createdAt: text('createdAt'),
     lastStartedAt: text('lastStartedAt'),
     lastReadyAt: text('lastReadyAt'),
@@ -308,6 +315,7 @@ function mutateRegistry<T>(
   out: ((line: string) => void) | undefined,
   backupBad: (path: string) => void,
 ): T {
+  if (process.platform === 'linux') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   return withRegistryLock(path, () => {
     const read = readInstancesFile(path);
     if (read.recovered) {
@@ -318,7 +326,7 @@ function mutateRegistry<T>(
     }
     const outcome = mutate(read.file, read.recovered);
     if (outcome.keep) {
-      writeFileAtomicSync(path, `${JSON.stringify(read.file, null, 2)}\n`);
+      writeFileAtomicSync(path, `${JSON.stringify(read.file, null, 2)}\n`, process.platform === 'linux' ? 0o600 : undefined);
     }
     return outcome.result;
   });
@@ -354,6 +362,7 @@ export interface UpsertInstanceInput {
   pid: number;
   nodeExe: string;
   entry: string;
+  configPath?: string;
   isDefault: boolean;
   now?: () => Date;
   out?: (line: string) => void;
@@ -399,6 +408,7 @@ export function upsertRunningInstance(input: UpsertInstanceInput): InstanceRecor
         existing.pid = input.pid;
         existing.nodeExe = input.nodeExe;
         existing.entry = input.entry;
+        if (input.configPath !== undefined) existing.configPath = input.configPath;
         existing.lastStartedAt = stamp;
         // createdAt / isDefault **刻意不更新**：见文件头
         const source = nameSourceOf(existing);
@@ -436,6 +446,7 @@ export function upsertRunningInstance(input: UpsertInstanceInput): InstanceRecor
         pid: input.pid,
         nodeExe: input.nodeExe,
         entry: input.entry,
+        ...(input.configPath === undefined ? {} : { configPath: input.configPath }),
         createdAt: stamp,
         lastStartedAt: stamp,
         lastReadyAt: '',

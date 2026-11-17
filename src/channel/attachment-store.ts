@@ -27,6 +27,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { writePillowImage } from '../media/pillow.ts';
 
 import type { RenderImageRef } from '../model/render.ts';
 import { decodeText } from '../util/bytes-text.ts';
@@ -114,11 +115,12 @@ export interface ImageCompressResult {
   reason?: string;
 }
 
-let compressor: ImageCompressor = compressWithGdiPlus;
+const defaultCompressor: ImageCompressor = process.platform === 'linux' ? compressWithPillow : compressWithGdiPlus;
+let compressor: ImageCompressor = defaultCompressor;
 
 /** 测试注入点：传 null 恢复默认 */
 export function setImageCompressorForTest(fn: ImageCompressor | null): void {
-  compressor = fn ?? compressWithGdiPlus;
+  compressor = fn ?? defaultCompressor;
 }
 
 /**
@@ -213,6 +215,17 @@ function verifyCompressedProduct(dest: string): ImageCompressResult {
  * `export` 是给"真 PowerShell"的验收与反向用例用的：它是默认实现、不是注入点，
  * 用例里注入不了它（见 `_research/verify-ctx-compress.mts`）。
  */
+async function compressWithPillow(
+  source: string,
+  dest: string,
+  options: { maxEdge: number; quality: number; timeoutMs: number },
+): Promise<ImageCompressResult> {
+  const outcome = await writePillowImage('resize', source, dest,
+    [String(Math.trunc(options.maxEdge)), 'JPEG', String(Math.trunc(options.quality))],
+    options.timeoutMs, file => verifyCompressedProduct(file).ok);
+  return 'error' in outcome ? { ok: false, reason: outcome.error } : { ok: true };
+}
+
 export async function compressWithGdiPlus(
   source: string,
   dest: string,

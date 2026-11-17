@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -11,6 +13,7 @@ import 'i18n/strings_scope.dart';
 import 'shell/tray.dart';
 // 「关窗时收进托盘」这个界面偏好（`%APPDATA%/Irmia/ui-state.json`，键 close-to-tray）
 import 'ui_state.dart';
+import 'window_channel.dart';
 // 窗口状态留痕（`[win] focus/visibility/restore`）：与主 isolate 的 `[stall]` 拼在一起读
 import 'win_trace.dart';
 
@@ -71,7 +74,7 @@ Future<void> main() async {
   // 只有它开着（没被显式关掉）才拦关闭。读盘失败也按默认开处理（失败静默在 ui_state 里）
   // ——与上一版的取舍相反，理由与那两道保险写在文件头与 ui_state.dart 的 kCloseToTrayFlag 上。
   final closeToTrayEnabled = await restoreCloseToTray();
-  await windowManager.setPreventClose(closeToTrayEnabled);
+  await windowManager.setPreventClose(Platform.isLinux || closeToTrayEnabled);
   windowManager.addListener(_CloseToTray());
 
   // 语言：**只在这一处读系统 locale**（理由见 i18n/strings_scope.dart 顶部）。
@@ -98,9 +101,13 @@ Future<void> main() async {
 class _CloseToTray extends WindowListener {
   @override
   void onWindowClose() {
+    unawaited(_handleClose());
+  }
+
+  Future<void> _handleClose() async {
     // 偏好是开（出厂默认）就隐藏；显式关掉的走下面"退出界面"那一支。
     // 走到这儿的是"开关开着但窗口还是收到关闭事件"的兜底路径。
-    if (closeToTray.value && IrmiaTray.instance.installed) {
+    if (closeToTray.value && await IrmiaTray.instance.canHide()) {
       // 界面收起来，她不跟着走：agent 是独立进程，界面只是她的一个窗口
       // （`hide()` 不会回一个事件，所以这一下要自己说一声，见 win_trace.dart）
       WinTrace.instance.noteHidden();
@@ -115,7 +122,8 @@ class _CloseToTray extends WindowListener {
     // 后端保活（gui-guard）拿它把"用户主动关的"与"崩了/被杀了"分开——不写就会被
     // 当成崩溃拉回来，最多 6 次。⚠ 上面"收进托盘"那一支**不许**写（进程还在跑）。
     unawaited(markGuiQuit('window-close'));
-    unawaited(windowManager.destroy());
+    if (Platform.isLinux) await IrmiaTray.instance.remove();
+    await WindowChannel.quit();
   }
 }
 

@@ -60,6 +60,7 @@ import 'theme.dart';
 import 'title_bar.dart';
 // 窗口状态留痕（`[win] focus/visibility/restore`）：与 `[stall]` 拼在一起才说得清现场
 import 'win_trace.dart';
+import 'window_channel.dart';
 // 更新检查（2026-10-22）：数据模型与两处界面（顶部提醒条 / 设置页那一块）共用同一份解析
 import 'update_check.dart';
 // toast（托盘那几句的落点）与 confirm（「退出全部」的确认框）
@@ -607,7 +608,7 @@ class _IrmiaAppState extends State<IrmiaApp> {
     WinTrace.instance.detach();
     await IrmiaTray.instance.remove();
     try {
-      await windowManager.destroy();
+      await WindowChannel.quit();
     } catch (err) {
       debugPrint('关窗失败：$err');
     }
@@ -1584,11 +1585,11 @@ class AppState extends ChangeNotifier {
     // ① 优雅停机；失败就退化为按端口强停（并如实记下来）
     final stop = await _stopBackendNow(port);
     // ② 等端口消失（≤20 秒）
-    final waited = await _awaitPortGone(port);
+    final waited = stop == 'still-running' ? 0 : await _awaitPortGone(port);
     _lifeLog('[life] close instance=$name stop=$stop waited=${waited}s token=kept');
     // ③ 记下"人停的"：看护脚本（计划任务）看到这个标记就不再自动拉起她
     //    （2026-10-28：没有它时，退出实例一分钟内后端又被拉起来，还触发了杀软）
-    markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'close-instance');
+    if (stop != 'still-running') markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'close-instance');
     // ③ 回选择页。只清**内存**里那张票与壳里的状态；盘上那一份是这条路的全部意义，留着。
     _resetForGate(withToken: true);
     gate = AuthGateKind.picker;
@@ -1617,6 +1618,10 @@ class AppState extends ChangeNotifier {
       );
       return 'graceful';
     } catch (err) {
+      if (Platform.isLinux) {
+        guiLog.write('[life] stop-instance was not confirmed port=$port error=$err');
+        return 'still-running';
+      }
       guiLog.write('[life] stop-instance failed port=$port error=$err -- falling back to kill-by-port');
       try {
         await instances.killPort(port);
@@ -1658,10 +1663,10 @@ class AppState extends ChangeNotifier {
     // ② 优雅停机；失败就退化为按 pid 强停（并如实记下来）
     final stop = await _stopBackendNow(port);
     // ③ 等端口消失（≤20 秒），再清本地凭据
-    final waited = await _awaitPortGone(port);
+    final waited = stop == 'still-running' ? 0 : await _awaitPortGone(port);
     _lifeLog('[life] logout instance=$name stop=$stop waited=${waited}s token=cleared');
     // 记下"人停的"：看护脚本看到标记就不再自动拉起（2026-10-28 那次报毒的直接诱因）
-    markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'logout');
+    if (stop != 'still-running') markBackendStoppedOnPurpose(known?.dataDir ?? knownDataDir, 'logout');
     // 盘上那一份**这一台**的凭据要清掉（"登出之后界面还能自己进去"才是真的问题）。
     // 先清文件、再清内存：反过来的话上面那次 `sessions.clear(key)` 就找不到 id 了。
     if (key != null) sessions.clear(key);
@@ -1850,6 +1855,15 @@ class AppState extends ChangeNotifier {
       guiLog.write('[life] pruned ghost instances=${ghosts.length}');
     }
     final running = <String, bool>{};
+    if (Platform.isLinux && entries.every((entry) => entry.port != backendPort)) {
+      final external = await instances.probe('127.0.0.1', backendPort);
+      if (external != null) {
+        entries.add(InstanceEntry(
+          id: external.id, name: external.name, dataDir: '', host: '127.0.0.1', port: backendPort,
+          pid: external.pid, nodeExe: '', entry: '', isDefault: external.isDefault,
+        ));
+      }
+    }
     // 逐条"本机有没有这一台的票"：与判活一起算完，页面那一帧就拿得到全部判据
     final tokens = <String, bool>{};
     for (final entry in entries) {

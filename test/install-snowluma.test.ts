@@ -186,8 +186,8 @@ describe('安装协议端 · 端到端（假 GitHub + 假下载 + 真 zip）', (
     const dataDir = tempDir();
     const outcome = await installSnowLuma({ dataDir, platform: 'linux', fetchText: async () => releaseJson('v1') });
     assert.equal(outcome.ok, false);
-    assert.match(outcome.detail, /只支持 Windows/);
-    assert.match(outcome.detail, /releases/, '要给出下载地址');
+    assert.match(outcome.detail, /已解压的 SnowLuma 安装目录/);
+    assert.match(outcome.detail, /OneBot 设置/);
   });
 });
 

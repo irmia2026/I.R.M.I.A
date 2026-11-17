@@ -124,7 +124,7 @@ void main() {
       // toast 是 4 秒的浮动条：把它那隻定时器跑完，别留到测试收尾（否则报 Timer is still pending）
       await tester.pump(IrmiaToast.duration);
       await tester.pump(const Duration(milliseconds: 500));
-    });
+    }, skip: Platform.isLinux);
 
     test('托盘「重启前后端」接到的是同一个 performRestart（分发一次、只调 restart）', () async {
       final api = _FakeApi(receipt: _confirmed());

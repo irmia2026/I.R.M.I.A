@@ -34,6 +34,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'desktop_paths.dart';
 
 import 'backend_stop_marker.dart';
 import 'win_spawn.dart';
@@ -161,6 +162,7 @@ String instancesFilePath({Map<String, String>? env}) {
   final override = _instancesFileOverride;
   if (override != null && override.isNotEmpty) return override;
   final environment = env ?? Platform.environment;
+  if (Platform.isLinux) return '${guiStateDirectory(environment)}/$kInstancesFileName';
   final appData = (environment['APPDATA'] ?? '').trim();
   final root = appData.isEmpty ? Directory.systemTemp.path : appData;
   return '$root${Platform.pathSeparator}Irmia${Platform.pathSeparator}$kInstancesFileName';
@@ -178,6 +180,7 @@ class InstanceEntry {
     required this.nodeExe,
     required this.entry,
     required this.isDefault,
+    this.configPath,
     this.lastStartedAt = '',
     this.lastReadyAt = '',
   });
@@ -193,6 +196,7 @@ class InstanceEntry {
   final String nodeExe;
   final String entry;
   final bool isDefault;
+  final String? configPath;
   final String lastStartedAt;
   final String lastReadyAt;
 
@@ -391,6 +395,10 @@ Future<int?> firstFreePort(int from, String host, {int tries = 50}) async {
 /// 只回答"这一层是不是构建目录"，不猜往上几层——与后端 `installRootOf` 同一条判据
 /// （`src/runtime/instance-registry.ts`）。
 String installRootOf(String entry) {
+  if (!Platform.isWindows) {
+    final parent = File(entry).absolute.parent;
+    return parent.path.split('/').last == 'dist' ? parent.parent.path : parent.path;
+  }
   final normalized = entry.replaceAll('/', Platform.pathSeparator);
   final parts = normalized.split(Platform.pathSeparator).where((part) => part.isNotEmpty).toList();
   if (parts.length <= 1) return normalized;
@@ -401,6 +409,7 @@ String installRootOf(String entry) {
 }
 
 String _normalizedPath(String value) {
+  if (!Platform.isWindows) return value.trim().replaceFirst(RegExp(r'(?<=.)/+$'), '');
   var text = value.trim().replaceAll('/', '\\');
   while (text.endsWith('\\')) {
     text = text.substring(0, text.length - 1);
@@ -448,12 +457,13 @@ List<String> backendNodeArgs({
   required String entry,
   required String dataDir,
   required int port,
+  String? configPath,
 }) {
   return <String>[
     '--max-old-space-size=1024',
     entry,
     '--config',
-    instanceConfigPathFor(entry: entry, dataDir: dataDir),
+    configPath ?? instanceConfigPathFor(entry: entry, dataDir: dataDir),
     '--data-dir',
     dataDir,
     '--port',
@@ -488,7 +498,18 @@ Future<bool> launchBackend({
   // 宁可偶尔冒一个控制台窗口，也不能让人被杀软删组件。
   // 人把她叫起来 ⇒ 撤掉"别再自己起来"的标记，看护恢复"崩了就拉"
   clearBackendStoppedMarker(dataDir);
-  final nodeArgs = backendNodeArgs(entry: entry, dataDir: dataDir, port: port);
+  String? configPath;
+  var desktopDefault = false;
+  if (Platform.isLinux) {
+    for (final current in InstanceBook.load().entries) {
+      if (current.entry == entry && _normalizedPath(current.dataDir) == _normalizedPath(dataDir)) {
+        configPath = current.configPath;
+        desktopDefault = current.isDefault;
+        break;
+      }
+    }
+  }
+  final nodeArgs = backendNodeArgs(entry: entry, dataDir: dataDir, port: port, configPath: configPath);
   // 走 FFI 的 CreateProcessW + CREATE_NO_WINDOW（见 lib/win_spawn.dart）：
   // 既没有控制台窗口，也**不**套 conhost（那个形态 2026-10-27 被火绒判成勒索）。
   if (Platform.isWindows) {
@@ -518,7 +539,11 @@ Future<bool> launchBackend({
     final process = await Process.start(
       nodeExe,
       nodeArgs,
-      workingDirectory: installRootOf(entry),
+      workingDirectory: Platform.isLinux ? dataDir : installRootOf(entry),
+      environment: Platform.isLinux ? {
+        'IRMIA_SKILLS_SEED_DIR': '${installRootOf(entry)}/skills',
+        if (desktopDefault) 'IRMIA_DESKTOP_DEFAULT_DATA_DIR': dataDir,
+      } : null,
       mode: ProcessStartMode.detached,
     );
     // detached 模式下拿不到输出、也等不到退出：这里只确认"fork 成功"（pid 有效）
@@ -615,6 +640,8 @@ class InstanceBook {
       pid: item['pid'] is int && (item['pid'] as int) > 0 ? item['pid'] as int : 0,
       nodeExe: item['nodeExe'] is String ? item['nodeExe'] as String : '',
       entry: item['entry'] is String ? item['entry'] as String : '',
+      configPath: item['configPath'] is String && (item['configPath'] as String).startsWith('/')
+          ? item['configPath'] as String : null,
       isDefault: item['isDefault'] == true,
       lastStartedAt: item['lastStartedAt'] is String ? item['lastStartedAt'] as String : '',
       lastReadyAt: item['lastReadyAt'] is String ? item['lastReadyAt'] as String : '',

@@ -25,9 +25,8 @@
  * 约定：值导入写 `.ts`，纯类型导入写 `.js`。
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-
 import type { SideEffect, ToolResultStatus } from '../log/types.js';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { decodeText, utf8ConsoleEnv } from '../util/bytes-text.ts';
 import type { ListForModelOptions, ToolRegistry } from './registry.js';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from './types.js';
@@ -846,7 +845,7 @@ async function runIsolated(
 /** 默认隔离子进程实现：stdio 走管道，kill 时 Windows 上用 taskkill 兜底杀进程树 */
 export const defaultIsolatedSpawner: IsolatedSpawner = (task) => {
   const hasStdin = task.stdin !== undefined;
-  const child: ChildProcess = spawn(task.command, [...task.args], {
+  const child = spawnManagedProcess(task.command, task.args, {
     cwd: task.cwd ?? process.cwd(),
     stdio: [hasStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -897,24 +896,6 @@ export const defaultIsolatedSpawner: IsolatedSpawner = (task) => {
     },
   };
 };
-
-/** 杀进程树：先直接杀，Windows 上再 taskkill /T /F 兜底（design §4.18 pwsh 超时杀树） */
-function killProcessTree(child: ChildProcess): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  try {
-    child.kill('SIGKILL');
-  } catch {
-    // 已经退出了：忽略
-  }
-  if (process.platform === 'win32') {
-    try {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {
-      // taskkill 不可用不影响直接 kill 的结果
-    }
-  }
-}
 
 // ──────────────────────────────── 结果构造 ────────────────────────────────
 

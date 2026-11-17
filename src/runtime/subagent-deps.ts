@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { downloadWithNode, installZipDependency, type DepName } from '../deps/index.ts';
 import { PIP_MIRROR_INDEX_URL, PIP_OFFICIAL_INDEX_URL } from '../deps/pip.ts';
 import { binaryAvailable } from './subagent-binaries.ts';
+import { probePythonModules } from './python-probe.ts';
 
 /**
  * 大依赖只在用户点“安装/下载”时补：MinGit 从华为镜像取，tree-sitter 从 PyPI 镜像取。
@@ -112,14 +113,28 @@ export async function installSubagentDependencies(
   let python: SubagentDependencyResult['python'] = modules.length > 0 ? 'failed' : 'ready';
 
   if (needsGit) {
-    const outcome = await installGit(dataDir);
-    git = outcome.ok ? 'installed' : 'failed';
-    details.push(...outcome.details);
+    if (process.platform === 'linux') {
+      git = binaryAvailable('git', dataDir) ? 'ready' : 'failed';
+      if (git === 'failed') details.push('请用发行版包管理器安装 Git（Ubuntu：sudo apt install git）。');
+    } else {
+      const outcome = await installGit(dataDir);
+      git = outcome.ok ? 'installed' : 'failed';
+      details.push(...outcome.details);
+    }
   }
   if (modules.length > 0) {
-    const outcome = installPython(modules, dataDir);
-    python = outcome.ok ? 'installed' : 'failed';
-    details.push(...outcome.details);
+    if (process.platform === 'linux') {
+      const missing = probePythonModules(modules);
+      python = missing.length === 0 ? 'ready' : 'failed';
+      if (python === 'failed') {
+        details.push('请在独立虚拟环境中安装依赖并将 IRMIA_PYTHON 指向该解释器；缺少：'
+          + missing.map(module => SUBAGENT_PYTHON_PACKAGES[module] ?? module).join(', '));
+      }
+    } else {
+      const outcome = installPython(modules, dataDir);
+      python = outcome.ok ? 'installed' : 'failed';
+      details.push(...outcome.details);
+    }
   }
   return { ok: git !== 'failed' && python !== 'failed', git, python, details };
 }

@@ -6,7 +6,7 @@ import {
 import { dirname, join, resolve, sep } from 'node:path';
 
 import { stickerExtension } from './media.ts';
-import { STICKER_PHASH_MAX_DISTANCE, phashDistance } from './phash.ts';
+import { STICKER_PHASH_MAX_DISTANCE, phashDistance, type StickerPHashField } from './phash.ts';
 import {
   emptyStickerState, type StickerEntry, type StickerMime, type StickerPack, type StickerSource, type StickerState,
   type StickerTag, type StickerTaggingResult,
@@ -125,12 +125,14 @@ export class StickerStore {
   }
 
   /** Nearest perceptual hash within maxDistance; null if none. */
-  findByPHash(phash: string, maxDistance = STICKER_PHASH_MAX_DISTANCE): { pack: StickerPack; entry: StickerEntry } | null {
+  findByPHash(phash: string, maxDistance = STICKER_PHASH_MAX_DISTANCE, field: StickerPHashField = 'phash'): {
+    pack: StickerPack; entry: StickerEntry;
+  } | null {
     if (!/^[0-9a-f]{16}$/u.test(phash)) return null;
     let best: { pack: StickerPack; entry: StickerEntry; distance: number } | null = null;
     for (const row of this.listEntries()) {
-      if (row.entry.phash === undefined) continue;
-      const distance = phashDistance(row.entry.phash, phash);
+      if (row.entry[field] === undefined) continue;
+      const distance = phashDistance(row.entry[field], phash);
       if (distance <= maxDistance && (best === null || distance < best.distance)) {
         best = {...row, distance};
       }
@@ -138,20 +140,20 @@ export class StickerStore {
     return best === null ? null : {pack: best.pack, entry: best.entry};
   }
 
-  setPHash(id: string, phash: string): StickerEntry {
+  setPHash(id: string, phash: string, field: StickerPHashField = 'phash'): StickerEntry {
     if (!/^[0-9a-f]{16}$/u.test(phash)) throw new Error('非法感知哈希');
     const found = this.findById(id);
     if (found === null) throw new Error(`找不到贴纸：${id}`);
-    found.entry.phash = phash;
+    found.entry[field] = phash;
     this.writePack(found.pack);
     return found.entry;
   }
 
-  entriesMissingPHash(): Array<{
+  entriesMissingPHash(field: StickerPHashField = 'phash'): Array<{
     packId: string; id: string; file: string; path: string; mime: StickerMime;
   }> {
     return this.listEntries()
-      .filter(({ entry }) => entry.phash === undefined)
+      .filter(({ entry }) => entry[field] === undefined)
       .map(({ pack, entry }) => ({
         packId: pack.packId,
         id: entry.id,
@@ -179,6 +181,7 @@ export class StickerStore {
     source: Exclude<StickerSource, 'plugin'>;
     addedAt?: string;
     phash?: string;
+    phashPillow?: string;
   }): { entry: StickerEntry; duplicate: boolean } {
     this.init();
     const sha256 = createHash('sha256').update(input.bytes).digest('hex');
@@ -192,6 +195,7 @@ export class StickerStore {
     const entry: StickerEntry = {
       id, file, tags: [], intensity: 'obvious', status: 'pending', sha256,
       ...(input.phash === undefined ? {} : {phash: input.phash}),
+      ...(input.phashPillow === undefined ? {} : {phashPillow: input.phashPillow}),
       addedAt: input.addedAt ?? this.clock().toISOString(), tagSource: 'auto', tagConfidence: 0,
       note: '', stats: { sent: 0, lastSentAt: null },
     };

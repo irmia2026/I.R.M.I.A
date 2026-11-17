@@ -226,7 +226,7 @@ export class WebhookSecretStore {
 
   private save(): void {
     if (this.file === null) return;
-    writeFileAtomicSync(this.path, `${JSON.stringify(this.file, null, 2)}\n`);
+    writeFileAtomicSync(this.path, `${JSON.stringify(this.file, null, 2)}\n`, 0o600);
   }
 
   // ── 状态 ──

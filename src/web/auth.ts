@@ -312,7 +312,7 @@ export class AuthStore {
 
   private save(): void {
     if (this.file === null) return;
-    writeFileAtomicSync(join(this.dataDir, AUTH_FILE_NAME), `${JSON.stringify(this.file, null, 2)}\n`);
+    writeFileAtomicSync(join(this.dataDir, AUTH_FILE_NAME), `${JSON.stringify(this.file, null, 2)}\n`, 0o600);
   }
 
   // ── 状态 ──

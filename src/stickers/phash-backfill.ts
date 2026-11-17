@@ -1,4 +1,4 @@
-import { computeStickerPHashBatch } from './phash.ts';
+import { computeStickerPHashBatch, STICKER_PHASH_FIELD } from './phash.ts';
 import type { StickerStore } from './store.ts';
 
 export interface PHashBackfillResult {
@@ -15,9 +15,10 @@ export async function backfillStickerPHashes(
   store: StickerStore,
   batch: (paths: readonly string[]) => Promise<Array<string | null>> = computeStickerPHashBatch,
 ): Promise<PHashBackfillResult> {
+  const field = batch === computeStickerPHashBatch ? STICKER_PHASH_FIELD : 'phash';
   let missing: ReturnType<StickerStore['entriesMissingPHash']> = [];
   try {
-    missing = store.entriesMissingPHash();
+    missing = store.entriesMissingPHash(field);
   } catch {
     return {total: 0, filled: 0, failed: 0};
   }
@@ -37,7 +38,7 @@ export async function backfillStickerPHashes(
       continue;
     }
     try {
-      store.setPHash(row.id, hash);
+      store.setPHash(row.id, hash, field);
       filled += 1;
     } catch {
       failed += 1;

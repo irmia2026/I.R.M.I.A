@@ -109,6 +109,18 @@ void main() {
       expect(resolved.source, BackendPortSource.defaultPort);
     });
 
+    test('④ Linux：XDG 运行目录和启动器指定的端口', () {
+      expect(serverPortFilePath({'XDG_RUNTIME_DIR': tmpDir.path}), '${tmpDir.path}/irmia/server.json');
+      expect(serverPortFilePath({'XDG_RUNTIME_DIR': 'relative'}), isNull);
+      File(serverFile).writeAsStringSync('{"port":7801}');
+      final resolved = resolveBackendPort(
+        env: {'IRMIA_DESKTOP_PORT': '7810'},
+        portFilePath: serverFile,
+      );
+      expect(resolved.port, 7810);
+      expect(resolved.source, BackendPortSource.env);
+    }, skip: !Platform.isLinux);
+
     test('④ 路径口径：`%LOCALAPPDATA%\\Irmia\\server.json`（与后端同一个名字）', () {
       final path = serverPortFilePath({'LOCALAPPDATA': r'C:\fake-localappdata'});
       expect(path, isNotNull);
@@ -116,7 +128,7 @@ void main() {
       expect(path, contains('fake-localappdata'));
       expect(kServerPortFileName, 'server.json');
       expect(serverPortFilePath({}), isNull, reason: '拿不到 LOCALAPPDATA 就不猜一个目录');
-    });
+    }, skip: Platform.isLinux);
   });
 
   // ──────────────────────── ②③④ 门上的"等后端" ────────────────────────

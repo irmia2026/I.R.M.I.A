@@ -22,6 +22,7 @@
 library;
 
 import 'dart:io';
+import 'desktop_paths.dart';
 
 /// 存储根目录覆盖：测试指向临时目录，避免踩到真实 `%APPDATA%`。
 ///
@@ -46,8 +47,7 @@ class SessionStore {
   String get root {
     final explicit = _root ?? _sessionsRootOverride;
     if (explicit != null && explicit.isNotEmpty) return explicit;
-    final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-    return '$appData${Platform.pathSeparator}Irmia${Platform.pathSeparator}sessions';
+    return '${guiStateDirectory(Platform.environment)}${Platform.pathSeparator}sessions';
   }
 
   /// 实例标识 → 文件名。**白名单**而不是黑名单：只留下 `[A-Za-z0-9._-]`，
@@ -89,6 +89,20 @@ class SessionStore {
     try {
       final file = File(pathFor(instance));
       file.parent.createSync(recursive: true);
+      if (Platform.isLinux) {
+        if (FileSystemEntity.typeSync(file.parent.path, followLinks: false) != FileSystemEntityType.directory ||
+            Process.runSync('chmod', ['700', '--', file.parent.path]).exitCode != 0) return;
+        final staging = file.parent.createTempSync('.session-');
+        try {
+          final pending = File('${staging.path}/token')..writeAsStringSync(value);
+          if (Process.runSync('chmod', ['600', '--', pending.path]).exitCode == 0) {
+            pending.renameSync(file.path);
+          }
+        } finally {
+          staging.deleteSync(recursive: true);
+        }
+        return;
+      }
       file.writeAsStringSync(value);
     } catch (_) {
       // 见上：静默
@@ -132,6 +146,7 @@ set legacyGuiTokenOverride(String? path) {
 String legacyGuiTokenPath() {
   final override = _legacyGuiTokenOverride;
   if (override != null && override.isNotEmpty) return override;
+  if (Platform.isLinux) return '${guiStateDirectory(Platform.environment)}/gui-token';
   final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
   return '$appData${Platform.pathSeparator}Irmia${Platform.pathSeparator}gui-token';
 }

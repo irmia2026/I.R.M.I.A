@@ -31,11 +31,11 @@
  * 纯类型导入写 `.js`。本模块零外部依赖，只用 node: 标准库。
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { killProcessTree } from '../process/kill-tree.ts';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { decodeText, utf8ConsoleEnv } from '../util/bytes-text.ts';
 import type { Projection } from '../log/types.js';
 import type {
@@ -208,7 +208,7 @@ function killHookTree(child: ChildProcess): void {
 
 /** 默认钩子 spawner：shell 执行命令串，stdin 一次性写入 JSON 后关闭 */
 export const defaultHookSpawner: HookSpawner = (task) => {
-  const child: ChildProcess = spawn(task.command, {
+  const child = spawnManagedProcess(task.command, [], {
     cwd: task.cwd,
     shell: true,
     windowsHide: true,

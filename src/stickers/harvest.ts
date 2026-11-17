@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { parseImageDataUrl } from '../log/types.ts';
 import { normalizeStickerMime, sniffStickerMime, stickerDimensions } from './media.ts';
-import { computeStickerPHash, type StickerPHasher } from './phash.ts';
+import { computeStickerPHash, STICKER_PHASH_FIELD, type StickerPHasher } from './phash.ts';
 import { resizeStickerImage, STICKER_MAX_EDGE, type StickerResizer } from './resize.ts';
 import type { StickerStore } from './store.ts';
 import type { StickerTagger } from './tagger.ts';
@@ -104,12 +104,13 @@ export class StickerHarvester {
       }
       if (this.deps.store.findBySha256(sha256) !== null) return this.reject(message, 'duplicate', sha256);
       let phash: string | null = null;
+      const hashField = this.deps.phash === undefined ? STICKER_PHASH_FIELD : 'phash';
       try {
         phash = await (this.deps.phash ?? computeStickerPHash)(bytes, finalMime);
       } catch {
         phash = null;
       }
-      if (phash !== null && this.deps.store.findByPHash(phash) !== null) {
+      if (phash !== null && this.deps.store.findByPHash(phash, undefined, hashField) !== null) {
         return this.reject(message, 'duplicate', sha256);
       }
       const sessionKey = `${message.channel}:${message.chatType}:${message.chatId}`;
@@ -122,7 +123,7 @@ export class StickerHarvester {
         return this.reject(message, 'rate-limited', sha256);
       }
       const imported = this.deps.store.importSticker({
-        bytes, mime: finalMime, source: 'collected', ...(phash === null ? {} : {phash}),
+        bytes, mime: finalMime, source: 'collected', ...(phash === null ? {} : {[hashField]: phash}),
       });
       if (imported.duplicate) return this.reject(message, 'duplicate', sha256);
       const tagged = await this.deps.tagger.tag({ stickerId: imported.entry.id, bytes, mime: finalMime });

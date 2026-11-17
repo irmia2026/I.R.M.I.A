@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
@@ -1165,10 +1165,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const raw = (process.argv[1] ?? '').trim();
     return raw === '' ? '' : resolve(raw);
   })();
+  const desktopDefaultDataDir = process.platform === 'linux' ? process.env['IRMIA_DESKTOP_DEFAULT_DATA_DIR'] ?? '' : '';
   const isDefaultInstance = isDefaultDataDir({
     entry: entryPath,
     dataDir,
-    configDataDir: startup.configDataDir,
+    configDataDir: isAbsolute(desktopDefaultDataDir) ? desktopDefaultDataDir : startup.configDataDir,
   });
   /** 每实例一份的端口文件路径（bind 成功那一刻才定得下来：端口是文件名的一部分） */
   let perInstancePortPath: string | null = null;
@@ -1232,6 +1233,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       pid: process.pid,
       nodeExe: process.execPath,
       entry: entryPath,
+      ...(process.platform === 'linux' ? { configPath: loadedConfig.path } : {}),
       isDefault: isDefaultInstance,
       now,
       out: write,
@@ -1541,7 +1543,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 这种半成品现场根本不会出现；事件顺序也就自然是"这一任起来了 → 它补了哪些出厂技能"。
    */
   const launchCwd = process.cwd();
-  const skillsSeed = ensureSkillsSeed(dataDir, join(launchCwd, SKILLS_DIR_NAME));
+  const installedSkills = process.env['IRMIA_SKILLS_SEED_DIR'];
+  const skillsSeed = ensureSkillsSeed(dataDir, installedSkills || join(launchCwd, SKILLS_DIR_NAME));
   if (skillsSeed.state === 'created') {
     append('skill/seed', {
       source: SKILLS_DIR_NAME,
@@ -3612,8 +3615,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 界面那一半**已经接上**（v50 起：`gui/lib/gui_quit.dart` ⇒ `%APPDATA%\Irmia\gui-quit.marker`，关窗
    * `main.dart:85`／托盘 `tray.dart:150` 各写一次、**收进托盘不写**，b5d68ce）；**只有旧构建的界面**不写标记 ⇒ 那时主动关仍会被当崩溃拉回。
    */
-  const guardMode = resolveGuardMode(process.env, dataDir);
-  const guiFound = discoverGuiExe({ dataDir, env: process.env, fileExists: existsSync });
+  const guardMode = process.platform === 'win32'
+    ? resolveGuardMode(process.env, dataDir)
+    : {mode: 'off' as const, why: '当前系统不启用 Windows 界面保活'};
+  const guiFound = guardMode.mode === 'off'
+    ? null : discoverGuiExe({ dataDir, env: process.env, fileExists: existsSync });
   /**
    * 句柄要先于 `stop()` 声明：退出路径里第一件事就是把它停掉
    * （不再有"界面没了 ⇒ 又被拉回来"这种在退出过程中冒出来的动作）。

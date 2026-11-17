@@ -48,6 +48,7 @@ export function pythonAstScannerPath(): string {
 
 /** 自带 node 优先；开发机上退回当前进程用的那个（版本完全相同：>=22 才允许起宿主） */
 export function resolveNodeExecutable(): string {
+  if (process.platform !== 'win32') return process.execPath;
   const bundled = join(process.cwd(), BUNDLED_NODE_REL);
   return existsSync(bundled) ? bundled : process.execPath;
 }

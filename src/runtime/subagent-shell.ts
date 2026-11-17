@@ -39,6 +39,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 
 import { errorResult, okResult, TOOL_ERROR_CODES, type ToolDefinition } from '../tools/types.ts';
 import { inside } from './subagent-workspace.ts';
@@ -537,7 +538,7 @@ async function runScopedPwshProcess(input: {
   return await new Promise((resolveResult) => {
     let child: ReturnType<typeof spawn> | null = null;
     try {
-      child = spawn(input.file, [...input.args], {
+      child = spawnManagedProcess(input.file, input.args, {
         cwd: input.cwd, shell: false, windowsHide: true, env: input.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -571,7 +572,7 @@ async function runScopedPwshProcess(input: {
           try { child.kill(); } catch { /* already gone */ }
         }
       } else {
-        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        killProcessTree(child);
       }
     };
     const abort = (): void => { killTree(); };

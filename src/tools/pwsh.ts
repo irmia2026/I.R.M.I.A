@@ -181,7 +181,9 @@ const SESSION_STDERR_SETTLE_MS = 30;
 export const JOB_LOG_SUFFIX = '.log';
 
 /** 检测不到 PS7 时回给模型的安装建议（design §4.18 pwsh 专项第 1 条） */
-export const POWERSHELL_INSTALL_HINT = 'winget install Microsoft.PowerShell';
+export const POWERSHELL_INSTALL_HINT = process.platform === 'win32'
+  ? 'winget install Microsoft.PowerShell'
+  : 'https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux';
 
 // ──────────────────────────────── 语言（v52） ────────────────────────────────
 
@@ -1183,7 +1185,8 @@ async function resolvePowerShell(
     if (legacy !== null) return legacy;
     throw new Error(
       `找不到可用的 PowerShell 运行时：框架依赖探测判定 pwsh 7 未就绪（${resolved.reason}），`
-      + `PATH 上也没有 Windows PowerShell 5.1 可回退。请安装后重试：${POWERSHELL_INSTALL_HINT}`,
+      + (process.platform === 'win32' ? 'PATH 上也没有 Windows PowerShell 5.1 可回退。' : '')
+      + `请安装后重试：${POWERSHELL_INSTALL_HINT}`,
     );
   }
 
@@ -1204,7 +1207,8 @@ async function resolvePowerShell(
 async function probeLegacy(
   probe: (exe: string) => Promise<string | null>,
 ): Promise<PowerShellProbe | null> {
-  const exe = process.platform === 'win32' ? 'powershell.exe' : 'powershell';
+  if (process.platform !== 'win32') return null;
+  const exe = 'powershell.exe';
   const legacy = await probe(exe);
   if (legacy === null) return null;
   return {

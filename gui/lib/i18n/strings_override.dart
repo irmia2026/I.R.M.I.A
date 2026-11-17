@@ -48,6 +48,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import '../desktop_paths.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -69,8 +70,7 @@ String stringsOverrideDir() {
   final override = stringsOverrideFileOverride;
   if (override != null && override.isNotEmpty)
     return File(override).parent.path;
-  final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-  return '$appData${Platform.pathSeparator}Irmia';
+  return guiConfigDirectory(Platform.environment);
 }
 
 /// 覆盖文件的完整路径（设置页显示的那一行就是它）
@@ -739,6 +739,7 @@ Map<String, String> stringsAsMap(AppStrings s) => <String, String>{
   'settingsSaveDir': s.settingsSaveDir,
   'settingsInstallDirNote': s.settingsInstallDirNote,
   'settingsOneClickInstall': s.settingsOneClickInstall,
+  'settingsManualProtocolInstall': s.settingsManualProtocolInstall,
   'settingsOneClickInstallNote': s.settingsOneClickInstallNote,
   'settingsOneClickPrerequisite': s.settingsOneClickPrerequisite,
   'settingsInstallRunningNote': s.settingsInstallRunningNote,
@@ -2883,6 +2884,9 @@ class OverriddenStrings extends AppStrings {
   @override
   String get settingsOneClickInstall =>
       overrides['settingsOneClickInstall'] ?? base.settingsOneClickInstall;
+  @override
+  String get settingsManualProtocolInstall =>
+      overrides['settingsManualProtocolInstall'] ?? base.settingsManualProtocolInstall;
   @override
   String get settingsOneClickInstallNote =>
       overrides['settingsOneClickInstallNote'] ??

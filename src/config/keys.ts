@@ -22,8 +22,9 @@
  * 模型层按同步帧用它）。文件极小、频率极低，同步读盘代价可忽略；写是异步的（界面路径上不阻塞）。
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { writeFileAtomicSync } from '../web/atomic.ts';
 
 // ──────────────────────────────── 常量与类型 ────────────────────────────────
 
@@ -203,31 +204,6 @@ export function keyStatus(name: KeyName, options: KeyStatusOptions = {}): KeySta
 
 // ──────────────────────────────── 写 ────────────────────────────────
 
-/** 原子写：同目录 tmp → fsync → rename 覆盖（与 config.ts 的统一写盘规则同源） */
-let tmpSeq = 0;
-
-async function writeKeysFileAtomic(path: string, text: string): Promise<void> {
-  // pid + 序号：同进程并发写各自有独立 tmp，最后 rename 的都是完整内容
-  const tmp = `${path}.tmp.${process.pid}.${tmpSeq++}`;
-  const fd = openSync(tmp, 'w');
-  try {
-    writeSync(fd, text);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(tmp, path);
-  } catch (err) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      /* tmp 残留不影响正确性：它的名字唯一，下一次写不会撞上 */
-    }
-    throw err;
-  }
-}
-
 /** 一次写里的"哪几格 = 什么值"（空串/纯空白 = 清除那一格） */
 export type KeysWritePlan = Partial<Record<KeyName, string>>;
 
@@ -277,8 +253,7 @@ export async function writeKeysFile(dataDir: string, plan: KeysWritePlan): Promi
     if (existing !== undefined) ordered[key] = existing;
   }
 
-  mkdirSync(dir, { recursive: true });
-  await writeKeysFileAtomic(path, `${JSON.stringify(ordered, null, 2)}\n`);
+  writeFileAtomicSync(path, `${JSON.stringify(ordered, null, 2)}\n`, 0o600);
   return changed;
 }
 

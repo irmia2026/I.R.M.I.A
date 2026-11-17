@@ -177,6 +177,9 @@ export async function buildFsTools(
   if (esGate.available) {
     tools.push(createFindTool(env, esGate));
     note(`[工具] find 已注册（引擎 ${esGate.command}，${esGate.label}）`);
+  } else if (process.platform === 'linux') {
+    tools.push(createFindTool(env, null));
+    note('[工具] find 已注册（本机目录扫描）');
   } else {
     note(`[工具] find 未注册：${esProbe.reason}`);
   }

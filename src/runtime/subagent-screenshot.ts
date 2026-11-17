@@ -1,9 +1,10 @@
 /**
- * Irmia Agent — worker 专用 `screenshot` 工具（Windows 桌面/窗口截图）
+ * Irmia Agent — worker 专用 `screenshot` 工具
  *
  * 目标：让 worker 子代理能“看见”自己刚做出来的界面——截当前屏幕或按标题子串截某个窗口，
  * PNG 只写进**本会话 workspace**，返回绝对路径/尺寸/字节数。不引入 MCP、不引入 Playwright：
  * Node 侧 spawn 一个 PowerShell 进程，用 .NET（System.Drawing）+ User32（PrintWindow）完成。
+ * Linux 用户桌面可选择用 XDG Screenshot Portal，画面范围由系统对话框决定。
  *
  * ## 边界与安全口径（必须与实现一致，不要宣传成沙箱）
  *
@@ -32,9 +33,10 @@
  */
 import { spawn } from 'node:child_process';
 import {
-  closeSync, existsSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync,
+  closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   argsRecord, errorResult, errorResultFromThrown, okResult, optionalString, TOOL_ERROR_CODES,
@@ -387,9 +389,19 @@ function codeForScriptError(code: unknown): string {
     case 'window-not-found': return 'screenshot-window-not-found';
     case 'window-not-capturable': return 'screenshot-window-not-capturable';
     case 'no-desktop': return 'screenshot-no-desktop';
+    case 'portal-timeout': return TOOL_ERROR_CODES.timeout;
+    case 'portal-cancelled': return TOOL_ERROR_CODES.aborted;
+    case 'portal-runtime-missing': return TOOL_ERROR_CODES.noRuntime;
     case 'bad-mode': return TOOL_ERROR_CODES.invalidArgs;
     default: return 'screenshot-capture-failed';
   }
+}
+
+export function hasLinuxScreenshotSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  return process.platform === 'linux'
+    && env['IRMIA_ENABLE_PORTAL_SCREENSHOT'] === '1'
+    && env['IRMIA_SYSTEMD_MANAGED'] !== '1'
+    && Boolean(env['DBUS_SESSION_BUS_ADDRESS'] && (env['DISPLAY'] || env['WAYLAND_DISPLAY']));
 }
 
 /**
@@ -411,22 +423,27 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
   const runner = options.runner ?? runScreenshotProcess;
   const nowMs = options.nowMs ?? (() => Date.now());
   const injectedRunner = options.runner !== undefined;
+  const baseEnv = options.baseEnv ?? process.env;
+  const portal = !injectedRunner && hasLinuxScreenshotSession(baseEnv);
+  const supportedModes = portal ? ['screen'] : SCREENSHOT_MODES;
   const timeoutMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
     ? Math.min(Math.floor(options.timeoutMs), MAX_SCREENSHOT_TIMEOUT_MS)
     : DEFAULT_SCREENSHOT_TIMEOUT_MS;
 
   return {
     name: SCREENSHOT_TOOL_NAME,
-    description: '截当前屏幕或指定标题子串的窗口，PNG 只写本会话 workspace（默认 screenshots/<时间>.png）。'
-      + '返回路径、宽高与字节数；可用于检查刚做的界面。找不到窗口/无桌面时明确报错。',
+    description: portal
+      ? '打开 Linux 系统截图对话框，由桌面用户选取并确认画面。PNG 写入会话 workspace，返回路径、宽高与字节数。'
+      : '截当前屏幕或指定标题子串的窗口，PNG 只写本会话 workspace（默认 screenshots/<时间>.png）。'
+        + '返回路径、宽高与字节数；可用于检查刚做的界面。找不到窗口/无桌面时明确报错。',
     parameters: {
       type: 'object',
       properties: {
         mode: {
-          type: 'string', enum: [...SCREENSHOT_MODES],
-          description: 'screen（默认，主屏幕全屏截图）/ window（按窗口标题子串截单个窗口）',
+          type: 'string', enum: [...supportedModes],
+          description: portal ? 'screen（由系统截图对话框决定范围）' : 'screen（默认，主屏幕全屏截图）/ window（按窗口标题子串截单个窗口）',
         },
-        window: {type: 'string', description: 'window 模式必填：窗口标题的子串（不区分大小写；多个匹配取面积最大）'},
+        ...(!portal ? {window: {type: 'string', description: 'window 模式必填：窗口标题的子串（不区分大小写；多个匹配取面积最大）'}} : {}),
         path: {
           type: 'string',
           description: '可选输出路径（workspace 内相对路径，必须以 .png 结尾）；缺省自动生成 screenshots/<时间>.png，不覆盖已有文件',
@@ -442,15 +459,16 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
     handler: async (args, ctx) => {
       const started = Date.now();
       let mode: ScreenshotMode = 'screen';
+      let staging: string | undefined;
       if (ctx.signal.aborted) {
         return errorResult('screenshot 调用在开始前已被取消（AbortSignal）。', TOOL_ERROR_CODES.aborted);
       }
       try {
         const row = argsRecord(args, SCREENSHOT_TOOL_NAME);
         const modeInput = optionalString(row, 'mode', {maxLength: 16}) ?? 'screen';
-        if (!(SCREENSHOT_MODES as readonly string[]).includes(modeInput)) {
+        if (!(supportedModes as readonly string[]).includes(modeInput)) {
           return errorResult(
-            `mode 只能是 ${SCREENSHOT_MODES.join(' / ')}；收到 ${JSON.stringify(modeInput)}。`,
+            `mode 只能是 ${supportedModes.join(' / ')}；收到 ${JSON.stringify(modeInput)}。`,
             TOOL_ERROR_CODES.invalidArgs,
           );
         }
@@ -474,7 +492,8 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
         }
         const {target, relativePath} = resolved.output;
 
-        const file = injectedRunner ? 'screenshot-runner-injected' : resolveShellBinary();
+        const file = portal ? baseEnv['IRMIA_SCREENSHOT_PYTHON']?.trim() || 'python3'
+          : injectedRunner ? 'screenshot-runner-injected' : resolveShellBinary();
         if (file === null) {
           options.emit?.({
             action: 'screenshot-unavailable', profileId: options.profileId, agentId: options.agentId,
@@ -485,15 +504,21 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
             TOOL_ERROR_CODES.noRuntime,
           );
         }
-        const env: NodeJS.ProcessEnv = {
-          ...scopedShellEnv(options.baseEnv),
+        if (portal) staging = mkdtempSync(join(workspace, '.portal-shot-'));
+        const captureTarget = staging === undefined ? target : join(staging, 'shot.png');
+        const env: NodeJS.ProcessEnv = portal
+          ? { ...scopedShellEnv(baseEnv), DBUS_SESSION_BUS_ADDRESS: baseEnv['DBUS_SESSION_BUS_ADDRESS'] }
+          : {
+          ...scopedShellEnv(baseEnv),
           IRMIA_SHOT_MODE: mode,
           IRMIA_SHOT_PATH: target,
           IRMIA_SHOT_WINDOW: windowInput ?? '',
         };
         const result = await runner({
           file,
-          args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_POWERSHELL_SCRIPT],
+          args: portal
+            ? ['-I', fileURLToPath(new URL('./portal-screenshot.py', import.meta.url)), captureTarget, String(Math.max(1, timeoutMs - 800))]
+            : ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_POWERSHELL_SCRIPT],
           cwd: workspace,
           env,
           signal: ctx.signal,
@@ -513,7 +538,8 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
         if (spawnFailed) {
           options.emit?.({...emitBase, ok: false, spawnFailed: true});
           return errorResult(
-            '截图子进程启动失败：检查 PowerShell 是否可执行（pwsh / powershell.exe）。',
+            portal ? '截图子进程启动失败：检查 Python 3 是否可执行。'
+              : '截图子进程启动失败：检查 PowerShell 是否可执行（pwsh / powershell.exe）。',
             TOOL_ERROR_CODES.spawnFailed,
           );
         }
@@ -537,7 +563,11 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
           const scriptCode = typeof payload['code'] === 'string' ? payload['code'] : 'capture-failed';
           const detail = decodeBase64Text(payload['messageB64'], 400) ?? '';
           options.emit?.({...emitBase, ok: false, scriptErrorCode: scriptCode});
-          const friendly = scriptCode === 'window-not-found'
+          const friendly = scriptCode === 'portal-runtime-missing' ? '桌面截图需要 Python GI（Ubuntu：python3-gi）。'
+            : scriptCode === 'portal-unavailable' ? '当前桌面的 XDG Screenshot Portal 不可用或拒绝了截图。'
+            : scriptCode === 'portal-cancelled' ? '桌面用户已取消截图。'
+            : scriptCode === 'portal-timeout' ? '等待桌面截图超时。'
+            : scriptCode === 'window-not-found'
             ? `找不到标题包含 ${JSON.stringify(windowInput ?? '')} 的可见窗口；请换一个更准确的子串，或先用 mode:"screen" 看整屏。`
             : scriptCode === 'no-desktop'
               ? '没有可截取的主屏幕（当前会话可能没有交互式桌面）。'
@@ -546,10 +576,10 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
         }
 
         // 文件是脚本写的：以 Node 侧的 PNG 头解析为准，并再校验一次真实路径没越界。
-        const facts = readPngFacts(target);
+        const facts = readPngFacts(captureTarget);
         if (facts === null) {
           options.emit?.({...emitBase, ok: false, scriptErrorCode: 'invalid-png'});
-          rmSync(target, {force: true});
+          rmSync(captureTarget, {force: true});
           return errorResult(
             '截图脚本报告成功，但输出文件不是合法 PNG（签名/IHDR 校验失败或超过上限），已删除。',
             'screenshot-invalid-output',
@@ -557,9 +587,18 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
         }
         let realTarget: string;
         try {
+          if (portal) {
+            if (!inside(workspace, realpathSync.native(dirname(target)))) {
+              return errorResult('截图输出目录已越出 workspace。', TOOL_ERROR_CODES.unsafePath);
+            }
+            linkSync(captureTarget, target);
+          }
           realTarget = realpathSync.native(target);
-        } catch {
+        } catch (error) {
           options.emit?.({...emitBase, ok: false, scriptErrorCode: 'missing-output'});
+          if (portal && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+            return errorResult('截图输出路径已存在。', TOOL_ERROR_CODES.unsafePath);
+          }
           return errorResult('截图脚本报告成功，但输出文件不存在。', 'screenshot-invalid-output');
         }
         if (!inside(workspace, realTarget)) {
@@ -594,6 +633,8 @@ export function createScreenshotTool(options: ScreenshotToolOptions): ToolDefini
           mode, ok: false, durationMs: Date.now() - started,
         });
         return errorResultFromThrown(error, 'screenshot-failed');
+      } finally {
+        if (staging !== undefined) rmSync(staging, {recursive: true, force: true});
       }
     },
   };

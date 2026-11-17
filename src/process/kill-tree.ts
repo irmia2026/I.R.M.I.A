@@ -13,7 +13,33 @@
  * 本模块零外部依赖，只用 node: 标准库。
  */
 
-import { spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
+
+const managedGroups = new WeakSet<ChildProcess>();
+
+/** Start a process whose descendants have the same lifetime as their launcher. */
+export function spawnManagedProcess(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
+  const detached = process.platform !== 'win32';
+  const child = spawn(command, args, { ...options, detached });
+  const pid = child.pid;
+  if (detached && pid !== undefined) {
+    managedGroups.add(child);
+    child.once('exit', () => {
+      // A launcher can exit normally while leaving descendants. Reclaim them before the group ID goes stale.
+      if (managedGroups.delete(child)) killGroup(pid);
+    });
+  }
+  return child;
+}
+
+function killGroup(pid: number): boolean {
+  try {
+    process.kill(-pid, 'SIGKILL');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** 进程树终止的结果：给调用方判定用（`taskkill` 不可用时仍会尝试直接 kill） */
 export interface KillTreeOutcome {
@@ -31,6 +57,11 @@ export function killProcessTree(child: ChildProcess, options: { forceTree?: bool
   const pid = child.pid;
   let usedTaskkill = false;
   let taskkillCode: number | null = null;
+
+  if (pid !== undefined && managedGroups.has(child) && killGroup(pid)) {
+    managedGroups.delete(child);
+    return { usedTaskkill, taskkillCode };
+  }
 
   // Windows：taskkill /T 才能把子孙一起带走。`forceTree` 为真时连自己也算进去
   // （`/F` 是强杀：gentle 关机已经试过了才会走到这里）。

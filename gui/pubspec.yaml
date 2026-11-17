@@ -96,6 +96,7 @@ flutter:
 
   assets:
     - assets/tray.ico
+    - assets/tray.png
     # IRMIA 标识（图案本身）。这里只声明 1x 那两份，同目录的 2.0x/ 与 3.0x/ 由 Flutter
     # 自动收作分辨率变体（按 devicePixelRatio 挑最近的一档，150% 缩放的机器取 2x）。
     # 两档是**两种几何**，不是同一个图案的两个尺寸：

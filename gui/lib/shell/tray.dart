@@ -105,6 +105,25 @@ class IrmiaTray with TrayListener {
   /// 绝不能把关窗改成"隐藏"——那会让人点一下 X 就再也叫不回界面，只能任务管理器。
   bool get installed => _installed;
 
+  Future<bool> canHide() async => _installed && (!Platform.isLinux || await _linuxTrayAvailable());
+
+  Future<bool> _linuxTrayAvailable() async {
+    try {
+      final result = await Process.run('gdbus', [
+        'call', '--session', '--timeout', '2', '--dest', 'org.kde.StatusNotifierWatcher',
+        '--object-path', '/StatusNotifierWatcher', '--method', 'org.freedesktop.DBus.Properties.Get',
+        'org.kde.StatusNotifierWatcher', 'IsStatusNotifierHostRegistered',
+      ]).timeout(const Duration(seconds: 3));
+      return result.exitCode == 0 && result.stdout.toString().contains('true');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _setToolTip() async {
+    if (!Platform.isLinux) await trayManager.setToolTip(_tooltip);
+  }
+
   /// 装托盘。`actions` 是四个动作的落点（见 [TrayActions]）；
   /// `strings` 只用来画菜单文字（`refreshMenu` 换了语言再画一遍）。
   Future<void> install({
@@ -116,15 +135,17 @@ class IrmiaTray with TrayListener {
     _strings = strings;
     if (displayName != null && displayName.trim().isNotEmpty) _displayName = displayName.trim();
     if (_installed) return;
+    if (Platform.isLinux && !await _linuxTrayAvailable()) return;
 
     trayManager.addListener(this);
     await trayManager.setIcon(_iconPath);
-    await trayManager.setToolTip(_tooltip);
+    await _setToolTip();
     await trayManager.setContextMenu(Menu(items: trayMenuItems(
       strings,
       pending: _pendingCount,
       updateVersion: _updateVersion,
       updateRequired: _updateRequired,
+      includeSystemActions: !Platform.isLinux,
     )));
     _installed = true;
   }
@@ -142,9 +163,10 @@ class IrmiaTray with TrayListener {
         pending: _pendingCount,
         updateVersion: _updateVersion,
         updateRequired: _updateRequired,
+        includeSystemActions: !Platform.isLinux,
       )));
       // 悬停提示里也可能挂着待批数（`名字 · 有 N 条待批`）：它同样是原生对象，一起换掉
-      await trayManager.setToolTip(_tooltip);
+      await _setToolTip();
     } catch (_) {
       // 重画失败不影响托盘还活着：下次 `install`（下一次启动）会画对
     }
@@ -169,9 +191,10 @@ class IrmiaTray with TrayListener {
           pending: _pendingCount,
           updateVersion: _updateVersion,
           updateRequired: _updateRequired,
+          includeSystemActions: !Platform.isLinux,
         )));
       }
-      await trayManager.setToolTip(_tooltip);
+      await _setToolTip();
     } catch (_) {
       // 忽略：与 setDisplayName 同一条口径
     }
@@ -199,8 +222,9 @@ class IrmiaTray with TrayListener {
         pending: _pendingCount,
         updateVersion: _updateVersion,
         updateRequired: _updateRequired,
+        includeSystemActions: !Platform.isLinux,
       )));
-      await trayManager.setToolTip(_tooltip);
+      await _setToolTip();
     } catch (_) {
       // 忽略：与 setPendingCount 同一条口径
     }
@@ -217,7 +241,7 @@ class IrmiaTray with TrayListener {
     _displayName = next;
     if (!_installed) return;
     try {
-      await trayManager.setToolTip(_tooltip);
+      await _setToolTip();
     } catch (_) {
       // 忽略：提示文字是锦上添花
     }
@@ -242,7 +266,7 @@ class IrmiaTray with TrayListener {
       return '$exeDir${Platform.pathSeparator}data${Platform.pathSeparator}flutter_assets'
           '${Platform.pathSeparator}assets${Platform.pathSeparator}tray.ico';
     }
-    return 'assets/tray.ico';
+    return Platform.isLinux ? 'assets/tray.png' : 'assets/tray.ico';
   }
 
   @override
@@ -359,6 +383,7 @@ List<MenuItem> trayMenuItems(
   int pending = 0,
   String? updateVersion,
   bool updateRequired = false,
+  bool includeSystemActions = true,
 }) =>
     <MenuItem>[
       if (pending > 0)
@@ -373,12 +398,14 @@ List<MenuItem> trayMenuItems(
       MenuItem(key: kTrayKeyShow, label: strings.trayShow),
       MenuItem(key: kTrayKeyHide, label: strings.trayHide),
       MenuItem.separator(),
-      MenuItem(key: kTrayKeyRestart, label: strings.trayRestart),
-      MenuItem.separator(),
+      if (includeSystemActions) ...[
+        MenuItem(key: kTrayKeyRestart, label: strings.trayRestart),
+        MenuItem.separator(),
+      ],
       // **两项退出**：一个只关界面（安全、常用），一个连后端一起（重、有代价）。
       // 措辞里就把区别写清楚——菜单只有一行字的地方，正是最该说准的地方。
       MenuItem(key: kTrayKeyQuitUi, label: strings.trayQuitUi),
-      MenuItem(key: kTrayKeyQuitAll, label: strings.trayQuitAll),
+      if (includeSystemActions) MenuItem(key: kTrayKeyQuitAll, label: strings.trayQuitAll),
     ];
 
 void _noop() {}
