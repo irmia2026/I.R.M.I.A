@@ -24,7 +24,12 @@ test('python 插件：运行器可跑则注册工具并回结果，不可用则�
   }
   const harness = await createHarness({ fixture: 'plugin-py' });
   t.after(async () => { await harness.dispose(); });
-  await harness.start();
+  try {
+    await harness.start();
+  } catch (error) {
+    t.diagnostic(harness.writes.join('\n'));
+    throw error;
+  }
   assert.equal(harness.tools.has('demo-py__echo'), true);
   const result = await harness.callTool('demo-py__echo', { text: '世界' });
   assert.deepEqual(result, { content: 'py:世界' });
@@ -42,7 +47,12 @@ test('python 插件：对象式工具定义保留 destructive 危险等级', asy
   }));
   writeFileSync(join(source, 'main.py'), `def activate(ctx):\n    ctx.tools.define({"name":"delete","description":"delete","sideEffect":"destructive","handler":lambda args:{"content":"ok"}})\n`);
   const pkg = harness.manager.install(source);
-  await harness.host.startPackage(pkg);
+  try {
+    await harness.host.startPackage(pkg);
+  } catch (error) {
+    t.diagnostic(harness.writes.join('\n'));
+    throw error;
+  }
   assert.equal(harness.tools.get('py-side-effect__delete')?.sideEffect, 'destructive');
 });
 

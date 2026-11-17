@@ -52,6 +52,7 @@ jobs:
           test/plugin-runtime-python.test.ts
           test/subagent-deps.test.ts
           test/fs-tools.test.ts
+          test/media-poster.test.ts
           test/web-server.test.ts
           test/keys.test.ts
           test/webhook-secret.test.ts
@@ -74,11 +75,17 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Install GTK and Flutter
+      - name: Install GTK build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libstdc++-12-dev libayatana-appindicator3-dev
-          git clone --depth 1 --branch 3.35.4 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+      - name: Install the verified Flutter SDK
+        run: |
+          archive="$RUNNER_TEMP/flutter.tar.xz"
+          curl -fSL --retry 3 --connect-timeout 15 --max-time 240 \
+            https://storage.googleapis.com/flutter_infra_release/flutter/stable/linux/flutter_linux_3.35.4-stable.tar.xz -o "$archive"
+          echo "151c75539aa1c01b874954d7b6e0006a622a3f12c76fd7f1fcafad27e6a2d68a  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run build

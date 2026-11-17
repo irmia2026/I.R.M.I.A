@@ -415,3 +415,13 @@ export async function resolveInsideRoot(
 export function insideAny(roots: readonly string[], p: string): boolean {
   return roots.some((root) => isInside(root, p));
 }
+
+/** Match an already resolved target against configured paths, including their filesystem aliases. */
+export async function insideAnyResolved(roots: readonly string[], path: string): Promise<boolean> {
+  if (insideAny(roots, path)) return true;
+  const canonical = await Promise.all(roots.map(async (root) => {
+    const { base, rest } = await deepestExisting(root);
+    return join(base, ...rest);
+  }));
+  return insideAny(canonical, path);
+}

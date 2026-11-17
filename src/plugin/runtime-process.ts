@@ -279,7 +279,7 @@ export class PluginProcess {
     }
     const file = this.options.pythonPath ?? resolvePythonExecutable();
     // -B must be a flag: -I ignores PYTHONDONTWRITEBYTECODE from the environment.
-    const args = ['-I', '-B', '-u', pythonRunnerPath(), entry];
+    const args = ['-I', '-X', 'utf8', '-B', '-u', pythonRunnerPath(), entry];
     if (process.platform !== 'win32') return { file, args };
     const powershell = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     return { file: powershell, args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',

@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { describe, it } from 'node:test';
@@ -141,7 +141,8 @@ async function makeHarness(
   options: Record<string, unknown> = {},
   deps: Record<string, unknown> = {},
 ): Promise<Harness> {
-  const root = await tempDir('irmia-fs-ws-');
+  // The tools report canonical paths. Windows runners may supply TEMP in 8.3 form.
+  const root = await realpath(await tempDir('irmia-fs-ws-'));
   const outside = await tempDir('irmia-fs-out-');
   const backupDir = join(root, '.backups');
   const counter = { n: 0 };

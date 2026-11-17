@@ -29,7 +29,7 @@
  *   ④ **受保护路径（凭据）不外发**（2026-10-05，用户点名）：`data/.keys.json` 这类凭据文件
  *      落在允许根里，于是"发得出去"曾经是成立的——读到本机文件与把密钥交给第三方通道
  *      是两件事，后者必须单独挡。名单**不在这里另写一份**：装配层把同一份受保护路径
- *      （fs 写入口用的那份）传进来，判定复用 `fs/path-guard.ts` 的 `insideAny`。
+ *      （fs 写入口用的那份）传进来，判定复用 `fs/path-guard.ts` 的 `insideAnyResolved`。
  *      判定读的是 **realpath**：一个指向凭据的目录联接（`link/.keys.json`）绕不过去。
  *      拒绝发生在**读字节之前**——回执里因此不可能带上凭据内容。
  */
@@ -39,7 +39,7 @@ import { basename, resolve, sep } from 'node:path';
 import { createChannelMediaPoster, type ChannelAdapter } from './qq-official.ts';
 import { ONEBOT_CHANNEL_NAME, isOneBotFamilyChannel, parseReplyUrl as parseOneBotReplyUrl } from './onebot.ts';
 import { MEDIA_MAX_BYTES, parseReplyUrlAny, type MediaRequest, type ReplyOutcome, type ReplyTarget } from '../tools/admin.ts';
-import { insideAny } from '../tools/fs/path-guard.ts';
+import { insideAnyResolved } from '../tools/fs/path-guard.ts';
 import type { MediaPoster } from '../tools/admin.ts';
 
 /**
@@ -150,7 +150,7 @@ export function createWorkspaceMediaPoster(options: WorkspaceMediaPosterOptions)
    * 展开后才是真正要读的那个文件。解析失败（路径不存在/没权限）**不在这里越权判**——
    * 交给下游如实报"不存在/读不到"。
    */
-  const refuseProtected = (path: string): ReplyOutcome | null => {
+  const refuseProtected = async (path: string): Promise<ReplyOutcome | null> => {
     if (protectedPaths.length === 0) return null;
     let real: string;
     try {
@@ -158,7 +158,7 @@ export function createWorkspaceMediaPoster(options: WorkspaceMediaPosterOptions)
     } catch {
       return null;
     }
-    if (!insideAny(protectedPaths, real)) return null;
+    if (!await insideAnyResolved(protectedPaths, real)) return null;
     return {
       ok: false,
       reason:
@@ -175,7 +175,7 @@ export function createWorkspaceMediaPoster(options: WorkspaceMediaPosterOptions)
       // （v64 起 `send_media` 每次都是 `data` + 绝对 `path` 一起下来，走的就是这一条；
       //  2026-10-18 起**四种 kind** 都带 path，于是默认的 `kind:image` 也在门的覆盖之内。）
       if (media.path !== undefined) {
-        const denied = refuseProtected(media.path);
+        const denied = await refuseProtected(media.path);
         if (denied !== null) return denied;
       }
       /**
@@ -214,7 +214,7 @@ export function createWorkspaceMediaPoster(options: WorkspaceMediaPosterOptions)
         };
       }
       // 受保护路径（本机凭据）：**在读字节之前**拒（判据与文案在 `refuseProtected`，与早退那条共用）
-      const denied = refuseProtected(full);
+      const denied = await refuseProtected(full);
       if (denied !== null) return denied;
       let size: number;
       try {
