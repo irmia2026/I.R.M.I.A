@@ -22,3 +22,16 @@ astrbot-src/
 qqbot-cache/
 # 品牌资产的拟合中间产物（.npy、比对截图、参考位图），只留几何源与导出物
 brand/_analysis/
+
+# ── 本地出包工具链（不进公开仓库）────────────────────────────────────────────
+# 这些是 release/installer 的开发脚手架和私有资源：包含本机路径、私有 wheel、
+# 角色包与发布闸门。保留在开发树里直接可用，但绝不进入 Git 历史或公开发布。
+/packaging/
+/packs/
+/tools/release.ps1
+/tools/package-gate.ps1
+/tools/make-config-example.ps1
+/tools/sanitize-audit.mjs
+/tools/sanitize-archive.mjs
+/tools/sanitize-rules.mjs
+/tools/publish-oss.mjs
