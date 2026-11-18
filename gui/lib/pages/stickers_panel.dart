@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app.dart';
 import '../i18n/app_strings.dart';
@@ -30,7 +31,26 @@ class _PagedStickers {
 typedef StickerFilePicker = Future<StickerFile?> Function();
 
 Future<StickerFile?> pickStickerFile() async {
-  if (!Platform.isWindows) throw UnsupportedError('sticker-upload-windows-only');
+  final path = Platform.isLinux
+      ? await const MethodChannel('irmia/desktop').invokeMethod<String>('pickStickerFile')
+      : await _pickWindowsStickerFile();
+  if (path == null || path.isEmpty) return null;
+  final file = File(path);
+  if (await file.length() > 8 * 1024 * 1024) throw const FormatException('sticker-too-large');
+  final extension = path.split('.').last.toLowerCase();
+  final mime = switch (extension) {
+    'png' => 'image/png',
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'gif' => 'image/gif',
+    'webp' => 'image/webp',
+    _ => null,
+  };
+  if (mime == null) throw const FormatException('unsupported-sticker-type');
+  return StickerFile(bytes: await file.readAsBytes(), mime: mime, name: path.split(Platform.pathSeparator).last);
+}
+
+Future<String?> _pickWindowsStickerFile() async {
+  if (!Platform.isWindows) throw UnsupportedError('sticker-file-picker-unavailable');
   const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
@@ -44,17 +64,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   final result = await Process.run('powershell.exe', ['-NoProfile', '-STA', '-Command', script]);
   if (result.exitCode != 0) throw ProcessException('powershell.exe', const [], '${result.stderr}', result.exitCode);
   final path = '${result.stdout}'.trim();
-  if (path.isEmpty) return null;
-  final extension = path.split('.').last.toLowerCase();
-  final mime = switch (extension) {
-    'png' => 'image/png',
-    'jpg' || 'jpeg' => 'image/jpeg',
-    'gif' => 'image/gif',
-    'webp' => 'image/webp',
-    _ => null,
-  };
-  if (mime == null) throw const FormatException('unsupported-sticker-type');
-  return StickerFile(bytes: await File(path).readAsBytes(), mime: mime, name: path.split(Platform.pathSeparator).last);
+  return path.isEmpty ? null : path;
 }
 
 bool validStickerView(dynamic raw) =>
@@ -482,7 +492,14 @@ class _StickersPanelState extends State<StickersPanel> {
           width: 420,
           child: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Center(child: Image.memory(file.bytes, width: 180, height: 180, fit: BoxFit.contain)),
+              Center(
+                child: Image(
+                  image: _stickerPreview(MemoryImage(file.bytes), edge: 180),
+                  width: 180,
+                  height: 180,
+                  fit: BoxFit.contain,
+                ),
+              ),
               const SizedBox(height: 12),
               Text('${entry['tags']?.join(' / ') ?? ''}'),
               Text('${s.stickerIntensityLabel}: ${s.stickerIntensity('${entry['intensity']}')}'),
@@ -1189,6 +1206,16 @@ class _StickersPanelState extends State<StickersPanel> {
         Wrap(spacing: 12, runSpacing: 12, children: [for (final entry in entries) _card(entry)]),
       ]);
 
+  ImageProvider _stickerPreview(ImageProvider source, {required int edge}) {
+    final pixels = (edge * MediaQuery.devicePixelRatioOf(context)).ceil();
+    return ResizeImage(
+      source,
+      width: pixels,
+      height: pixels,
+      policy: ResizeImagePolicy.fit,
+    );
+  }
+
   Widget _card(Map<String, dynamic> entry, {bool selectable = false}) {
     final s = IrmiaStrings.of(context);
     final id = '${entry['id']}';
@@ -1220,10 +1247,17 @@ class _StickersPanelState extends State<StickersPanel> {
         ]),
         ClipRRect(
           borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            '${widget.state.api.baseUrl}${entry['imageUrl']}',
+          child: Image(
+            image: _stickerPreview(
+              NetworkImage(
+                '${widget.state.api.baseUrl}${entry['imageUrl']}',
+                headers: widget.state.api.token == null
+                    ? null
+                    : {'Authorization': 'Bearer ${widget.state.api.token}'},
+              ),
+              edge: 168,
+            ),
             key: ValueKey('sticker-image-$id'),
-            headers: widget.state.api.token == null ? null : {'Authorization': 'Bearer ${widget.state.api.token}'},
             height: 104,
             width: 168,
             fit: BoxFit.cover,

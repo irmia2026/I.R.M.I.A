@@ -2466,6 +2466,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final state = _protocolField('state');
     final stateText = _protocolField('stateText');
     final configured = data?['configured'] == true;
+    final canInstall = data?['oneClickInstallSupported'] != false;
     final install = protocolInstall;
 
     // 卡头汇总：读不到就**什么都不说**（没有数据时的"已就绪"就是撒谎，v30 同一条纪律）。
@@ -2509,13 +2510,13 @@ class _SettingsPageState extends State<SettingsPage> {
               message: _s.settingsProtocolEmpty,
               // 原来的后半句是"要收群里的全量消息，点下面的「一键安装」"——那建立在"官 bot 收不到
               // 群消息"的错判上（见 docs/review.md 的「已了结」）。现在这句只讲这条路自己。
-              hint: _s.settingsProtocolEmptyHint,
+              hint: canInstall ? _s.settingsProtocolEmptyHint : _s.settingsManualProtocolInstall,
             )
           else
             _protocolStatusRow(state),
           const SizedBox(height: 14),
           // 主路径（v35）：装 + 配一次点完。手填目录那条路留在它下面——它是备选，不是主路
-          _protocolInstallBlock(install),
+          if (canInstall) _protocolInstallBlock(install),
           const SizedBox(height: 14),
           _FieldCell(
             label: _s.settingsProtocolEnabled,
@@ -2562,7 +2563,7 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             // 用户 ⑨：这段原来口语化（"以后的人就得先猜它相对谁""我自己下载解压"），
             // 改成技术说明——只留填这一格真正要知道的两件事：填哪一层、谁来填
-            note: _s.settingsInstallDirNote,
+            note: canInstall ? _s.settingsInstallDirNote : null,
           ),
           const SizedBox(height: 10),
           _protocolDownloadGuide(),

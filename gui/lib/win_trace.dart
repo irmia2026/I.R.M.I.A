@@ -29,6 +29,7 @@
 /// 按事件记会让人误以为"切了两次"。
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'gui_log.dart';
@@ -58,7 +59,9 @@ class WinTrace extends WindowListener {
   static final WinTrace instance = WinTrace._();
 
   /// 最近一次的可见性（初值按"窗口建好就是可见"算——runner 一建好就 show）
-  WinVisibility visibility = WinVisibility.visible;
+  final _visibility = ValueNotifier(WinVisibility.visible);
+  WinVisibility get visibility => _visibility.value;
+  ValueListenable<WinVisibility> get visibilityChanges => _visibility;
 
   /// 最近一次的焦点状态
   bool focused = false;
@@ -107,7 +110,7 @@ class WinTrace extends WindowListener {
   /// 记可见性。值没变就不写（见文件头"一条分寸"）。
   void setVisibility(WinVisibility next) {
     if (visibility == next) return;
-    visibility = next;
+    _visibility.value = next;
     guiLog.write('[win] visibility=${next.name}');
   }
 

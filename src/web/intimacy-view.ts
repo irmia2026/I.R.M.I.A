@@ -86,6 +86,7 @@ function historyOf(events: readonly AppEvent[], limit = INTIMACY_HISTORY_LIMIT):
       satisfaction: state.satisfaction,
       restraint: state.restraint,
     });
+    if (points.length > 2 * limit) points.splice(0, points.length - limit);
   }
   return points.slice(-limit);
 }
@@ -101,7 +102,13 @@ export function buildIntimacyView(input: {
   const state: IntimacyState = input.projection.intimacy;
   const nowMs = Date.parse(input.now);
   const viewState = Number.isFinite(nowMs) ? evolveIntimacy(state, nowMs) : state;
-  const latest = [...input.events].reverse().find((event) => event.type === 'intimacy/updated');
+  let latest: string | null = null;
+  for (let i = input.events.length - 1; i >= 0; i--) {
+    const event = input.events[i]!;
+    if (event.type !== 'intimacy/updated') continue;
+    latest = event.ts;
+    break;
+  }
   let line: string | null = null;
   if (enabled && Number.isFinite(nowMs)) {
     try {
@@ -116,7 +123,7 @@ export function buildIntimacyView(input: {
     privateOnly: true,
     maxLevel: input.config.intimacy.maxLevel,
     atMs: state.atMs,
-    updatedAt: latest?.ts ?? null,
+    updatedAt: latest,
     intimacy: viewState.intimacy,
     desire: viewState.desire,
     satisfaction: viewState.satisfaction,

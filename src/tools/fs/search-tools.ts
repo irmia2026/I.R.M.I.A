@@ -64,6 +64,7 @@ import { PATH_HINT } from '../boundary.ts';
 import { effectiveBoundaryRoot } from '../boundary.ts';
 import type { FsEnv } from './env.ts';
 import { resolveGuarded } from './env.ts';
+import { LINUX_FIND_SORT_KEYS, runLinuxFind, type LinuxFindOptions } from './linux-find.ts';
 import { buildMatcher } from './search-core.ts';
 import { formatBytes } from './text-codec.ts';
 import {
@@ -576,7 +577,9 @@ function esItemPath(item: EsCsvItem, root: string): string {
  * 这边能拿到的信息**不低于**那边（那边一次调用固定回结构化条目 name/path/full/size/date_modified
  * + count + total_size；这边 `detail:'full'` 同样给全，`detail:'paths'` 是省上下文的默认档）。
  */
-export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefinition {
+export function createFindTool(env: FsEnv, gate: SearchEngineGate | null): ToolDefinition {
+  const local = gate === null;
+  const sortKeys: readonly EsSortBy[] = local ? LINUX_FIND_SORT_KEYS : ES_SORT_KEYS;
   return {
     // 名字：`find` → **`find`**（用户 2026-10-13 的裁决「名字不误导，desc 才算」那一批）。
     // 与 `grep` 成对：`find` 按**文件名**、`grep` 按**内容**（`find` 本来就是"找文件"的动词）。
@@ -604,7 +607,10 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
      * **预算（实测，`estimateTokens` 同一把尺）**：改写前 **88** token（`catalogTokens` 5405）；
      * 改写后 **90**（5407，上界 5500 ⇒ 余 **93**，单件 100 门照过）。
      */
-    description:
+    description: local
+      ? '按名称搜文件/目录，内容用 grep。pattern 支持 * ? 或子串，regex=true 用正则。'
+        + 'path 默认工作目录，可指定绝对目录。max_results=0 只计数。大目录可能只返回部分。'
+      :
       '按文件名（glob）搜；内容用 grep。pattern 必填：* ? 通配或字面子串，regex=true 按正则'
       + '（分支别写括号，用 [ab]），匹配整个文件名；只给 ext 会报错。'
       + 'path 可绝对或相对仓库根、只吃目录（文件用 grep），不传=全盘；file_type 选 file|folder。'
@@ -622,11 +628,15 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
         // 范围那条（v64）：**不传＝搜全盘**才是这一件的默认行为（用户：「全盘使用应该是默认行为，
         // 怎么可以设计成默认工作根呢」）。⚠ 信任范围只限工作目录那一档里，"全盘"会绕过配置里写明
         // 的限制 ⇒ 那种配置下默认仍是**边界根**（实现见 handler 里的 boundary 判据）。
-        path: { type: 'string', description: '限定目录（相对仓库根）；不传＝搜全盘（只限工作目录那一档＝该根内）；只吃目录，传文件走 grep' },
+        path: { type: 'string', description: local
+          ? '目录，可绝对或相对；不传搜工作目录'
+          : '限定目录（相对仓库根）；不传＝搜全盘（只限工作目录那一档＝该根内）；只吃目录，传文件走 grep' },
         max_results: { type: 'integer', description: '最多几条，默认 100，上限 2000；0 = 只报数量' },
         // `match_path`（v55）：删掉的是"而不是只匹配名字"这句**重复**——同一句的前半句已经说了
         // "匹配整条路径"，默认值与那对命中示例（判据本身）一字未动。
-        match_path: { type: 'boolean', description: 'true = 匹配整条路径，默认 false；此时分隔符写 \\（fs/index 命中 0，fs\\index 命中 1）' },
+        match_path: { type: 'boolean', description: local
+          ? 'true = 匹配绝对路径，分隔符 /'
+          : 'true = 匹配整条路径，默认 false；此时分隔符写 \\（fs/index 命中 0，fs\\index 命中 1）' },
         ignore_case: { type: 'boolean', description: '忽略大小写，默认 true' },
         regex: { type: 'boolean', description: 'pattern 按正则解释，默认 false' },
         whole_word: { type: 'boolean', description: '全词匹配，默认 false' },
@@ -634,7 +644,7 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
         ext: { type: 'string', description: '扩展名过滤，如 "ts"；只在 regex=false 时生效' },
         // `sort_by` 的取值就在同一格的 `enum` 里逐条列着 ⇒ 描述只留"它是什么"，不再重复"默认由引擎决定"
         // （那句已由 `enum` 与实参拼装那一段的注释承担）；取值一个没少。
-        sort_by: { type: 'string', enum: [...ES_SORT_KEYS], description: '排序键' },
+        sort_by: { type: 'string', enum: [...sortKeys], description: '排序键' },
         detail: { type: 'string', enum: [...ES_DETAILS], description: 'paths（默认）只列路径；full 加大小与时间' },
       },
       required: ['pattern'],
@@ -666,7 +676,7 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
       const fileTypeRes = readOptionalEnum(args, 'file_type', ES_FILE_TYPES);
       if ('error' in fileTypeRes) return invalidArgs('find', fileTypeRes.error);
       const fileType = fileTypeRes.value ?? 'all';
-      const sortRes = readOptionalEnum(args, 'sort_by', ES_SORT_KEYS);
+      const sortRes = readOptionalEnum(args, 'sort_by', sortKeys);
       if ('error' in sortRes) return invalidArgs('find', sortRes.error);
       const sortBy = sortRes.value;
       const detailRes = readOptionalEnum(args, 'detail', ES_DETAILS);
@@ -684,10 +694,11 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
       // 空串与不传**同义**（不做出第三种行为）：两者都走这里的默认。
       const pathInput = (readOptionalString(args, 'path') ?? '').trim();
       let searchRoot: string | null;
-      if (pathInput === '') {
+      if (pathInput === '' && !local) {
         searchRoot = effectiveBoundaryRoot(ctx); // null = 不设边界（full 档）⇒ 真·全盘
       } else {
-        const guarded = await resolveGuarded(env, ctx, pathInput, {
+        const guarded = await resolveGuarded(env, ctx,
+          pathInput || effectiveBoundaryRoot(ctx) || ctx.workspaceRoot, {
           purpose: 'find',
           access: 'read',
           requireDirectory: true,
@@ -707,6 +718,36 @@ export function createFindTool(env: FsEnv, gate: SearchEngineGate): ToolDefiniti
         searchRoot = guarded.path;
       }
       if (ctx.signal.aborted) return ABORTED_RESULT;
+
+      if (gate === null) {
+        try {
+          const result = await runLinuxFind({
+            root: searchRoot ?? ctx.workspaceRoot, pattern, regex, ignoreCase, matchPath, wholeWord,
+            ext, fileType, maxResults, detail: detail === 'full',
+            sortBy: (sortBy ?? 'name') as LinuxFindOptions['sortBy'],
+          }, ctx.signal);
+          if ('error' in result) {
+            return result.invalidPattern ? invalidArgs('find', result.error)
+              : fail(FS_ERROR_CODES.SEARCH_FAILED, result.error);
+          }
+          const heading = 'engine: filesystem\n模式 ' + JSON.stringify(pattern) + ' · 命中 '
+            + (result.partial ? '至少 ' : '') + result.matched + ' 个';
+          const partial = result.partial ? '\n[扫描未覆盖整个目录。可缩小 path 后再试。]' : '';
+          if (countOnly) return ok(heading + partial);
+          const lines = result.hits.map(hit => {
+            const path = relative(ctx.workspaceRoot, hit.path);
+            const display = /[\r\n\t]/u.test(path) ? JSON.stringify(path) : path;
+            if (detail !== 'full') return display;
+            const date = hit.mtime === null ? '-' : new Date(hit.mtime).toISOString();
+            return (hit.size === null ? '-' : formatBytes(hit.size)) + ' · ' + date + ' · ' + display;
+          });
+          const more = result.matched > result.hits.length ? truncationNote(result.hits.length, maxResults) : '';
+          return ok(heading + '\n\n' + (lines.join('\n') || '(无命中)') + more + partial);
+        } catch (error) {
+          return ctx.signal.aborted ? ABORTED_RESULT
+            : fail(FS_ERROR_CODES.SEARCH_FAILED, '文件名搜索未完成。可缩小 path 或简化正则。' + String(error));
+        }
+      }
 
       // ──────────────── 实参拼装：逐条对应 devkit 的判据（顺序按 es.exe 的实测要求） ────────────────
       // 范围那一对（`-path <dir>`）只在**有范围**时给：不给就是全盘（见上面那一段判据）。

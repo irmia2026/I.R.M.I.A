@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { AppEvent, Visibility, WakeChannel } from './log/types.js';
@@ -35,7 +35,7 @@ import { ManagedProtocolService, readEndpointFromConfig, resolveServiceDir } fro
 import { normalizeSid, parseAliases } from './channel/sessions.ts';
 import { isOwnerChannelMessage, ownerIdsFrom } from './runtime/trust.ts';
 import { createNotifier } from './alert/notifier.ts';
-import { notifyStartupRecoveryDetailed, restoreStartupAlertWindow } from './alert/startup.ts';
+import { notifyStartupRecoveryDetailed } from './alert/startup.ts';
 import {
   CONFIG_FILE_NAME, lightLaneKeyPolicy, loadConfig, modelKeyGroups, readApiKey, trustBoundaryRoot,
   configHash, type AppConfig, type LoadedConfig,
@@ -113,7 +113,7 @@ import {
   GUI_GUARD_OFF_FILE_NAME, GUI_PATH_FILE_NAME,
   type GuiGuard, type GuiGuardRecord,
 } from './runtime/gui-guard.ts';
-import { FakeLoop, maxTurnOfLog } from './runtime/loop.ts';
+import { FakeLoop } from './runtime/loop.ts';
 // 插件平台（2026-10-26）：管理器、组合面、熔断器与半开探针。装配全在本文件；
 // 判据各自在模块里（`plugin/*.ts` 的注释指着每一处"为什么这样写"）。
 import { PluginManager, type PluginView } from './plugin/manager.ts';
@@ -126,7 +126,6 @@ import {
 import { PluginHost, type PluginOutboundMedia } from './plugin/host-services.ts';
 import { completePluginModel } from './plugin/model-call.ts';
 import { parseReplyUrlAny, replyUrlForWake } from './tools/admin.ts';
-import { allEventsOf } from './state/event-snapshot.ts';
 import { EVENT_LOG_DIR_NAME, TIMER_FILE_NAME, recover, type RecoverResult } from './runtime/recover.ts';
 import { TimerStore } from './wake/timer-store.ts';
 import {
@@ -1041,6 +1040,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     console.log(line);
   });
   const now = options.now ?? (() => new Date());
+  const startupMs: Record<string, number> = {};
+  let stageStarted = performance.now();
+  const markStartup = (stage: string): void => {
+    const ended = performance.now();
+    startupMs[stage] = Math.round(ended - stageStarted);
+    stageStarted = ended;
+  };
 
   /**
    * ── 顺序即判据（2026-10-23）：① 先定"读哪份配置"并真读它 → ② 再由它定数据目录 ──
@@ -1059,6 +1065,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   const loadedConfig = startup.loaded;
   const config = loadedConfig.config;
   const dataDir = startup.dataDir;
+  markStartup('config');
 
   /**
    * `--port`：**显式给的端口压过 config.json 的 `web.port`**（多实例的唯一入口）。
@@ -1158,10 +1165,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     const raw = (process.argv[1] ?? '').trim();
     return raw === '' ? '' : resolve(raw);
   })();
+  const desktopDefaultDataDir = process.platform === 'linux' ? process.env['IRMIA_DESKTOP_DEFAULT_DATA_DIR'] ?? '' : '';
   const isDefaultInstance = isDefaultDataDir({
     entry: entryPath,
     dataDir,
-    configDataDir: startup.configDataDir,
+    configDataDir: isAbsolute(desktopDefaultDataDir) ? desktopDefaultDataDir : startup.configDataDir,
   });
   /** 每实例一份的端口文件路径（bind 成功那一刻才定得下来：端口是文件名的一部分） */
   let perInstancePortPath: string | null = null;
@@ -1225,6 +1233,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
       pid: process.pid,
       nodeExe: process.execPath,
       entry: entryPath,
+      ...(process.platform === 'linux' ? { configPath: loadedConfig.path } : {}),
       isDefault: isDefaultInstance,
       now,
       out: write,
@@ -1247,6 +1256,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     write(`[界面] 端口没能先 bind（${describeError(err)}）——不拦启动；`
       + '如果端口被占，本次的界面仍会退回环境变量 / 默认端口那两档去找后端');
   }
+  markStartup('preflight');
   /** 收掉那个"还没交给真服务"的 socket（启动失败 / 退出时用；已经 handoff 之后是空操作） */
   const closePreflight = async (): Promise<void> => {
     const current = preflight;
@@ -1286,6 +1296,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 若让 recover 自建一份，它的回调只写日志，到期事实不会变成 wake/timer 事件。
   const timers = new TimerStore(join(dataDir, TIMER_FILE_NAME), { now });
   const overdue = await overdueHints(timers, now);
+  markStartup('workspace');
 
   const lockState: { takeover: TakeoverRecord | null } = { takeover: null };
   let stopRef: ((reason: SessionEndReason, detail?: string) => Promise<void>) | null = null;
@@ -1356,6 +1367,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   } finally {
     gate.release();
   }
+  markStartup('recover');
 
   const { log, lock } = recovery;
 
@@ -1426,10 +1438,22 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 注意顺序：**先落库再动手**——"启用过"这一事实必须在任何副作用之前成立。
     pluginHostRef.host?.onLifecycleEvent(type, data as Record<string, unknown>);
   });
-  const recoveredEvents = await allEventsOf(log);
-  pluginManager.setEvents(recoveredEvents);
+  const pluginEvents: AppEvent[] = [];
+  const startupAlarms: AppEvent[] = [];
+  const topUpEvents: AppEvent[] = [];
+  let startTurn = 0;
+  const startupTypes = new Set(['turn/start', 'budget/topped-up', 'alarm/sent']);
+  for await (const event of log.readRange(1, { throughSeq: log.latestSeq(), types: startupTypes, typePrefixes: ['plugin/'] })) {
+    if (event.type === 'turn/start') {
+      if (event.data.turn > startTurn) startTurn = event.data.turn;
+    } else if (event.type === 'budget/topped-up') topUpEvents.push(event);
+    else if (event.type === 'alarm/sent') startupAlarms.push(event);
+    else pluginEvents.push(event);
+  }
+  pluginManager.setEvents(pluginEvents);
   const pluginStartupBudgetGuard = new BudgetGuard(config.budget);
-  pluginStartupBudgetGuard.setTopUps(foldTopUps(recoveredEvents));
+  pluginStartupBudgetGuard.setTopUps(foldTopUps(topUpEvents));
+  markStartup('startupHistory');
   let pluginRuntime = composePluginRuntime(pluginManager, config.mcp.extraLaunchers);
   let pluginMcpOwners = new Map<string, { pluginId: string; contentHash: string }>();
   let circuitBreaker: PluginCircuitBreaker | null = null;
@@ -1519,7 +1543,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 这种半成品现场根本不会出现；事件顺序也就自然是"这一任起来了 → 它补了哪些出厂技能"。
    */
   const launchCwd = process.cwd();
-  const skillsSeed = ensureSkillsSeed(dataDir, join(launchCwd, SKILLS_DIR_NAME));
+  const installedSkills = process.env['IRMIA_SKILLS_SEED_DIR'];
+  const skillsSeed = ensureSkillsSeed(dataDir, installedSkills || join(launchCwd, SKILLS_DIR_NAME));
   if (skillsSeed.state === 'created') {
     append('skill/seed', {
       source: SKILLS_DIR_NAME,
@@ -1566,18 +1591,6 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
   // 它是**清垃圾**，不属于"能不能开始干活"：推迟到就绪之后再跑，语义不变
   // （同一个 plan、同一处 append、同一个事件），只是不再让人对着启动画面等。
   const sweepPlan = planTempSweep(process.env);
-  const sweepTimer = setTimeout(() => {
-    void runStartupTempSweep({
-      plan: sweepPlan,
-      log: write,
-      append: (type, data, visibility) => {
-        append(type, data, visibility);
-      },
-    }).catch(() => {
-      // runStartupTempSweep 自己吞异常；这里兜底，别让未处理的 rejection 带走进程
-    });
-  }, 15_000);
-  sweepTimer.unref?.();
 
   // 后台任务管理器（design §4.21 jobs）：pwsh 的 runInBackground 从这里进出，
   // 共用它一个实例——job/* 与 wake/job 事件只有这一个写入点。
@@ -1620,14 +1633,13 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 而启动告警在**那之前**就发了 ⇒ "同一类告警 30 分钟内只发一次"这条承诺在**告警自己身上**
    * 失效：一个必然崩溃的进程被守护脚本反复拉起，每重启一次就合法地多发一条，而那时窗口还是空的。
    *
-   * 代价说清楚：这里要把事件日志顺序读一遍（稍后 `warmUp` 还会再读一遍）。两份都是启动期
-   * 一次性成本，换来的是"崩溃循环里人只收到一条"。
+   * 启动恢复已收集 alarm/sent，直接用它重建限流窗口。
    * 读不动日志**不拦启动**（告警是观测，不是启动前置条件），但这时要说清"本次可能重复"——
    * 悄悄退化成原顺序，等于把这条承诺又丢了一次。
    */
   try {
-    const restoredAlarms = await restoreStartupAlertWindow(notifier, log);
-    if (restoredAlarms > 0) write(`[告警] 已从日志重建限流窗口（${restoredAlarms} 条 alarm/sent）`);
+    notifier.restore(startupAlarms);
+    if (startupAlarms.length > 0) write(`[告警] 已从日志重建限流窗口（${startupAlarms.length} 条 alarm/sent）`);
   } catch (err) {
     write(`[告警] 限流窗口重建失败（不拦启动；本次启动告警可能重复）：${describeError(err)}`);
   }
@@ -1681,7 +1693,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     write(`[模型] 密钥补齐没成（不拦启动）：${describeError(err)}`);
   }
 
-  const startTurn = await maxTurnOfLog(log);
+  markStartup('servicesAndAlerts');
   /**
    * **两把 key，各按自己那一格解析**（2026-10-21，per-lane 端点与密钥）。
    *
@@ -1750,6 +1762,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 在听哪个端口"），而且"它已经在跑、只是本次进程没管它"这条路上，端点也可能已经存在。
    */
   const managedStatus = managedService === null ? null : await managedService.status();
+  markStartup('managedProtocol');
   /**
    * 端点重读口（v37）：协议端的 OneBot 配置**可能晚于本进程物化**（人登录 QQ 之后才写下来），
    * 所以"启动时读到的是 null"不能成为定论——把它交给适配器，由它每次建连前现读一次。
@@ -2294,6 +2307,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    */
   // 阶段播报（`/api/health` 的 `phase`）：接下来是 MCP 池与工具注册表的装配
   startupState.setPhase('mcp');
+  markStartup('channelSetup');
   const mcpAttachImage = makeMcpImageAttacher({
     dataDir,
     enabled: config.vision.imagesToContext === true,
@@ -3104,6 +3118,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     write(`[工具] 假循环下仍装配 ${toolRegistry.listForModel({}).length} 件工具供界面查看与开关（不会被执行）`);
   }
   if (loop instanceof RealLoop) realLoopRef.current = loop;
+  markStartup('toolsAndPlugins');
 
   /**
    * 「她被怎么称呼」（`channels.mentionKeywords`）：**可变**，界面改完立刻生效。
@@ -3286,6 +3301,8 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 打上从**进程启动**到就绪的毫秒数：这台机器冷启动到底多久，日志里一眼能查。
     write(`[界面] 后端就绪：http://${config.web.host}:${webServer.port()}`
       + `（从进程启动起 ${Math.round(process.uptime() * 1000)} ms；/api/health 现报 ready）`);
+    markStartup('web');
+    write(`[启动] 分阶段耗时（ms）${JSON.stringify(startupMs)}`);
     /**
      * 登记表：**就绪那一刻**补记 `lastReadyAt`。
      *
@@ -3306,6 +3323,16 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 留着只会让界面对着一个"有人听、谁都不答"的端口（或者连到一个死端口）等到超时。
     await closePreflight();
   }
+
+  // Schedule after the Web handoff so a slow startup never overlaps the scan.
+  const sweepTimer = sweepPlan.mode === 'off' ? null : setTimeout(() => {
+    void runStartupTempSweep({
+      plan: sweepPlan,
+      log: write,
+      append: (type, data, visibility) => { append(type, data, visibility); },
+    }).catch(() => undefined);
+  }, 15_000);
+  sweepTimer?.unref();
 
   // 更新检查起拍：**无论 web 服务成没成**（见上面装配点那段注释）。
   // 首检延迟 60 秒（`UPDATE_FIRST_CHECK_DELAY_MS`），之后按 12h /（连续失败 3 次后）24h 自查；
@@ -3588,8 +3615,11 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
    * 界面那一半**已经接上**（v50 起：`gui/lib/gui_quit.dart` ⇒ `%APPDATA%\Irmia\gui-quit.marker`，关窗
    * `main.dart:85`／托盘 `tray.dart:150` 各写一次、**收进托盘不写**，b5d68ce）；**只有旧构建的界面**不写标记 ⇒ 那时主动关仍会被当崩溃拉回。
    */
-  const guardMode = resolveGuardMode(process.env, dataDir);
-  const guiFound = discoverGuiExe({ dataDir, env: process.env, fileExists: existsSync });
+  const guardMode = process.platform === 'win32'
+    ? resolveGuardMode(process.env, dataDir)
+    : {mode: 'off' as const, why: '当前系统不启用 Windows 界面保活'};
+  const guiFound = guardMode.mode === 'off'
+    ? null : discoverGuiExe({ dataDir, env: process.env, fileExists: existsSync });
   /**
    * 句柄要先于 `stop()` 声明：退出路径里第一件事就是把它停掉
    * （不再有"界面没了 ⇒ 又被拉回来"这种在退出过程中冒出来的动作）。
@@ -3652,6 +3682,7 @@ export async function runMain(options: MainOptions = {}): Promise<MainHandle> {
     // 更新检查的定时器跟着收掉：退出流程里不该再排一次 12 小时后的检测
     // （在飞的那一次请求由它自己的 8 秒上限收场，不拦退出）。
     updateService.stop();
+    if (sweepTimer !== null) clearTimeout(sweepTimer);
 
     // 协议端是框架拉起来的，就得由框架收尸：先停它（killProcessTree 连子进程一起，
     // 否则 NTQQ 那层会变成孤儿进程，下次启动还会抢同一个端口）

@@ -61,6 +61,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'desktop_paths.dart';
 
 /// 单个日志文件的滚动上限（2 MiB）。
 const int kGuiLogMaxBytes = 2 * 1024 * 1024;
@@ -78,6 +79,7 @@ String? guiLogPathOverride;
 
 /// 这份日志的落点（真机路径；被 [guiLogPathOverride] 覆盖时以覆盖为准）。
 String guiLogDefaultPath() {
+  if (Platform.isLinux) return '${guiStateDirectory(Platform.environment)}/gui.log';
   final base = Platform.environment['LOCALAPPDATA'];
   if (base == null || base.trim().isEmpty) {
     // 没有 LOCALAPPDATA（非 Windows / 精简环境）：退到临时目录，仍然有日志可看

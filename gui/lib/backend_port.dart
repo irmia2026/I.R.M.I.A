@@ -28,6 +28,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'desktop_paths.dart';
 
 /// 出厂端口（与 `src/config/config.ts` 的 `web.port` 缺省值同值）
 const int kDefaultBackendPort = 7788;
@@ -87,6 +88,10 @@ class BackendPort {
 ///
 /// 路径口径与后端**只有这一处**（后端那份在 `src/runtime/server-port-file.ts`）。
 String? serverPortFilePath(Map<String, String> env) {
+  if (Platform.isLinux) {
+    final runtime = linuxRuntimeDirectory(env);
+    return runtime == null ? null : '$runtime/$kServerPortFileName';
+  }
   final local = (env['LOCALAPPDATA'] ?? '').trim();
   if (local.isEmpty) return null;
   return '$local${Platform.pathSeparator}Irmia${Platform.pathSeparator}$kServerPortFileName';
@@ -128,11 +133,16 @@ BackendPort? parseEnvPort(String? raw) {
 /// **三级来源**的唯一判据（纯函数：环境变量与端口文件路径都可注入，便于逐档验）
 ///
 /// `env` 缺省读 `Platform.environment`；`portFilePath` 缺省按 `env` 推。
+/// Linux 桌面启动器用 `IRMIA_DESKTOP_PORT` 明确绑定本次启动选择的实例。
 BackendPort resolveBackendPort({
   Map<String, String>? env,
   String? portFilePath,
 }) {
   final environment = env ?? Platform.environment;
+  if (Platform.isLinux) {
+    final explicit = parseEnvPort(environment['IRMIA_DESKTOP_PORT']);
+    if (explicit != null) return explicit;
+  }
   final path = portFilePath ?? serverPortFilePath(environment);
   final fromFile = readServerPortFile(path);
   if (fromFile != null) return fromFile;

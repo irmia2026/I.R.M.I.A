@@ -39,12 +39,12 @@
  * 零外部依赖：只用 node: 标准库。
  */
 
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { killProcessTree } from '../process/kill-tree.ts';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { createUtf8Stream, decodeText } from '../util/bytes-text.ts';
 import type { SideEffect } from '../log/types.js';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -1063,7 +1063,7 @@ export const defaultMcpProcessSpawner: McpProcessSpawner = (entry) => {
   } : entry.env === undefined ? process.env : { ...process.env, ...entry.env };
   const unstartable = unstartableLauncherReason(entry.command, process.platform, childEnv);
   if (unstartable !== null) throw new Error(unstartable);
-  const child = spawn(entry.command, [...(entry.args ?? [])], {
+  const child = spawnManagedProcess(entry.command, entry.args ?? [], {
     cwd: entry.cwd ?? process.cwd(),
     env: childEnv,
     stdio: ['pipe', 'pipe', 'pipe'],

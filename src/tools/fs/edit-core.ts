@@ -25,7 +25,7 @@ import type { FsEnv } from './env.ts';
 import {
   VERSION_SCOPE_WORKSPACE, workspaceVersionRelOf, writeFileVersion,
 } from '../../persona/versions.ts';
-import { insideAny, readOnlyPrefixOfWrite } from './path-guard.ts';
+import { insideAnyResolved, readOnlyPrefixOfWrite } from './path-guard.ts';
 import { checkSyntax, describeVerdict, type SyntaxVerdict } from './syntax-check.ts';
 import { encodeText, positionAt, previewLine, splitLines, type DetectedEncoding, type Eol } from './text-codec.ts';
 import {
@@ -616,7 +616,7 @@ export async function guardedWrite(
   // 第零步之二：受保护文件（钩子配置等「防护自身定义」，绝对路径）。同样放在最前面：
   // 命中就不该产生备份、更不该碰盘。绕过它等于让 agent 自己拆掉拦自己的门（design §4.19 第 5 条）。
   for (const target of targets) {
-    if (!insideAny(env.protectedPaths, target.path)) continue;
+    if (!await insideAnyResolved(env.protectedPaths, target.path)) continue;
     return {
       ok: false,
       code: FS_ERROR_CODES.PATH_DENIED,

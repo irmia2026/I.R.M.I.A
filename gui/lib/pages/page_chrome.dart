@@ -102,7 +102,7 @@ class GuideBar extends StatelessWidget {
   /// 状态句，以「还没有 X。」结尾；「从这里开始：」由本组件补足
   final String text;
   final String actionLabel;
-  final VoidCallback onAction;
+  final VoidCallback? onAction;
   final String? hint;
   final Color? tone;
 
@@ -127,9 +127,9 @@ class GuideBar extends StatelessWidget {
             runSpacing: 2,
             children: [
               Icon(icon, size: 16, color: color),
-              Text('$text从这里开始：',
+              Text(onAction == null ? text : '$text从这里开始：',
                   style: TextStyle(fontSize: 13, height: 1.5, color: scheme.onSurface)),
-              TextButton(
+              if (onAction != null) TextButton(
                 onPressed: onAction,
                 style: TextButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 10),

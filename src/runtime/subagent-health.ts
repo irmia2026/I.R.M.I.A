@@ -72,7 +72,8 @@ export async function healthcheckSubagentProfile(
       // 只让 probePythonModules 自己找 PATH 会漏掉 data/tools/python。
       const managedPython = join(options.dataDir, 'tools', 'python', 'python.exe');
       // 托管 Python 优先：安装按钮把 tree-sitter 装到这一份，探测也必须看同一份。
-      const pythonBinary = existsSync(managedPython) ? managedPython : (resolvePythonBinary() ?? undefined);
+      const pythonBinary = process.platform === 'win32' && existsSync(managedPython)
+        ? managedPython : (resolvePythonBinary() ?? undefined);
       missingModules = options.pythonModulesCheck !== undefined
         ? options.pythonModulesCheck(pythonModules)
         : probePythonModules(pythonModules, pythonBinary === undefined ? {} : {binary: pythonBinary});

@@ -5,6 +5,7 @@ import 'package:irmia_gui/api.dart';
 import 'package:irmia_gui/app.dart';
 import 'package:irmia_gui/pages/overview_page.dart';
 import 'package:irmia_gui/theme.dart';
+import 'package:irmia_gui/win_trace.dart';
 
 /// 「外部会话」卡的**未读徽章会自己变**（2026-10-24 用户报的 bug）
 ///
@@ -128,6 +129,28 @@ void main() {
     expect(find.textContaining('外部会话读取失败'), findsNothing,
         reason: '一次后台刷新失败不该把已经读数的那一行换成红字（人会以为数据没了）');
     expect(find.text('未读 3'), findsOneWidget, reason: '保留上一次读到的事实，等下一拍再试');
+
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('托盘和最小化时暂停会话轮询，恢复后立即刷新', (tester) async {
+    final trace = WinTrace.instance;
+    addTearDown(trace.noteShown);
+    final api = _PollingApi(sessionPayloads: [_payload(3), _payload(0)]);
+    await _pump(tester, api);
+    expect(api.sessionReads, 1);
+
+    trace.noteHidden();
+    await tester.pump(const Duration(minutes: 1));
+    trace.onWindowMinimize();
+    await tester.pump(const Duration(minutes: 1));
+    expect(api.sessionReads, 1);
+
+    trace.onWindowRestore();
+    expect(api.sessionReads, 2);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('未读 3'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
   });

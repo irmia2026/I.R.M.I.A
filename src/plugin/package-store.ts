@@ -191,7 +191,7 @@ function scanPythonEntry(rootDir: string, manifest: PluginManifest): string | nu
   }
   const entry = join(rootDir, manifest.runtime.entry ?? '');
   const scanner = pythonAstScannerPath();
-  const result = spawnSync(probe.binary, ['-I', scanner, entry, manifest.permissions.join(',')], {
+  const result = spawnSync(probe.executable, ['-I', '-X', 'utf8', scanner, entry, manifest.permissions.join(',')], {
     encoding: 'utf8',
     timeout: 30_000,
     windowsHide: true,

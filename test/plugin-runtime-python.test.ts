@@ -22,9 +22,14 @@ test('python 插件：运行器可跑则注册工具并回结果，不可用则�
     t.skip(`这台机器没有可用的 Python（${probe.binary}：${probe.detail}）`);
     return;
   }
-  const harness = await createHarness({ fixture: 'plugin-py' });
+  const harness = await createHarness({ fixture: 'plugin-py', env: { IRMIA_PLUGIN_JOB_DIAGNOSTICS: '1' } });
   t.after(async () => { await harness.dispose(); });
-  await harness.start();
+  try {
+    await harness.start();
+  } catch (error) {
+    t.diagnostic(harness.writes.join('\n'));
+    throw error;
+  }
   assert.equal(harness.tools.has('demo-py__echo'), true);
   const result = await harness.callTool('demo-py__echo', { text: '世界' });
   assert.deepEqual(result, { content: 'py:世界' });
@@ -33,7 +38,7 @@ test('python 插件：运行器可跑则注册工具并回结果，不可用则�
 
 test('python 插件：对象式工具定义保留 destructive 危险等级', async (t) => {
   if (!probePython().available) { t.skip('Python unavailable'); return; }
-  const harness = await createHarness();
+  const harness = await createHarness({ env: { IRMIA_PLUGIN_JOB_DIAGNOSTICS: '1' } });
   t.after(async () => { await harness.dispose(); });
   const source = tempDirSync('irmia-plugin-py-side-effect-');
   writeFileSync(join(source, 'plugin.json'), JSON.stringify({
@@ -42,7 +47,12 @@ test('python 插件：对象式工具定义保留 destructive 危险等级', asy
   }));
   writeFileSync(join(source, 'main.py'), `def activate(ctx):\n    ctx.tools.define({"name":"delete","description":"delete","sideEffect":"destructive","handler":lambda args:{"content":"ok"}})\n`);
   const pkg = harness.manager.install(source);
-  await harness.host.startPackage(pkg);
+  try {
+    await harness.host.startPackage(pkg);
+  } catch (error) {
+    t.diagnostic(harness.writes.join('\n'));
+    throw error;
+  }
   assert.equal(harness.tools.get('py-side-effect__delete')?.sideEffect, 'destructive');
 });
 

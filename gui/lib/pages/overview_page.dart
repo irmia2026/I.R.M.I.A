@@ -5,6 +5,7 @@
 // 页面里 `final s = IrmiaStrings.of(context);` 之后取用，**别在页面里拼字符串**（语序因语言而异）。
 // 不许迁的：她的人设文案、她的发言/记忆正文、她说话的口吻——那是内容，不是界面的一层皮。
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -20,6 +21,7 @@ import '../theme.dart';
 // 新写的间距/字号/圆角一律走令牌（本轮新增的「配置引导」按钮就是这么摆的）
 import '../theme/design_tokens.dart';
 import '../ui_kit.dart';
+import '../win_trace.dart';
 import 'page_chrome.dart';
 
 /// 运行情况页（默认首页）——与 Web 端同构。
@@ -80,10 +82,9 @@ class _OverviewPageState extends State<OverviewPage> {
   /// 可屏幕上的数字还是她读之前那个——用户看到的就是「读过了，未读标签不消失」，
   /// 而且**页面一直开着不动就永远不变**（"直到再次有未读消息"那句话的由来）。
   ///
-  /// 间隔取 15 秒（与消息适配器页那条轮询同档）：这个端点是按日志实例缓存的**增量**快照，
-  /// 没有新事件时零 IO、零解析，所以刷新它的代价只有一次本地 HTTP；而它答的是"她现在还欠
-  /// 多少没看"，慢于十几秒的读数就没有意义了。
+  /// 窗口可见时每隔 15 秒刷新。收进托盘或最小化期间停止，窗口回来时立即回读。
   Timer? _sessionsPoll;
+  int _sessionsRead = 0;
 
   /// 死信动作（重投 / 丢弃）上一次失败的原因。
   ///
@@ -97,13 +98,13 @@ class _OverviewPageState extends State<OverviewPage> {
     super.initState();
     widget.state.addListener(_onStateChange);
     unawaited(load());
-    // 进页就读一次（`load()` 里已经带了），之后每 `_sessionsPollEvery` 再读一次：
-    // 她读没读那个群，只有这条轮询能把"未读从 X 变 0"送到屏幕上（见 `_sessionsPoll` 的注释）。
-    _sessionsPoll = Timer.periodic(_sessionsPollEvery, (_) => unawaited(_loadSessions(silent: true)));
+    WinTrace.instance.visibilityChanges.addListener(_onVisibilityChange);
+    _onVisibilityChange(refresh: false);
   }
 
   @override
   void dispose() {
+    WinTrace.instance.visibilityChanges.removeListener(_onVisibilityChange);
     _sessionsPoll?.cancel();
     _sessionsPoll = null;
     widget.state.removeListener(_onStateChange);
@@ -112,6 +113,17 @@ class _OverviewPageState extends State<OverviewPage> {
 
   /// 未读徽章那条轮询的间隔（见 `_sessionsPoll`）
   static const Duration _sessionsPollEvery = Duration(seconds: 15);
+
+  void _onVisibilityChange({bool refresh = true}) {
+    _sessionsPoll?.cancel();
+    _sessionsPoll = null;
+    if (WinTrace.instance.visibility != WinVisibility.visible) return;
+
+    if (refresh) unawaited(_loadSessions(silent: true));
+    _sessionsPoll = Timer.periodic(_sessionsPollEvery, (_) {
+      unawaited(_loadSessions(silent: true));
+    });
+  }
 
   void _onStateChange() {
     if (widget.state.online && error != null) unawaited(load());
@@ -155,11 +167,13 @@ class _OverviewPageState extends State<OverviewPage> {
   /// 红字——后台刷新把卡片打回三态里的另外两态，比数字晚十几秒难看得多。人按的「重试」与
   /// 进页那一次照旧走完整三态（`silent: false`）。
   Future<void> _loadSessions({bool silent = false}) async {
+    if (silent && sessionsLoading) return;
+    final read = ++_sessionsRead;
     if (mounted && !silent) setState(() => sessionsLoading = true);
     try {
       final data = await widget.state.api.get('/api/sessions');
       final list = data is Map ? data['sessions'] : null;
-      if (!mounted) return;
+      if (!mounted || read != _sessionsRead) return;
       // 非对象/缺字段当"读失败"而不是"没有会话"：说"没有"是断言，得先真的读到
       final rows = list is List
           ? [for (final item in list) _SessionRow.from(item)]
@@ -171,7 +185,7 @@ class _OverviewPageState extends State<OverviewPage> {
         sessionsLoading = false;
       });
     } catch (err) {
-      if (!mounted || silent) return;
+      if (!mounted || read != _sessionsRead || silent) return;
       setState(() {
         sessionsError = err.toString();
         sessionsLoading = false;
@@ -242,7 +256,7 @@ class _OverviewPageState extends State<OverviewPage> {
                   _HeroCard(
                     state: widget.state,
                     stats: stats,
-                    onRestart: _restart,
+                    onRestart: Platform.isLinux ? null : _restart,
                     onConfigGuide: _openConfigGuide,
                     onGoto: _goto,
                   ),
@@ -279,7 +293,7 @@ class _OverviewPageState extends State<OverviewPage> {
                   ),
                   const SizedBox(height: 18),
                   _SectionTitle(IrmiaStrings.of(context).overviewSectionRecent),
-                  _RecentList(stats: stats, onWake: () => unawaited(_restart())),
+                  _RecentList(stats: stats, onWake: Platform.isLinux ? null : () => unawaited(_restart())),
                 ],
               ],
             ),
@@ -564,7 +578,7 @@ class _HeroCard extends StatelessWidget {
   });
   final AppState state;
   final Map<String, dynamic>? stats;
-  final Future<void> Function() onRestart;
+  final Future<void> Function()? onRestart;
 
   /// 「配置引导」：打开首次引导卡（`OnboardingHost` 那张），可随时关掉
   final VoidCallback onConfigGuide;
@@ -646,11 +660,13 @@ class _HeroCard extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: Space.x2),
-              FilledButton(
-                onPressed: () => unawaited(onRestart()),
-                child: Text(IrmiaStrings.of(context).trayRestart),
-              ),
+              if (onRestart case final restart?) ...[
+                const SizedBox(width: Space.x2),
+                FilledButton(
+                  onPressed: () => unawaited(restart()),
+                  child: Text(IrmiaStrings.of(context).trayRestart),
+                ),
+              ],
             ],
           ),
         ],
@@ -2636,7 +2652,7 @@ class _RecentList extends StatelessWidget {
   const _RecentList({required this.stats, required this.onWake});
 
   final Map<String, dynamic>? stats;
-  final VoidCallback onWake;
+  final VoidCallback? onWake;
 
   @override
   Widget build(BuildContext context) {

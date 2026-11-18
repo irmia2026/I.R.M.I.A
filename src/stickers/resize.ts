@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
+import { runPillow } from '../media/pillow.ts';
 
 import { sniffStickerMime, stickerDimensions, stickerExtension } from './media.ts';
 import type { StickerMime } from './types.ts';
@@ -52,6 +53,28 @@ export const resizeStickerImage: StickerResizer = async (input) => {
   const outPath = join(dir, isJpeg ? 'out.jpg' : 'out.png');
   try {
     writeFileSync(inPath, input.bytes);
+    const ok = process.platform === 'linux'
+      ? !('error' in await runPillow(['resize', inPath, outPath, String(maxEdge), isJpeg ? 'JPEG' : 'PNG', '80'],
+        input.timeoutMs ?? 10_000))
+      : await resizeWithGdiPlus(inPath, outPath, maxEdge, isJpeg, input.timeoutMs ?? 10_000);
+    if (!ok) return null;
+    const bytes = readFileSync(outPath);
+    const mime = sniffStickerMime(bytes);
+    if (mime === null || bytes.length === 0) return null;
+    const dims = stickerDimensions(bytes, mime);
+    if (dims === null || dims.width <= 0 || dims.height <= 0) return null;
+    if (dims.width > maxEdge || dims.height > maxEdge) return null;
+    const expected: StickerMime = isJpeg ? 'image/jpeg' : 'image/png';
+    if (mime !== expected) return null;
+    return {bytes, mime, width: dims.width, height: dims.height, resized: true};
+  } catch {
+    return null;
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+};
+
+async function resizeWithGdiPlus(inPath: string, outPath: string, maxEdge: number, isJpeg: boolean, timeout: number): Promise<boolean> {
     const script = [
       '$ErrorActionPreference = "Stop"',
       'Add-Type -AssemblyName System.Drawing',
@@ -92,27 +115,12 @@ export const resizeStickerImage: StickerResizer = async (input) => {
       'if ((Get-Item -LiteralPath $dstPath).Length -le 0) { exit 2 }',
       'exit 0',
     ].join('\n');
-    const ok = await new Promise<boolean>((resolve) => {
+    return await new Promise<boolean>((resolve) => {
       execFile(
         powershellExe(),
         ['-NoProfile', '-NonInteractive', '-EncodedCommand', b64Script(script)],
-        {timeout: input.timeoutMs ?? 10_000, windowsHide: true},
+        {timeout, windowsHide: true},
         (error) => resolve(error === null),
       );
     });
-    if (!ok) return null;
-    const bytes = readFileSync(outPath);
-    const mime = sniffStickerMime(bytes);
-    if (mime === null || bytes.length === 0) return null;
-    const dims = stickerDimensions(bytes, mime);
-    if (dims === null || dims.width <= 0 || dims.height <= 0) return null;
-    if (dims.width > maxEdge || dims.height > maxEdge) return null;
-    const expected: StickerMime = isJpeg ? 'image/jpeg' : 'image/png';
-    if (mime !== expected) return null;
-    return {bytes, mime, width: dims.width, height: dims.height, resized: true};
-  } catch {
-    return null;
-  } finally {
-    rmSync(dir, {recursive: true, force: true});
-  }
-};
+}

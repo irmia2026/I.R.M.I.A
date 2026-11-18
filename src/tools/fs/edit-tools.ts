@@ -24,7 +24,7 @@ import {
   readTargetFile,
   type WriteTarget,
 } from './edit-core.ts';
-import { insideAny, readOnlyPrefixOfWrite } from './path-guard.ts';
+import { insideAnyResolved, readOnlyPrefixOfWrite } from './path-guard.ts';
 import { decodeText, encodeText, formatBytes, previewLine, type DetectedEncoding } from './text-codec.ts';
 import {
   ABORTED_RESULT,
@@ -339,7 +339,7 @@ export function createSafeWriteTool(env: FsEnv): ToolDefinition {
           + (env.readOnlyHints[roPrefixOfWrite] ?? '要改它请走它自己的写通道，不要用通用文件工具。'),
         );
       }
-      if (insideAny(env.protectedPaths, guarded.path)) {
+      if (await insideAnyResolved(env.protectedPaths, guarded.path)) {
         return fail(
           FS_ERROR_CODES.PATH_DENIED,
           `${guarded.relPath} 是受保护配置（对 agent 只读）：它定义的正是「谁能改我」，`
@@ -482,6 +482,10 @@ export function createSafeRollbackTool(env: FsEnv): ToolDefinition {
           `${guarded.relPath} 在只读区 ${roPrefix}/ 内（可读、不可写）；回滚同样是写操作，被拒绝。`
           + (env.readOnlyHints[roPrefix] ?? '要改它请走它自己的写通道，不要用通用文件工具。'),
         );
+      }
+
+      if (await insideAnyResolved(env.protectedPaths, guarded.path)) {
+        return fail(FS_ERROR_CODES.PATH_DENIED, `${guarded.relPath} 是受保护配置，不能通过回滚改写。`);
       }
 
       if (all.length === 0) {

@@ -182,8 +182,9 @@ export async function installSnowLuma(input: SnowLumaInstallInput): Promise<Snow
   if (platform !== 'win32') {
     return {
       ok: false,
-      detail: `一键安装目前只支持 Windows（官方在 Linux 上发的是 .tar.gz，而解压器只认 zip）。`
-        + '请从 https://github.com/SnowLuma/SnowLuma/releases 手动下载解压，再把目录填进来。',
+      detail: platform === 'linux'
+        ? 'Linux 可填写已解压的 SnowLuma 安装目录，或在 OneBot 设置中连接已独立运行的协议端。'
+        : '当前平台请安装适用的协议端并在 OneBot 设置中填写连接地址。',
       log,
     };
   }

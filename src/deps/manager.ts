@@ -54,6 +54,29 @@ import {
 import { bootstrapPip, probePipOf, type PipBootstrapOutcome } from './pip.ts';
 import { findWinget, installPowerShellWithWinget } from './winget.ts';
 
+const LINUX_DEPENDENCIES = {
+  pwsh: {
+    impact: 'PowerShell 脚本需要系统提供 PowerShell 7；Node 和 Python 脚本各用自己的解释器。',
+    manualHint: '按微软的 Linux 安装说明安装 PowerShell 7。',
+    downloadPage: 'https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux',
+  },
+  rg: {
+    impact: '缺少 ripgrep 时，按内容搜索的 grep 工具不可用。',
+    manualHint: '用发行版包管理器安装 ripgrep（Ubuntu：sudo apt install ripgrep）。',
+    downloadPage: 'https://github.com/BurntSushi/ripgrep#installation',
+  },
+  es: {
+    impact: 'Everything 只支持 Windows；Linux 暂无对应的文件名索引。',
+    manualHint: null,
+    downloadPage: null,
+  },
+  python: {
+    impact: '缺少 Python 3 时，Python 脚本和 Python 插件不可用。',
+    manualHint: '用发行版包管理器安装 Python 3（Ubuntu：sudo apt install python3）。',
+    downloadPage: 'https://www.python.org/downloads/source/',
+  },
+} satisfies Record<DepName, Pick<DependencySpec, 'impact' | 'manualHint' | 'downloadPage'>>;
+
 // ──────────────────────────────── 常量 ────────────────────────────────
 
 /** 系统常见安装位置（只在自装目录没命中时才试，见 probe.ts 的三段顺序） */
@@ -151,6 +174,8 @@ export interface DepsReport {
 // ──────────────────────────────── 选项 ────────────────────────────────
 
 export interface DepsManagerOptions {
+  /** Platform override for tests that exercise the Windows installers without launching them. */
+  platform?: NodeJS.Platform;
   /** 数据目录：自装落点是 `<dataDir>/tools/<name>/` */
   dataDir: string;
   /** 用户在 config 里指定的路径（`deps.paths`） */
@@ -205,12 +230,14 @@ export class DepsManager {
   readonly toolsDir: string;
 
   readonly #options: DepsManagerOptions;
+  readonly #linux: boolean;
   readonly #cache = new Map<DepName, Promise<DependencyProbeOutcome>>();
   /** 探测计数器：测试用它断言"只探一次"（也是 review v27 Σ-5 的回归锁） */
   #probeCount = 0;
 
   constructor(options: DepsManagerOptions) {
     this.#options = options;
+    this.#linux = (options.platform ?? process.platform) === 'linux';
     this.dataDir = options.dataDir;
     this.toolsDir = `${options.dataDir}${sep()}${TOOLS_DIR_NAME}`;
   }
@@ -275,6 +302,14 @@ export class DepsManager {
    * winget 不存在或失败时由 GUI 回退到「打开下载页」。
    */
   async install(name: DepName): Promise<DepInstallOutcome> {
+    if (this.#linux) {
+      const spec = this.#spec(name);
+      return {
+        ok: false, step: 'download', name,
+        error: spec.manualHint ?? spec.impact,
+        details: spec.downloadPage === null ? [] : [spec.downloadPage],
+      };
+    }
     if (name === 'pwsh') return this.#installPwshWithWinget();
     const pkg = packageFor(name, this.#options.fetchText ?? fetchTextWithNode);
     if (pkg === null) {
@@ -417,8 +452,19 @@ export class DepsManager {
     this.#options.onNote?.(message);
   }
 
-  #entry(name: DepName, outcome: DependencyProbeOutcome): DepReportEntry {
+  #spec(name: DepName): DependencySpec {
     const spec = DEP_SPECS[name];
+    if (!this.#linux) return spec;
+    return {
+      ...spec,
+      ...LINUX_DEPENDENCIES[name],
+      candidates: spec.candidates.filter(candidate => !candidate.includes('.')),
+      install: 'manual',
+    };
+  }
+
+  #entry(name: DepName, outcome: DependencyProbeOutcome): DepReportEntry {
+    const spec = this.#spec(name);
     const installable = spec.install === 'zip'
       || (spec.install === 'winget' && this.#wingetPath() !== null);
     return {
@@ -433,7 +479,8 @@ export class DepsManager {
       reason: outcome.reason,
       purpose: spec.purpose,
       impact: spec.impact,
-      action: outcome.status === 'ready' ? null : (installable ? 'install' : 'open-download'),
+      action: outcome.status === 'ready' || (this.#linux && name === 'es')
+        ? null : (installable ? 'install' : 'open-download'),
       installable,
       manualHint: spec.manualHint,
       downloadPage: spec.downloadPage,
@@ -441,21 +488,29 @@ export class DepsManager {
       managedDir: this.managedDir(name),
       // 只有 python 会带这两格（`pipVersion` 是 undefined 时是"没有这一格"⇒ 界面显示 null）
       pipVersion: outcome.pipVersion ?? null,
-      pipReason: outcome.pipReason ?? '',
+      pipReason: this.#linux && outcome.pipVersion === ''
+        ? '当前解释器没有 pip。Ubuntu 可安装 python3-venv，再为项目创建虚拟环境。'
+        : outcome.pipReason ?? '',
     };
   }
 
   /** 一次完整的依赖探测（三段顺序在 probe.ts）。这是唯一给计数加一的地方 */
   async #probeOnce(name: DepName): Promise<DependencyProbeOutcome> {
     this.#probeCount += 1;
-    const spec = DEP_SPECS[name];
+    const spec = this.#spec(name);
+    if (this.#linux && name === 'es' && this.#options.probe === undefined) {
+      return {
+        name, status: 'missing', path: '', version: '', anyVersion: '',
+        source: null, dir: null, reason: spec.impact, attempts: [],
+      };
+    }
     const outcome = await (this.#options.probe?.(name, spec)
       ?? probeDependency(spec, {
         configPath: this.#configPathFor(name),
         managedDir: this.managedDir(name),
         ...(this.#options.exists === undefined ? {} : { exists: this.#options.exists }),
         ...(this.#options.listDir === undefined ? {} : { listDir: this.#options.listDir }),
-        extraSearchDirs: EXTRA_SEARCH_DIRS[name],
+        extraSearchDirs: this.#linux ? [] : EXTRA_SEARCH_DIRS[name],
         ...(this.#options.probeTimeoutMs === undefined ? {} : { timeoutMs: this.#options.probeTimeoutMs }),
         // python 专属：解释器找到之后顺手问一次 pip（别的依赖这一格用不上）。
         // 默认实现直接拿**探测到的那个可执行文件**去问（`python.exe -m pip --version`）：
@@ -633,7 +688,7 @@ export { defaultDepFs } from './probe.ts';
  */
 export function summarizeNotReady(report: DepsReport): string[] {
   return report.entries
-    .filter((entry) => !entry.ok)
+    .filter((entry) => entry.action !== null)
     .map((entry) => {
       const state = entry.status === 'version-mismatch'
         ? `版本不符（需要 ${entry.minVersion}）`

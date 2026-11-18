@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 
 /**
  * 运行时二进制探测的唯一实现。
@@ -10,9 +10,11 @@ import { delimiter, dirname, join, resolve } from 'node:path';
  * 不能假定 PATH 上有它们。
  */
 export function npmCliPath(): string {
+  const nodeBin = dirname(process.execPath);
   const candidates = [
     process.env['npm_execpath'],
-    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(nodeBin, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    ...(process.platform === 'win32' ? [] : [join(nodeBin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')]),
     ...(process.env['APPDATA'] === undefined
       ? []
       : [join(process.env['APPDATA'], 'npm', 'node_modules', 'npm', 'bin', 'npm-cli.js')]),
@@ -32,6 +34,12 @@ function pathNpmCliCandidates(): string[] {
     if (trimmed === '') continue;
     out.push(join(trimmed, 'node_modules', 'npm', 'bin', 'npm-cli.js'));
     out.push(join(trimmed, 'npm-cli.js'));
+    if (process.platform !== 'win32') {
+      try {
+        const cli = realpathSync(join(trimmed, 'npm'));
+        if (basename(cli) === 'npm-cli.js') out.push(cli);
+      } catch { /* npm is not installed in this PATH entry */ }
+    }
   }
   return out;
 }
@@ -61,7 +69,7 @@ export function binaryAvailable(id: string, dataDir?: string): boolean {
     join(dataDir, 'tools', id, 'cmd'),
     join(process.cwd(), 'runtime', id),
   ];
-  const exts = (process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM')
+  const exts = (process.platform === 'win32' ? process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM' : '')
     .split(';')
     .map((ext) => ext.trim())
     .filter((ext) => ext !== '');

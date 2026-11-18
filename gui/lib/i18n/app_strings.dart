@@ -1675,6 +1675,8 @@ abstract class AppStrings {
   /// 一键安装
   String get settingsOneClickInstall;
 
+  String get settingsManualProtocolInstall;
+
   /// 从 SnowLuma 官方 Release 下载 Lite 包；自动下载失败时，自行下载并填写安装目录。此包不随框架分发，不得用于商业使用。
   String get settingsOneClickInstallNote;
 
@@ -5819,6 +5821,9 @@ class ZhStrings extends AppStrings {
   @override
   String get settingsOneClickInstall => '一键安装';
   @override
+  String get settingsManualProtocolInstall =>
+      '填写已解压的 SnowLuma 安装目录。若协议端独立运行，在 OneBot 设置中填写连接地址和密钥。';
+  @override
   String get settingsOneClickInstallNote =>
       '从 SnowLuma 官方 Release 下载 Lite 包；自动下载失败时，自行下载并填写安装目录。此包不随框架分发，不得用于商业使用。';
   @override
@@ -9824,6 +9829,9 @@ class EnStrings extends AppStrings {
       'Protocol-side install directory (absolute path). After unpacking the Lite package, the entry index.mjs sits at this level, with no dist/ subdirectory; "one-click install" fills it in automatically.';
   @override
   String get settingsOneClickInstall => 'One-click install';
+  @override
+  String get settingsManualProtocolInstall =>
+      'Enter the directory of an unpacked SnowLuma installation. For a separately running service, set its address and token in OneBot settings.';
   @override
   String get settingsOneClickInstallNote =>
       'Downloads the Lite package from the official SnowLuma Release; if the automatic download fails, download it yourself and fill in the install directory. This package is not distributed with the framework and must not be used commercially.';

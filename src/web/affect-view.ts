@@ -1,8 +1,9 @@
-import { foldAffectEvents, prepareAffectStep } from '../affect/adapter.ts';
+import { prepareAffectStep } from '../affect/adapter.ts';
+import { applyAppraised, initialAffect } from '../affect/engine.ts';
 // 值导入写 `.ts`（Node 的 --experimental-strip-types 不改写扩展名；编译时由 rewriteRelativeImportExtensions 换回 .js）
 import { EMOTIONS, REASONS, type EmotionName, type EmotionVector, type ReasonCode } from '../affect/types.ts';
 import { affectEnabled, type AppConfig } from '../config/config.ts';
-import type { AffectAppraised, AppEvent, Projection } from '../log/types.js';
+import type { AppEvent, Projection } from '../log/types.js';
 
 /** 心境轨迹上的一个点：某次评价落下之后那一刻的累计状态。 */
 export interface AffectHistoryPoint {
@@ -39,7 +40,7 @@ export interface AffectView {
    *
    * 为什么在这里算而不是让界面自己折：折叠的判据（半衰期、冲动、主导情绪）只有
    * `affect/adapter.ts` 一份，界面若自算就会长出第二套公式。这里用
-   * `foldAffectEvents` 的逐条回调一次线性折完，既拿到每个时点，又不重复判据。
+   * 按序应用 `applyAppraised`，算出各时点并沿用同一套判据。
    */
   history: AffectHistoryPoint[];
   neutral: boolean;
@@ -51,19 +52,17 @@ export function buildAffectHistory(
   events: readonly AppEvent[],
   limit = AFFECT_HISTORY_LIMIT,
 ): AffectHistoryPoint[] {
-  const appraised = events.filter((event): event is AffectAppraised => event.type === 'affect/appraised');
-  if (appraised.length === 0) return [];
   const points: AffectHistoryPoint[] = [];
-  // onState 与事件一一对应、按同一顺序回调；cursor 把每个快照映射回它那条事件的原因码。
-  let cursor = 0;
-  foldAffectEvents(appraised.map((event) => event.data), 0, (state) => {
-    const source = appraised[cursor]?.data;
-    cursor += 1;
+  const requested = Math.trunc(limit);
+  let state = initialAffect(0);
+  for (const event of events) {
+    if (event.type !== 'affect/appraised') continue;
+    state = applyAppraised(state, event.data);
     let dominant: EmotionName = EMOTIONS[0];
     for (const name of EMOTIONS) {
       if (state.emotions[name] > state.emotions[dominant]) dominant = name;
     }
-    const rawReason = source?.reasonCode ?? 'general';
+    const rawReason = event.data.reasonCode;
     const reasonCode = (REASONS as readonly string[]).includes(rawReason)
       ? (rawReason as ReasonCode)
       : 'general';
@@ -75,10 +74,9 @@ export function buildAffectHistory(
       reasonCode,
       strength: state.emotions[dominant],
     });
-  });
-  // 事件在日志里按 seq 追加，正常情况下已经是升序；这里再按 atMs 稳定排一次，
-  // 免得时钟回拨留下的"早评价写在晚评价后面"让折线倒着画。
-  points.sort((a, b) => a.atMs - b.atMs);
+    // applyAppraised 的状态时刻只递增，时钟回拨也不改变点的顺序。
+    if (requested > 0 && points.length > 2 * requested) points.splice(0, points.length - requested);
+  }
   return points.slice(-limit);
 }
 
@@ -93,13 +91,19 @@ export function buildAffectView(input: {
   const enabled = affectEnabled(input.config, input.env ?? process.env);
   const prepared = enabled ? prepareAffectStep(input.projection.affect, input.now) : null;
   const state = prepared?.state ?? input.projection.affect;
-  const latest = [...input.events].reverse().find((event) => event.type === 'affect/appraised');
+  let latest: string | null = null;
+  for (let i = input.events.length - 1; i >= 0; i--) {
+    const event = input.events[i]!;
+    if (event.type !== 'affect/appraised') continue;
+    latest = event.ts;
+    break;
+  }
   return {
     enabled,
     configured: input.configured,
     evaluatorEnabled: input.config.affect?.evaluatorEnabled === true,
-    atMs: latest === undefined ? null : input.projection.affect.atMs,
-    updatedAt: latest?.ts ?? null,
+    atMs: latest === null ? null : input.projection.affect.atMs,
+    updatedAt: latest,
     emotions: { ...state.emotions },
     mood: { ...state.mood },
     causes: [...state.causes]

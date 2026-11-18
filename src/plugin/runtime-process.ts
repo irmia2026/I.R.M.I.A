@@ -18,10 +18,10 @@
  *     与"不整包停"的裁决相反）——它按自己的冷却重启。
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 
-import { killProcessTree } from '../process/kill-tree.ts';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { utf8ConsoleEnv } from '../util/bytes-text.ts';
 import {
   PLUGIN_HOST_METHODS, PLUGIN_NOTIFICATIONS, PLUGIN_PROTOCOL_VERSION, PLUGIN_RPC_ERRORS, PluginRpcError,
@@ -137,7 +137,6 @@ export class PluginProcess {
   private exited = false;
   private stderrRest = '';
   private spawnError: string | null = null;
-  private processGroup: number | null = null;
   private stderrWindowStarted = 0;
   private stderrWindowBytes = 0;
   private stderrWindowLines = 0;
@@ -165,20 +164,11 @@ export class PluginProcess {
   /** 起进程 → 等 ready → 发 activate。任一步失败都会杀掉进程并 throw。 */
   async start(): Promise<void> {
     if (this.child !== null) throw new Error('插件进程已经起过；重启用 stop() + 新的实例');
-    const { runtime } = this.target;
-    if (runtime.type === 'python') {
-      const probe = probePython(this.options.pythonPath ?? resolvePythonExecutable());
-      if (!probe.available) {
-        throw new PluginRpcError(PLUGIN_RPC_ERRORS.internalError,
-          `Python 运行时不可用（${probe.binary}：${probe.detail}）。Python 插件需要宿主机上装 Python 3.9+，或设 IRMIA_PYTHON 指到解释器`, 'crash');
-      }
-    }
-    this.state = 'starting';
     const command = this.buildCommand();
-    const child = spawn(command.file, command.args, {
+    this.state = 'starting';
+    const child = spawnManagedProcess(command.file, command.args, {
       cwd: this.target.rootDir,
       windowsHide: true,
-      detached: runtime.type === 'python' && process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...pluginProcessEnv(process.env, this.options.env),
@@ -189,7 +179,6 @@ export class PluginProcess {
       },
     });
     this.child = child;
-    if (runtime.type === 'python' && process.platform !== 'win32') this.processGroup = child.pid ?? null;
     this.attach(child);
 
     try {
@@ -261,14 +250,7 @@ export class PluginProcess {
   private killNow(reason: string): void {
     if (this.child === null) return;
     this.requestedReason = reason;
-    this.killGroup();
     killProcessTree(this.child, { forceTree: true });
-  }
-
-  private killGroup(): void {
-    // Only the PGID created by our detached spawn is ever targeted.
-    if (this.processGroup === null) return;
-    try { process.kill(-this.processGroup, 'SIGKILL'); } catch { /* group already empty */ }
   }
 
   private buildCommand(): { file: string; args: string[] } {
@@ -287,13 +269,18 @@ export class PluginProcess {
       args.push(nodeRunnerPath(), entry);
       return { file, args };
     }
-    const file = this.options.pythonPath ?? resolvePythonExecutable();
+    const probe = probePython(this.options.pythonPath ?? resolvePythonExecutable());
+    if (!probe.available) {
+      throw new PluginRpcError(PLUGIN_RPC_ERRORS.internalError,
+        `Python 运行时不可用（${probe.binary}：${probe.detail}）。Python 插件需要宿主机上装 Python 3.9+，或设 IRMIA_PYTHON 指到解释器`, 'crash');
+    }
+    const file = probe.executable;
     // -B must be a flag: -I ignores PYTHONDONTWRITEBYTECODE from the environment.
-    const args = ['-I', '-B', '-u', pythonRunnerPath(), entry];
+    const args = ['-I', '-X', 'utf8', '-B', '-u', pythonRunnerPath(), entry];
     if (process.platform !== 'win32') return { file, args };
     const powershell = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     return { file: powershell, args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      join(pluginRunnerRoot(), 'windows-job.ps1'), '-Payload', Buffer.from(JSON.stringify({ file, args }), 'utf8').toString('base64')] };
+      join(pluginRunnerRoot(), 'windows-job.ps1'), '-Payload', Buffer.from([file, ...args].join('\0'), 'utf8').toString('base64')] };
   }
 
   private attach(child: ChildProcess): void {
@@ -529,8 +516,6 @@ export class PluginProcess {
 
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.exited) return;
-    this.killGroup();
-    this.processGroup = null;
     this.flushStderrDrops();
     this.exited = true;
     const requested = this.requestedReason !== null;

@@ -7,7 +7,7 @@
  *   ① 前缀不在白名单 ⇒ 不动（`other-data-*` 那条）；
  *   ② 不够老 ⇒ 不动（刚建的那个）；
  *   ③ 被占用 ⇒ 不动（把目录当 CWD，Windows 的 rename 会失败）；
- *   ④ `dry`（缺省档）⇒ **一个都不删**，只在账上写"将删 N 个 / 共 M MB"。
+ *   ④ `dry`（缺省档）⇒ **一个都不删**，只在账上写"候选 N 个 / 共 M MB"。
  *
  * 用**自己的临时根**（`tempDir('irmia-sweep-test-')`）跑，绝不碰真的 `os.tmpdir()`：
  * 这份测试自己就是"会被兜底扫扫到的人"，一旦它往真 TEMP 里造目录又忘了删，就成了新的泄漏源。
@@ -44,7 +44,7 @@ async function makeSamples(): Promise<{ root: string; fresh: string; old: string
   return { root, fresh, old, foreign };
 }
 
-test('dry（缺省档）：三个样本一个都不删，账上写「将删 1 个」', async (t) => {
+test('dry（缺省档）：三个样本一个都不删，账上写「候选 1 个」', async (t) => {
   const { root, fresh, old, foreign } = await makeSamples();
   const report = await runTempSweep({ mode: 'dry', root });
 
@@ -59,7 +59,7 @@ test('dry（缺省档）：三个样本一个都不删，账上写「将删 1 �
 
   const line = formatTempSweepLine(report);
   assert.match(line, /dry-run/u, line);
-  assert.match(line, /将删 1 个 \/ 共 [\d.]+ (KB|MB)/u, line);
+  assert.match(line, /候选 1 个 \/ 共 [\d.]+ (KB|MB)/u, line);
   t.diagnostic(line);
 });
 
@@ -94,6 +94,11 @@ test('占用（把目录当 CWD）⇒ rename 试探失败 ⇒ 跳过，绝不动
   process.chdir(busy); // Windows：目录是某个进程的 CWD 时 rename 会失败
   let report;
   try {
+    const dry = await runTempSweep({ mode: 'dry', root });
+    assert.equal(dry.candidates, 1);
+    assert.equal(dry.skippedInUse, 0, 'dry 仅统计，不用 rename 探测占用');
+    assert.equal(dry.deleted, 0);
+
     report = await runTempSweep({ mode: 'on', root });
   } finally {
     process.chdir(before);
@@ -175,7 +180,7 @@ test('启动接线：IRMIA_TEMP_SWEEP 未设 ⇒ 按 dry 跑一次、落 temp/sw
   assert.equal(swept.data['root'], rig.root);
 
   assert.ok(
-    rig.lines.some((line) => /dry-run：将删 1 个 \/ 共 [\d.]+ (KB|MB)/u.test(line)),
+    rig.lines.some((line) => /dry-run：候选 1 个 \/ 共 [\d.]+ (KB|MB)/u.test(line)),
     `当场也要看得见（启动日志）：\n${rig.lines.join('\n')}`,
   );
   t.diagnostic(`启动日志：${rig.lines.join(' ｜ ')}`);

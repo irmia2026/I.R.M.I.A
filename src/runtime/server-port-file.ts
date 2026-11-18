@@ -19,10 +19,11 @@
  *     两档可走；为了一个"提示位"把后端拦下来，主次就颠倒了。
  */
 
-import { readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { writeFileAtomicSync } from '../web/atomic.ts';
+import { linuxRuntimeDirectory } from './linux-desktop-paths.ts';
 
 /** 文件名（界面那一半在 `gui/lib/backend_port.dart` 里按同一个名字读） */
 export const SERVER_PORT_FILE_NAME = 'server.json';
@@ -57,6 +58,10 @@ export function serverPortFilePath(
   env: Record<string, string | undefined> = process.env,
   platform: string = process.platform,
 ): string | null {
+  if (platform === 'linux') {
+    const runtime = linuxRuntimeDirectory(env);
+    return runtime === null ? null : join(runtime, SERVER_PORT_FILE_NAME);
+  }
   if (platform !== 'win32') return null;
   const local = (env['LOCALAPPDATA'] ?? '').trim();
   if (local === '') return null;
@@ -75,10 +80,14 @@ export function serverPortFilePathForPort(
   env: Record<string, string | undefined> = process.env,
   platform: string = process.platform,
 ): string | null {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  if (platform === 'linux') {
+    const runtime = linuxRuntimeDirectory(env);
+    return runtime === null ? null : join(runtime, `${SERVER_PORT_FILE_PREFIX}${port}.json`);
+  }
   if (platform !== 'win32') return null;
   const local = (env['LOCALAPPDATA'] ?? '').trim();
   if (local === '') return null;
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
   return join(local, 'Irmia', `${SERVER_PORT_FILE_PREFIX}${port}.json`);
 }
 
@@ -99,7 +108,8 @@ export function writeServerPortFile(input: {
     since: input.since ?? now().toISOString(),
   };
   try {
-    writeFileAtomicSync(input.path, `${JSON.stringify(record)}\n`);
+    if (process.platform === 'linux') mkdirSync(dirname(input.path), { recursive: true, mode: 0o700 });
+    writeFileAtomicSync(input.path, `${JSON.stringify(record)}\n`, process.platform === 'linux' ? 0o600 : undefined);
     return true;
   } catch (err) {
     input.out?.(`[界面] 端口文件写不进去（${input.path}）：${err instanceof Error ? err.message : String(err)}`

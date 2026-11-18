@@ -11,6 +11,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { killProcessTree, spawnManagedProcess } from '../../process/kill-tree.ts';
 
 import { buildSkipSet } from './search-core.ts';
 import { DEFAULT_MAX_EDIT_BYTES } from './edit-core.ts';
@@ -84,19 +85,20 @@ export const PERSONA_DIR_NAME = 'persona';
 export const SKILLS_DIR_NAME = 'skills';
 
 function killTree(child: ChildProcess): void {
+  if (process.platform !== 'win32') {
+    killProcessTree(child);
+    return;
+  }
   const pid = child.pid;
   if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    try {
-      // Windows 没有进程组信号，必须借 taskkill /T 才能连子进程一起收掉
-      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-      killer.on('error', () => undefined);
-    } catch {
-      // taskkill 不可用就退到普通 kill，至少收掉主进程
-    }
+  try {
+    const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    killer.on('error', () => undefined);
+  } catch {
+    // If taskkill is unavailable, at least stop the direct child.
   }
   try {
     child.kill('SIGKILL');
@@ -138,7 +140,7 @@ export function runProcessDefault(
   return new Promise<ProcessResult>((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(command, args, {
+      child = spawnManagedProcess(command, args, {
         cwd: options.cwd,
         // 「请它按 UTF-8 写」只在这一个地方拼（`util/bytes-text.ts` 的 utf8ConsoleEnv）：
         // rg / es.exe 对这两个变量闻所未闻，加了无害；真正的价值是同一个环境给到

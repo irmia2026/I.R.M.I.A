@@ -62,10 +62,11 @@ const DEP_IMPACT: Record<string, string> = {
 
 function depLine(entry: DepReportEntry): string {
   const state = entry.ok ? 'ready' : entry.status;
+  const impact = (process.platform === 'linux' ? entry.impact : undefined) ?? DEP_IMPACT[entry.name];
   const detail = entry.ok
     ? [entry.version, entry.path, entry.pipVersion === null ? '' : `pip ${entry.pipVersion}`]
       .filter((part) => part !== '').join('；')
-    : [entry.reason, `影响：${DEP_IMPACT[entry.name] ?? '相关能力不可用'}`]
+    : [entry.reason, `影响：${impact ?? '相关能力不可用'}`]
       .filter((part) => part !== '').join('；');
   return `- ${entry.label}（${entry.name}）：${state}${detail === '' ? '' : `；${detail}`}`;
 }

@@ -327,9 +327,14 @@ export function hasPendingPlanAsk(
  * 挂起的输入只认「`turn/end{blocked, by:'ask-human'}` 之前那一个 turn 的 input/claimed」——
  * 挂起 turn 之后再没有新 turn，所以队列里最多只有一条真正需要重入的线索。
  */
-export function scanSuspension(events: readonly AppEvent[]): SuspensionScan {
-  const bySeq = new Map<number, AppEvent>();
-  for (const event of events) bySeq.set(event.seq, event);
+export function scanSuspension(
+  events: readonly AppEvent[], readWake?: (seq: number) => AppEvent | undefined,
+): SuspensionScan {
+  const wakeAt = readWake ?? (() => {
+    const bySeq = new Map<number, AppEvent>();
+    for (const event of events) bySeq.set(event.seq, event);
+    return (seq: number) => bySeq.get(seq);
+  })();
 
   const claimed = new Map<number, { wakeSeqs: number[]; claimCounts: number[] }>();
   const queue: Suspension[] = [];
@@ -367,7 +372,7 @@ export function scanSuspension(events: readonly AppEvent[]): SuspensionScan {
           question: event.data.question,
           wakeSeqs: own?.wakeSeqs ?? [],
           claimCounts: own?.claimCounts ?? [],
-          sources: (own?.wakeSeqs ?? []).map(seq => sourceOfWake(bySeq.get(seq))),
+          sources: (own?.wakeSeqs ?? []).map(seq => sourceOfWake(wakeAt(seq))),
         });
         break;
       }

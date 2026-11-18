@@ -2,12 +2,15 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runPillow } from '../media/pillow.ts';
 
 import { stickerExtension } from './media.ts';
 import type { StickerMime } from './types.ts';
 
 export const STICKER_PHASH_MAX_DISTANCE = 6;
 export type StickerPHasher = (bytes: Buffer, mime: StickerMime) => Promise<string | null>;
+export type StickerPHashField = 'phash' | 'phashPillow';
+export const STICKER_PHASH_FIELD: StickerPHashField = process.platform === 'linux' ? 'phashPillow' : 'phash';
 const PHASH_RE = /^[0-9a-f]{16}$/u;
 
 function b64Script(script: string): string {
@@ -45,6 +48,29 @@ export async function computeStickerPHash(bytes: Buffer, mime: StickerMime): Pro
  */
 export async function computeStickerPHashBatch(paths: readonly string[]): Promise<Array<string | null>> {
   if (paths.length === 0) return [];
+  if (process.platform === 'linux') {
+    const results: Array<string | null> = [];
+    for (let offset = 0; offset < paths.length; offset += 64) {
+      const batch = paths.slice(offset, offset + 64);
+      const dir = mkdtempSync(join(tmpdir(), 'irmia-sticker-phash-batch-'));
+      try {
+        const manifest = join(dir, 'paths.b64');
+        writeFileSync(manifest, batch.map(b64Path).join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+        const outcome = await runPillow(['hash', manifest], 15_000);
+        const hashes: unknown[] = 'value' in outcome && Array.isArray(outcome.value) ? outcome.value : [];
+        results.push(...batch.map((_, i) => {
+          const hash = hashes[i];
+          return typeof hash === 'string' && isHash(hash) ? hash : null;
+        }));
+        // A missing decoder or a failed batch should not cause a loop of expensive retries at startup.
+        if ('error' in outcome) break;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    while (results.length < paths.length) results.push(null);
+    return results;
+  }
   // Paths go through a temp manifest, not the command line: 97 long paths would
   // otherwise exceed Windows' command-line limit. The manifest is base64 lines,
   // so even non-ASCII paths survive Windows PowerShell 5.1's encoding.

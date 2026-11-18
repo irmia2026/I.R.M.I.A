@@ -32,7 +32,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { killProcessTree } from '../process/kill-tree.ts';
+import { killProcessTree, spawnManagedProcess } from '../process/kill-tree.ts';
 import { createUtf8Stream, decodeText } from '../util/bytes-text.ts';
 
 /** 服务状态机的取值（GUI 直接显示，所以用词要人能看懂） */
@@ -232,6 +232,7 @@ export interface WebuiListenerInfo {
  * 排在后面是因为它多一层 cmd 进程，而我们要收 stdout 与进程树。
  */
 const ENTRY_CANDIDATES = ['index.mjs', 'dist/index.mjs', 'launcher.bat', 'launcher.sh'] as const;
+const LINUX_ENTRY_CANDIDATES = ['launcher.sh', 'index.mjs', 'dist/index.mjs'] as const;
 
 /** 协议端的 OneBot 配置（相对于它的安装目录） */
 const ONEBOT_CONFIG_PATH = 'config/onebot.json';
@@ -703,8 +704,7 @@ export class ManagedProtocolService {
   private state: ManagedServiceState = 'stopped';
   private detail = '';
   private endpoint: { wsUrl: string; accessToken: string } | undefined;
-  /** 我们主动 stop 时置位：用来区分"它自己死了"与"我叫它停的" */
-  private stopping = false;
+  private stopGeneration = 0;
   /**
    * 本次 stdout 里捞到的初始凭据。
    *
@@ -775,6 +775,9 @@ export class ManagedProtocolService {
     } catch {
       // 快速探活失败不是结论，继续走下面那条
     }
+    if (process.platform === 'linux' && this.options.runNetstat === undefined && this.options.processFacts === undefined) {
+      return null;
+    }
     try {
       return discoverWebuiListener(this.options.dir, {
         ...(this.options.runNetstat === undefined ? {} : { netstat: this.options.runNetstat }),
@@ -791,9 +794,14 @@ export class ManagedProtocolService {
 
   /** 入口文件路径；找不到返回 null（= 还没装） */
   entryPath(): string | null {
-    for (const rel of ENTRY_CANDIDATES) {
+    const candidates = process.platform === 'linux' ? LINUX_ENTRY_CANDIDATES : ENTRY_CANDIDATES;
+    for (const rel of candidates) {
       const p = join(this.options.dir, rel);
-      if (existsSync(p)) return p;
+      try {
+        if (statSync(p, { throwIfNoEntry: false })?.isFile()) return p;
+      } catch {
+        // 入口暂时不可读，继续检查其余候选。
+      }
     }
     return null;
   }
@@ -927,16 +935,18 @@ export class ManagedProtocolService {
    */
   async start(): Promise<ManagedServiceStatus> {
     if (this.child !== null) return await this.status();
+    const generation = this.stopGeneration;
     // **已经在跑就别再拉一个**：那会变成两个进程抢同一个 WebUI 端口（第二个退让到 5100），
     // 而适配器只连 3001——人看到的是"点了启动，然后什么都对不上了"
     const alive = await this.processInfo();
+    if (this.child !== null || this.stopGeneration !== generation) return await this.status();
     if (alive.running) {
       this.state = 'starting';
       const where = alive.webuiUrl === undefined ? '' : `（面板在 ${alive.webuiUrl}）`;
       this.detail = `它已经在跑了（pid ${alive.pid ?? '未知'}${where}，本次进程没有拉起它）——`
         + '等它的 OneBot 端口开起来；没有端口说明它还没登录 QQ。';
       const endpoint = readEndpointFromConfig(this.options.dir);
-      if (endpoint !== null && await this.probePort(endpoint.wsUrl)) {
+      if (endpoint !== null && await this.probePort(endpoint.wsUrl) && this.stopGeneration === generation) {
         this.endpoint = endpoint;
         this.state = 'ready';
         this.detail = `已就绪，OneBot 在 ${endpoint.wsUrl}`;
@@ -946,21 +956,26 @@ export class ManagedProtocolService {
     const entry = this.entryPath();
     if (entry === null) {
       this.state = 'not-installed';
-      this.detail = `没找到可执行入口（找过 ${ENTRY_CANDIDATES.join(' / ')}）——请先下载协议端发行包并解压`;
+      const candidates = process.platform === 'linux' ? LINUX_ENTRY_CANDIDATES : ENTRY_CANDIDATES;
+      this.detail = `没找到可执行入口（找过 ${candidates.join(' / ')}）——请先准备该平台的协议端发行包`;
       return await this.status();
     }
 
     this.state = 'starting';
     this.detail = '正在拉起协议端…';
-    const spawnFn = this.options.spawnFn ?? spawn;
+    this.endpoint = undefined;
+    this.listening = null;
+    this.credential = null;
+    const linux = process.platform === 'linux';
+    const spawnFn = this.options.spawnFn ?? (linux ? spawnManagedProcess : spawn);
     const isScript = entry.endsWith('.mjs') || entry.endsWith('.js');
-    const nodePath = this.options.nodePath ?? process.execPath;
-    const args = isScript ? [entry] : [];
-    const child = isScript
-      ? spawnFn(nodePath, args, { cwd: this.options.dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-      : spawnFn(entry, [], { cwd: this.options.dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const bashLauncher = linux && entry.endsWith('.sh');
+    const nodePath = this.options.nodePath ?? (linux ? process.env['IRMIA_SNOWLUMA_NODE']?.trim() : undefined) ?? process.execPath;
+    const command = bashLauncher ? 'bash' : isScript ? nodePath || process.execPath : entry;
+    const child = spawnFn(command, isScript || bashLauncher ? [entry] : [], {
+      cwd: this.options.dir, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
     this.child = child;
-    this.stopping = false;
 
     // 流式解 + **行缓冲**：逐块 `toString('utf8').split('\n')` 有两个病——
     // ① 跨块的多字节字符会被切成两半（变成替换字符）；
@@ -980,19 +995,22 @@ export class ManagedProtocolService {
     };
     child.stdout?.on('data', relay);
     child.stderr?.on('data', relay);
-    child.on('exit', (code, signal) => {
+    child.on('error', (error) => {
+      if (this.child !== child) return;
       this.child = null;
-      if (this.stopping) {
-        this.state = 'stopped';
-        this.detail = '已停止';
-        return;
-      }
+      this.state = 'failed';
+      this.detail = `协议端启动失败：${error.message}`;
+    });
+    child.on('exit', (code, signal) => {
+      if (this.child !== child) return;
+      this.child = null;
       this.state = 'failed';
       this.detail = `协议端自己退出了（code=${code ?? 'null'} signal=${signal ?? 'null'}）——日志见服务日志`;
     });
 
     // 等端口就绪：**以它的配置文件为准**轮询，文件还没生成时按默认端口探
     const endpoint = await this.waitReady(child);
+    if (this.child !== child) return await this.status();
     /**
      * **端点必须有配置背书才算就绪**（v37 收紧；2026-10-07 那条"永远的 401"就是这个形状）。
      *
@@ -1023,6 +1041,7 @@ export class ManagedProtocolService {
        *     或者那份文件还没写全——按三档如实说"配置缺失/读不出"，绝不说成"就绪"。
        */
       const why = await this.diagnoseNoPort();
+      if (this.child !== child) return await this.status();
       this.state = 'failed';
       this.detail = endpoint === null
         ? `等 ${Math.round((this.options.readyTimeoutMs ?? 30_000) / 1000)} 秒仍没等到 OneBot 端口——${why.what}。${why.next}`
@@ -1101,17 +1120,18 @@ export class ManagedProtocolService {
 
   /** 停掉协议端（连同它的子进程——NTQQ 那层不杀干净会留孤儿） */
   async stop(): Promise<void> {
+    this.stopGeneration++;
     const child = this.child;
-    if (child === null) {
-      this.state = 'stopped';
-      this.detail = '已停止';
-      return;
+    if (child !== null) {
+      killProcessTree(child, { forceTree: true });
     }
-    this.stopping = true;
-    killProcessTree(child, { forceTree: true });
     this.child = null;
     this.state = 'stopped';
     this.detail = '已停止';
+    this.endpoint = undefined;
+    this.listening = null;
+    this.credential = null;
+    this.discoveryCache = null;
   }
 
   /**
@@ -1135,7 +1155,7 @@ export class ManagedProtocolService {
     const deadline = Date.now() + (this.options.readyTimeoutMs ?? 30_000);
     const fallback = this.options.fallbackProbeUrl ?? DEFAULT_FALLBACK_PROBE_URL;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null || this.child === null) return null;
+      if (child.exitCode !== null || this.child !== child) return null;
       const fromConfig = readEndpointFromConfig(this.options.dir);
       const probe = fromConfig ?? { wsUrl: fallback, accessToken: '' };
       if (await this.probePort(probe.wsUrl)) {

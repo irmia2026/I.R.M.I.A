@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { describe, it } from 'node:test';
 import { deflateRawSync } from 'node:zlib';
 
@@ -100,12 +100,12 @@ function fakeFs(files: readonly string[]): {
   return {
     exists: (path) => set.has(path),
     listDir: (dir) => {
-      const prefix = `${dir}\\`;
+      const prefix = dir + sep;
       const names = new Set<string>();
       for (const file of set) {
         if (!file.startsWith(prefix)) continue;
         const rest = file.slice(prefix.length);
-        const slash = rest.indexOf('\\');
+        const slash = rest.indexOf(sep);
         if (slash === -1) continue; // 只列子目录名（manager 会自己去拼候选名）
         names.add(rest.slice(0, slash));
       }
@@ -222,7 +222,7 @@ describe('依赖探测：三段顺序（config → 自装目录 → PATH）', ()
       configPath: 'C:\\path\\to\\rg.exe',
       managedDir,
       answers: { 'C:\\path\\to\\rg.exe': 'ripgrep 15.1.0', 'rg.exe': 'ripgrep 14.0.0' },
-      files: [`${managedDir}\\rg.exe`],
+      files: [join(managedDir, 'rg.exe')],
     }, seen);
     assert.equal(outcome.status, 'ready');
     assert.equal(outcome.source, 'config');
@@ -235,20 +235,21 @@ describe('依赖探测：三段顺序（config → 自装目录 → PATH）', ()
     const seen: string[] = [];
     const outcome = await probeWith('rg', {
       managedDir,
-      answers: { [`${managedDir}\\rg.exe`]: 'ripgrep 15.1.0', 'rg.exe': 'ripgrep 14.0.0' },
-      files: [`${managedDir}\\rg.exe`],
+      answers: { [join(managedDir, 'rg.exe')]: 'ripgrep 15.1.0', 'rg.exe': 'ripgrep 14.0.0' },
+      files: [join(managedDir, 'rg.exe')],
     }, seen);
     assert.equal(outcome.status, 'ready');
     assert.equal(outcome.source, 'managed');
-    assert.equal(outcome.path, `${managedDir}\\rg.exe`);
-    assert.deepEqual(seen, [`${managedDir}\\rg.exe`]);
+    assert.equal(outcome.path, join(managedDir, 'rg.exe'));
+    assert.deepEqual(seen, [join(managedDir, 'rg.exe')]);
   });
 
   it('自装目录里多一层子目录也认（手工解压 zip 的人不会剥那层）', async () => {
+    const managedExe = join(managedDir, 'ripgrep-15.1.0-x86_64-pc-windows-msvc', 'rg.exe');
     const outcome = await probeWith('rg', {
       managedDir,
-      answers: { [`${managedDir}\\ripgrep-15.1.0-x86_64-pc-windows-msvc\\rg.exe`]: 'ripgrep 15.1.0' },
-      files: [`${managedDir}\\ripgrep-15.1.0-x86_64-pc-windows-msvc\\rg.exe`],
+      answers: { [managedExe]: 'ripgrep 15.1.0' },
+      files: [managedExe],
     });
     assert.equal(outcome.status, 'ready');
     assert.equal(outcome.source, 'managed');
@@ -259,12 +260,12 @@ describe('依赖探测：三段顺序（config → 自装目录 → PATH）', ()
     const seen: string[] = [];
     const outcome = await probeWith('es', {
       managedDir: 'C:\\data\\tools\\es',
-      answers: { 'C:\\Program Files\\Everything\\es.exe': '1.1.0.38' },
+      answers: { [join('C:\\Program Files\\Everything', 'es.exe')]: '1.1.0.38' },
       extraSearchDirs: ['C:\\Program Files\\Everything'],
     }, seen);
     assert.equal(outcome.status, 'ready');
     assert.equal(outcome.source, 'path');
-    assert.equal(outcome.path, 'C:\\Program Files\\Everything\\es.exe');
+    assert.equal(outcome.path, join('C:\\Program Files\\Everything', 'es.exe'));
     assert.ok(seen.length >= 2, `应当逐级试过来：${seen.join(' → ')}`);
   });
 
@@ -350,7 +351,7 @@ describe('依赖探测：三段顺序（config → 自装目录 → PATH）', ()
     // 用户 2026-10-17：「**Python 和 pip 不应该是默认要求装的，而是有就用 PATH 里的。
     // 没有的话就要求装。**」⇒ `DEP_SPECS.python.sourceOrder === 'path-first'`：
     // 机器上本来就有 python 的，框架托管那一份**一次都不该被碰**。
-    const managedExe = 'C:\\data\\tools\\python\\python.exe';
+    const managedExe = join('C:\\data\\tools\\python', 'python.exe');
     const seen: string[] = [];
     const outcome = await probeWith('python', {
       managedDir: 'C:\\data\\tools\\python',
@@ -369,7 +370,7 @@ describe('依赖探测：三段顺序（config → 自装目录 → PATH）', ()
   });
 
   it('python：PATH 上一个都没有、托管有 ⇒ 用托管的（没有 Python 的机器走得通的那条路）', async () => {
-    const managedExe = 'C:\\data\\tools\\python\\python.exe';
+    const managedExe = join('C:\\data\\tools\\python', 'python.exe');
     const outcome = await probeWith('python', {
       managedDir: 'C:\\data\\tools\\python',
       answers: { [managedExe]: 'Python 3.13.16' },
@@ -396,6 +397,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
   it('探测只做一次：多次 get 与 getAll 共用同一份结论', async () => {
     let calls = 0;
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       probe: async (name) => {
         calls += 1;
@@ -415,6 +417,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
   it('返回值连失败一起缓存：get 不因失败而反复重探', async () => {
     let calls = 0;
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       probe: async (name) => {
         calls += 1;
@@ -434,6 +437,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
     let ready = false;
     let calls = 0;
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       probe: async (name) => {
         calls += 1;
@@ -460,6 +464,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
 
   it('报告形状：四件依赖各一行，字段齐（徽章/路径/版本/影响/动作/自装目录）', async () => {
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       probe: async (name) => ({
         name,
@@ -478,7 +483,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
     const report = await manager.report(() => new Date('2026-10-01T00:00:00.000Z'));
     assert.equal(report.entries.length, 4);
     assert.equal(report.needsAttention, true);
-    assert.equal(report.toolsDir, 'C:\\data\\tools');
+    assert.equal(report.toolsDir, join('C:\\data', 'tools'));
     const rg = report.entries.find((entry) => entry.name === 'rg')!;
     assert.equal(rg.ok, true);
     assert.equal(rg.action, null, '已就绪就没有建议动作');
@@ -511,6 +516,7 @@ describe('依赖管理器：一次探测 + 安装后复检', () => {
 
   it('startup 告知：未就绪的每一件都有一句话，且带上装法', async () => {
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -675,6 +681,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     // 探测结论由"文件系统上真的有没有"决定：装完复检才有意义。
     // 复检那一步注入假探测——测试里落地的是一段假字节，跑不起来（生产路径走真探测）
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir,
       probe: async (name) => {
         const exe = join(managedDirFor(dataDir, name), name === 'rg' ? 'rg.exe' : 'es.exe');
@@ -719,6 +726,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
   it('失败一：下载失败 → step=download，且说清"重试还是换源"', async () => {
     const root = await tempDir('irmia-dep-');
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -769,6 +777,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     await writeFile(join(cacheDir, 'python.zip'), offline);
 
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir,
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -822,6 +831,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     };
 
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir,
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -849,6 +859,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     const root = await tempDir('irmia-dep-');
     const dataDir = join(root, 'data');
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir,
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -890,6 +901,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
    * （含越界成员）时，已经挪出去的包必须迁回——**失败也不许丢**。
    */
   const installFor = (dataDir: string, bytes: Buffer): DepsManager => new DepsManager({
+    platform: 'win32',
     dataDir,
     probe: async (name) => ({
       name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -991,6 +1003,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
 
   it('失败二：解压失败 → step=extract（下载到的东西不是 zip）', async () => {    const root = await tempDir('irmia-dep-');
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -1014,6 +1027,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     const root = await tempDir('irmia-dep-');
     const zip = buildZip([{ name: 'rg/rg.exe', data: Buffer.from('not-really-rg', 'utf8') }]);
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -1036,6 +1050,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
   it('pwsh：没有 winget 时如实失败并给手动下载页；有 winget 时报告可一键安装', async () => {
     const root = await tempDir('irmia-dep-');
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -1054,6 +1069,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     assert.equal(packageFor('pwsh'), null);
 
     const withWinget = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name, status: 'missing', path: '', version: '', anyVersion: '',
@@ -1163,6 +1179,7 @@ describe('一键安装：下载 → 解压 → 复检', () => {
     // fetchText 注入假的 release 元数据：这条用例要在**任意一台机器、任意网络**下同一个结果，
     // 绝不能让 packageFor 去问真 GitHub（那既是联网测试，也会随上游版本漂移）
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: join(root, 'data'),
       probe: async (name) => ({
         name,
@@ -1206,8 +1223,8 @@ describe('一键安装：下载 → 解压 → 复检', () => {
  *   ③ **托管那份仍然保留**：一个都没有时它顶上，一键安装 / pip 引导 / 离线回退都不动。
  */
 describe('python：PATH 优先 · 托管兜底（用户 2026-10-17）', () => {
-  const managedDir = 'C:\\data\\tools\\python';
-  const managedExe = `${managedDir}\\python.exe`;
+  const managedDir = managedDirFor('C:\\data', 'python');
+  const managedExe = join(managedDir, 'python.exe');
 
   /** 造一个走真 `probeDependency`、只注入假进程与假文件系统、并且**带上 pip 探测**的管理器 */
   function managerWith(input: {
@@ -1218,6 +1235,7 @@ describe('python：PATH 优先 · 托管兜底（用户 2026-10-17）', () => {
     const fs = fakeFs(input.files ?? []);
     const seen: string[] = [];
     const manager = new DepsManager({
+      platform: 'win32',
       dataDir: 'C:\\data',
       exists: fs.exists,
       listDir: fs.listDir,

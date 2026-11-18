@@ -210,6 +210,8 @@ export type ChannelEvent =
   | (AppEvent & { type: 'channel/notice' })
   | (AppEvent & { type: 'channel/self-action' });
 
+export const SESSION_EVENT_TYPES = ['wake/channel', 'channel/message', 'channel/notice', 'channel/self-action', 'channel/read'] as const;
+
 /** 这条事件要不要并进会话簿（唯一判据，collect 与 upsert 共用一处） */
 function isChannelEvent(event: AppEvent): event is ChannelEvent {
   return event.type === 'wake/channel' || event.type === 'channel/message'
@@ -225,11 +227,13 @@ function isChannelEvent(event: AppEvent): event is ChannelEvent {
  */
 export function collectSessions(events: readonly AppEvent[]): SessionEntry[] {
   const map = new Map<string, SessionEntry>();
-  for (const e of events) {
-    if (isChannelEvent(e)) applyChannelMessage(map, e);
-    else if (e.type === 'channel/read') applyChannelRead(map, e);
-  }
+  for (const event of events) applySessionEvent(map, event);
   return sortSessions(map);
+}
+
+export function applySessionEvent(map: Map<string, SessionEntry>, event: AppEvent): void {
+  if (event.type === 'channel/read') applyChannelRead(map, event);
+  else if (isChannelEvent(event)) applyChannelMessage(map, event);
 }
 
 /**
@@ -243,8 +247,7 @@ export function collectSessions(events: readonly AppEvent[]): SessionEntry[] {
  */
 export function upsertSession(book: readonly SessionEntry[], event: AppEvent): SessionEntry[] {
   const map = new Map<string, SessionEntry>(book.map((entry) => [entry.sid, entry]));
-  if (event.type === 'channel/read') applyChannelRead(map, event);
-  else if (isChannelEvent(event)) applyChannelMessage(map, event);
+  applySessionEvent(map, event);
   return sortSessions(map);
 }
 
@@ -388,7 +391,7 @@ function applyChannelRead(map: Map<string, SessionEntry>, event: AppEvent & { ty
 }
 
 /** 排序的唯一实现：最近说话的排最前（她要的是"现在谁在那头"） */
-function sortSessions(map: ReadonlyMap<string, SessionEntry>): SessionEntry[] {
+export function sortSessions(map: ReadonlyMap<string, SessionEntry>): SessionEntry[] {
   return [...map.values()].sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : a.lastSeenAt > b.lastSeenAt ? -1 : 0));
 }
 

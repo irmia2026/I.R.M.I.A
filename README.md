@@ -11,7 +11,7 @@
 
 A resident, local-first agent that keeps its own identity, memory and capability
 boundary. The backend is a TypeScript/Node 22 process; the desktop shell is a
-Flutter Windows app.
+Flutter app for Windows and Ubuntu.
 
 ## 它是什么
 
@@ -26,14 +26,14 @@ Flutter Windows app.
 - **它能自己待着**。没有人守着也照常运行：静默久了会自己醒一次，出了意外能恢复；关掉界面它不会
   跟着走。
 
-后端是零运行时依赖的 Node 22 进程；界面是 Windows 桌面应用，关窗即收进托盘，agent 照常常驻。
+后端运行于 Node 22。Windows 和 Ubuntu 有 Flutter 桌面客户端，关窗后后端继续运行。系统提供托盘时，界面可收进托盘。
 
 ## 需要什么
 
 | | 版本 | 用途 |
 | --- | --- | --- |
 | [Node.js](https://nodejs.org/) | **22 或更高** | 后端主进程（用到 `--experimental-strip-types`，所以 22 是硬要求） |
-| [Flutter](https://flutter.dev/) | stable，含 Windows 桌面支持 | 桌面界面（只跑后端的话不需要） |
+| [Flutter](https://flutter.dev/) | 3.35.4，含对应系统的桌面支持 | 从源码构建桌面界面 |
 
 ## 跑起来
 
@@ -44,6 +44,8 @@ npm ci
 npm run build
 npm start
 ```
+
+Ubuntu 桌面启动、系统服务和发布包见 [Linux 兼容性](docs/linux-compatibility.md)。
 
 启动后它就在本机待着了（默认监听 `127.0.0.1:7788`，端口在 `config.json` 的 `web.port`）。
 
@@ -62,13 +64,15 @@ npm start
 其他命令：
 
 ```bash
-npm run cli        # 只读命令行视图（日志、预算、会话）
+npm run cli        # 命令行（日志、预算、自检和唤醒）
 npm test           # 单元与集成测试
 ```
 
 ### 桌面界面（可选）
 
-后端在跑着的时候：
+Ubuntu 的依赖和启动步骤见 [Linux 兼容性](docs/linux-compatibility.md#桌面客户端)。
+
+Windows 后端在跑着的时候：
 
 ```bash
 cd gui
@@ -109,7 +113,7 @@ cp config.example.json config.json   # Windows: copy config.example.json config.
 | 目录 | 里面是什么 |
 | --- | --- |
 | `src/` | 后端本体（零运行时依赖） |
-| `gui/` | Windows 桌面界面（Flutter），唯一的界面 |
+| `gui/` | Windows 和 Ubuntu 的 Flutter 桌面界面 |
 | `test/` | 后端测试；`gui/test/` 是界面测试 |
 | `tools/` `scripts/` | 运行期工具与启停脚本 |
 | `skills/` | 技能包（第三方 `anysearch`——见下方许可证一节） |

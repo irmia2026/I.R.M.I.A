@@ -10,6 +10,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'desktop_paths.dart';
 
 // ValueNotifier：把「关窗时收进托盘」的内存镜像给窗口关闭回调用（那里做不了异步读盘）
 import 'package:flutter/foundation.dart';
@@ -72,8 +73,7 @@ set stateFileOverride(String? path) {
 String stateFilePath() {
   final override = _override;
   if (override != null && override.isNotEmpty) return override;
-  final appData = Platform.environment['APPDATA'] ?? Directory.systemTemp.path;
-  return '$appData${Platform.pathSeparator}Irmia${Platform.pathSeparator}ui-state.json';
+  return '${guiStateDirectory(Platform.environment)}${Platform.pathSeparator}ui-state.json';
 }
 
 /// 写入队列：loadFlag/saveFlag 串行落盘，避免并发读改写互相覆盖

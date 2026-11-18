@@ -34,8 +34,8 @@
  * 只补最近一段——前端重连后本来就要全量重拉 `/api/projection`（frontend.md §4），
  * 投影是派生数据，全量覆盖永远安全。
  *
- * **③ 查询函数与 CLI 共用**。budget / review / 事件摘要直接调用 `cli.ts` 的导出
- * （`buildBudgetReport` / `buildReviewEntries` / `summarizeEvent`）——"界面上看到的和命令行看到的
+ * **③ 查询函数与 CLI 共用**。budget 与事件摘要直接调用 `cli.ts` 的导出
+ * （`buildBudgetReport` / `summarizeEvent`）——"界面上看到的和命令行看到的
  * 不一样"是这类系统最恶心的故障，唯一的根治办法是不给第二份实现。
  *
  * **④ 密钥不落日志**。webhook 记录的 headers 里 `authorization` / `cookie` 等一律存 `[redacted]`；
@@ -56,8 +56,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { ALERT_DIR_NAME, type AlertNotifier } from '../alert/notifier.ts';
-import { buildBudgetReport, buildReviewEntries, summarizeEvent } from '../cli.ts';
+import { buildBudgetReport, buildBudgetReportFromProjection, summarizeEvent, type BudgetReport } from '../cli.ts';
 import { answerHuman } from '../runtime/plan-mode.ts';
+import { applyTopUpEvent, emptyTopUps } from '../runtime/topup.ts';
 import type { AppConfig, JsonObject, JsonValue } from '../config/config.js';
 import { CONFIG_FILE_NAME, MENTION_KEYWORD_LEN_MAX, MENTION_KEYWORD_MAX, configHash, loadConfig, modelKeyRoutes } from '../config/config.ts';
 import {
@@ -129,8 +130,9 @@ import { listPlugins, runPluginCommand } from '../plugin/http.ts';
 import type { MarketHttpFetch, PluginMarketClient } from '../plugin/market-http.ts';
 import type { PluginManager } from '../plugin/manager.js';
 import type { PluginRuntimeComposition } from '../plugin/runtime.js';
-import type { EventLog } from '../log/event-log.js';
+import type { EventLog, ReadRangeOptions } from '../log/event-log.js';
 import type { AppEvent, BudgetLayer, Projection, WakeSource } from '../log/types.js';
+import { emptyProjection } from '../log/types.ts';
 import {
   DEFAULT_PROTOCOL_VERSION, MCP_NAME_PATTERN, MCP_NAME_PREFIX, McpConnection, defaultMcpProcessSpawner,
   parseMcpServers,
@@ -138,7 +140,11 @@ import {
 import type {
   McpConnectionHost, McpProcess, McpServerEntry, McpShutdownReport, McpToolInfo,
 } from '../mcp/client.js';
-import { aliasNoteOf, avatarUrlOf, channelRenderOf, collectSessions, normalizeSid, parseAliases, parseMemberAliases, resolveSessionName, sidLookupKeys, type SessionAlias } from '../channel/sessions.ts';
+import {
+  aliasNoteOf, applySessionEvent, avatarUrlOf, channelRenderOf, normalizeSid, parseAliases,
+  parseMemberAliases, resolveSessionName, SESSION_EVENT_TYPES, sidLookupKeys, sortSessions,
+  type SessionAlias, type SessionEntry,
+} from '../channel/sessions.ts';
 import { readEndpointFromConfig, resolveServiceDir, maskCredential } from '../services/snowluma.ts';
 import { loadPersona } from '../persona/loader.ts';
 import {
@@ -167,10 +173,9 @@ import {
   CACHE_BREAK_CAUSE_LABEL, CACHE_BREAK_CLASS_LABEL, CACHE_BREAK_LABEL, type ContextBreakdown,
 } from '../model/context-audit.ts';
 import { SKILL_DESCRIPTION_MAX_CHARS, SKILL_FILE_NAME, SkillManager, skillNameProblem } from '../skill/skills.ts';
-import { applyOne, budgetTokensOf, finalizePressure, wakeSourceOf } from '../state/fold.ts';
-// 全量事件快照：与 `real-loop.ts` 的 `mcpIndexSync()` **共用同一份**（那边每一拍要它）。
-// 两份实现会让"每拍 98 MB 的重读"重新长出来，见 event-snapshot.ts 的文件头。
-import { readAllEvents } from '../state/event-snapshot.ts';
+import { applyEvent, applyOne, budgetTokensOf, finalizePressure, wakeSourceOf } from '../state/fold.ts';
+import { readAllEvents, readEventTypes } from '../state/event-snapshot.ts';
+import { EventFold } from './event-fold.ts';
 import { compactTimestamp } from '../tools/fs/text-codec.ts';
 import { estimateTokens } from '../tools/registry.ts';
 import type { ToolRegistry } from '../tools/registry.js';
@@ -294,6 +299,18 @@ export const FRAMEWORK_NOTE_QUOTES_MAX = 3;
 const LATEST_SCAN_FACTOR = 20;
 /** dashboard 保留的尾部事件窗口：24h 序列与建议规则只需要尾部视图 */
 export const DASHBOARD_EVENT_WINDOW = 10_000;
+
+const GRANT_EVENT_TYPES = ['grant/requested', 'grant/resolved'] as const;
+const FRAMEWORK_NOTE_EVENT_TYPES = ['alarm/sent', 'injection/flagged', 'budget/consumed'] as const;
+const BUDGET_EVENT_TYPES = [
+  'budget/consumed', 'budget/rollover', 'budget/topped-up', 'budget/resumed',
+  'turn/start', 'turn/end', 'step/start', 'tool/call',
+] as const;
+const ANSWER_EVENT_TYPES = [
+  'human/asked', 'human/answered', 'human/expired', 'input/claimed', 'input/requeued',
+  'turn/end', 'plan/pending', 'plan/resolved', 'wake/timer', 'wake/file', 'wake/webhook',
+  'wake/heartbeat', 'wake/intention', 'wake/job', 'wake/subagent',
+] as const;
 
 /**
  * 协议端状态的中文说法（v34）。
@@ -1618,47 +1635,67 @@ function clipFrameworkQuotes(quotes: unknown): string[] {
   return out;
 }
 
-/**
- * 尾部事件视图：dashboard 的 24h 序列与建议规则只需最近一段，不必每次全量读盘。
- * 首次 sync 从"尾部 DASHBOARD_EVENT_WINDOW 条"起读（seq 有空洞时是估算，注释在案），
- * 之后按 `latestSeq` 增量补齐；保留条数超过窗口就从头部裁掉。
- *
- * 裁剪**用头部下标，不用 `slice(-window)`**。⚠ 老实说这一处的收益也很小：`slice` 复制的
- * 是**引用数组**，1 万条 ≈ 几十 KB（与 `allEventsOf` 那处同一性质，见那里的注释）；
- * 它是"每拍少一次分配"，不是"省下几十 MB"。之所以还是改：dashboard 每次刷新都走这里，
- * 而 RSS 只涨不还，长期就是白交给 V8 的峰值。
- * 用下标时只在"死区比活区还大"时才真压一次，均摊几乎为零；`sync()` 的返回值仍然只含
- * 窗口内那些条（消费方看不见下标）。
- */
+const DASHBOARD_RECENT_LIMIT = 10;
+
+interface DashboardWindow {
+  /** Keep one slot per event so filtering preserves the original window boundary. */
+  window: (AppEvent | null)[];
+  recent: AppEvent[];
+}
+
+function dashboardEventOf(event: AppEvent): AppEvent | null {
+  switch (event.type) {
+    case 'budget/consumed':
+    case 'persona/updated':
+    case 'grant/requested':
+    case 'grant/resolved':
+    case 'model/reasoning-echo':
+      return event;
+    default:
+      return null;
+  }
+}
+
+/** Keep the latest raw rows for display and only the events used by dashboard calculations. */
 class RecentEventView {
   private readonly log: EventLog;
-  private readonly window: number;
-  private events: AppEvent[] = [];
-  /** 逻辑头部：`events[head..]` 才是有效窗口；`head === events.length` = 空 */
-  private head = 0;
+  private readonly limit: number;
+  private state: DashboardWindow = { window: [], recent: [] };
   private upToSeq = 0;
+  private inflight: Promise<void> | null = null;
 
-  constructor(log: EventLog, window: number) {
+  constructor(log: EventLog, limit: number) {
     this.log = log;
-    this.window = window;
+    this.limit = limit;
   }
 
-  async sync(): Promise<AppEvent[]> {
-    const latest = this.log.latestSeq();
-    if (latest <= this.upToSeq) return this.head === 0 ? this.events : this.events.slice(this.head);
-
-    const from = this.upToSeq === 0 ? Math.max(1, latest - this.window) : this.upToSeq + 1;
-    for await (const event of this.log.readRange(from)) this.events.push(event);
-    // 超出窗口的部分只**记账**（推 head），不复制
-    const live = this.events.length - this.head;
-    if (live > this.window) this.head += live - this.window;
-    // 死区比活区还大时才真压一次，免得数组无限长（摊销到每一拍几乎为零）
-    if (this.head > 0 && this.head >= this.events.length - this.head) {
-      this.events = this.events.slice(this.head);
-      this.head = 0;
+  async sync(): Promise<DashboardWindow> {
+    const requested = this.log.latestSeq();
+    while (this.upToSeq < requested) {
+      this.inflight ??= this.advance(this.log.latestSeq()).finally(() => { this.inflight = null; });
+      await this.inflight;
     }
-    this.upToSeq = latest;
-    return this.head === 0 ? this.events : this.events.slice(this.head);
+    return this.state;
+  }
+
+  private async advance(throughSeq: number): Promise<void> {
+    const from = this.upToSeq === 0 ? Math.max(1, throughSeq - this.limit) : this.upToSeq + 1;
+    const next = this.state.window.slice();
+    const recent = this.state.recent.slice();
+    let head = 0;
+    for await (const event of this.log.readRange(from, { throughSeq })) {
+      const entry = dashboardEventOf(event);
+      if (next.length < this.limit) next.push(entry);
+      else {
+        next[head] = entry;
+        head = (head + 1) % this.limit;
+      }
+      if (recent.length === DASHBOARD_RECENT_LIMIT) recent.shift();
+      recent.push(event);
+    }
+    // 读取失败时保留上次完整视图，成功之后按 seq 顺序一并提交。
+    this.state = { window: head === 0 ? next : next.slice(head).concat(next.slice(0, head)), recent };
+    this.upToSeq = throughSeq;
   }
 }
 
@@ -1670,10 +1707,15 @@ interface EventFilters {
   visibility: 'model' | 'internal' | null;
 }
 
-function matchesFilters(event: AppEvent, filters: EventFilters): boolean {
-  if (filters.visibility !== null && event.visibility !== filters.visibility) return false;
-  if (filters.types.length === 0) return true;
-  return filters.types.some((type) => (type.endsWith('/') ? event.type.startsWith(type) : event.type === type));
+function eventTypeFilter(filters: EventFilters): ReadRangeOptions | undefined {
+  if (filters.types.length === 0) return undefined;
+  const types = new Set<string>();
+  const typePrefixes: string[] = [];
+  for (const type of filters.types) {
+    if (type.endsWith('/')) typePrefixes.push(type);
+    else types.add(type);
+  }
+  return { types, typePrefixes };
 }
 
 async function collectEvents(
@@ -1683,8 +1725,8 @@ async function collectEvents(
   limit: number,
 ): Promise<AppEvent[]> {
   const out: AppEvent[] = [];
-  for await (const event of log.readRange(fromSeq)) {
-    if (!matchesFilters(event, filters)) continue;
+  for await (const event of log.readRange(fromSeq, eventTypeFilter(filters))) {
+    if (filters.visibility !== null && event.visibility !== filters.visibility) continue;
     out.push(event);
     if (out.length >= limit) break;
   }
@@ -1702,12 +1744,25 @@ async function tailMatches(
   limit: number,
 ): Promise<AppEvent[]> {
   const keep: AppEvent[] = [];
-  for await (const event of log.readRange(fromSeq)) {
-    if (!matchesFilters(event, filters)) continue;
+  for await (const event of log.readRange(fromSeq, eventTypeFilter(filters))) {
+    if (filters.visibility !== null && event.visibility !== filters.visibility) continue;
     keep.push(event);
     if (keep.length > limit) keep.splice(0, keep.length - limit);
   }
   return keep;
+}
+
+/** 只重建指定调用的待确认状态，沿用父投影忽略子代理调用的口径。 */
+async function hasPendingReview(log: EventLog, callId: string): Promise<boolean> {
+  let pending = false;
+  const types = new Set(['tool/result', 'review/resolved']);
+  for await (const event of log.readRange(1, { types, throughSeq: log.latestSeq() })) {
+    if (event.parentCallId !== undefined) continue;
+    if (event.type === 'tool/result' && event.data.callId === callId && event.data.status === 'unknown') {
+      pending = true;
+    } else if (event.type === 'review/resolved' && event.data.callId === callId) pending = false;
+  }
+  return pending;
 }
 
 /** 分页查询（frontend.md §4：200/批；`from_seq` 缺省时给**最新**一批） */
@@ -1761,6 +1816,20 @@ function hourlyKeys(nowMs: number): string[] {
   return keys;
 }
 
+function emptyHour(key: string): HourlyPoint {
+  return { hour: `${key}:00Z`, tokens: 0, input: 0, output: 0, hit: 0, miss: 0 };
+}
+
+type Consumed = AppEvent & { type: 'budget/consumed' };
+
+function addHourlyUsage(bucket: HourlyPoint, data: Consumed['data'], tokens: number): void {
+  bucket.input += data.inputTokens;
+  bucket.output += data.outputTokens;
+  bucket.tokens += tokens;
+  bucket.hit += data.cacheHitTokens;
+  bucket.miss += data.cacheMissTokens;
+}
+
 /**
  * 最近 24 小时的逐小时序列。总览趋势线与预算弹层共用**同一份实现**：
  * 两处各算一遍必然会漂移，而“图表不一样”比“图没数据”更难查。
@@ -1773,17 +1842,13 @@ export function buildHourlySeries(events: readonly AppEvent[], nowMs: number): H
   const keys = hourlyKeys(nowMs);
   const buckets = new Map<string, HourlyPoint>();
   for (const key of keys) {
-    buckets.set(key, { hour: `${key}:00Z`, tokens: 0, input: 0, output: 0, hit: 0, miss: 0 });
+    buckets.set(key, emptyHour(key));
   }
   for (const event of events) {
     if (event.type !== 'budget/consumed') continue;
     const bucket = buckets.get(event.ts.slice(0, 13));
     if (bucket === undefined) continue;
-    bucket.input += event.data.inputTokens;
-    bucket.output += event.data.outputTokens;
-    bucket.tokens += budgetTokensOf(event.data);
-    bucket.hit += event.data.cacheHitTokens;
-    bucket.miss += event.data.cacheMissTokens;
+    addHourlyUsage(bucket, event.data, budgetTokensOf(event.data));
   }
   return keys.map((key) => buckets.get(key)!);
 }
@@ -1932,27 +1997,29 @@ export function livePausedLayers(p: Projection): BudgetLayer[] {
  * 直接把 31.8 ms 挂上去，就是每十秒白花 31.8 ms 换一个**绝大多数时候与上一次逐字相同**的答案。
  *
  * 缓存的键只有两个，都取"**结果会不会变**"的真实判据：
- *   · `upToSeq`：日志是 append-only，没有新事件 ⇒ 窗口与基线一个字节都不会变；
+ *   · 窗口引用：每个日志实例只在日志推进后发布新的窗口；
  *   · `nowMs` 的**分钟桶**：判据里唯一与时间有关的是"24 小时基线回看"的边界，
  *     分钟级足够（跨过那个边界时最多晚一分钟换读数，而它本来就是个观测）。
  *
- * ⚠ 键**必须包含 `upToSeq`**：只按时间缓存会让"这一秒刚落了三条 budget/consumed"被压掉——
- * 那正是用户报的"框架一声不响"里最不该重演的一种。
+ * 以窗口引用为键，也避免不同实例的相同序号共用结果。
  */
-let cacheAlertMemo: { upToSeq: number; minute: number; value: CacheAlertVerdict[] } | null = null;
+const cacheAlertMemo = new WeakMap<readonly (AppEvent | null)[], { minute: number; value: CacheAlertVerdict[] }>();
 
-function cacheAlertsForDashboard(events: AppEvent[], nowMs: number): CacheAlertVerdict[] {
-  const upToSeq = events.length === 0 ? 0 : (events[events.length - 1]?.seq ?? 0);
+function cacheAlertsForDashboard(
+  events: readonly AppEvent[], key: readonly (AppEvent | null)[] | undefined, nowMs: number,
+): CacheAlertVerdict[] {
+  if (key === undefined) return planCacheAlerts({ events, nowMs, respectDedupe: false });
   const minute = Math.floor(nowMs / 60_000);
-  if (cacheAlertMemo !== null && cacheAlertMemo.upToSeq === upToSeq && cacheAlertMemo.minute === minute) {
-    return cacheAlertMemo.value;
-  }
+  const memo = cacheAlertMemo.get(key);
+  if (memo?.minute === minute) return memo.value;
   const value = planCacheAlerts({ events, nowMs, respectDedupe: false });
-  cacheAlertMemo = { upToSeq, minute, value };
+  cacheAlertMemo.set(key, { minute, value });
   return value;
 }
 
-function buildSuggestions(p: Projection, events: AppEvent[], nowMs: number): Suggestion[] {
+function buildSuggestions(
+  p: Projection, events: readonly AppEvent[], key: readonly (AppEvent | null)[] | undefined, nowMs: number,
+): Suggestion[] {
   const out: Suggestion[] = [];
   const push = (
     item: { id: string; level: 'info' | 'warn'; title: string; body: string; act: string; actLabel: string },
@@ -1984,7 +2051,7 @@ function buildSuggestions(p: Projection, events: AppEvent[], nowMs: number): Sug
   //     重编码前缀"——它是钱与体感同时变差的事，该占告警那一档（`cacheBreak` 那张卡也是 warn）。
   // 这里**不去重**（`respectDedupe:false`）：这张卡回答"现在健不健康"。24 小时去重是
   // **通知**的纪律（运行期那条路管），不是状态展示的纪律。
-  const cacheFired = cacheAlertsForDashboard(events, nowMs)
+  const cacheFired = cacheAlertsForDashboard(events, key, nowMs)
     .filter((verdict): verdict is typeof verdict & { reading: CacheAlertReading } => verdict.fired && verdict.reading !== null);
   if (cacheFired.length > 0) {
     const worst = cacheFired.reduce((a, b) => (b.reading.missRatio > a.reading.missRatio ? b : a));
@@ -2521,11 +2588,11 @@ export function pairedRecoveries(events: readonly AppEvent[]): Map<number, strin
     const data = event.data;
     // key 是配对用的身份；老日志（没有 key）退回指纹——同类别同参数的告警指纹相同，
     // 仍然配得上；代价是"层"不再参与身份（老日志里 task / daily 会被算作同一个）
-    const key = data.key !== undefined && data.key !== '' ? data.key : `fp:${data.fingerprint}`;
+    const key = alarmRecoveryKey(data);
     if (data.recovered === true) {
       const original = pending.get(key)?.shift();
       if (original !== undefined) {
-        paired.set(original, `已恢复（${event.ts} 的恢复通知，seq ${event.seq}）：${data.title}`);
+        paired.set(original, alarmRecoveryReason(event));
       }
       continue;
     }
@@ -2536,10 +2603,75 @@ export function pairedRecoveries(events: readonly AppEvent[]): Map<number, strin
   return paired;
 }
 
+type AlarmEvent = AppEvent & { type: 'alarm/sent' };
+type InjectionEvent = AppEvent & { type: 'injection/flagged' };
+type CacheBreakEvent = Pick<Consumed, 'seq' | 'ts' | 'type'> & { data: Pick<Consumed['data'], 'cacheBreak'> };
+
+function alarmRecoveryKey(data: AlarmEvent['data']): string {
+  return data.key !== undefined && data.key !== '' ? data.key : `fp:${data.fingerprint}`;
+}
+
+function alarmRecoveryReason(event: AlarmEvent): string {
+  return `已恢复（${event.ts} 的恢复通知，seq ${event.seq}）：${event.data.title}`;
+}
+
+/** 每类只保存可见窗口。更旧的未配对告警用数量保留 FIFO 配对顺序。 */
+class FrameworkNoteEvents {
+  private readonly injections: InjectionEvent[] = [];
+  private readonly alarms: Array<AlarmEvent | CacheBreakEvent> = [];
+  private readonly pending = new Map<string, { older: number; visible: number[] }>();
+  readonly recoveries = new Map<number, string>();
+
+  apply(event: AppEvent): void {
+    if (event.type === 'injection/flagged') {
+      this.injections.push(event);
+      if (this.injections.length > FRAMEWORK_NOTES_MAX_LIMIT) this.injections.shift();
+      return;
+    }
+    if (event.type === 'alarm/sent') {
+      this.pair(event);
+      this.alarms.push(event);
+    } else if (event.type === 'budget/consumed' && event.data.cacheBreak !== undefined && event.data.cacheBreak.silent !== true) {
+      const { seq, ts, type } = event;
+      this.alarms.push({ seq, ts, type, data: { cacheBreak: event.data.cacheBreak } });
+    }
+    if (this.alarms.length <= FRAMEWORK_NOTES_MAX_LIMIT) return;
+    const evicted = this.alarms.shift()!;
+    if (evicted.type !== 'alarm/sent' || evicted.data.recovered === true || this.recoveries.delete(evicted.seq)) return;
+
+    const queue = this.pending.get(alarmRecoveryKey(evicted.data));
+    if (queue?.visible[0] === evicted.seq) {
+      queue.visible.shift();
+      queue.older++;
+    }
+  }
+
+  private pair(event: AlarmEvent): void {
+    const key = alarmRecoveryKey(event.data);
+    const queue = this.pending.get(key) ?? { older: 0, visible: [] };
+    if (event.data.recovered === true) {
+      if (queue.older > 0) queue.older--;
+      else {
+        const original = queue.visible.shift();
+        if (original !== undefined) this.recoveries.set(original, alarmRecoveryReason(event));
+      }
+      if (queue.older === 0 && queue.visible.length === 0) this.pending.delete(key);
+    } else {
+      queue.visible.push(event.seq);
+      this.pending.set(key, queue);
+    }
+  }
+
+  entries(): Array<InjectionEvent | AlarmEvent | CacheBreakEvent> {
+    return [...this.injections, ...this.alarms].sort((a, b) => a.seq - b.seq);
+  }
+}
+
 /** 总览页的全部数据（frontend.md §3.1：状态机 + 磁贴 + 建议 + 24h 序列） */
 export function buildDashboard(input: {
   projection: Projection;
-  events: AppEvent[];
+  events: readonly (AppEvent | null)[];
+  recentEvents?: readonly AppEvent[];
   now: Date;
   personaRoot: string;
   /**
@@ -2555,7 +2687,8 @@ export function buildDashboard(input: {
   const p = input.projection;
   const nowMs = input.now.getTime();
   const derived = deriveState(p, nowMs);
-  const hourly = buildHourlySeries(input.events, nowMs);
+  const events = input.events.filter((event) => event !== null);
+  const hourly = buildHourlySeries(events, nowMs);
 
   const cacheTotal = p.budget.cacheHitToday + p.budget.cacheMissToday;
   const firstAt = p.firstEventAt === null ? null : parseTs(p.firstEventAt);
@@ -2563,7 +2696,7 @@ export function buildDashboard(input: {
     ? null
     : Math.max(0, Math.floor((nowMs - firstAt) / 86_400_000));
 
-  const recent = input.events.slice(-10).map((event) => ({
+  const recent = (input.recentEvents ?? events).slice(-DASHBOARD_RECENT_LIMIT).map((event) => ({
     seq: event.seq,
     ts: event.ts,
     type: event.type,
@@ -2604,18 +2737,16 @@ export function buildDashboard(input: {
     ask: askCardOf(p),
     // 申请单（她递的）：判据取事件，盘上那份只补"还没被拾取"那一段（见 `listGrants` 的注释）
     grants: (() => {
-      const items = listGrants(input.dataDir ?? '', input.events, p.humanAsks);
+      const items = listGrants(input.dataDir ?? '', events, p.humanAsks);
       return { items, open: items.filter((item) => item.outcome === null && item.picked).length };
     })(),
     deadLetters: p.deadLetters.length,
-    suggestions: buildSuggestions(p, input.events, nowMs),
+    suggestions: buildSuggestions(p, events, input.recentEvents === undefined ? undefined : input.events, nowMs),
     hourly,
     personaProposals: buildPersonaFiles(input.personaRoot).proposals.length,
     // 空态：一条事件都没有，或只有 session/start（总览页据此换成引导卡）
     empty: p.lastSeq === 0
-      || (input.events.length === 1
-        && input.events[0]!.type === 'session/start'
-        && input.events[0]!.seq === p.lastSeq),
+      || (input.events.length === 1 && recent[0]?.type === 'session/start' && recent[0].seq === p.lastSeq),
     recent,
   };
 }
@@ -2671,7 +2802,6 @@ function askCardOf(p: Projection): DashboardView['ask'] {
 export function buildBudgetView(input: {
   dataDir: string;
   config: AppConfig;
-  /** 只读：这条路上只折叠，不改事件（共享快照直接喂进来，就地改会污染别人） */
   events: readonly AppEvent[];
   now: Date;
   range: 'today' | '7d';
@@ -2682,40 +2812,28 @@ export function buildBudgetView(input: {
     events: input.events,
     limitSource: 'file',
   });
+  const charts = new BudgetCharts();
+  for (const event of input.events) charts.apply(event);
+  return formatBudgetView(input.config, report, charts, input.now, input.range);
+}
 
-  const days = input.range === 'today' ? 1 : 7;
-  const dayKeys: string[] = [];
-  const dayBuckets = new Map<string, { tokens: number; heavy: number; light: number; hit: number; miss: number }>();
-  for (let i = days - 1; i >= 0; i--) {
-    const key = new Date(input.now.getTime() - i * 86_400_000).toISOString().slice(0, 10);
-    dayKeys.push(key);
-    dayBuckets.set(key, { tokens: 0, heavy: 0, light: 0, hit: 0, miss: 0 });
-  }
-  for (const event of input.events) {
-    if (event.type !== 'budget/consumed') continue;
-    const bucket = dayBuckets.get(event.ts.slice(0, 10));
-    if (bucket === undefined) continue;
-    // 按天分桶也走**预算口径**（非缓存）：7d 视图与「今日用量」那张卡必须是同一个数
-    const total = budgetTokensOf(event.data);
-    bucket.tokens += total;
-    if (event.data.lane === 'heavy') bucket.heavy += total;
-    else bucket.light += total;
-    bucket.hit += event.data.cacheHitTokens;
-    bucket.miss += event.data.cacheMissTokens;
-  }
-
-  // 五档阈值（前端画"距硬阈值进度条"直接读它）
+function formatBudgetView(
+  config: AppConfig,
+  report: BudgetReport,
+  charts: BudgetCharts,
+  now: Date,
+  range: BudgetView['range'],
+): BudgetView {
   const limits = {
-    stepTools: input.config.budget.stepTools,
-    turnSteps: input.config.budget.turnSteps,
-    taskTokens: input.config.budget.taskTokens,
-    dailyTokens: input.config.budget.dailyTokens,
-    softRatio: input.config.budget.softRatio,
+    stepTools: config.budget.stepTools,
+    turnSteps: config.budget.turnSteps,
+    taskTokens: config.budget.taskTokens,
+    dailyTokens: config.budget.dailyTokens,
+    softRatio: config.budget.softRatio,
   };
-
   return {
-    range: input.range,
-    generatedAt: input.now.toISOString(),
+    range,
+    generatedAt: now.toISOString(),
     limitSource: report.limitSource,
     metricNote: BUDGET_METRIC_NOTE,
     today: { ...report.today },
@@ -2725,70 +2843,113 @@ export function buildBudgetView(input: {
     taskTokens: report.taskTokens,
     topUps: { ...report.topUps },
     layers: report.layers.map((layer) => ({ ...layer })),
-    hourly: buildHourlySeries(input.events, input.now.getTime()),
-    daily: dayKeys.map((key) => ({ date: key, ...dayBuckets.get(key)! })),
-    turns: buildTurnRows(input.events),
-    month: buildMonth(input.events, input.now),
+    ...charts.view(now, range),
   };
 }
 
-/** 最近 20 个 turn 的明细：预算行合并 + turn/end 的结局。只读聚合，不另存一份账 */
-function buildTurnRows(events: readonly AppEvent[], limit = 20): BudgetTurnRow[] {
-  interface Acc { input: number; output: number; hit: number; miss: number; durationMs: number; reasonKind: string | null }
-  const byTurn = new Map<number, Acc>();
-  const ensure = (turn: number): Acc => {
-    const existing = byTurn.get(turn);
-    if (existing !== undefined) return existing;
-    const created: Acc = { input: 0, output: 0, hit: 0, miss: 0, durationMs: 0, reasonKind: null };
-    byTurn.set(turn, created);
-    return created;
-  };
-  for (const event of events) {
+type DailyUsage = BudgetView['daily'][number];
+type TurnUsage = Omit<BudgetTurnRow, 'hitRate' | 'turn'>;
+const BUDGET_TURN_LIMIT = 20;
+
+function emptyDay(key: string): DailyUsage {
+  return { date: key, tokens: 0, heavy: 0, light: 0, hit: 0, miss: 0 };
+}
+
+/** 图表只保留时段累计、每月轮次编号和最近 20 轮明细。 */
+class BudgetCharts {
+  private readonly hours = new Map<string, HourlyPoint>();
+  private readonly days = new Map<string, DailyUsage>();
+  private readonly months = new Map<string, { tokens: number; turns: Set<number> }>();
+  private readonly turns = new Map<number, TurnUsage>();
+
+  apply(event: AppEvent): void {
     if (event.type === 'budget/consumed') {
-      const row = ensure(event.data.turn);
-      row.input += event.data.inputTokens;
-      row.output += event.data.outputTokens;
-      row.hit += event.data.cacheHitTokens;
-      row.miss += event.data.cacheMissTokens;
-      row.durationMs += event.data.durationMs;
+      const d = event.data;
+      const tokens = budgetTokensOf(d);
+      const hour = event.ts.slice(0, 13);
+      const hourly = this.hours.get(hour) ?? emptyHour(hour);
+      addHourlyUsage(hourly, d, tokens);
+      this.hours.set(hour, hourly);
+
+      const day = event.ts.slice(0, 10);
+      const daily = this.days.get(day) ?? emptyDay(day);
+      daily.tokens += tokens;
+      if (d.lane === 'heavy') daily.heavy += tokens;
+      else daily.light += tokens;
+      daily.hit += d.cacheHitTokens;
+      daily.miss += d.cacheMissTokens;
+      this.days.set(day, daily);
+
+      const month = event.ts.slice(0, 7);
+      const monthly = this.months.get(month) ?? { tokens: 0, turns: new Set<number>() };
+      monthly.tokens += tokens;
+      monthly.turns.add(d.turn);
+      this.months.set(month, monthly);
+
+      const row = this.turn(d.turn);
+      if (row !== null) {
+        row.input += d.inputTokens;
+        row.output += d.outputTokens;
+        row.hit += d.cacheHitTokens;
+        row.miss += d.cacheMissTokens;
+        row.durationMs += d.durationMs;
+      }
     } else if (event.type === 'turn/end') {
-      ensure(event.data.turn).reasonKind = event.data.reason.kind;
+      const reason = event.data.reason.kind;
+      const row = this.turn(event.data.turn);
+      if (row !== null) row.reasonKind = reason;
     }
   }
-  return [...byTurn.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .slice(-limit)
-    .map(([turn, acc]) => {
-      const samples = acc.hit + acc.miss;
-      return {
-        turn,
-        input: acc.input,
-        output: acc.output,
-        hit: acc.hit,
-        miss: acc.miss,
-        hitRate: samples > 0 ? acc.hit / samples : null,
-        durationMs: acc.durationMs,
-        reasonKind: acc.reasonKind,
-      };
+
+  private turn(turn: number): TurnUsage | null {
+    const existing = this.turns.get(turn);
+    if (existing !== undefined) return existing;
+    if (this.turns.size >= BUDGET_TURN_LIMIT) {
+      const oldest = Math.min(...this.turns.keys());
+      if (turn < oldest) return null;
+      this.turns.delete(oldest);
+    }
+    const row = { input: 0, output: 0, hit: 0, miss: 0, durationMs: 0, reasonKind: null };
+    this.turns.set(turn, row);
+    return row;
+  }
+
+  view(now: Date, range: BudgetView['range']): Pick<BudgetView, 'hourly' | 'daily' | 'turns' | 'month'> {
+    const nowMs = now.getTime();
+    const hourly = hourlyKeys(nowMs).map((key) => ({ ...(this.hours.get(key) ?? emptyHour(key)) }));
+    const daily: DailyUsage[] = [];
+    for (let i = (range === 'today' ? 1 : 7) - 1; i >= 0; i--) {
+      const key = new Date(nowMs - i * 86_400_000).toISOString().slice(0, 10);
+      daily.push({ ...(this.days.get(key) ?? emptyDay(key)) });
+    }
+    const turns = [...this.turns.entries()].sort((a, b) => a[0] - b[0]).map(([turn, row]) => {
+      const samples = row.hit + row.miss;
+      return { turn, ...row, hitRate: samples > 0 ? row.hit / samples : null };
     });
+    const month = this.months.get(now.toISOString().slice(0, 7));
+    const tokens = month?.tokens ?? 0;
+    const monthlyTurns = month?.turns.size ?? 0;
+    return {
+      hourly, daily, turns,
+      month: { tokens, turns: monthlyTurns, avgPerTurn: monthlyTurns > 0 ? Math.round(tokens / monthlyTurns) : 0 },
+    };
+  }
 }
 
-/**
- * 本月估算（页脚）：token 累计 / 跨过的 turn 数 / 单次均价。
- * token 走**预算口径**（非缓存，`budgetTokensOf`）——页脚那个数与卡片、趋势线同一套语义。
- */
-function buildMonth(events: readonly AppEvent[], now: Date): { tokens: number; turns: number; avgPerTurn: number } {
-  const prefix = now.toISOString().slice(0, 7);
-  let tokens = 0;
-  const turns = new Set<number>();
-  for (const event of events) {
-    if (event.type !== 'budget/consumed') continue;
-    if (!event.ts.startsWith(prefix)) continue;
-    tokens += budgetTokensOf(event.data);
-    turns.add(event.data.turn);
+class BudgetEventState {
+  readonly projection = emptyProjection();
+  readonly topUps = emptyTopUps();
+  readonly charts = new BudgetCharts();
+
+  apply(event: AppEvent): void {
+    this.charts.apply(event);
+    applyEvent(this.projection, event);
+    applyTopUpEvent(this.topUps, event);
+    // 预算只用调用次数，无需持有每次调用的待完成记录。
+    if (event.type === 'tool/call') this.projection.openTools.length = 0;
   }
-  return { tokens, turns: turns.size, avgPerTurn: turns.size > 0 ? Math.round(tokens / turns.size) : 0 };
 }
+
 
 // ──────────────────────────────── persona ────────────────────────────────
 
@@ -3092,7 +3253,6 @@ function groupMemberNameOfUnder(dataDir: string): (person: string) => string | n
 }
 
 export function buildReplay(input: {
-  /** 只读：见 buildBudgetView 的同一句——事件来自共享快照 */
   events: readonly AppEvent[];
   turn: number;
   step: number;
@@ -3121,9 +3281,18 @@ export function buildReplay(input: {
     (event) => event.type === 'input/claimed' && event.data.turn === input.turn,
   );
   const wakeSeqs = claimed !== undefined && claimed.type === 'input/claimed' ? claimed.data.wakeSeqs : [];
-  const wakeEvent = wakeSeqs.length > 0
-    ? [...input.events].reverse().find((event) => event.seq === wakeSeqs[0]) ?? null
-    : null;
+  let wakeEvent: AppEvent | null = null;
+  let configHashAt = '';
+  let foundSessionStart = false;
+  for (let i = input.events.length - 1; i >= 0; i--) {
+    const event = input.events[i]!;
+    if (wakeEvent === null && event.seq === wakeSeqs[0]) wakeEvent = event;
+    if (!foundSessionStart && event.type === 'session/start') {
+      configHashAt = event.data.configHash;
+      foundSessionStart = true;
+    }
+    if (foundSessionStart && (wakeEvent !== null || wakeSeqs.length === 0)) break;
+  }
   /**
    * **本轮新输入的钉住位置**（v74；与运行期 `agent-loop` 的 `pinnedWake` 同一口径）：
    * `beforeSeq` = 本轮 `turn/start` 的 seq。首步=历史末尾，之后每一步停在同一个位置。
@@ -3136,10 +3305,6 @@ export function buildReplay(input: {
     ? null
     : { event: wakeEvent, beforeSeq: turnStart?.seq ?? stepStart.seq };
 
-  const sessionStart = [...input.events].reverse().find((event) => event.type === 'session/start');
-  const configHashAt = sessionStart !== undefined && sessionStart.type === 'session/start'
-    ? sessionStart.data.configHash
-    : '';
   // 本任务相关资产那一行（v34）：**只从事件读**（轮首那条 `memory/selected.assets`）——
   // 与 CLI 的重放（`replay.ts` 的 `assetsFromEvents`）同一个口径。盘上的 `assets.md` 是她
   // 随时会改的文件，从盘上重算就不是"当时那个请求"了；事件里没有（老日志 / 那一轮没挑）
@@ -3470,6 +3635,18 @@ interface WebhookRate {
   refillPerSec: number;
 }
 
+type ContextBreakdownState = { latest: { ts: string; turn: number; step: number; context: ContextBreakdown } | null };
+
+interface SseClient {
+  response: ServerResponse;
+  throughSeq: number;
+  blocked: boolean;
+}
+
+function sseFrame(event: AppEvent): string {
+  return `event: ${event.type}\nid: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
 class WebServerImpl implements WebServer {
   readonly server: Server;
   readonly auth: AuthStore;
@@ -3480,8 +3657,12 @@ class WebServerImpl implements WebServer {
   private readonly portWanted: number;
   private readonly configPath: string;
   private readonly recent: RecentEventView;
+  private readonly budgetEvents: EventFold<BudgetEventState>;
+  private readonly frameworkNoteEvents: EventFold<FrameworkNoteEvents>;
+  private readonly sessions: EventFold<Map<string, SessionEntry>>;
+  private readonly contextBreakdown: EventFold<ContextBreakdownState>;
   private readonly buckets: TokenBucketTable;
-  private readonly sseClients = new Set<ServerResponse>();
+  private readonly sseClients = new Set<SseClient>();
   /** webhook 专用凭据（B9）：`/webhook/*` 的唯一判据，与 `auth` 互不通用 */
   readonly webhookSecret: WebhookSecretStore;
   /** Ingress Bridge 多来源注册表 */
@@ -3573,6 +3754,14 @@ class WebServerImpl implements WebServer {
     this.portWanted = deps.bootstrap?.port ?? deps.port ?? 0;
     this.configPath = deps.configPath ?? join(process.cwd(), CONFIG_FILE_NAME);
     this.recent = new RecentEventView(deps.log, DASHBOARD_EVENT_WINDOW);
+    this.budgetEvents = new EventFold(deps.log, BUDGET_EVENT_TYPES, new BudgetEventState(), (state, event) => state.apply(event));
+    this.frameworkNoteEvents = new EventFold(deps.log, FRAMEWORK_NOTE_EVENT_TYPES, new FrameworkNoteEvents(), (state, event) => state.apply(event));
+    this.sessions = new EventFold(deps.log, SESSION_EVENT_TYPES, new Map<string, SessionEntry>(), applySessionEvent);
+    this.contextBreakdown = new EventFold<ContextBreakdownState>(deps.log, ['budget/consumed'], { latest: null }, (state, event) => {
+      if (event.type !== 'budget/consumed' || event.data.context === undefined) return;
+      const { turn, step, context } = event.data;
+      state.latest = { ts: event.ts, turn, step, context };
+    });
     const rate = deps.webhookRate ?? DEFAULT_WEBHOOK_RATE;
     this.webhookRate = { capacity: rate.capacity, refillPerSec: rate.refillPerSec };
     this.buckets = new TokenBucketTable(this.webhookRate.capacity, this.webhookRate.refillPerSec);
@@ -3790,6 +3979,9 @@ class WebServerImpl implements WebServer {
       this.sendAuthError(res, 401, 'unauthorized', '缺少或无效的会话凭据（可能改过密码或已登出）。请重新登录。');
       return;
     }
+    if (process.platform === 'linux' && process.env['IRMIA_SYSTEMD_MANAGED'] === '1') {
+      throw new HttpError(409, 'supervised-instance', '此实例由 systemd 管理，请用 systemctl stop irmia-agent 停止。');
+    }
     const via = viaLogout
       ? '刚刚注销的那张会话票'
       : (verdict.ok && verdict.via === 'legacy-token' ? '旧共享 token' : '有效会话');
@@ -3844,7 +4036,9 @@ class WebServerImpl implements WebServer {
     }, pollMs);
     this.pumpTimer.unref?.();
     this.heartbeatTimer = setInterval(() => {
-      for (const client of this.sseClients) client.write(': hb\n\n');
+      for (const client of this.sseClients) {
+        if (!client.blocked) this.writeSse(client, ': hb\n\n');
+      }
     }, SSE_HEARTBEAT_MS);
     this.heartbeatTimer.unref?.();
   }
@@ -3870,7 +4064,7 @@ class WebServerImpl implements WebServer {
     this.qqBind = null;
     for (const client of this.sseClients) {
       try {
-        client.end();
+        client.response.end();
       } catch {
         /* 已经断开的连接不必再管 */
       }
@@ -3891,23 +4085,45 @@ class WebServerImpl implements WebServer {
     const latest = this.deps.log.latestSeq();
     if (latest <= this.pumpedSeq) return;
     const from = this.pumpedSeq + 1;
-    for (let seq = from; seq <= latest; seq++) {
-      const event = this.deps.log.get(seq);
-      if (event === null) continue; // 崩溃留下的 seq 空洞：跳过，不是错误
-      this.broadcast(event);
+    if ([...this.sseClients].some((client) => !client.blocked)) {
+      for (let seq = from; seq <= latest; seq++) {
+        const event = this.deps.log.get(seq);
+        if (event !== null && !this.broadcast(event)) break;
+      }
     }
     this.pumpedSeq = latest;
+    for (const client of this.sseClients) {
+      if (!client.blocked) client.throughSeq = latest;
+    }
   }
 
-  private broadcast(event: AppEvent): void {
-    if (this.sseClients.size === 0) return;
-    const frame = `event: ${event.type}\nid: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`;
+  private broadcast(event: AppEvent): boolean {
+    let frame: string | undefined;
+    let anyWritable = false;
     for (const client of this.sseClients) {
-      try {
-        client.write(frame);
-      } catch {
-        this.sseClients.delete(client);
-      }
+      if (client.blocked) continue;
+      client.throughSeq = event.seq;
+      this.writeSse(client, frame ??= sseFrame(event));
+      if (!client.blocked) anyWritable = true;
+    }
+    return anyWritable;
+  }
+
+  private writeSse(client: SseClient, frame: string): void {
+    try {
+      client.blocked = !client.response.write(frame);
+    } catch {
+      client.blocked = true;
+      this.sseClients.delete(client);
+      client.response.destroy();
+    }
+  }
+
+  private catchUpSse(client: SseClient): void {
+    // 慢连接只记最后一次已排入 socket 的 seq。drain 后从磁盘补发，避免继续堆积缓冲。
+    while (!client.blocked && client.throughSeq < this.pumpedSeq) {
+      const event = this.deps.log.get(++client.throughSeq);
+      if (event !== null) this.writeSse(client, sseFrame(event));
     }
   }
 
@@ -4309,10 +4525,11 @@ class WebServerImpl implements WebServer {
           sendJson(res, 200, this.deps.projection);
           return;
         case '/api/stats/dashboard': {
-          const events = await this.recent.sync();
+          const dashboard = await this.recent.sync();
           sendJson(res, 200, buildDashboard({
             projection: this.deps.projection,
-            events,
+            events: dashboard.window,
+            recentEvents: dashboard.recent,
             now: this.deps.now(),
             personaRoot: this.deps.personaRoot,
             // 数据目录（**不是** `<dataDir>/grants`）：拼路径那一层在 `listGrants` 里
@@ -4330,7 +4547,7 @@ class WebServerImpl implements WebServer {
          * 两个端点共用 `listGrants`（一处实现，两处读同一份字节）。
          */
         case '/api/grants': {
-          const grantEvents = await readAllEvents(this.deps.log);
+          const grantEvents = await readEventTypes(this.deps.log, GRANT_EVENT_TYPES);
           const items = listGrants(
             // **dataDir**（不是 `grantsDirOf(dataDir)`）：`listGrants` 内部自己拼 `<dataDir>/grants`。
             // 这里先拼一次会让它再拼一次 ⇒ 扫 `data/grants/grants`（不存在）⇒ catch 成空清单
@@ -4370,7 +4587,7 @@ class WebServerImpl implements WebServer {
             config: this.deps.config,
             configured: this.readAffectConfigured(),
             projection: this.deps.projection,
-            events: await readAllEvents(this.deps.log),
+            events: await readEventTypes(this.deps.log, ['affect/appraised']),
             now: this.deps.now().toISOString(),
           }));
           return;
@@ -4380,7 +4597,7 @@ class WebServerImpl implements WebServer {
             config: this.deps.config,
             configured: this.readIntimacyConfigured(),
             projection: this.deps.projection,
-            events: await readAllEvents(this.deps.log),
+            events: await readEventTypes(this.deps.log, ['intimacy/updated']),
             now: this.deps.now().toISOString(),
           }));
           return;
@@ -4505,7 +4722,7 @@ class WebServerImpl implements WebServer {
           return;
         }
         case '/api/persona/history':
-          sendJson(res, 200, { entries: buildPersonaHistory(await readAllEvents(this.deps.log)) });
+          sendJson(res, 200, { entries: buildPersonaHistory(await readEventTypes(this.deps.log, ['persona/updated'])) });
           return;
         case '/api/replay':
           sendJson(res, 200, await this.replayView(url));
@@ -4893,7 +5110,8 @@ class WebServerImpl implements WebServer {
       return;
     }
 
-    const before = (await host.status()).state;
+    const previous = await host.status();
+    const before = previous.state;
     let after: ManagedServiceStatus;
     let changed = false;
     let note: string;
@@ -4915,7 +5133,12 @@ class WebServerImpl implements WebServer {
           note = `当前状态：${PROTOCOL_STATE_TEXT[after.state] ?? after.state}`;
         }
       } else {
-        if (before === 'stopped' || before === 'not-installed') {
+        const externalLinux = process.platform === 'linux'
+          && previous.report.process.running && previous.report.process.managed === 'unmanaged';
+        if (externalLinux) {
+          after = previous;
+          note = '协议端由外部程序启动，请用该程序的停机方式。';
+        } else if (before === 'stopped' || before === 'not-installed') {
           // 已经没在跑就别再去调 stop()：服务层的 stop() 会把状态改写成 "stopped"，
           // 那会把 `not-installed` 这条**给人指路的诊断**（"先去下载"）一起抹掉。
           after = await host.status();
@@ -5486,6 +5709,7 @@ class WebServerImpl implements WebServer {
       kind: savedKind,
       dir: savedDir,
       autoStart: savedAutoStart,
+      oneClickInstallSupported: process.platform === 'win32',
       configSource: saved.fromDisk ? 'disk' : 'memory',
       // ② 运行期
       attached: host !== undefined,
@@ -5594,15 +5818,15 @@ class WebServerImpl implements WebServer {
     if (rangeRaw !== 'today' && rangeRaw !== '7d') {
       throw badRequest(`range 只能是 today 或 7d，收到 ${rangeRaw}`);
     }
-    // 预算查询与 CLI 同源：全量折叠一次（低频请求，弹层打开时才算）
-    const events = await readAllEvents(this.deps.log);
-    return buildBudgetView({
+    const state = await this.budgetEvents.sync();
+    const report = buildBudgetReportFromProjection({
       dataDir: this.deps.dataDir,
-      config: this.deps.config,
-      events,
-      now: this.deps.now(),
-      range: rangeRaw,
+      budget: this.deps.config.budget,
+      projection: state.projection,
+      topUps: state.topUps,
+      limitSource: 'file',
     });
+    return formatBudgetView(this.deps.config, report, state.charts, this.deps.now(), rangeRaw);
   }
 
   private async replayView(url: URL): Promise<ReplayView> {
@@ -5639,8 +5863,6 @@ class WebServerImpl implements WebServer {
       'x-accel-buffering': 'no',
       'x-content-type-options': 'nosniff',
     });
-    res.write(`retry: ${SSE_RETRY_MS}\n\n`);
-
     // 先把"已广播水位"追到日志末尾：既服务已经在连的客户端，也让本次补拉有一个确定的上界
     // （不追水位的话，补拉之后再跑 pump 会把补过的那一段又推一遍）
     this.pump();
@@ -5653,24 +5875,22 @@ class WebServerImpl implements WebServer {
 
     // 补拉上界 = 已广播水位（不是日志末尾）：中间那段由 pump 继续推，避免同一条事件发两遍
     const upTo = this.pumpedSeq;
-    if (lastId > 0 && lastId < upTo) {
-      // 补拉量设上限：超出就只补最近一段——重连后前端本来就要全量重拉 /api/projection，
-      // 投影是派生数据，全量覆盖永远安全（frontend.md §4 的 reconcile 两条腿）
-      const from = Math.max(lastId + 1, upTo - SSE_REPLAY_LIMIT + 1);
-      for (let seq = from; seq <= upTo; seq++) {
-        const event = this.deps.log.get(seq);
-        if (event === null) continue;
-        res.write(`event: ${event.type}\nid: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
-      }
-    }
-
-    this.sseClients.add(res);
+    const throughSeq = lastId > 0 && lastId < upTo ? Math.max(lastId, upTo - SSE_REPLAY_LIMIT) : upTo;
+    const client: SseClient = { response: res, throughSeq, blocked: false };
+    this.sseClients.add(client);
     const drop = (): void => {
-      this.sseClients.delete(res);
+      this.sseClients.delete(client);
     };
     req.on('close', drop);
     res.on('close', drop);
     res.on('error', drop);
+    res.on('drain', () => {
+      if (!this.sseClients.has(client)) return;
+      client.blocked = false;
+      this.catchUpSse(client);
+    });
+    this.writeSse(client, `retry: ${SSE_RETRY_MS}\n\n`);
+    this.catchUpSse(client);
   }
 
   // ── /api/auth/*（认证端点） ──
@@ -6061,7 +6281,7 @@ class WebServerImpl implements WebServer {
         if (path === '/api/stickers/events') {
           const rawLimit = Number(url.searchParams.get('limit') ?? '100');
           const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(200, rawLimit) : 100;
-          const items = (await readAllEvents(this.deps.log)).filter((event) => event.type.startsWith('sticker/')).slice(-limit).reverse();
+          const items = (await tailMatches(this.deps.log, 1, { types: ['sticker/'], visibility: null }, limit)).reverse();
           sendJson(res, 200, { items });
           return;
         }
@@ -6328,8 +6548,7 @@ class WebServerImpl implements WebServer {
         }
         const note = typeof payload['note'] === 'string' ? payload['note'] : '';
         // 与 CLI 同一条校验：拼错的 callId 写成结案事实 = 往唯一真相源里灌假事实
-        const known = buildReviewEntries(await readAllEvents(this.deps.log))
-          .some((entry) => entry.callId === callId);
+        const known = await hasPendingReview(this.deps.log, callId);
         if (!known) {
           throw notFound(
             `callId=${callId} 不在待确认列表里（可能已结案或拼写有误）；先 GET /api/projection 核对`,
@@ -6359,7 +6578,7 @@ class WebServerImpl implements WebServer {
         }
         const by = typeof payload['by'] === 'string' && payload['by'] !== '' ? payload['by'] : 'human';
         const outcome = answerHuman({
-          events: await readAllEvents(this.deps.log),
+          events: await readEventTypes(this.deps.log, ANSWER_EVENT_TYPES),
           answer,
           by,
           ...(callId !== undefined ? { callId } : {}),
@@ -6404,7 +6623,7 @@ class WebServerImpl implements WebServer {
           throw badRequest('批准不带理由（理由栏目只在驳回时用得到）');
         }
 
-        const events = await readAllEvents(this.deps.log);
+        const events = await readEventTypes(this.deps.log, [...GRANT_EVENT_TYPES, ...ANSWER_EVENT_TYPES]);
         // `listGrants` 收 **dataDir**（内部自己拼 `<dataDir>/grants`）：传 `grantsDirOf(...)`
         // 会双重拼接，于是"还没被拾取"的单子在这里也查不到 ⇒ 一会 404 报"不在清单里"（2026-10-21 修）。
         const item = listGrants(this.deps.dataDir, events, this.deps.projection.humanAsks)
@@ -6786,6 +7005,12 @@ class WebServerImpl implements WebServer {
         return;
       }
       case 'restart': {
+        if (process.platform !== 'win32') {
+          throw new HttpError(501, 'restart-not-supported',
+            process.platform === 'linux'
+              ? '由 systemd 管理的实例请运行 systemctl restart irmia-agent；前台实例请重新启动进程。'
+              : '请通过启动此实例的程序重启后端。');
+        }
         // 运行情况页那颗按钮（原来这里是"立即唤醒"，用户 2026-10-04 说那个没用了，改成重启）。
         //
         // ── **排他：同一时刻只允许一个拉起器在飞**（2026-10-11 加，判据只此一处）────────
@@ -8698,7 +8923,7 @@ class WebServerImpl implements WebServer {
       baseRoot: this.deps.skillsRoot ?? process.cwd(),
       packageRoots: pluginRoots,
     });
-    manager.setTrustEvents(await readAllEvents(this.deps.log));
+    manager.setTrustEvents(await readEventTypes(this.deps.log, ['skill/installed']));
     const scan = manager.scan();
     const catalog = manager.catalog();
     const inCatalog = new Set(catalog.entries.map((entry) => entry.name));
@@ -9113,7 +9338,7 @@ class WebServerImpl implements WebServer {
       return out;
     };
     const latest = new Map<string, Seen>();
-    for (const event of await readAllEvents(this.deps.log)) {
+    for (const event of await readEventTypes(this.deps.log, ['mcp/server-started', 'mcp/server-stopped', 'mcp/server-resource'])) {
       if (event.type === 'mcp/server-started') {
         const data = event.data as unknown as {
           name?: unknown; pid?: unknown; tools?: unknown; toolDetails?: unknown; startMs?: unknown;
@@ -9450,8 +9675,7 @@ class WebServerImpl implements WebServer {
     } catch {
       // 没有那份文件 = 她还没认过人
     }
-    const events = await readAllEvents(this.deps.log);
-    const sessions = collectSessions(events).map((entry) => {
+    const sessions = sortSessions(await this.sessions.sync()).map((entry) => {
       // 走共用查找（联系人 > 别名 > 她自己贴的标签 > openid），且**新旧两种 sid 写法都认**：
       // 会话身份归一之后条目是 `qq:group:<群id>`，而用户手里那张表可能还是 `qq:group-at:<群id>`
       // ——只按一种写法查，会让"我给这个群起过名字"在界面上变成一串 openid（实测踩到）
@@ -9573,17 +9797,7 @@ class WebServerImpl implements WebServer {
    *   **不是 404、不是全零**："没有数"与"数是 0"是两件事（这里回全零，界面就会画一条 0% 的进度条）。
    */
   private async contextBreakdownView(): Promise<Record<string, unknown>> {
-    const events = await readAllEvents(this.deps.log);
-    // 倒着找第一条带归因的调用：日志按 seq 追加，seq 序即时间序，所以"最后一条"就是"最近一次"
-    let latest: { ts: string; turn: number; step: number; context: ContextBreakdown } | null = null;
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const event = events[i];
-      if (event === undefined || event.type !== 'budget/consumed') continue;
-      const context = event.data.context;
-      if (context === undefined) continue;
-      latest = { ts: event.ts, turn: event.data.turn, step: event.data.step, context };
-      break;
-    }
+    const { latest } = await this.contextBreakdown.sync();
     if (latest === null) return { empty: true };
 
     const { context } = latest;
@@ -9661,13 +9875,10 @@ class WebServerImpl implements WebServer {
  */
 private async frameworkNotesView(url: URL): Promise<Record<string, unknown>> {
     const contacts = this.deps.config.persona.contacts;
-    const events = await readAllEvents(this.deps.log);
+    const noteEvents = await this.frameworkNoteEvents.sync();
+    const events = noteEvents.entries();
+    const { recoveries } = noteEvents;
     const limit = frameworkNoteLimit(url.searchParams.get('limit'));
-
-    // 配对表**在倒扫之前整份算出来**：倒扫为了 `?limit=` 小的时候提前停，只看得到日志的尾巴，
-    // 而"某条 17:33 的告警后来被销掉了吗"要看它**之后**发生了什么——那可能远在尾巴之外
-    // （真实日志里 09:33 那条告警的配对在 09:47，隔着一万四千条事件）。
-    const recoveries = pairedRecoveries(events);
 
     // 从尾部往前扫：要的是"最近若干条"。日志按 seq 追加，seq 序即时间序——
     // 几种类型混着走一遍就是全局时间倒序，不需要再排一次（`?limit=` 小的时候还提前停）
@@ -9934,13 +10145,8 @@ private async frameworkNotesView(url: URL): Promise<Record<string, unknown>> {
  */
 function isUnderDir(child: string, dir: string): boolean {
   if (dir.trim() === '') return false;
-  const normalize = (p: string): string => {
-    const abs = resolve(p).replace(/[\\/]+$/u, '');
-    return process.platform === 'win32' ? abs.toLowerCase() : abs;
-  };
-  const c = normalize(child);
-  const d = normalize(dir);
-  return c === d || c.startsWith(`${d}\\`) || c.startsWith(`${d}/`);
+  const path = relative(resolve(dir), resolve(child));
+  return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
 }
 
 /**

@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/services.dart';
+import 'package:window_manager/window_manager.dart';
 
 /// 自绘标题栏与 Windows runner 之间的那条通道（见 docs/gui-revision.md ①）。
 ///
@@ -19,8 +21,20 @@ class WindowChannel {
 
   static Future<void> close() => _invoke('close');
 
+  static Future<void> quit() => Platform.isLinux
+      ? const MethodChannel('irmia/desktop').invokeMethod<void>('quit')
+      : windowManager.destroy();
+
   static Future<void> _invoke(String method) async {
     try {
+      if (Platform.isLinux) {
+        switch (method) {
+          case 'startDragging': await windowManager.startDragging();
+          case 'minimize': await windowManager.minimize();
+          case 'close': await windowManager.close();
+        }
+        return;
+      }
       await _channel.invokeMethod<void>(method);
     } on MissingPluginException {
       // 没有对端：非 Windows runner

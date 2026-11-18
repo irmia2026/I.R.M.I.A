@@ -31,6 +31,7 @@ import 'package:flutter/foundation.dart';
 /// 告诉后端"这次是我主动退的，别把我拉回来"（协议见 docs/gui-guard.md §3）。
 /// 写不下去就算了：退出这条路不该被一个标记拦住（后端只是会把它当崩溃）。
 Future<void> markGuiQuit(String reason) async {
+  if (!Platform.isWindows) return;
   try {
     final dir = Directory('${Platform.environment['APPDATA']}\\Irmia');
     if (!dir.existsSync()) dir.createSync(recursive: true);

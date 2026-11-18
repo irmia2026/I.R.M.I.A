@@ -282,9 +282,10 @@ export function compactionWarningRowsOf(events: readonly AppEvent[]): Compaction
  */
 export function compactionWarningStateOf(
   rows: readonly CompactionWarningRow[],
+  previous?: { lastTier: CompactionWarningTier; lastAtMs: number | null },
 ): { lastTier: CompactionWarningTier; lastAtMs: number | null } {
-  let lastTier: CompactionWarningTier = 0;
-  let lastAtMs: number | null = null;
+  let lastTier: CompactionWarningTier = previous?.lastTier ?? 0;
+  let lastAtMs: number | null = previous?.lastAtMs ?? null;
   for (const row of rows) {
     const low = row.historyTokens !== null && row.thresholdTokens !== null && row.thresholdTokens > 0
       && row.historyTokens / row.thresholdTokens < COMPACTION_WARNING_RESET_RATIO;

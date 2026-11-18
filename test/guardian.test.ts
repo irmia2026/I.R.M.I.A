@@ -170,8 +170,11 @@ function spawnInstance(fx: GuardianFixture, t: TestContext): Spawned {
   // 没有密钥 → main.ts 走假循环；模型调用与"守护会不会双写"无关
   delete env['IRMIA_API_KEY'];
   env['IRMIA_DATA_DIR'] = fx.dataDir;
+  env['APPDATA'] = join(fx.dir, 'app-data');
+  env['LOCALAPPDATA'] = join(fx.dir, 'local-app-data');
+  env['IRMIA_GUI_GUARD'] = 'off';
 
-  const child = spawn(process.execPath, ['--experimental-strip-types', INSTANCE_SCRIPT], {
+  const child = spawn(process.execPath, ['--experimental-strip-types', INSTANCE_SCRIPT, '--config', fx.dir], {
     cwd: PROJECT_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
@@ -364,7 +367,9 @@ test('M4-5 交付物：三个平台的守护样例含关键指令（Windows 脚�
   assert.match(unit, /^\s*StartLimitBurst=0\s*$/mu, 'StartLimitBurst=0（不限制重启次数）');
   assert.match(unit, /^\s*StandardOutput=journal\s*$/mu, '标准输出落 journal');
   assert.match(unit, /^\s*StandardError=journal\s*$/mu, '标准错误落 journal');
-  assert.match(unit, /^\s*ExecStart=.*\bnode\b.*dist\/main\.js\s*$/mu, 'ExecStart 必须是 node dist/main.js');
+  assert.match(unit, /^ExecStart=.*\bnode\b.*dist\/main\.js --config \/var\/lib\/irmia-agent --data-dir \/var\/lib\/irmia-agent\/data$/mu);
+  assert.match(unit, /^User=irmia-agent$/mu);
+  assert.match(unit, /^StateDirectoryMode=0700$/mu);
 
   // macOS launchd（KeepAlive=true，且 Label 与文件名一致否则 launchctl 认不出来）
   assert.match(plist, /<key>Label<\/key>\s*<string>com\.google\.irmia\.agent<\/string>/u, 'Label 必须与 plist 文件名一致');
