@@ -102,6 +102,18 @@ jobs:
           bash scripts/package-linux.sh "$RUNNER_TEMP/irmia-release" --desktop
           cd "$RUNNER_TEMP/irmia-release"
           sha256sum -c ./*.sha256
+          for archive in ./*.tar.gz; do
+            tar -tzf "$archive" > "$RUNNER_TEMP/archive-list.txt"
+            if grep -qE '\.map$' "$RUNNER_TEMP/archive-list.txt"; then
+              echo "source map leaked into $archive" >&2
+              exit 1
+            fi
+            if grep -qE '^[^/]+/skills/(image-dialogue|sd-selfie|sd-scene-play|agently-mail|ref2va-prompt-optimizer)(/|$)' \
+              "$RUNNER_TEMP/archive-list.txt"; then
+              echo "private skill leaked into $archive" >&2
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: irmia-ubuntu-x86_64

@@ -49,7 +49,15 @@ def capture(target, timeout):
         GLib.Variant("(sa{sv})", ("", options)), GLib.VariantType.new("(o)"),
         Gio.DBusCallFlags.NONE, min(timeout, 5000), None,
     ).unpack()
-    if returned_handle == handle:
+    # handle_token is normally honored, but the portal is allowed to return a
+    # different object path. Follow the path it actually returned instead of
+    # waiting forever on the predicted one.
+    if returned_handle != handle:
+        bus.signal_unsubscribe(subscription)
+        subscription = bus.signal_subscribe(
+            PORTAL, REQUEST, "Response", returned_handle, None, Gio.DBusSignalFlags.NONE, receive
+        )
+    if response is None:
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
         GLib.timeout_add(max(1, (deadline - GLib.get_monotonic_time()) // 1000), stop)
         loop.run()

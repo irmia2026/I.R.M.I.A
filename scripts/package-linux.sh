@@ -31,14 +31,30 @@ fi
 stage="$(mktemp -d)"
 trap 'rm -rf -- "$stage"' EXIT
 bundle="$stage/$name"
-mkdir -p -- "$bundle/scripts" "$bundle/docs"
-cp -R -- dist skills "$bundle/"
+mkdir -p -- "$bundle/scripts" "$bundle/docs" "$bundle/skills"
+# Only the public skill set may leave the repository. The Windows assembly has the
+# same allowlist; copying all of skills/ here would ship private local skills.
+for skill in irmia-framework office; do
+  if [[ ! -d "skills/$skill" ]]; then
+    echo "Missing public skill: skills/$skill" >&2
+    exit 1
+  fi
+  cp -R -- "skills/$skill" "$bundle/skills/"
+done
+cp -R -- dist "$bundle/"
+# Source maps expose original source and comments; the Windows package excludes
+# them for the same reason (tsconfig keeps sourceMap enabled for debugging).
+find "$bundle/dist" -type f -name '*.map' -delete
 cp -- README.md LICENSE config.example.json "$bundle/"
 cp -- docs/linux-compatibility.md "$bundle/docs/"
 cp -- scripts/irmia-agent.service "$bundle/scripts/"
 if "$desktop"; then
   cp -R -- "$gui_bundle" "$bundle/gui"
   install -m 0755 scripts/start-linux-desktop.sh "$bundle/scripts/"
+fi
+if [[ -n "$(find "$bundle" -type f -name '*.map' -print -quit)" ]]; then
+  echo 'Refusing to package source maps.' >&2
+  exit 1
 fi
 tar -czf "$stage/$name.tar.gz" -C "$stage" "$name"
 mv -- "$stage/$name.tar.gz" "$output/"
